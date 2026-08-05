@@ -1,0 +1,28 @@
+// swift-tools-version: 6.0
+
+import PackageDescription
+
+let package = Package(
+    name: "JidokaCode",
+    platforms: [
+        .macOS(.v14)
+    ],
+    products: [
+        .library(name: "JidokaCodeCore", targets: ["JidokaCodeCore"]),
+        .executable(name: "JidokaCodeApp", targets: ["JidokaCodeApp"]),
+        .executable(name: "JidokaCodeEngineProbe", targets: ["JidokaCodeEngineProbe"]),
+    ],
+    targets: [
+        .target(name: "JidokaCodeCore"),
+        .executableTarget(
+            name: "JidokaCodeApp",
+            dependencies: ["JidokaCodeCore"]
+        ),
+        .executableTarget(name: "JidokaCodeEngineProbe"),
+        .testTarget(
+            name: "JidokaCodeCoreTests",
+            dependencies: ["JidokaCodeCore"]
+        ),
+    ],
+    swiftLanguageModes: [.v6]
+)
