@@ -27,6 +27,16 @@ pi
 
 The implementation plan currently gates on Pi `0.83.0`; W0 must revalidate compatibility against the installed public package and documentation before source work.
 
+## Development toolchain
+
+Development requires full Xcode. Project-owned commands use the per-process setting:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+```
+
+Jidoka Code does not change the machine-wide `xcode-select` configuration. W0 must verify the bundle, Xcode version, SDK, XCTest and Swift Testing through that exact developer directory.
+
 ## Status
 
 Planning only. No application release or supported installation exists yet.

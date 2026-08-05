@@ -18,7 +18,7 @@
 - Il completamento Pi richiede output strutturato e un evento terminale osservabile, non il solo ack del prompt. Skill ed estensioni project-local dei repository target sono input non fidati e non diventano execution capability.
 - `MenuBarExtra`, Keychain, `SMAppService`, Swift concurrency, SQLite, code signing e packaging macOS devono essere provati nel contesto bundle reale. Fonti API iniziali: `https://developer.apple.com/documentation/swiftui/menubarextra` e `https://developer.apple.com/documentation/servicemanagement/smappservice`.
 - La descrizione OpenAPI GitHub ufficiale usata come baseline è version `1.1.4`, commit `66c7249d69f9aa013abda010658d15eefbacd0a3`: `https://github.com/github/rest-api-description/commit/66c7249d69f9aa013abda010658d15eefbacd0a3`. W0 deve ricontrollare versione, operation id, status e permission prima di implementare.
-- Nel planning environment SwiftUI, Security, ServiceManagement e SQLite3 hanno compilato con SwiftPM, ma era selezionato soltanto Command Line Tools: `xcodebuild` e i moduli test non erano disponibili. Questo è un blocker da ri-verificare, non evidence trasferibile a un altro host.
+- Xcode `26.6` build `17F113` è installato in `/Applications/Xcode.app`; `xcode-select` resta intenzionalmente su Command Line Tools. Con exact per-process `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, SDK macOS `26.5`, Swift `6.3.3`, XCTest e Swift Testing hanno compilato ed eseguito un probe temporaneo. W0 deve ripetere questa evidence senza cambiare la configurazione globale.
 - Un probe di availability ha richiesto macOS 14 per `@Observable`; il target minimo 14 resta una decisione testabile. Un probe Git ha inoltre mostrato che config globale, credential helper, SSH agent e hook devono essere neutralizzati come composizione, senza pubblicarne valori.
 
 ### Root cause or design gap
@@ -113,6 +113,7 @@ Append only. Reverse a decision with a new row that names the superseded row.
 | 47 | Ambiguous object disposition | Stessa job/object revision non viene rediscovered dopo unknown create; late read o humanRetryAuthorized soltanto | Evita duplicate indirette attraverso poll/restart | GitHub offre idempotency key documentata |
 | 48 | Complexity authority | Deterministic max severity dopo plan review; unknown/disagreement è complex, hard rail è humanOwned | Il triage guess non può bypassare `plan:approved` | rubric versionata cambia con evidence |
 | 49 | Contract bump and review identity | Un contract/app/skill bump non rivede lo stesso PR head SHA e non azzera disposition | Decisione #23 è contract-independent | project owner autorizza esplicitamente una one-off re-review campaign |
+| 50 | Xcode selection | Non modificare global `xcode-select`; build, test e command runner usano exact per-process `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` | Xcode 26.6 e i due test framework passano con l’override, mentre CLT resta il default scelto | il bundle si sposta o il probe exact fallisce |
 
 ## Architecture contract
 
@@ -319,7 +320,7 @@ ApprovedCommand {
 - Vietati per ogni system executable: `-c`, `--config`, `--config-env`, remote/fetch/push/merge/tag/worktree/config verbs, `--no-verify`, hook/signing override, shell/interpreter/process launcher (`sh`, `bash`, `zsh`, `env`, `xargs`, `osascript`, `open`, `curl`, `ssh`, `gh`) e nested command execution.
 - `repositoryScript` deve essere un exact relative regular file nel workspace, senza symlink escape, con content digest incluso nel frozen plan. Può eseguire codice nativo same-user, ma riceve lo stesso env credentialless; script cambiato dopo review viene rifiutato.
 - Nessuna shell, pipe, redirection, command substitution o string interpolation nel runner. `workingDirectory` deve risolvere dentro il workspace.
-- Environment allowlist, PATH costruita, HOME di job dove possibile, GitHub/model token e Git/SSH credentials assenti. Una config Git generata include soltanto identity commit e hook path approvati, escludendo credential helper, `url.*.insteadOf`, signing command e remote rewrite.
+- Environment allowlist, PATH costruita, HOME di job dove possibile, GitHub/model token e Git/SSH credentials assenti. `makeTargets`, `swiftBuildTest` e `xcodebuildBuildTest` ricevono l’exact `DEVELOPER_DIR` locked e una PATH con toolchain Xcode attestata; issue, repository e Pi non possono sovrascriverli. Una config Git generata include soltanto identity commit e hook path approvati, escludendo credential helper, `url.*.insteadOf`, signing command e remote rewrite.
 - Timeout monotonic, process group cancellation, bounded stdout/stderr, artifact completo locale con redazione e nessun log di environment values. Exit, signal, duration e output digest diventano acceptance evidence.
 - Hook vengono eseguiti dal normale engine-generated `git commit`. Un hook che fallisce blocca; un hook o command che richiede capability non disponibile escala invece di ereditare credenziali utente.
 - Fixture obbligatorie: metacharacter resta singolo argomento, cwd/symlink escape, forbidden Git flags/verbs, nested launcher, arbitrary command id, changed digest, timeout descendants, huge output, hook fail e credential lookup.
@@ -479,7 +480,7 @@ Il `complexity guess` del triage è solo un hint. Dopo plan review, ogni plannin
 ## Acceptance criteria
 
 - [ ] W0 risolve e registra l’exact `origin/main` SHA approvato dopo fetch, prova che working tree e plan blob sono puliti e usa quello stesso SHA per il worktree. Qualunque drift successivo ferma i source edit e richiede revalidation.
-- [ ] Ogni target compila in Swift 6 con deployment target macOS 14; un explicit macOS 13 typecheck del probe `@Observable` resta una prova negativa documentata.
+- [ ] Ogni target compila in Swift 6 con deployment target macOS 14 usando l’exact per-process `DEVELOPER_DIR`; un explicit macOS 13 typecheck del probe `@Observable` resta una prova negativa documentata. Global `xcode-select` non viene modificato.
 - [ ] Da un checkout pulito, `make jidoka-code-package` produce `Jidoka Code.app` e un `.pkg`; bundle, risorse Pi, helper eventuale e askpass sono code-signed e verificati.
 - [ ] Dopo autorizzazione dell’install esatto, il `.pkg` installa in `/Applications`; una package build ripetuta in un disposable staging checkout viene lanciata dopo la rimozione di quel solo staging path, con cwd `/`, e funziona senza Pi/Node bundled o path di sviluppo.
 - [ ] Alla fine del primo onboarding il login item è enabled per default oppure mostra `requiresApproval` con istruzione esplicita; una prova login supervisionata rilancia tray ed engine.
@@ -514,13 +515,13 @@ Il `complexity guess` del triage è solo un hint. Dopo plan review, ogni plannin
 ### W0: Execution environment, base and isolation gate
 
 - Scope: toolchain, plan/base validation e worktree, nessun source edit applicativo.
-- Excluded: installazione automatica di Xcode, modifica di credenziali o LaunchAgent.
+- Excluded: installazione automatica di Xcode, modifica di `xcode-select`, credenziali o LaunchAgent.
 - [ ] Nel checkout pubblico corrente eseguire `git fetch origin main`, richiedere working tree/index puliti e calcolare exact `origin/main` SHA più SHA-256 di questo piano. Catturare i valori nell’artifact di esecuzione fuori dal repository, senza editare il checkout validato. Se local `main`, remote o plan blob differiscono, fermarsi e revalidare.
 - [ ] Verificare che branch/worktree `feat/jidoka-code-macos-app` non esista. Se esiste, fermarsi e ispezionarlo, mai cancellarlo. Altrimenti creare un worktree pulito dedicato dall’exact approved SHA e verificare che il plan digest sia identico.
 - [ ] Soltanto nel nuovo worktree appendere exact base SHA, plan digest e command evidence a Progress. Questo living-plan edit avviene dopo la base validation e non modifica il checkout pubblico validato.
 - [ ] Il bootstrap non possiede ancora root gates. Registrare questa assenza senza inventare un pass; come primo scaffold W1 aggiungere target truthful `make check` e `make test-e2e`, poi eseguirli prima di espandere oltre le spike.
-- [ ] Verificare `xcodebuild -version`, `swift --version`, SDK, XCTest/Swift Testing, `codesign`, `pkgbuild`, `productbuild`, `git`, `pi`, `node`.
-- [ ] Se Xcode completo non è installato e selezionato, fermarsi `blocked` e chiedere a project owner di installarlo/selezionarlo. Non sostituire i test con script custom.
+- [ ] Registrare il default globale con `(unset DEVELOPER_DIR; xcode-select -p)`, perché `xcode-select` riflette l’override quando presente; non cambiarlo. Validare exact `/Applications/Xcode.app/Contents/Developer`, poi verificare con quel `DEVELOPER_DIR`: `xcodebuild -version`, `xcrun swift --version`, SDK, XCTest/Swift Testing, `codesign`, `pkgbuild`, `productbuild`, `git`, `pi`, `node`.
+- [ ] Se il bundle exact manca, first-launch status fallisce o il probe XCTest/Swift Testing non passa con l’override per-process, fermarsi `blocked`. Non eseguire `sudo xcode-select` e non sostituire i test con script custom.
 - [ ] Verificare Pi exact `0.83.0`. Versione diversa è fail-closed finché la contract suite non viene eseguita e una nuova locked decision amplia il range.
 - [ ] Ricontrollare OpenAPI GitHub e documentare eventuale drift di operation/status prima di W3.
 
@@ -528,7 +529,7 @@ Il `complexity guess` del triage è solo un hint. Dopo plan review, ogni plannin
 
 - Scope: `Package.swift`, target probe minimali, `scripts/spikes/`, `docs/evidence/spike-report.md`.
 - Excluded: feature UI completa, scheduler produttivo, real token e live GitHub writes non autorizzati.
-- [ ] Creare lo scheletro SwiftPM con Swift 6 mode, platform macOS 14, `JidokaCodeCore`, probe app `MenuBarExtra`, probe engine/helper e test target. Nessuna dependency esterna. Aggiungere root `make check` e `make test-e2e` truthful per lo scaffold, poi provarli prima di S1.
+- [ ] Creare lo scheletro SwiftPM con Swift 6 mode, platform macOS 14, `JidokaCodeCore`, probe app `MenuBarExtra`, probe engine/helper e test target. Nessuna dependency esterna. Aggiungere root `make check` e `make test-e2e` truthful che impostano l’exact per-process `DEVELOPER_DIR`, poi provarli prima di S1.
 - [ ] S1 packaging locale, senza install/register: costruire `.app` minimale con Info.plist `LSUIElement`, firma ad-hoc, nested executables e verifica `plutil` più `codesign --verify --strict --deep`; copiare il bundle in un temp path fuori checkout e lanciare con cwd `/`.
 - [ ] CHECKPOINT A, prima di S2/S3/S4/S8 e di qualunque provider call: presentare a project owner bundle id app/probe/helper esatti; SMAppService operations; Keychain service/account sentinel; eventuale prompt di sistema; provider/model per ogni ruolo; categorie payload limitate a repository/issue/diff sintetici; exact call matrix per S4 preflight e S8 adapted workflows, hard cap 24 model call totali; costo stimato da model metadata; durata e cleanup. Procedere soltanto con autorizzazione per quella matrice. Nessun logout automatico.
 - [ ] S2 lifecycle autorizzato: confrontare monolith e LaunchAgent helper con `SMAppService`; registration/status, launch, graceful quit/reopen, SIGKILL/restart, exactly-one engine, IPC, update/re-register e cleanup.
@@ -651,7 +652,7 @@ Pass/falsifier/disposition normativi:
 - [ ] Ripetere package build in un disposable staging checkout creato per il test, registrare il target e rimuovere soltanto quel path dopo build. Il bundle deve poi avviarsi con cwd `/`; il normale implementation worktree non viene spostato o nascosto.
 - [ ] CHECKPOINT C prima di `installer`: presentare exact pkg path e SHA-256, package/receipt id, target `/Applications/Jidoka Code.app`, firma, eventuale app preesistente e rollback. Dopo autorizzazione, installare, provare risorse bundled e disinstall/restore soltanto se separatamente autorizzato.
 - [ ] Documentare install, primo avvio, token capability, Pi auth, repo toggle, pause, logs, recovery, conflitto con automazioni concorrenti, uninstall manuale e no-merge contract.
-- [ ] Aggiungere target `jidoka-code-check`, `jidoka-code-test`, `jidoka-code-app`, `jidoka-code-package`; integrare build/test macOS nei root gate in modo esplicito e non silenzioso.
+- [ ] Aggiungere target `jidoka-code-check`, `jidoka-code-test`, `jidoka-code-app`, `jidoka-code-package`; integrare build/test macOS nei root gate con exact `DEVELOPER_DIR`, in modo esplicito e non silenzioso.
 - [ ] Su host non-macOS il gate deve dichiarare che la release macOS non è verificabile; nessuna release può basarsi soltanto su quel risultato.
 
 ### W9: Final verification, review and supervised canary
@@ -672,7 +673,7 @@ Pass/falsifier/disposition normativi:
 | # | Surface/path | Scenario | Expected evidence | Depth |
 |---|---|---|---|---|
 | 1 | Base | clean plan-bearing `origin/main`/local same o drift | exact SHA+plan digest registrati; drift ferma e revalida | behavior+error |
-| 2 | Toolchain | Xcode completo e Swift test modules | `xcodebuild -version`, probe `swift test` exit 0 | behavior+error |
+| 2 | Toolchain | Xcode bundle exact, CLT machine-wide default, per-process override | global path letto con override unset; env-scoped `xcodebuild -version` e XCTest/Swift Testing probe exit 0 | behavior+error |
 | 3 | Deployment target | `@Observable` target 13 e 14 | 13 fail di availability, 14 pass; ogni binary `minos 14` | behavior+edge |
 | 4 | Swift package | debug/release strict concurrency | build senza warning/error | happy |
 | 5 | App bundle | layout, plist, nested signature | `plutil`, resource manifest, `codesign --verify --strict --deep` | behavior+error |
@@ -761,7 +762,7 @@ Pass/falsifier/disposition normativi:
 - Risk: app installer ad-hoc non soddisfa SMAppService/Keychain. Mitigation: W1; se fallisce, richiedere identity firmata. Non aggirare ServiceManagement con un plist installato silenziosamente.
 - Risk: Jidoka Code e un’automazione esterna pubblicano entrambi. Mitigation: exactly-one app/helper, claim/marker preconditions, onboarding disclosure e hard block su collisione; automazioni arbitrarie same-user restano rischio dichiarato.
 - Risk: root Make gate diventa non portabile. Mitigation: target macOS esplicito, release verificabile solo su macOS, nessun silent pass.
-- Risk: full Xcode non presente o non selezionato. Mitigation: W0 lo tratta come blocker; nessuna implementazione ampia prima del fix ambiente.
+- Risk: full Xcode manca o il per-process developer directory drifta. Mitigation: W0 attesta bundle/versione/framework e i root gate impostano l’exact path; nessuna modifica globale a `xcode-select`.
 - Risk: un ordinary Git push aggiorna una ref apparsa nella race. Mitigation: atomic expected-old-absent è un falsifier W1; nessun force-class fallback implicito.
 - Risk: Pi, DoD o hook bypassa il runner. Mitigation: generic Bash assente da Pi, approved command ids, registry/subcommand/flag chiuso, reviewed plan/script digest, safe Git config e process cleanup.
 - Risk: GitHub REST status/permission drift. Mitigation: pinned OpenAPI evidence ricontrollata in W0, request enum chiuso e operation-specific classification.
@@ -785,6 +786,7 @@ Pass/falsifier/disposition normativi:
 - [x] 2026-08-05: review indipendente a quattro prospettive completata, verdict `revise`, Major composto incorporato.
 - [x] 2026-08-05: project owner ha scelto la fleet Pi headless fresh-context per plan review unattended.
 - [x] 2026-08-05: public bootstrap payload e draft ExecPlan preparati.
+- [x] 2026-08-05: Xcode 26.6 installato; exact `DEVELOPER_DIR` probe con XCTest e Swift Testing verde, global `xcode-select` lasciato su CLT per decisione #50.
 - [x] 2026-08-05: primo review indipendente del draft, 0 Critical e 11 Major; incorporati.
 - [x] 2026-08-05: secondo review fresh-context, 0 Critical e 8 Major residui; incorporati.
 - [x] 2026-08-05: terzo blocker review, 0 Critical e 4 Major residui; incorporati.
@@ -796,7 +798,7 @@ Pass/falsifier/disposition normativi:
 
 ## Surprises and discoveries
 
-- Command Line Tools compila il core SwiftUI/ServiceManagement/SQLite probe ma non offre moduli test utilizzabili da SwiftPM su questa macchina. Build verde senza Xcode non è sufficiente.
+- Command Line Tools compila il core SwiftUI/ServiceManagement/SQLite probe ma non offre i moduli test; full Xcode li offre tramite per-process `DEVELOPER_DIR`, senza richiedere uno switch globale.
 - Pi installato via Homebrew è JavaScript con shebang `env node`; il contesto Finder/launchd deve risolvere Node esplicitamente.
 - Un review path esterno che richiede consenso interattivo per ogni invio non può essere il reviewer unattended del runtime. La fleet fresh-context è una decisione di prodotto, non un dettaglio di implementazione.
 - La review architetturale indipendente non ha scelto helper o monolith; ha richiesto una prova composta prima della decisione.
