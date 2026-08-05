@@ -37,9 +37,19 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 Jidoka Code does not change the machine-wide `xcode-select` configuration. W0 must verify the bundle, Xcode version, SDK, XCTest and Swift Testing through that exact developer directory.
 
+Canonical scaffold commands:
+
+```sh
+make check                 # format, shell, debug/release builds and unit tests
+make test-e2e              # copied, signed application preflight from cwd /
+make jidoka-code-package   # assemble build/Jidoka Code.app
+```
+
+These commands perform local builds only. They do not install the app, register a login item, access Keychain, call a model provider, or mutate GitHub.
+
 ## Status
 
-Planning only. No application release or supported installation exists yet.
+Early implementation is active on the spike-first plan. No application release or supported installation exists yet.
 
 The active implementation plan is:
 

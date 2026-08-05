@@ -1,8 +1,8 @@
 # Jidoka Code: app macOS per workflow GitHub autonomi tramite Pi
 
-**Status:** draft
+**Status:** active
 **Origin:** bootstrap pubblico del 2026-08-05
-**Base:** il commit pubblico che contiene questo piano; W0 deve risolverne e registrare l’exact SHA prima di qualunque source edit
+**Base:** `origin/main@688feb5f87e04e572fffc8b3cac624ad1541379f`; approved pre-execution plan SHA-256 `fe25406e15cd894bd37bc212fb59b447c4a75d261943caa1f212c2eb3b7ab2cc`
 **Complexity:** complex
 **Goal:** distribuire un’app personale macOS da menu bar, installabile e attiva al login, che gestisca repository GitHub configurabili, recensisca PR per head SHA, faccia triage delle issue e porti le issue idonee fino a una PR verificata, senza mai effettuare merge e senza affidare credenziali GitHub a Pi.
 
@@ -516,22 +516,22 @@ Il `complexity guess` del triage è solo un hint. Dopo plan review, ogni plannin
 
 - Scope: toolchain, plan/base validation e worktree, nessun source edit applicativo.
 - Excluded: installazione automatica di Xcode, modifica di `xcode-select`, credenziali o LaunchAgent.
-- [ ] Nel checkout pubblico corrente eseguire `git fetch origin main`, richiedere working tree/index puliti e calcolare exact `origin/main` SHA più SHA-256 di questo piano. Catturare i valori nell’artifact di esecuzione fuori dal repository, senza editare il checkout validato. Se local `main`, remote o plan blob differiscono, fermarsi e revalidare.
-- [ ] Verificare che branch/worktree `feat/jidoka-code-macos-app` non esista. Se esiste, fermarsi e ispezionarlo, mai cancellarlo. Altrimenti creare un worktree pulito dedicato dall’exact approved SHA e verificare che il plan digest sia identico.
-- [ ] Soltanto nel nuovo worktree appendere exact base SHA, plan digest e command evidence a Progress. Questo living-plan edit avviene dopo la base validation e non modifica il checkout pubblico validato.
-- [ ] Il bootstrap non possiede ancora root gates. Registrare questa assenza senza inventare un pass; come primo scaffold W1 aggiungere target truthful `make check` e `make test-e2e`, poi eseguirli prima di espandere oltre le spike.
-- [ ] Registrare il default globale con `(unset DEVELOPER_DIR; xcode-select -p)`, perché `xcode-select` riflette l’override quando presente; non cambiarlo. Validare exact `/Applications/Xcode.app/Contents/Developer`, poi verificare con quel `DEVELOPER_DIR`: `xcodebuild -version`, `xcrun swift --version`, SDK, XCTest/Swift Testing, `codesign`, `pkgbuild`, `productbuild`, `git`, `pi`, `node`.
-- [ ] Se il bundle exact manca, first-launch status fallisce o il probe XCTest/Swift Testing non passa con l’override per-process, fermarsi `blocked`. Non eseguire `sudo xcode-select` e non sostituire i test con script custom.
-- [ ] Verificare Pi exact `0.83.0`. Versione diversa è fail-closed finché la contract suite non viene eseguita e una nuova locked decision amplia il range.
-- [ ] Ricontrollare OpenAPI GitHub e documentare eventuale drift di operation/status prima di W3.
+- [x] Nel checkout pubblico corrente eseguire `git fetch origin main`, richiedere working tree/index puliti e calcolare exact `origin/main` SHA più SHA-256 di questo piano. Catturare i valori nell’artifact di esecuzione fuori dal repository, senza editare il checkout validato. Se local `main`, remote o plan blob differiscono, fermarsi e revalidare.
+- [x] Verificare che branch/worktree `feat/jidoka-code-macos-app` non esista. Se esiste, fermarsi e ispezionarlo, mai cancellarlo. Altrimenti creare un worktree pulito dedicato dall’exact approved SHA e verificare che il plan digest sia identico.
+- [x] Soltanto nel nuovo worktree appendere exact base SHA, plan digest e command evidence a Progress. Questo living-plan edit avviene dopo la base validation e non modifica il checkout pubblico validato.
+- [x] Il bootstrap non possiede ancora root gates. Registrare questa assenza senza inventare un pass; come primo scaffold W1 aggiungere target truthful `make check` e `make test-e2e`, poi eseguirli prima di espandere oltre le spike.
+- [x] Registrare il default globale con `(unset DEVELOPER_DIR; xcode-select -p)`, perché `xcode-select` riflette l’override quando presente; non cambiarlo. Validare exact `/Applications/Xcode.app/Contents/Developer`, poi verificare con quel `DEVELOPER_DIR`: `xcodebuild -version`, `xcrun swift --version`, SDK, XCTest/Swift Testing, `codesign`, `pkgbuild`, `productbuild`, `git`, `pi`, `node`.
+- [x] Se il bundle exact manca, first-launch status fallisce o il probe XCTest/Swift Testing non passa con l’override per-process, fermarsi `blocked`. Non eseguire `sudo xcode-select` e non sostituire i test con script custom.
+- [x] Verificare Pi exact `0.83.0`. Versione diversa è fail-closed finché la contract suite non viene eseguita e una nuova locked decision amplia il range.
+- [x] Ricontrollare OpenAPI GitHub e documentare eventuale drift di operation/status prima di W3.
 
 ### W1: Stop/go spikes in the packaged launch context
 
 - Scope: `Package.swift`, target probe minimali, `scripts/spikes/`, `docs/evidence/spike-report.md`.
 - Excluded: feature UI completa, scheduler produttivo, real token e live GitHub writes non autorizzati.
-- [ ] Creare lo scheletro SwiftPM con Swift 6 mode, platform macOS 14, `JidokaCodeCore`, probe app `MenuBarExtra`, probe engine/helper e test target. Nessuna dependency esterna. Aggiungere root `make check` e `make test-e2e` truthful che impostano l’exact per-process `DEVELOPER_DIR`, poi provarli prima di S1.
-- [ ] S1 packaging locale, senza install/register: costruire `.app` minimale con Info.plist `LSUIElement`, firma ad-hoc, nested executables e verifica `plutil` più `codesign --verify --strict --deep`; copiare il bundle in un temp path fuori checkout e lanciare con cwd `/`.
-- [ ] CHECKPOINT A, prima di S2/S3/S4/S8 e di qualunque provider call: presentare a project owner bundle id app/probe/helper esatti; SMAppService operations; Keychain service/account sentinel; eventuale prompt di sistema; provider/model per ogni ruolo; categorie payload limitate a repository/issue/diff sintetici; exact call matrix per S4 preflight e S8 adapted workflows, hard cap 24 model call totali; costo stimato da model metadata; durata e cleanup. Procedere soltanto con autorizzazione per quella matrice. Nessun logout automatico.
+- [x] Creare lo scheletro SwiftPM con Swift 6 mode, platform macOS 14, `JidokaCodeCore`, probe app `MenuBarExtra`, probe engine/helper e test target. Nessuna dependency esterna. Aggiungere root `make check` e `make test-e2e` truthful che impostano l’exact per-process `DEVELOPER_DIR`, poi provarli prima di S1.
+- [x] S1 packaging locale, senza install/register: costruire `.app` minimale con Info.plist `LSUIElement`, firma ad-hoc, nested executables e verifica `plutil` più `codesign --verify --strict --deep`; copiare il bundle in un temp path fuori checkout e lanciare con cwd `/`.
+- [x] CHECKPOINT A, prima di S2/S3/S4/S8 e di qualunque provider call: project owner ha autorizzato il 2026-08-05 la matrice esatta presentata, con probe app/helper, SMAppService lifecycle, Keychain sentinel temporaneo, payload esclusivamente sintetici e 19 model call massime. Nessun logout automatico.
 - [ ] S2 lifecycle autorizzato: confrontare monolith e LaunchAgent helper con `SMAppService`; registration/status, launch, graceful quit/reopen, SIGKILL/restart, exactly-one engine, IPC, update/re-register e cleanup.
 - [ ] S3 Keychain autorizzato: creare item sentinel temporaneo, provare accesso app e a ciascuna candidate topology firmata, provare che Pi child non lo legge, poi eliminare l’exact item. Una topology che non accede viene scartata; nessun token reale.
 - [ ] S4 Pi RPC autorizzato: lanciare exact Pi/Node, verificare `get_commands`, skill/extension path/hash, structured result, `agent_settled`, timeout/abort e una fixture prompt per ognuno dei quattro profili autorizzati.
@@ -773,9 +773,10 @@ Pass/falsifier/disposition normativi:
 ## External side effects
 
 - Bootstrap pubblico iniziale: autorizzato separatamente dal project owner e limitato a `README.md`, `LICENSE` e questo ExecPlan sanitizzato su `main` di `maroffo/jidoka-code`.
-- Source edit applicativi, branch/worktree di implementazione, commit successivi, push, PR e issue non sono autorizzati da questo piano; richiedono un’invocazione o consenso successivo esplicito.
-- Installazione Xcode, cambio `xcode-select`, certificati, Keychain reale, `SMAppService` register/unregister/kickstart, login/logout e installazione `.pkg`: non autorizzati.
-- Provider model prompt dal processo app: non autorizzato dal solo piano. CHECKPOINT A deve nominare provider/model, payload sintetico o source category, massimo chiamate e costo prima del primo invio.
+- Local branch `feat/jidoka-code-macos-app`, worktree dedicato e source edit necessari a W0/W1: autorizzati dall’invocazione implementation del 2026-08-05.
+- Commit, push e PR della tranche W0/W1 S1 sulla branch dedicata: autorizzati esplicitamente dal project owner il 2026-08-05. Issue e merge restano non autorizzati; CHECKPOINT C/D restano separati.
+- CHECKPOINT A autorizza esclusivamente i side effect S2/S3 nominati: probe app/helper `com.maroffo.JidokaCode.Probe` e `com.maroffo.JidokaCode.EngineProbe`, register/status/unregister SMAppService, lifecycle test, Keychain service `com.maroffo.JidokaCode.test.github` con account `eabf21b6-02df-4854-b9a8-c8a21eafdbca` e cleanup. Installazione Xcode, cambio `xcode-select`, certificati, login/logout e installazione `.pkg` restano non autorizzati.
+- Provider model prompt dal processo app: CHECKPOINT A autorizza esclusivamente 19 call senza retry a `openai-codex/gpt-5.6-sol:max`, per i quattro profili e workflow S4/S8, con soli workflow pubblici e fixture sintetiche, envelope stimato 152k token input e 39,5k output, costo metadata massimo stimato 2,15 USD.
 - GitHub canary comments, labels, branch e PR, incluso l’head update del fixture actor: non autorizzati; richiedono repository, object e target esatti. Merge non autorizzabile da questa V1.
 - Nessun deploy, publication, release o notarization autorizzato.
 
@@ -787,12 +788,19 @@ Pass/falsifier/disposition normativi:
 - [x] 2026-08-05: project owner ha scelto la fleet Pi headless fresh-context per plan review unattended.
 - [x] 2026-08-05: public bootstrap payload e draft ExecPlan preparati.
 - [x] 2026-08-05: Xcode 26.6 installato; exact `DEVELOPER_DIR` probe con XCTest e Swift Testing verde, global `xcode-select` lasciato su CLT per decisione #50.
+- [x] 2026-08-05: W0 base/isolation gate, `origin/main@688feb5f87e04e572fffc8b3cac624ad1541379f`, approved plan digest `fe25406e15cd894bd37bc212fb59b447c4a75d261943caa1f212c2eb3b7ab2cc`, worktree `feat/jidoka-code-macos-app` creato e verificato.
+- [x] 2026-08-05: W0 toolchain, Xcode 26.6 build 17F113, SDK 26.5, Swift 6.3.3, XCTest/Swift Testing, Pi 0.83.0, Node v26.6.0 e SQLite 3.51.0 pass. Root `make check`/`make test-e2e` assenti con exit 2, gap assegnato al primo scaffold W1.
+- [x] 2026-08-05: OpenAPI head `e50419c4bb8f2d1d34735044bb3b410863dc0a10`, version 1.1.4; projection operation/status rilevante invariata rispetto al pin, SHA-256 `b2633d14f2527ebf9a8fa2db1b8b51e97d5e31e0eca3f34d4343149d0d8f6eb9`.
+- [x] 2026-08-05: W1 scaffold e S1 local package completati. Clean rebuild prova Swift 6 debug/release, XCTest e 10 Swift Testing cases, app/helper min OS 14, exact inventory/provenance, portable Mach-O, nested/outer signature, copied execution da `/`, manifest digest/mutation e fail-closed assenza/schema.
+- [x] 2026-08-05: implementation review round 1, architecture/security senza finding; test e dependency hanno riportato 4 Major verificati, più 3 Minor. Corretti output/digest deboli, consumo manifest non provato, payload provenance, toolchain pin, negative matrix, cleanup e W1 README.
+- [x] 2026-08-05: implementation review round 2 fresh-context su architecture/security/test/dependency/DX, zero Critical e zero Major.
+- [x] 2026-08-05: CHECKPOINT A autorizzato con target S2/S3 esatti e hard cap 19 provider call S4/S8; commit, push e PR della tranche W0/W1 S1 autorizzati separatamente.
 - [x] 2026-08-05: primo review indipendente del draft, 0 Critical e 11 Major; incorporati.
 - [x] 2026-08-05: secondo review fresh-context, 0 Critical e 8 Major residui; incorporati.
 - [x] 2026-08-05: terzo blocker review, 0 Critical e 4 Major residui; incorporati.
-- [ ] Implementation approval.
-- [ ] W0 environment gate.
-- [ ] W1 stop/go spikes e checkpoint.
+- [x] Implementation approval per local source edit/worktree; commit, push e PR della tranche W0/W1 S1 autorizzati successivamente. Gli altri side effect restano gated come documentato.
+- [x] W0 environment gate.
+- [ ] W1 S2-S9, CHECKPOINT A approvato; S2 è il prossimo gate.
 - [ ] W2-W8 implementation.
 - [ ] W9 final verification, review e canary autorizzato.
 
@@ -802,6 +810,8 @@ Pass/falsifier/disposition normativi:
 - Pi installato via Homebrew è JavaScript con shebang `env node`; il contesto Finder/launchd deve risolvere Node esplicitamente.
 - Un review path esterno che richiede consenso interattivo per ogni invio non può essere il reviewer unattended del runtime. La fleet fresh-context è una decisione di prodotto, non un dettaglio di implementazione.
 - La review architetturale indipendente non ha scelto helper o monolith; ha richiesto una prova composta prima della decisione.
+- SwiftPM 6.3 ha aggiunto un LC_RPATH verso la toolchain Xcode anche al release binary; S1 ora lo rimuove prima della firma e fallisce su qualunque dependency/rpath non portabile.
+- Un preflight positivo con grep di frammenti non prova consumo o integrità della risorsa. S1 ora muta, corrompe e rimuove il manifest nel bundle ri-firmato, valida JSON exact-key e confronta digest indipendente.
 - La neutralizzazione Git non può basarsi soltanto su `origin`: credential helper, SSH, URL rewrite, hook e submodule fanno parte della superficie reale.
 - `@Observable` rende macOS 14, non 13, il minimum coerente con l’UI scelta; il typecheck locale lo dimostra.
 - Un read-back vuoto dopo un send incerto non prova assenza. Per comment/PR create il solo comportamento sicuro è attribution successiva o escalation.
@@ -811,7 +821,14 @@ Pass/falsifier/disposition normativi:
 
 ## Execution decisions
 
-Append-only. Nessuna decisione di esecuzione ancora presa.
+Append-only.
+
+- 2026-08-05: implementation invocation autorizza local source edit e worktree soltanto; commit, push, provider call, Keychain, ServiceManagement, installer e GitHub mutation restano non autorizzati.
+- 2026-08-05: W0 usa `origin/main@688feb5f87e04e572fffc8b3cac624ad1541379f` e worktree `feat/jidoka-code-macos-app`; global `xcode-select` resta CLT e tutti i comandi Apple usano l’exact per-process developer directory.
+- 2026-08-05: OpenAPI head è avanzato rispetto al pin, ma la projection di operation id e response status usata dal piano è byte-identica; nessuna locked decision cambia.
+- 2026-08-05: W1 anticipa `.gitignore` da W8 perché i gate scaffold producono `.build`, `build` e artifact harness; nessun output generato entra nel changed-file set.
+- 2026-08-05: review round 1 ha dimostrato che presenza file, grep output e filename blacklist non erano evidence sufficiente. S1 usa ora exact inventory, normalized binary provenance, Mach-O allowlist, JSON schema/key set, independent SHA e dynamic packaged-resource mutation.
+- 2026-08-05: project owner autorizza commit, push e PR della tranche W0/W1 S1 e approva CHECKPOINT A come presentato. S2/S3 sono limitati agli exact target registrati; S4/S8 hanno hard cap 19 call senza retry e payload sintetici.
 
 ## Outcomes and retrospective
 
