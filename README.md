@@ -63,7 +63,7 @@ Identity signing uses hardened runtime, signs nested code before the app, and fa
 
 ## Status
 
-W1 packaged-context spikes S1-S9 are complete and Checkpoint B review is pending. W2 has not started. No application release or supported installation exists yet.
+W1 packaged-context spikes S1-S9 are complete and Checkpoint B is accepted. W2 now provides the durable SQLite core, total runtime/recovery state machines, repository leases, scheduler timing, persistent configuration, and contained artifact storage. No application release or supported installation exists yet.
 
 The active implementation plan is:
 
@@ -73,7 +73,7 @@ The spike report records the executable evidence, provider-call accounting, clea
 
 - [`docs/evidence/spike-report.md`](docs/evidence/spike-report.md)
 
-The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. Starting W2 requires explicit Checkpoint B acceptance.
+The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. W3-W9 remain unimplemented; the W2 core is not yet wired to GitHub, Pi production workflows, or the menu-bar UI.
 
 ## Scope boundary
 
