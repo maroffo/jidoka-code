@@ -63,7 +63,7 @@ Identity signing uses hardened runtime, signs nested code before the app, and fa
 
 ## Status
 
-W1 packaged-context spikes S1-S9 are complete and Checkpoint B is accepted. W2 now provides the durable SQLite core, total runtime/recovery state machines, repository leases, scheduler timing, persistent configuration, and contained artifact storage. No application release or supported installation exists yet.
+W1 packaged-context spikes S1-S9 are complete and Checkpoint B is accepted. W2 provides the durable SQLite core and scheduler. W3 adds the closed GitHub REST broker, Keychain token boundary, byte-exact markers and revisions, prepared-before-send mutation reconciliation, and evidence-based discovery. No application release or supported installation exists yet.
 
 The active implementation plan is:
 
@@ -73,7 +73,7 @@ The spike report records the executable evidence, provider-call accounting, clea
 
 - [`docs/evidence/spike-report.md`](docs/evidence/spike-report.md)
 
-The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. W3-W9 remain unimplemented; the W2 core is not yet wired to GitHub, Pi production workflows, or the menu-bar UI.
+The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. W4-W9 remain unimplemented; the W3 broker has no live credential or GitHub canary evidence and is not yet connected to production job coordinators, Pi workflows, or the menu-bar UI.
 
 ## Scope boundary
 
