@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "decision": 53,
+  "supersedes": 35,
+  "status": "locked",
+  "selectedTopology": "launch-agent-helper",
+  "nonSelectedTopology": "in-process-monolith",
+  "evidence": {
+    "lifecycle": "build/evidence/signed-hikma-fresh-probe/s2/summary.json",
+    "keychain": "build/evidence/signed-hikma-fresh-probe/s3/summary.json",
+    "piProfiles": "build/evidence/jidoka-code-s4.G1gnat/summary.json",
+    "composedSecurity": "build/evidence/jidoka-code-s5-s7.vf3Zv9/summary.json",
+    "workflowFidelity": "build/evidence/jidoka-code-s8.JHFouK/summary.json"
+  },
+  "thresholds": {
+    "exactlyOneEngine": true,
+    "crashRestartWithinSeconds": 30,
+    "reconciliationBeforeDispatch": true,
+    "gracefulQuitDoesNotCrashLoop": true,
+    "keychainIPCAndPiValid": true
+  },
+  "falsifier": {
+    "monolithCrashRestart": false,
+    "helperLifecycle": true
+  },
+  "bundleDisposition": {
+    "monolithProbeSourceRemoved": true,
+    "selectedHelperRetained": true
+  },
+  "residualRisks": [
+    "The W1 helper uses temporary probe identities; production identifiers and registration UI remain W9 work.",
+    "Distribution notarization is outside W1 scope.",
+    "The durable production engine and scheduler remain blocked until Checkpoint B is accepted."
+  ]
+}

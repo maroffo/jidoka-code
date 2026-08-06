@@ -18,7 +18,10 @@ let package = Package(
             name: "JidokaCodeApp",
             dependencies: ["JidokaCodeCore"]
         ),
-        .executableTarget(name: "JidokaCodeEngineProbe"),
+        .executableTarget(
+            name: "JidokaCodeEngineProbe",
+            dependencies: ["JidokaCodeCore"]
+        ),
         .testTarget(
             name: "JidokaCodeCoreTests",
             dependencies: ["JidokaCodeCore"]

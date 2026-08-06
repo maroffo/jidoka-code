@@ -25,7 +25,7 @@ pi
 # Run /login inside Pi and select a provider.
 ```
 
-The implementation plan currently gates on Pi `0.83.0`; W0 must revalidate compatibility against the installed public package and documentation before source work.
+The implementation plan gates on Pi `0.83.0`. W0 and W1 verified the exact installed package and pinned the reviewed runtime paths used by the packaged-context probes.
 
 ## Development toolchain
 
@@ -40,22 +40,40 @@ Jidoka Code does not change the machine-wide `xcode-select` configuration. W0 mu
 Canonical scaffold commands:
 
 ```sh
-make check                 # format, shell, debug/release builds and unit tests
-make test-e2e              # copied, signed application preflight from cwd /
-make jidoka-code-package   # assemble build/Jidoka Code.app
+make check  # format, shell, debug/release builds and unit tests
+make test-e2e  # copied, signed application preflight from cwd /
+make jidoka-code-package  # assemble build/Jidoka Code.app
+make jidoka-code-test-s2-preflight  # offline-only lifecycle contract check
+make jidoka-code-test-s3-preflight  # offline-only Keychain isolation contract check
+make jidoka-code-test-s4-preflight  # packaged Pi, retry, ledger and cleanup checks, zero provider calls
+make jidoka-code-test-s5-s7-preflight  # temporary local Git/security/recovery fixtures
+make jidoka-code-test-s8-preflight  # workflow matrix and command provenance, zero provider calls
+make jidoka-code-test-s9-preflight  # locked helper topology and monolith-removal check
 ```
 
-These commands perform local builds only. They do not install the app, register a login item, access Keychain, call a model provider, or mutate GitHub.
+These commands do not install the app, register a login item, access a real credential, call a model provider, or mutate GitHub. The S5-S7 preflight creates only temporary repositories and a loopback smart-HTTP fixture, then removes them.
+
+Offline packaging defaults to an ad-hoc signature. Any lifecycle or distribution probe must pass an exact local identity SHA-1 explicitly:
+
+```sh
+SIGN_IDENTITY=<40-character-codesigning-identity> make jidoka-code-package
+```
+
+Identity signing uses hardened runtime, signs nested code before the app, and fails unless app and helper have the same concrete TeamIdentifier. The ad-hoc output is not accepted as lifecycle evidence.
 
 ## Status
 
-Early implementation is active on the spike-first plan. No application release or supported installation exists yet.
+W1 packaged-context spikes S1-S9 are complete and Checkpoint B review is pending. W2 has not started. No application release or supported installation exists yet.
 
 The active implementation plan is:
 
 - [`docs/plans/active/2026-08-05_jidoka-code-macos-app.md`](docs/plans/active/2026-08-05_jidoka-code-macos-app.md)
 
-The plan is spike-first. Implementation must first prove the macOS lifecycle, system Pi integration, credential isolation, workflow fidelity, and exact Git publication behavior in the packaged context.
+The spike report records the executable evidence, provider-call accounting, cleanup, and residual risks:
+
+- [`docs/evidence/spike-report.md`](docs/evidence/spike-report.md)
+
+The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. Starting W2 requires explicit Checkpoint B acceptance.
 
 ## Scope boundary
 

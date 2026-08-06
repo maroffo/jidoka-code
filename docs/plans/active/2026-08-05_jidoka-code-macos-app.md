@@ -114,6 +114,9 @@ Append only. Reverse a decision with a new row that names the superseded row.
 | 48 | Complexity authority | Deterministic max severity dopo plan review; unknown/disagreement è complex, hard rail è humanOwned | Il triage guess non può bypassare `plan:approved` | rubric versionata cambia con evidence |
 | 49 | Contract bump and review identity | Un contract/app/skill bump non rivede lo stesso PR head SHA e non azzera disposition | Decisione #23 è contract-independent | project owner autorizza esplicitamente una one-off re-review campaign |
 | 50 | Xcode selection | Non modificare global `xcode-select`; build, test e command runner usano exact per-process `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` | Xcode 26.6 e i due test framework passano con l’override, mentre CLT resta il default scelto | il bundle si sposta o il probe exact fallisce |
+| 51 | Signing gate, applica #37 | L’helper non può essere approvato con firma ad-hoc: W1 resta bloccato finché un’identità Apple Development o Developer ID valida non firma e ripete S2-S4/S8 | Dopo un S2 iniziale verde, qualunque rebuild con nuovo code identity è stato respinto da AMFI con `OS_REASON_CODESIGNING`; ripristinare il bundle byte-identico torna verde, mentre incrementare `CFBundleVersion` non basta | una firma valida supera update, relaunch, Keychain e packaged Pi context senza reset BTM |
+| 52 | Firma locale W1, soddisfa il gate #51 | Usare l’identità locale Apple Development Hikma tramite exact SHA-1 `SIGN_IDENTITY`, hardened runtime e timestamp disabilitato per i probe; non riutilizzare le label contaminate dai run ad-hoc | Un fresh signed probe passa S1, S2 completo incluso update generation, e S3 completo con stesso TeamIdentifier; cleanup exact passa senza reset BTM | il certificato scade, manca la chiave privata, cambia team o una build firmata fallisce i gate |
+| 53 | Topologia W1, supersedes #35 | Selezionare il LaunchAgent helper; rimuovere il probe monolith dal bundle finale W1 | Il monolith fallisce crash restart entro 30 s; il helper Apple Development passa exactly-one, XPC, restart, reconciliation-first, graceful reopen, Keychain, Pi, S5 composition e cleanup | il helper fallisce un threshold lifecycle/security o una topologia più semplice passa l'intera stessa matrice |
 
 ## Architecture contract
 
@@ -532,14 +535,14 @@ Il `complexity guess` del triage è solo un hint. Dopo plan review, ogni plannin
 - [x] Creare lo scheletro SwiftPM con Swift 6 mode, platform macOS 14, `JidokaCodeCore`, probe app `MenuBarExtra`, probe engine/helper e test target. Nessuna dependency esterna. Aggiungere root `make check` e `make test-e2e` truthful che impostano l’exact per-process `DEVELOPER_DIR`, poi provarli prima di S1.
 - [x] S1 packaging locale, senza install/register: costruire `.app` minimale con Info.plist `LSUIElement`, firma ad-hoc, nested executables e verifica `plutil` più `codesign --verify --strict --deep`; copiare il bundle in un temp path fuori checkout e lanciare con cwd `/`.
 - [x] CHECKPOINT A, prima di S2/S3/S4/S8 e di qualunque provider call: project owner ha autorizzato il 2026-08-05 la matrice esatta presentata, con probe app/helper, SMAppService lifecycle, Keychain sentinel temporaneo, payload esclusivamente sintetici e 19 model call massime. Nessun logout automatico.
-- [ ] S2 lifecycle autorizzato: confrontare monolith e LaunchAgent helper con `SMAppService`; registration/status, launch, graceful quit/reopen, SIGKILL/restart, exactly-one engine, IPC, update/re-register e cleanup.
-- [ ] S3 Keychain autorizzato: creare item sentinel temporaneo, provare accesso app e a ciascuna candidate topology firmata, provare che Pi child non lo legge, poi eliminare l’exact item. Una topology che non accede viene scartata; nessun token reale.
-- [ ] S4 Pi RPC autorizzato: lanciare exact Pi/Node, verificare `get_commands`, skill/extension path/hash, structured result, `agent_settled`, timeout/abort e una fixture prompt per ognuno dei quattro profili autorizzati.
-- [ ] S5 composed security: dallo stesso packaged service context usare credential-helper fixture, il reale contesto redatto `insteadOf`/SSH agent, fake SSH endpoint, tracked hook e submodule. Pi deve restare credentialless, direct remote/push deve essere bloccato, hook non bypassato e submodule locale o escalated.
-- [ ] S6 Git transport locale: authenticated fixture remote più askpass one-shot; exact SHA create passa, same SHA è attributable, divergent SHA escala. Iniettare ref al base SHA tra preflight e receive: CAS create-only deve rifiutare senza avanzare. Token sentinel assente da process/artifact. Se serve force-class semantic, S6 fail.
-- [ ] S7 mutation recovery: fake GitHub stateful con lost response e delayed visibility oltre 30 s; matrice completa. Unknown comment/PR create assente deve escalation, non retry.
-- [ ] S8 workflow fidelity autorizzato: nel packaged service context, exact Pi esegue gli adapted PR review, triage, planning fleet e orchestration su sole fixture sintetiche entro il call matrix A. Golden/replay tests restano aggiuntivi, non sostituiscono il run reale. Produrre mapping precondition/action/postcondition/evidence per ogni invariant.
-- [ ] S9 topology decision: scegliere helper o monolith soltanto dai risultati e appendere una locked decision che supersede #35; rimuovere dal production bundle il probe non scelto.
+- [x] S2 lifecycle autorizzato: la firma ad-hoc è stata falsificata sugli update; un fresh probe firmato Apple Development Hikma passa registration/status, launch, graceful quit/reopen, SIGKILL/restart, exactly-one engine, XPC, generation 1→2 ri-firmata con lo stesso team e cleanup. Monolith resta scartato.
+- [x] S3 Keychain autorizzato: item sentinel temporaneo seedato dall’harness via stdin con ACL esatta app/helper; app read/replace e helper read passano, Pi direct Bash è bloccato pre-spawn dall’estensione SHA-pinned, cleanup exact passa. Nessun token reale.
+- [x] S4 Pi RPC autorizzato: exact Pi/Node, `get_commands`, skill/extension path/hash, strict JSON result, `agent_settled`, timeout/abort e quattro profili passano con 4 call, SSE e zero retry.
+- [x] S5 composed security: credential helper, host `insteadOf`/SSH agent redatti, fake SSH, tracked hook e submodule passano; Pi resta credentialless, remote receive zero, hook non bypassato e submodule network escalated.
+- [x] S6 Git transport locale: smart-HTTP autenticato più askpass one-shot passa exact create/read-back, same SHA attributable e divergent escalation. La race after-advertisement/before-receive rifiuta CAS expected-old zero senza avanzare e senza force-class semantic.
+- [x] S7 mutation recovery: fake GitHub stateful attraversa 10 operation x 6 crash window x 2 visibility scenario. Unknown comment/PR assente escala; zero second create e zero success senza attribution.
+- [x] S8 workflow fidelity autorizzato: 15 sessioni Pi fresh-context completano la matrice 4 review/synthesis, 1 triage, 5 planning e 5 orchestration con 29 mapping invariant-evidence. Ledger totale 19/19, ogni request count 1 e zero retry.
+- [x] S9 topology decision: decisione locked #53 seleziona helper e supersede #35; il probe monolith è rimosso dal bundle W1 finale.
 
 Pass/falsifier/disposition normativi:
 
@@ -555,8 +558,8 @@ Pass/falsifier/disposition normativi:
 | S8 fidelity | exact Pi real run su fixture sintetiche entro call matrix A più golden evidence per tutte le righe; zero hard rail perso | invariant senza owner/test, generic Bash/remote side effect disponibile, o real run non strutturato | block il workflow e W2 |
 | S9 topology | una topologia soddisfa S1-S5 e i threshold lifecycle; decisione e residual risk registrati | scelta per preferenza o risultato incompleto | block W2 |
 
-- [ ] Scrivere `docs/evidence/spike-report.md` con setup/command, output redatto, pass/fail/falsifier per S1-S9, autorizzazioni ricevute, cleanup e rischi residui.
-- [ ] STOP CHECKPOINT B: non iniziare W2. Presentare spike report a project owner. Tutti S1-S9 devono essere pass; nessuna categoria omitted è implicitamente accettata.
+- [x] Scrivere `docs/evidence/spike-report.md` con setup/command, output redatto, pass/fail/falsifier per S1-S9, autorizzazioni ricevute, cleanup e rischi residui.
+- [x] CHECKPOINT B: accettato esplicitamente dal project owner in-session il 2026-08-06 dopo review e correzione dei documenti. Tutti S1-S9 passano senza categorie omitted. W2 è sbloccato ma non avviato.
 
 ### W2: Durable core, persistence and scheduler
 
@@ -776,6 +779,7 @@ Pass/falsifier/disposition normativi:
 - Local branch `feat/jidoka-code-macos-app`, worktree dedicato e source edit necessari a W0/W1: autorizzati dall’invocazione implementation del 2026-08-05.
 - Commit, push e PR della tranche W0/W1 S1 sulla branch dedicata: autorizzati esplicitamente dal project owner il 2026-08-05. Issue e merge restano non autorizzati; CHECKPOINT C/D restano separati.
 - CHECKPOINT A autorizza esclusivamente i side effect S2/S3 nominati: probe app/helper `com.maroffo.JidokaCode.Probe` e `com.maroffo.JidokaCode.EngineProbe`, register/status/unregister SMAppService, lifecycle test, Keychain service `com.maroffo.JidokaCode.test.github` con account `eabf21b6-02df-4854-b9a8-c8a21eafdbca` e cleanup. Installazione Xcode, cambio `xcode-select`, certificati, login/logout e installazione `.pkg` restano non autorizzati.
+- Il 2026-08-05 il project owner ha autorizzato la creazione e l’uso di una identità locale Apple Development Hikma e, dopo il constraint storico della label ad-hoc, i target temporanei esatti `com.maroffo.JidokaCode.SignedProbe` e `com.maroffo.JidokaCode.SignedEngineProbe`. Il probe è stato disregistrato e rimosso; il certificato locale resta intenzionalmente nel login Keychain.
 - Provider model prompt dal processo app: CHECKPOINT A autorizza esclusivamente 19 call senza retry a `openai-codex/gpt-5.6-sol:max`, per i quattro profili e workflow S4/S8, con soli workflow pubblici e fixture sintetiche, envelope stimato 152k token input e 39,5k output, costo metadata massimo stimato 2,15 USD.
 - GitHub canary comments, labels, branch e PR, incluso l’head update del fixture actor: non autorizzati; richiedono repository, object e target esatti. Merge non autorizzabile da questa V1.
 - Nessun deploy, publication, release o notarization autorizzato.
@@ -795,12 +799,18 @@ Pass/falsifier/disposition normativi:
 - [x] 2026-08-05: implementation review round 1, architecture/security senza finding; test e dependency hanno riportato 4 Major verificati, più 3 Minor. Corretti output/digest deboli, consumo manifest non provato, payload provenance, toolchain pin, negative matrix, cleanup e W1 README.
 - [x] 2026-08-05: implementation review round 2 fresh-context su architecture/security/test/dependency/DX, zero Critical e zero Major.
 - [x] 2026-08-05: CHECKPOINT A autorizzato con target S2/S3 esatti e hard cap 19 provider call S4/S8; commit, push e PR della tranche W0/W1 S1 autorizzati separatamente.
+- [x] 2026-08-05: S2 live completato con cleanup verificato. `SMAppService.mainApp` passa enabled, direct EngineClient 100 e graceful/reopen ma non crash-restart entro 30 s, quindi monolith scartato. LaunchAgent helper passa enabled/exactly-one, XPC 100, crash-restart entro 30 s, reconciliation-first, graceful no-loop per 31 s, on-demand reopen e generation 1→2 unregister/update/re-register.
+- [x] 2026-08-05: review S2 iniziale fresh-context architecture/security/test, zero Critical e zero Major; postcondizioni indipendenti confermano target, job e processi assenti dopo cleanup. La review precede il successivo falsifier di code-identity update e non lo chiude.
 - [x] 2026-08-05: primo review indipendente del draft, 0 Critical e 11 Major; incorporati.
 - [x] 2026-08-05: secondo review fresh-context, 0 Critical e 8 Major residui; incorporati.
 - [x] 2026-08-05: terzo blocker review, 0 Critical e 4 Major residui; incorporati.
 - [x] Implementation approval per local source edit/worktree; commit, push e PR della tranche W0/W1 S1 autorizzati successivamente. Gli altri side effect restano gated come documentato.
+- [x] 2026-08-05: S3 live passa con item sintetico da 32 byte, ACL app/helper senza prompt, app read/replace, helper XPC read, Pi `user_bash` blocked con exit 126, zero provider prompt e cleanup verificato. Un run precedente ha dimostrato che `--no-tools` da solo non blocca il comando RPC `bash`; il blocker packaged è quindi obbligatorio.
+- [x] 2026-08-05: Apple Development Hikma locale creato e verificato con firma hardened-runtime. Il fresh signed probe autorizzato passa S1, S2 completo e S3 completo; app/helper hanno lo stesso TeamIdentifier. Le label, il target, i processi, il sentinel e la copia temporanea sono assenti dopo cleanup.
 - [x] W0 environment gate.
-- [ ] W1 S2-S9, CHECKPOINT A approvato; S2 è il prossimo gate.
+- [x] 2026-08-06: W1 S4-S9 passano. S4 consuma 4 call, S8 15, ledger 19/19 tutto `settled` con request count 1 e zero retry. S5-S7 passano local-only; locked decision #53 seleziona il helper e rimuove il monolith. Spike report completo, STOP a Checkpoint B.
+- [x] 2026-08-06: review documentale Checkpoint B inizialmente `revise`: corretti i claim troppo ampi su commit/push fixture, aggiunta matrice setup/command/rerun, registrata evidenza S1 e creato manifest redatto versionabile con digest. S9 Apple Development è stato ripetuto sulla decisione corrente byte-identica.
+- [x] 2026-08-06: project owner approva esplicitamente Checkpoint B in-session. W2 è sbloccato ma non avviato; commit e push restano separatamente gated.
 - [ ] W2-W8 implementation.
 - [ ] W9 final verification, review e canary autorizzato.
 
@@ -812,12 +822,24 @@ Pass/falsifier/disposition normativi:
 - La review architetturale indipendente non ha scelto helper o monolith; ha richiesto una prova composta prima della decisione.
 - SwiftPM 6.3 ha aggiunto un LC_RPATH verso la toolchain Xcode anche al release binary; S1 ora lo rimuove prima della firma e fallisce su qualunque dependency/rpath non portabile.
 - Un preflight positivo con grep di frammenti non prova consumo o integrità della risorsa. S1 ora muta, corrompe e rimuove il manifest nel bundle ri-firmato, valida JSON exact-key e confronta digest indipendente.
+- Su questo host un servizio SMAppService assente può riportare `notFound`, incluso dopo un unregister riuscito; S2 lo considera inerte soltanto insieme ad assenza del launchd job e dei processi esatti.
+- `plutil -replace` su un indice array ha inserito il nuovo valore senza rimuovere il precedente. S2 usa remove+insert e un preflight exact-arity prima dell’update.
+- `SMAppService.mainApp` non supervisiona il processo dopo SIGKILL nel contesto provato; il monolith non soddisfa il topology gate lifecycle.
 - La neutralizzazione Git non può basarsi soltanto su `origin`: credential helper, SSH, URL rewrite, hook e submodule fanno parte della superficie reale.
 - `@Observable` rende macOS 14, non 13, il minimum coerente con l’UI scelta; il typecheck locale lo dimostra.
 - Un read-back vuoto dopo un send incerto non prova assenza. Per comment/PR create il solo comportamento sicuro è attribution successiva o escalation.
 - Ordinary pre-read più push non esprime da solo la regola branch absent in modo atomicamente dimostrato; la primitive CAS è ora un gate, non un dettaglio W4.
 - I comandi DoD e gli hook sono un execution boundary distinto da Pi e richiedono un runner credentialless dedicato.
 - L’OpenAPI ufficiale rende enumerabile l’assenza di endpoint merge e impedisce la categoria falsa “4xx/5xx generic retry”.
+- Pi RPC espone il comando diretto `bash` anche con `--no-tools`; soltanto un handler packaged `user_bash` che termina con exit 126 ha impedito lo spawn nel probe popolato.
+- Il prompt ACL Keychain manuale non è automatizzabile. S3 usa `security add-generic-password` con valore sintetico via stdin, creator escluso e trust ristretto a exact app bundle e helper; il prodotto dovrà usare la strategia del signing spike.
+- `SMAppService` più firma ad-hoc accetta il bundle già registrato ma AMFI respinge una nuova code identity con `OS_REASON_CODESIGNING`, anche dopo unregister e incremento di `CFBundleVersion`. Il ritorno all’exact bundle precedente ripassa, isolando il problema alla firma/update e non alla lifecycle logic.
+- Xcode ha inizialmente creato un certificato Apple Development senza chiave locale corrispondente. Una build automatica di un command-line tool senza bundle id o provisioning profile ha creato la coppia locale; `codesign` e il fresh signed lifecycle ne provano l’uso.
+- Il constraint BTM storico sopravvive a `SMAppService.unregister()`: passare da ad-hoc a Apple Development sulla stessa label resta bloccato. Una label mai registrata, firmata Hikma fin dal primo run, accetta rebuild e generation update con lo stesso team.
+- Pi/Codex con transport `auto` può tentare WebSocket e poi SSE dietro un solo `before_provider_request`; W1 impone SSE, provider retry zero e attesta i digest runtime per mantenere una request per reservation.
+- Il direct Git smart protocol invia old SHA zero per una create osservata assente. Una fixture actor che crea il ref dopo advertisement ma prima di receive causa rifiuto CAS e lascia il ref concorrente invariato, senza flag force-class.
+- Il ledger provider canonico è un authorization boundary durabile: 19 tentativi unici, tutti settled, nessun replay di attempt o fixture e nessun ventesimo tentativo possibile.
+- Il PID del subshell launcher non prova cleanup di un'app AppKit: il primo S9 lasciava tre processi exact-path reparented. Il gate corretto enumera l'executable path, usa graceful quit riconosciuto e richiede zero processi esatti.
 
 ## Execution decisions
 
@@ -829,7 +851,16 @@ Append-only.
 - 2026-08-05: W1 anticipa `.gitignore` da W8 perché i gate scaffold producono `.build`, `build` e artifact harness; nessun output generato entra nel changed-file set.
 - 2026-08-05: review round 1 ha dimostrato che presenza file, grep output e filename blacklist non erano evidence sufficiente. S1 usa ora exact inventory, normalized binary provenance, Mach-O allowlist, JSON schema/key set, independent SHA e dynamic packaged-resource mutation.
 - 2026-08-05: project owner autorizza commit, push e PR della tranche W0/W1 S1 e approva CHECKPOINT A come presentato. S2/S3 sono limitati agli exact target registrati; S4/S8 hanno hard cap 19 call senza retry e payload sintetici.
+- 2026-08-05: S2 scarta il monolith per assenza di crash restart entro 30 s. LaunchAgent helper resta l’unico candidato lifecycle, ma non diventa decisione #35 definitiva prima di S3-S5 e S9.
+- 2026-08-05: per cleanup e precondition SMAppService, `notFound` equivale a stato inerte soltanto quando il job agent e i processi app/helper sono anch’essi assenti; `enabled` resta obbligatorio durante la prova registrata.
+- 2026-08-05: S3 non delega il valore sintetico a argv o env. L’harness lo passa due volte via stdin a `security -w`, esclude il creator con `-T ""`, autorizza exact app/helper, conserva soltanto SHA-256, e richiede read/replace/helper/Pi-gate più cleanup.
+- 2026-08-05: il falsifier AMFI attiva la decisione #37. Nessun reset BTM è stato usato; il project owner ha poi autorizzato certificato locale e fresh signed labels esatte per ripetere i gate packaged.
+- 2026-08-05: il fresh signed probe differisce dal sorgente operativo soltanto per i due identifier autorizzati. Usa `SIGN_IDENTITY` exact SHA-1, hardened runtime, nested-before-outer signing e stessa identità sul generation update; S2/S3 passano e gli artifact redatti sono conservati sotto `build/evidence/signed-hikma-fresh-probe/`.
+- 2026-08-06: S4 usa un `PI_CODING_AGENT_DIR` isolato, solo auth `openai-codex`, SSE, tool disabilitati e provider hook `reserved -> issued`; quattro profili passano e il falsifier locale blocca la seconda request prima del provider.
+- 2026-08-06: S5-S7 passano nel bundle firmato. S6 prova CAS create-only old-zero con race al receive e nessun force-class flag; S7 classifica 120 casi senza seconda create.
+- 2026-08-06: S8 consuma le 15 call residue, tutte fresh-context e schema-valid. Il ledger raggiunge esattamente 19/19. Decisione #53 seleziona il LaunchAgent helper; il monolith probe è rimosso. W2 resta bloccato in attesa di Checkpoint B.
+- 2026-08-06: il primo S9 cleanup basato sul launcher PID è falsificato da tre processi app reparented. Terminati solo gli exact target, il test passa a exact-path inventory più acknowledged graceful quit; run ad-hoc e Apple Development chiudono a zero processi.
 
 ## Outcomes and retrospective
 
-Da compilare alla chiusura o all’abbandono. Il piano non è approvato e nessun codice applicativo è stato scritto.
+W0 e W1 S1-S9 sono eseguiti. Ad-hoc è definitivamente scartato; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Il budget provider è esaurito esattamente a 19/19 senza retry. `docs/evidence/spike-report.md` è pronto per Checkpoint B; W2 non è iniziato e resta correttamente bloccato fino ad approvazione esplicita.
