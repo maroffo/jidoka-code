@@ -579,14 +579,14 @@ Pass/falsifier/disposition normativi:
 
 - Scope: `Sources/JidokaCodeCore/GitHub/`, `Keychain/`, `Reconciliation/`, fixture HTTP e test.
 - Excluded: Git object transport e Pi workflows.
-- [ ] Implementare Keychain store con service/account stabili, replace atomico e zero logging del payload.
-- [ ] Implementare `URLSession` GitHub REST client con request enum chiuso, host allowlist `api.github.com`, API version header, redirect policy, pagination, rate/abuse limit, Retry-After, timeout e typed status classification.
-- [ ] Implementare soltanto l’inventario read per identity, repository/default branch, PR/head/draft, issues, comments, labels, refs e PR lookup; contract test method/path/query/operation id.
-- [ ] Implementare soltanto l’inventario write per label bootstrap, comment create, workflow label mutation e PR create più read-back. Nessun metodo merge, auto-merge, close, delete comment/label/repo, release o tag; enum snapshot test.
-- [ ] Implementare marker builder/parser, canonical bytes, multipart e `issue_revision`; golden/fuzz test per HTML/body ostile, line ending, Unicode, size boundary, marker spoof, author mismatch e linked digest.
-- [ ] Implementare `mutation_intents` prepared-before-send, unknown-send state, delayed reconciliation schedule e operation-specific outcomes secondo la tabella normativa.
-- [ ] Fault test tutte le crash windows e status classes. Assert zero second create after unknown, zero false success e classification esatta.
-- [ ] Implementare discovery PR/issue con full pagination e terminal evidence, non timestamp window.
+- [x] Implementare Keychain store con service/account stabili, replace atomico e zero logging del payload.
+- [x] Implementare `URLSession` GitHub REST client con request enum chiuso, host allowlist `api.github.com`, API version header, redirect policy, pagination, rate/abuse limit, Retry-After, timeout e typed status classification.
+- [x] Implementare soltanto l’inventario read per identity, repository/default branch, PR/head/draft, issues, comments, labels, refs e PR lookup; contract test method/path/query/operation id.
+- [x] Implementare soltanto l’inventario write per label bootstrap, comment create, workflow label mutation e PR create più read-back. Nessun metodo merge, auto-merge, close, delete comment/label/repo, release o tag; enum snapshot test.
+- [x] Implementare marker builder/parser, canonical bytes, multipart e `issue_revision`; golden/fuzz test per HTML/body ostile, line ending, Unicode, size boundary, marker spoof, author mismatch e linked digest.
+- [x] Implementare `mutation_intents` prepared-before-send, unknown-send state, delayed reconciliation schedule e operation-specific outcomes secondo la tabella normativa.
+- [x] Fault test tutte le crash windows e status classes. Assert zero second create after unknown, zero false success e classification esatta.
+- [x] Implementare discovery PR/issue con full pagination e terminal evidence, non timestamp window.
 
 ### W4: Repository store, Git transport and exact publication
 
@@ -813,7 +813,9 @@ Pass/falsifier/disposition normativi:
 - [x] 2026-08-06: project owner approva esplicitamente Checkpoint B in-session. W2 è sbloccato; commit e push restano separatamente gated.
 - [x] 2026-08-06: W2 durable core implementato su `feat/jidoka-code-w2-core`: SQLite WAL/schema/migration backup, state e recovery totali, disposition contract-independent, lease/semaphore, scheduler virtual-clock, configurazione e artifact containment. Suite funzionale, AddressSanitizer, ThreadSanitizer e package E2E passano senza provider call.
 - [x] W2 durable core, persistence and scheduler.
-- [ ] W3-W8 implementation.
+- [x] 2026-08-06: W3 GitHub broker implementato su `feat/jidoka-code-w3-github-broker` da `origin/main@97b1fad`: Keychain boundary, inventario REST chiuso, fixture HTTP offline, marker/revision byte-exact, mutation intents e reconciliation delayed, read-back e discovery. Suite funzionale, AddressSanitizer, ThreadSanitizer e package E2E passano senza provider call, credential access o GitHub live.
+- [x] W3 GitHub broker and operation reconciliation.
+- [ ] W4-W8 implementation.
 - [ ] W9 final verification, review e canary autorizzato.
 
 ## Surprises and discoveries
@@ -842,6 +844,9 @@ Pass/falsifier/disposition normativi:
 - Il direct Git smart protocol invia old SHA zero per una create osservata assente. Una fixture actor che crea il ref dopo advertisement ma prima di receive causa rifiuto CAS e lascia il ref concorrente invariato, senza flag force-class.
 - Il ledger provider canonico è un authorization boundary durabile: 19 tentativi unici, tutti settled, nessun replay di attempt o fixture e nessun ventesimo tentativo possibile.
 - Il PID del subshell launcher non prova cleanup di un'app AppKit: il primo S9 lasciava tre processi exact-path reparented. Il gate corretto enumera l'executable path, usa graceful quit riconosciuto e richiede zero processi esatti.
+- Un `Retry-After` mancante o malformato non autorizza un delay arbitrario: il broker usa il reset di rate limit se valido, altrimenti escalation.
+- Gli status GitHub `404/406/409/410/422` non sono categorie globali. L’operation inventory deve autorizzare ogni coppia operation/status; una coppia non dichiarata escala.
+- Un initializer pubblico per iniettare token provider o transport trasformerebbe una seam di test in un bypass del Keychain/host boundary. Le seam restano `internal` e il package le prova con `@testable`.
 
 ## Execution decisions
 
@@ -862,7 +867,11 @@ Append-only.
 - 2026-08-06: S5-S7 passano nel bundle firmato. S6 prova CAS create-only old-zero con race al receive e nessun force-class flag; S7 classifica 120 casi senza seconda create.
 - 2026-08-06: S8 consuma le 15 call residue, tutte fresh-context e schema-valid. Il ledger raggiunge esattamente 19/19. Decisione #53 seleziona il LaunchAgent helper; il monolith probe è rimosso. W2 resta bloccato in attesa di Checkpoint B.
 - 2026-08-06: il primo S9 cleanup basato sul launcher PID è falsificato da tre processi app reparented. Terminati solo gli exact target, il test passa a exact-path inventory più acknowledged graceful quit; run ad-hoc e Apple Development chiudono a zero processi.
+- 2026-08-06: W3 parte soltanto dopo fetch e prova che W2 `9df46a6c00ff8057ee04ae98ace141d577548422` è antenato di `origin/main@97b1fad`; branch e worktree dedicati non toccano il checkout di sviluppo.
+- 2026-08-06: W3 è fixture-only. Il Security backend e il transport production compilano, ma token provider/transport injection restano internal; non viene letto alcun Keychain reale e non parte alcuna request GitHub o provider.
+- 2026-08-06: pagination e marker input hanno ceiling espliciti con escalation, non truncation; una create con send iniziato non può mai essere inviata una seconda volta automaticamente.
+- 2026-08-06: il project owner autorizza un singolo commit W3 e il push non-force del branch dedicato; merge e ulteriori side effect restano non autorizzati.
 
 ## Outcomes and retrospective
 
-W0, W1 S1-S9 e W2 sono eseguiti. Ad-hoc è definitivamente scartato; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Il durable core W2 è verificato localmente; W3-W9, integrazione engine/UI, installer e canary restano aperti.
+W0, W1 S1-S9, W2 e W3 sono eseguiti. Ad-hoc è definitivamente scartato; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Il durable core W2 e il broker/reconciliation W3 sono verificati localmente. W4-W9, integrazione engine/UI, credential e GitHub canary, installer e final review restano aperti.
