@@ -1,0 +1,238 @@
+{
+  "schemaVersion": 1,
+  "scope": "W1 packaged-context spikes S1-S9",
+  "checkpoint": "B",
+  "checkpointStatus": "accepted",
+  "acceptedBy": "project-owner",
+  "acceptedDate": "2026-08-06",
+  "recordedDate": "2026-08-06",
+  "rawEvidencePolicy": {
+    "root": "build/evidence",
+    "tracked": false,
+    "availability": "local-only",
+    "description": "Raw transcripts and detailed artifacts remain ignored because they may contain machine-specific paths or synthetic provider output. This versioned manifest records the exact reviewed paths, SHA-256 values, results, signing modes, and safe aggregate facts."
+  },
+  "decision": {
+    "path": "docs/evidence/topology-decision.json",
+    "sha256": "5d86cdc21d6f10c5a633eaf49c8a4f50acd1b2ba177f9d9d5ceaa53f6365625f",
+    "decision": 53,
+    "selectedTopology": "launch-agent-helper"
+  },
+  "providerAuthorization": {
+    "authorizedCalls": 19,
+    "consumedCalls": 19,
+    "remainingCalls": 0,
+    "retryAuthorized": false,
+    "attemptsSettled": 19,
+    "providerRequestCountPerAttempt": 1
+  },
+  "spikes": [
+    {
+      "id": "S1",
+      "result": "pass",
+      "signingMode": "ad-hoc",
+      "providerCalls": 0,
+      "command": "make test-e2e",
+      "rerunPolicy": "offline-rerun-allowed",
+      "facts": {
+        "appMinimumOS": "14.0",
+        "helperMinimumOS": "14.0",
+        "packagedWorkingDirectory": "/",
+        "mutationDetection": true
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/w1-checkpoint-b-review/s1-test-e2e.log",
+          "sha256": "cdab9421d8d6dd3c7610420c499262d0eef40ec7c0ba537cee21a8a94224a55e"
+        }
+      ]
+    },
+    {
+      "id": "S2",
+      "result": "pass-helper-monolith-rejected",
+      "signingMode": "apple-development",
+      "providerCalls": 0,
+      "command": "SIGN_IDENTITY=<authorized-apple-development-sha1> ./scripts/spikes/test-s2-lifecycle.sh",
+      "setup": "Executed from the authorized fresh signed probe copy with com.maroffo.JidokaCode.SignedProbe and com.maroffo.JidokaCode.SignedEngineProbe identifiers.",
+      "rerunPolicy": "requires-fresh-authorized-identifiers",
+      "facts": {
+        "helperPassed": true,
+        "monolithCrashRestartPassed": false,
+        "cleanupVerified": true
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/signed-hikma-fresh-probe/s2/summary.json",
+          "sha256": "6b48313519a4c07742156b8271366ea67d74b808a88c19e68766a8294dcf37cf"
+        }
+      ]
+    },
+    {
+      "id": "S3",
+      "result": "pass",
+      "signingMode": "apple-development",
+      "providerCalls": 0,
+      "command": "SIGN_IDENTITY=<authorized-apple-development-sha1> ./scripts/spikes/test-s3-keychain.sh",
+      "setup": "Executed from the same authorized fresh signed probe copy as S2 with one fixed synthetic Keychain fixture.",
+      "rerunPolicy": "requires-fresh-authorized-identifiers-and-keychain-fixture",
+      "facts": {
+        "helperAccess": true,
+        "piDenied": true,
+        "replaceVerified": true,
+        "cleanupVerified": true
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/signed-hikma-fresh-probe/s3/summary.json",
+          "sha256": "e11dd239a856aff017f2423fa1acae8136cdef6ada3394cdaee295f6093e6096"
+        }
+      ]
+    },
+    {
+      "id": "S4",
+      "result": "pass",
+      "signingMode": "apple-development",
+      "providerCalls": 4,
+      "command": "SIGN_IDENTITY=<authorized-apple-development-sha1> ./scripts/spikes/test-s4-pi.sh",
+      "rerunPolicy": "do-not-rerun-provider-authorization-exhausted",
+      "facts": {
+        "profiles": 4,
+        "agentSettled": true,
+        "cleanupVerified": true,
+        "transport": "sse",
+        "workflowRetry": false,
+        "providerRetry": false
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/jidoka-code-s4.G1gnat/summary.json",
+          "sha256": "0bbbcf24f529deb5d12e6a58931eba9ca954f0f230d259d3b823e2241f332bf9"
+        },
+        {
+          "path": "build/evidence/jidoka-code-s4.G1gnat/preflight.json",
+          "sha256": "3850f5b826608916ede72e26782ed79d46b3653046b16883ca1ea2b3444ada48"
+        },
+        {
+          "path": "build/evidence/jidoka-code-s4.G1gnat/provider-call-ledger.json",
+          "sha256": "2c492a6ad2d0983e6eb937ed9a0a43addbd0db187be46a187af73f9aac164f2d"
+        }
+      ]
+    },
+    {
+      "id": "S5",
+      "result": "pass",
+      "signingMode": "apple-development",
+      "providerCalls": 0,
+      "command": "SIGN_IDENTITY=<authorized-apple-development-sha1> ./scripts/spikes/test-s5-s7-local.sh",
+      "rerunPolicy": "local-rerun-allowed-with-explicit-signing-identity",
+      "facts": {
+        "credentialHelperInvocations": 0,
+        "hookBlockedCommit": true,
+        "remoteReceiveCountFromPi": 0,
+        "sshInvocations": 0
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/jidoka-code-s5-s7.vf3Zv9/s5-security.json",
+          "sha256": "e2d5675b7324039409f2f2452fb7ffca72ce6de440cb8f742081e2dabe1a8dd9"
+        }
+      ]
+    },
+    {
+      "id": "S6",
+      "result": "pass",
+      "signingMode": "apple-development",
+      "providerCalls": 0,
+      "command": "SIGN_IDENTITY=<authorized-apple-development-sha1> ./scripts/spikes/test-s5-s7-local.sh",
+      "rerunPolicy": "local-rerun-allowed-with-explicit-signing-identity",
+      "facts": {
+        "loopbackPushesOccurred": true,
+        "receiveRequests": 2,
+        "createExpectedOld": "0000000000000000000000000000000000000000",
+        "raceRejected": true,
+        "forceClassArguments": false
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/jidoka-code-s5-s7.vf3Zv9/s6-git-transport.json",
+          "sha256": "16c8addc8c093ee77038667b28db3b8302cb30f9b6b069a5fe2a86d79e788716"
+        }
+      ]
+    },
+    {
+      "id": "S7",
+      "result": "pass",
+      "signingMode": "apple-development",
+      "providerCalls": 0,
+      "command": "SIGN_IDENTITY=<authorized-apple-development-sha1> ./scripts/spikes/test-s5-s7-local.sh",
+      "rerunPolicy": "local-rerun-allowed-with-explicit-signing-identity",
+      "facts": {
+        "cases": 120,
+        "safeRetry": 56,
+        "attributableEffect": 40,
+        "escalation": 24,
+        "secondCreateAttempts": 0,
+        "succeededWithoutAttribution": 0
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/jidoka-code-s5-s7.vf3Zv9/s7-mutation-recovery.json",
+          "sha256": "e50742b359014c5a7e379648deeed9bd72b951a1906a5968ea8959efcce30763"
+        }
+      ]
+    },
+    {
+      "id": "S8",
+      "result": "pass",
+      "signingMode": "apple-development",
+      "providerCalls": 15,
+      "command": "SIGN_IDENTITY=<authorized-apple-development-sha1> ./scripts/spikes/test-s8-workflows.sh",
+      "rerunPolicy": "do-not-rerun-provider-authorization-exhausted",
+      "facts": {
+        "roles": 15,
+        "invariantEvidenceMappings": 29,
+        "uniqueInvariants": 18,
+        "toolExecutions": 0,
+        "cleanupVerified": true
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/jidoka-code-s8.JHFouK/summary.json",
+          "sha256": "338a40874ebf358055ae716279a264708dd96ef267cf4bff17c5e96fc16372ff"
+        },
+        {
+          "path": "build/evidence/jidoka-code-s8.JHFouK/s8-workflows.json",
+          "sha256": "a59f4394907ac9db436914201157956165e6e8f154405e26b2bbf639f28eb474"
+        },
+        {
+          "path": "build/evidence/jidoka-code-s8.JHFouK/provider-call-ledger.json",
+          "sha256": "9bb94a32fac85a75a5365ed4578f205eaf7d4a55eeddf114b16c7cf4f3f79bc5"
+        }
+      ]
+    },
+    {
+      "id": "S9",
+      "result": "pass-helper-selected",
+      "signingMode": "apple-development",
+      "providerCalls": 0,
+      "command": "SIGN_IDENTITY=<authorized-apple-development-sha1> ./scripts/spikes/test-s9-topology.sh",
+      "rerunPolicy": "local-rerun-allowed-with-explicit-signing-identity",
+      "facts": {
+        "selectedTopology": "launch-agent-helper",
+        "monolithAbsent": true,
+        "exactProcessCleanup": true,
+        "decisionSnapshotMatchesCurrent": true
+      },
+      "evidence": [
+        {
+          "path": "build/evidence/jidoka-code-s9.0LSqRD/summary.json",
+          "sha256": "4fbe9e73c9a96c4b7d5787743a51015676d42614e2072929bbbfebbf1298aed6"
+        },
+        {
+          "path": "build/evidence/jidoka-code-s9.0LSqRD/topology-decision.json",
+          "sha256": "5d86cdc21d6f10c5a633eaf49c8a4f50acd1b2ba177f9d9d5ceaa53f6365625f"
+        }
+      ]
+    }
+  ]
+}

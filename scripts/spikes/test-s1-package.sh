@@ -124,6 +124,25 @@ assert_failure() {
         fail "missing expected failure: $expected_error"
 }
 
+assert_pi_runner_failure() {
+    local app="$1"
+    local stdout_path="$TEMP_ROOT/pi-runner-failure.stdout"
+    local stderr_path="$TEMP_ROOT/pi-runner-failure.stderr"
+    if (
+        cd /
+        /usr/bin/env -i \
+            HOME="$TEMP_ROOT/home" \
+            PATH="/opt/homebrew/bin:/usr/bin:/bin" \
+            TMPDIR="$TEMP_ROOT/runtime-tmp" \
+            "$app/Contents/MacOS/Jidoka Code" --pi-probe preflight
+    ) >"$stdout_path" 2>"$stderr_path"; then
+        fail "mutated packaged Pi runner unexpectedly executed"
+    fi
+    [[ ! -s "$stdout_path" ]] || fail "mutated packaged Pi runner wrote stdout"
+    /usr/bin/grep -Fq 'invalidPackagedRunner' "$stderr_path" || \
+        fail "mutated packaged Pi runner did not fail digest attestation"
+}
+
 assert_cleanup_guard() {
     local parent
     local owned
@@ -148,6 +167,7 @@ readonly TEMP_ROOT
 trap cleanup EXIT
 readonly COPIED_APP="$TEMP_ROOT/Jidoka Code.app"
 readonly MUTATED_APP="$TEMP_ROOT/Jidoka Code Mutated.app"
+readonly MUTATED_RUNNER_APP="$TEMP_ROOT/Jidoka Code Runner Mutated.app"
 
 "$ROOT/scripts/package-app.sh"
 
@@ -162,11 +182,40 @@ expected_inventory="$(cat <<'EOF'
 ./Contents/Helpers
 ./Contents/Helpers/JidokaCodeEngineProbe
 ./Contents/Info.plist
+./Contents/Library
+./Contents/Library/LaunchAgents
+./Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist
 ./Contents/MacOS
 ./Contents/MacOS/Jidoka Code
 ./Contents/Resources
 ./Contents/Resources/Pi
+./Contents/Resources/Pi/extensions
+./Contents/Resources/Pi/extensions/jidoka-deny-user-bash.js
+./Contents/Resources/Pi/extensions/jidoka-runtime.ts
 ./Contents/Resources/Pi/manifest.json
+./Contents/Resources/Pi/runtime
+./Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs
+./Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs
+./Contents/Resources/Pi/skills
+./Contents/Resources/Pi/skills/jidoka-code-issue-triage
+./Contents/Resources/Pi/skills/jidoka-code-issue-triage/SKILL.md
+./Contents/Resources/Pi/skills/jidoka-code-orchestrate
+./Contents/Resources/Pi/skills/jidoka-code-orchestrate/SKILL.md
+./Contents/Resources/Pi/skills/jidoka-code-plan
+./Contents/Resources/Pi/skills/jidoka-code-plan/SKILL.md
+./Contents/Resources/Pi/skills/jidoka-code-pr-review
+./Contents/Resources/Pi/skills/jidoka-code-pr-review/SKILL.md
+./Contents/Resources/Pi/workflow-skills
+./Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity
+./Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity/SKILL.md
+./Contents/Resources/Pi/workflow-skills/jidoka-code-planning-fidelity
+./Contents/Resources/Pi/workflow-skills/jidoka-code-planning-fidelity/SKILL.md
+./Contents/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity
+./Contents/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity/SKILL.md
+./Contents/Resources/Pi/workflow-skills/jidoka-code-triage-fidelity
+./Contents/Resources/Pi/workflow-skills/jidoka-code-triage-fidelity/SKILL.md
+./Contents/Resources/Spikes
+./Contents/Resources/Spikes/jidoka-local-spikes.mjs
 ./Contents/_CodeSignature
 ./Contents/_CodeSignature/CodeResources
 EOF
@@ -175,9 +224,84 @@ actual_inventory="$(cd "$SOURCE_APP" && /usr/bin/find . -print | LC_ALL=C /usr/b
 [[ "$actual_inventory" == "$expected_inventory" ]] || fail "bundle inventory differs from allowlist"
 [[ -z "$(/usr/bin/find "$SOURCE_APP" -type l -print)" ]] || fail "bundle contains symbolic links"
 
+launch_agent_plist="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist"
+/usr/bin/plutil -lint "$launch_agent_plist"
+[[ "$(/usr/bin/plutil -extract Label raw "$launch_agent_plist")" == \
+    "com.maroffo.JidokaCode.EngineProbe" ]]
+[[ "$(/usr/bin/plutil -extract BundleProgram raw "$launch_agent_plist")" == \
+    "Contents/Helpers/JidokaCodeEngineProbe" ]]
+[[ "$(/usr/bin/plutil -extract ProgramArguments.3 raw "$launch_agent_plist")" == "1" ]]
+[[ "$(/usr/bin/plutil -extract RunAtLoad raw "$launch_agent_plist")" == "true" ]]
+[[ "$(/usr/bin/plutil -extract KeepAlive.SuccessfulExit raw "$launch_agent_plist")" == "false" ]]
+[[ "$(/usr/bin/plutil -extract 'MachServices.com\.maroffo\.JidokaCode\.EngineProbe' raw "$launch_agent_plist")" == "true" ]] || \
+    fail "launch agent Mach service differs from allowlist"
+
+assert_resource_digest() {
+    local relative_path="$1"
+    local expected_digest="$2"
+    local resource="$SOURCE_APP/Contents/Resources/Pi/$relative_path"
+    [[ -f "$resource" && ! -L "$resource" ]] || fail "missing regular Pi resource: $relative_path"
+    [[ "$(/usr/bin/shasum -a 256 "$resource" | /usr/bin/awk '{print $1}')" == \
+        "$expected_digest" ]] || fail "packaged Pi resource digest differs: $relative_path"
+}
+assert_resource_digest \
+    extensions/jidoka-deny-user-bash.js \
+    ba18988ad739c592920555515ee246e07d325f0e90df345a61de4e7f41a24995
+assert_resource_digest \
+    extensions/jidoka-runtime.ts \
+    b6bae1cb282d95b3c1a3e6e4f37c5b967aa5bd3885ec3050c5d7bddb72b4a19b
+assert_resource_digest \
+    runtime/pi-rpc-profile-probe.mjs \
+    748a14b739a910fa5318819ed5a9391ef0b0f0a13fb028f942477bc373976679
+assert_resource_digest \
+    runtime/pi-rpc-workflow-probe.mjs \
+    37ebfc816041f9242b5da4298e064dbb9bcde794ab192926fca6f73ca156c1dd
+assert_resource_digest \
+    skills/jidoka-code-issue-triage/SKILL.md \
+    04b3b248a86dffbde0a543ddf1276f7515454fa7311347f317ff980d5ad9c5f6
+assert_resource_digest \
+    skills/jidoka-code-orchestrate/SKILL.md \
+    7a7339c25f27134c443d389472c404a0e9ae161ddb826ee3b13921ee76522a22
+assert_resource_digest \
+    skills/jidoka-code-plan/SKILL.md \
+    71fc244807117d61d2f335d7120c19e1d08bb04eab095013a86a3eaeb9bdfad9
+assert_resource_digest \
+    skills/jidoka-code-pr-review/SKILL.md \
+    3ec091bfc47124074ccf01496078460be9b1b42c01d5636d10ac6288930e832d
+assert_resource_digest \
+    workflow-skills/jidoka-code-orchestration-fidelity/SKILL.md \
+    b836936c3b9f4b262669e51191f207b87d406f3a9add4e6bc091c182e18be79c
+assert_resource_digest \
+    workflow-skills/jidoka-code-planning-fidelity/SKILL.md \
+    307702956b6aa2a119310854a739c0c1afedf8f4d8eddc94f5daedd1ccabf56e
+assert_resource_digest \
+    workflow-skills/jidoka-code-pr-fidelity/SKILL.md \
+    cb5e4d24107503158eeecd569a968baed35c4e487e546d8049f77080bbdf3508
+assert_resource_digest \
+    workflow-skills/jidoka-code-triage-fidelity/SKILL.md \
+    9d75a49c6b45136189b002574e193ce5e82a6606c26979199ed7c4ee5264f843
+[[ "$(/usr/bin/shasum -a 256 "$SOURCE_APP/Contents/Resources/Spikes/jidoka-local-spikes.mjs" | \
+    /usr/bin/awk '{print $1}')" == \
+    "59a4b657195d443c49f9211d25978dcdb29e64da0baea7e172c59ff5605b32e7" ]] || \
+    fail "packaged local spike runner digest differs"
+
 for path in \
     "$SOURCE_APP/Contents/Info.plist" \
+    "$launch_agent_plist" \
     "$SOURCE_APP/Contents/Resources/Pi/manifest.json" \
+    "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-deny-user-bash.js" \
+    "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-runtime.ts" \
+    "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs" \
+    "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs" \
+    "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-issue-triage/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-orchestrate/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-plan/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-pr-review/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-planning-fidelity/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-triage-fidelity/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Spikes/jidoka-local-spikes.mjs" \
     "$SOURCE_APP/Contents/_CodeSignature/CodeResources"
 do
     [[ -f "$path" && ! -L "$path" ]] || fail "expected regular bundle file: $path"
@@ -265,6 +389,11 @@ assert_failure "$MUTATED_APP/Contents/MacOS/Jidoka Code" 'unsupportedSchema(2)'
 /bin/rm -f -- "$mutated_manifest"
 /usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe "$MUTATED_APP"
 assert_failure "$MUTATED_APP/Contents/MacOS/Jidoka Code" 'manifestMissing'
+
+/usr/bin/ditto "$COPIED_APP" "$MUTATED_RUNNER_APP"
+printf '\n' >>"$MUTATED_RUNNER_APP/Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe "$MUTATED_RUNNER_APP"
+assert_pi_runner_failure "$MUTATED_RUNNER_APP"
 
 printf 'S1 package E2E: PASS\n'
 printf 'app_minos=%s engine_minos=%s\n' "$app_minos" "$engine_minos"

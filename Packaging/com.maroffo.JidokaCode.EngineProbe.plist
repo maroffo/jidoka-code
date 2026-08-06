@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maroffo.JidokaCode.EngineProbe</string>
+    <key>BundleProgram</key>
+    <string>Contents/Helpers/JidokaCodeEngineProbe</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>JidokaCodeEngineProbe</string>
+        <string>--service</string>
+        <string>--generation</string>
+        <string>1</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>MachServices</key>
+    <dict>
+        <key>com.maroffo.JidokaCode.EngineProbe</key>
+        <true/>
+    </dict>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
+</dict>
+</plist>
