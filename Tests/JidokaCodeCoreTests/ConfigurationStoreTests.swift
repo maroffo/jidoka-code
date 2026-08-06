@@ -1,0 +1,300 @@
+import Foundation
+import Testing
+
+@testable import JidokaCodeCore
+
+@Suite("Persistent configuration")
+struct ConfigurationStoreTests {
+  @Test("repository toggles, model profiles, and app settings survive reopen")
+  func persistence() async throws {
+    let fixture = try ConfigurationFixture()
+    defer { fixture.remove() }
+    let database = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let store = ConfigurationStore(database: database)
+    let now = Date(timeIntervalSince1970: 30_000)
+    let repositoryID = UUID()
+
+    try await store.upsertRepository(
+      RepositoryConfiguration(
+        id: repositoryID,
+        nodeID: "R_node",
+        owner: "maroffo",
+        name: "jidoka-code",
+        defaultBranch: "main",
+        reviewEnabled: true,
+        triageEnabled: false,
+        implementationEnabled: true,
+        enabled: true
+      ),
+      now: now
+    )
+    await #expect(throws: SQLiteStoreError.self) {
+      try await store.upsertRepository(
+        RepositoryConfiguration(
+          id: UUID(),
+          nodeID: "R_other",
+          owner: "MAROFFO",
+          name: "JIDOKA-CODE",
+          defaultBranch: "main",
+          reviewEnabled: true,
+          triageEnabled: true,
+          implementationEnabled: true,
+          enabled: true
+        ),
+        now: now
+      )
+    }
+    let publicModel = [
+      "openai-codex",
+      ["gpt", "5.6", "sol:max"].joined(separator: "-"),
+    ].joined(separator: "/")
+    let profiles = [
+      ModelProfileConfiguration(
+        role: .review,
+        provider: "openai-codex",
+        model: publicModel,
+        thinking: .max
+      ),
+      ModelProfileConfiguration(
+        role: .triage,
+        provider: "openai-codex",
+        model: publicModel,
+        thinking: .high
+      ),
+      ModelProfileConfiguration(
+        role: .planning,
+        provider: "openai-codex",
+        model: publicModel,
+        thinking: .max
+      ),
+      ModelProfileConfiguration(
+        role: .orchestration,
+        provider: "openai-codex",
+        model: publicModel,
+        thinking: .max
+      ),
+    ]
+    for profile in profiles {
+      try await store.setProfile(profile, now: now)
+    }
+    try await store.setMaxConcurrency(4, now: now)
+    try await store.setPaused(true, now: now)
+    await database.close()
+
+    let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let reopened = ConfigurationStore(database: reopenedDatabase)
+    let snapshot = try await reopened.snapshot()
+    #expect(snapshot.repositories.count == 1)
+    #expect(snapshot.repositories.first?.id == repositoryID)
+    #expect(snapshot.repositories.first?.triageEnabled == false)
+    #expect(snapshot.repositories.first?.implementationEnabled == true)
+    #expect(snapshot.profiles == profiles)
+    #expect(snapshot.app == AppConfiguration(maxConcurrency: 4, paused: true))
+    await reopenedDatabase.close()
+  }
+
+  @Test("repository and branch validation fail closed")
+  func repositoryValidation() async throws {
+    let fixture = try ConfigurationFixture()
+    defer { fixture.remove() }
+    let database = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let store = ConfigurationStore(database: database)
+    let base = RepositoryConfiguration(
+      id: UUID(),
+      nodeID: "node",
+      owner: "owner",
+      name: "repo",
+      defaultBranch: "main",
+      reviewEnabled: true,
+      triageEnabled: true,
+      implementationEnabled: true,
+      enabled: true
+    )
+
+    for repository in [
+      RepositoryConfiguration(
+        id: base.id, nodeID: "", owner: base.owner, name: base.name,
+        defaultBranch: base.defaultBranch, reviewEnabled: true,
+        triageEnabled: true, implementationEnabled: true, enabled: true),
+      RepositoryConfiguration(
+        id: base.id, nodeID: base.nodeID, owner: "-owner", name: base.name,
+        defaultBranch: base.defaultBranch, reviewEnabled: true,
+        triageEnabled: true, implementationEnabled: true, enabled: true),
+      RepositoryConfiguration(
+        id: base.id, nodeID: base.nodeID, owner: "ownér", name: base.name,
+        defaultBranch: base.defaultBranch, reviewEnabled: true,
+        triageEnabled: true, implementationEnabled: true, enabled: true),
+      RepositoryConfiguration(
+        id: base.id, nodeID: base.nodeID, owner: base.owner, name: "..",
+        defaultBranch: base.defaultBranch, reviewEnabled: true,
+        triageEnabled: true, implementationEnabled: true, enabled: true),
+      RepositoryConfiguration(
+        id: base.id, nodeID: base.nodeID, owner: base.owner, name: base.name,
+        defaultBranch: "refs/../escape", reviewEnabled: true,
+        triageEnabled: true, implementationEnabled: true, enabled: true),
+      RepositoryConfiguration(
+        id: base.id, nodeID: base.nodeID, owner: base.owner, name: base.name,
+        defaultBranch: "feature/.hidden", reviewEnabled: true,
+        triageEnabled: true, implementationEnabled: true, enabled: true),
+      RepositoryConfiguration(
+        id: base.id, nodeID: base.nodeID, owner: base.owner, name: base.name,
+        defaultBranch: "feature/topic.lock", reviewEnabled: true,
+        triageEnabled: true, implementationEnabled: true, enabled: true),
+      RepositoryConfiguration(
+        id: base.id, nodeID: base.nodeID, owner: base.owner, name: base.name,
+        defaultBranch: "@", reviewEnabled: true,
+        triageEnabled: true, implementationEnabled: true, enabled: true),
+    ] {
+      await #expect(throws: ConfigurationStoreError.self) {
+        try await store.upsertRepository(repository, now: Date())
+      }
+    }
+    #expect(try await store.repositories().isEmpty)
+    await database.close()
+  }
+
+  @Test("configuration schema and API reject credential-shaped values")
+  func noSecretPersistence() async throws {
+    let fixture = try ConfigurationFixture()
+    defer { fixture.remove() }
+    let database = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let store = ConfigurationStore(database: database)
+    let sentinel = ["ghp", "this-value-must-never-reach-sqlite"]
+      .joined(separator: "_")
+
+    await #expect(throws: ConfigurationStoreError.credentialLikeValue) {
+      try await store.setProfile(
+        ModelProfileConfiguration(
+          role: .review,
+          provider: "openai-codex",
+          model: sentinel,
+          thinking: .high
+        ),
+        now: Date()
+      )
+    }
+    let definitions = try await database.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL"
+    )
+    let schema = definitions.compactMap { row -> String? in
+      guard case .text(let sql)? = row["sql"] else { return nil }
+      return sql.lowercased()
+    }.joined(separator: "\n")
+    for forbidden in ["access_token", "github_token", "authorization_header", "credential_value"] {
+      #expect(!schema.contains(forbidden))
+    }
+    await database.close()
+    let bytes = try Data(contentsOf: fixture.databaseURL)
+    #expect(!bytes.contains(Data(sentinel.utf8)))
+  }
+
+  @Test("max concurrency is bounded and drives durable lease admission")
+  func concurrencyIntegration() async throws {
+    let fixture = try ConfigurationFixture()
+    defer { fixture.remove() }
+    let database = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let configuration = ConfigurationStore(database: database)
+    await #expect(throws: ConfigurationStoreError.invalidMaxConcurrency) {
+      try await configuration.setMaxConcurrency(0, now: Date())
+    }
+    await #expect(throws: ConfigurationStoreError.invalidMaxConcurrency) {
+      try await configuration.setMaxConcurrency(9, now: Date())
+    }
+    await #expect(throws: SQLiteStoreError.self) {
+      try await database.execute(
+        "UPDATE app_settings SET max_concurrency = 9 WHERE singleton = 1"
+      )
+    }
+    try await configuration.setMaxConcurrency(1, now: Date())
+
+    let now = Date(timeIntervalSince1970: 40_000)
+    let firstRepository = UUID()
+    let secondRepository = UUID()
+    for (id, name) in [(firstRepository, "first"), (secondRepository, "second")] {
+      try await configuration.upsertRepository(
+        RepositoryConfiguration(
+          id: id,
+          nodeID: "node-\(name)",
+          owner: "owner",
+          name: name,
+          defaultBranch: "main",
+          reviewEnabled: true,
+          triageEnabled: true,
+          implementationEnabled: true,
+          enabled: true
+        ),
+        now: now
+      )
+    }
+    let jobs = DurableJobStore(database: database)
+    let first = try await createConfigurationJob(
+      jobs: jobs,
+      repositoryID: firstRepository,
+      revision: "first",
+      now: now
+    )
+    let second = try await createConfigurationJob(
+      jobs: jobs,
+      repositoryID: secondRepository,
+      revision: "second",
+      now: now
+    )
+    _ = try await jobs.transition(
+      jobID: first.id,
+      eventKey: "first-lease",
+      event: .acquireLease,
+      context: JobTransitionContext(now: now, reason: "first")
+    )
+    await #expect(throws: DurableJobStoreError.globalConcurrencyReached) {
+      _ = try await jobs.transition(
+        jobID: second.id,
+        eventKey: "second-lease",
+        event: .acquireLease,
+        context: JobTransitionContext(now: now, reason: "second")
+      )
+    }
+    await database.close()
+  }
+}
+
+private final class ConfigurationFixture: @unchecked Sendable {
+  let root: URL
+  let databaseURL: URL
+
+  init() throws {
+    root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "jidoka-code-configuration-tests-\(UUID().uuidString.lowercased())",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    databaseURL = root.appendingPathComponent("jidoka-code.sqlite3")
+  }
+
+  func remove() {
+    try? FileManager.default.removeItem(at: root)
+  }
+}
+
+private func createConfigurationJob(
+  jobs: DurableJobStore,
+  repositoryID: UUID,
+  revision: String,
+  now: Date
+) async throws -> JobRecord {
+  let result = try await jobs.createJob(
+    identity: LogicalJobIdentity(
+      repositoryID: repositoryID,
+      kind: .prReview,
+      objectNodeID: "object-\(revision)",
+      revisionKey: revision
+    ),
+    contractVersionUsed: "v1",
+    priority: .prReview,
+    firstStep: .review,
+    now: now
+  )
+  guard case .created(let job) = result else {
+    throw ConfigurationStoreError.decode("job unexpectedly suppressed")
+  }
+  return job
+}

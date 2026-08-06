@@ -13,7 +13,10 @@ let package = Package(
         .executable(name: "JidokaCodeEngineProbe", targets: ["JidokaCodeEngineProbe"]),
     ],
     targets: [
-        .target(name: "JidokaCodeCore"),
+        .target(
+            name: "JidokaCodeCore",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
         .executableTarget(
             name: "JidokaCodeApp",
             dependencies: ["JidokaCodeCore"]
