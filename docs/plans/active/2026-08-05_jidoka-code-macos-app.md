@@ -559,21 +559,21 @@ Pass/falsifier/disposition normativi:
 | S9 topology | una topologia soddisfa S1-S5 e i threshold lifecycle; decisione e residual risk registrati | scelta per preferenza o risultato incompleto | block W2 |
 
 - [x] Scrivere `docs/evidence/spike-report.md` con setup/command, output redatto, pass/fail/falsifier per S1-S9, autorizzazioni ricevute, cleanup e rischi residui.
-- [x] CHECKPOINT B: accettato esplicitamente dal project owner in-session il 2026-08-06 dopo review e correzione dei documenti. Tutti S1-S9 passano senza categorie omitted. W2 è sbloccato ma non avviato.
+- [x] CHECKPOINT B: accettato esplicitamente dal project owner in-session il 2026-08-06 dopo review e correzione dei documenti. Tutti S1-S9 passano senza categorie omitted. W2 è stato successivamente avviato su worktree dedicato.
 
 ### W2: Durable core, persistence and scheduler
 
 - Scope: `Sources/JidokaCodeCore/State/`, `Scheduler/`, `Configuration/`, relativi test.
 - Excluded: REST reale, Pi reale e SwiftUI; recuperabili dai protocolli e fixture.
-- [ ] Implementare migration runner, schema e `SQLiteStore` actor con WAL, foreign keys, busy timeout, backup e typed transactions.
-- [ ] Scrivere runtime e recovery state machine totali, `job_steps`, claim generation e transition validation append-only. Testare ogni riga, illegal pairs, process restart per stato, attempt/deadline preservation, multi-step continuation e stale-approval sequence.
-- [ ] Implementare `object_dispositions` e unique contract-independent logical job identity. Poll/restart e contract/app/skill bump dopo attributed/ambiguous devono produrre zero nuovo intent; late attribution ed exact human retry dialog hanno transition dedicate.
-- [ ] Implementare repository lease e global semaphore; property test per una lease per repo e max concurrency.
-- [ ] Implementare priority queue e starvation observation senza cambiare l’ordine locked.
-- [ ] Implementare scheduler con injected `Clock`, tick 600 s, immediate/debounced triggers, overlap coalescing e per-repo backoff; virtual-clock matrix completa.
-- [ ] Startup reconciler classifica job non terminali prima di dispatch. Test crash snapshot per ogni stato e assert della prima transition.
-- [ ] Config persistence per repository, toggle, profili modello e max concurrency; nessun secret.
-- [ ] Artifact store con digest, path containment, permission e redaction classification.
+- [x] Implementare migration runner, schema e `SQLiteStore` actor con WAL, foreign keys, busy timeout, backup e typed transactions.
+- [x] Scrivere runtime e recovery state machine totali, `job_steps`, claim generation e transition validation append-only. Testare ogni riga, illegal pairs, process restart per stato, attempt/deadline preservation, multi-step continuation e stale-approval sequence.
+- [x] Implementare `object_dispositions` e unique contract-independent logical job identity. Poll/restart e contract/app/skill bump dopo attributed/ambiguous devono produrre zero nuovo intent; late attribution ed exact human retry dialog hanno transition dedicate.
+- [x] Implementare repository lease e global semaphore; property test per una lease per repo e max concurrency.
+- [x] Implementare priority queue e starvation observation senza cambiare l’ordine locked.
+- [x] Implementare scheduler con injected `Clock`, tick 600 s, immediate/debounced triggers, overlap coalescing e per-repo backoff; virtual-clock matrix completa.
+- [x] Startup reconciler classifica job non terminali prima di dispatch. Test crash snapshot per ogni stato e assert della prima transition.
+- [x] Config persistence per repository, toggle, profili modello e max concurrency; nessun secret.
+- [x] Artifact store con digest, path containment, permission e redaction classification.
 
 ### W3: GitHub broker and operation reconciliation
 
@@ -810,8 +810,10 @@ Pass/falsifier/disposition normativi:
 - [x] W0 environment gate.
 - [x] 2026-08-06: W1 S4-S9 passano. S4 consuma 4 call, S8 15, ledger 19/19 tutto `settled` con request count 1 e zero retry. S5-S7 passano local-only; locked decision #53 seleziona il helper e rimuove il monolith. Spike report completo, STOP a Checkpoint B.
 - [x] 2026-08-06: review documentale Checkpoint B inizialmente `revise`: corretti i claim troppo ampi su commit/push fixture, aggiunta matrice setup/command/rerun, registrata evidenza S1 e creato manifest redatto versionabile con digest. S9 Apple Development è stato ripetuto sulla decisione corrente byte-identica.
-- [x] 2026-08-06: project owner approva esplicitamente Checkpoint B in-session. W2 è sbloccato ma non avviato; commit e push restano separatamente gated.
-- [ ] W2-W8 implementation.
+- [x] 2026-08-06: project owner approva esplicitamente Checkpoint B in-session. W2 è sbloccato; commit e push restano separatamente gated.
+- [x] 2026-08-06: W2 durable core implementato su `feat/jidoka-code-w2-core`: SQLite WAL/schema/migration backup, state e recovery totali, disposition contract-independent, lease/semaphore, scheduler virtual-clock, configurazione e artifact containment. Suite funzionale, AddressSanitizer, ThreadSanitizer e package E2E passano senza provider call.
+- [x] W2 durable core, persistence and scheduler.
+- [ ] W3-W8 implementation.
 - [ ] W9 final verification, review e canary autorizzato.
 
 ## Surprises and discoveries
@@ -863,4 +865,4 @@ Append-only.
 
 ## Outcomes and retrospective
 
-W0 e W1 S1-S9 sono eseguiti. Ad-hoc è definitivamente scartato; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Il budget provider è esaurito esattamente a 19/19 senza retry. `docs/evidence/spike-report.md` è pronto per Checkpoint B; W2 non è iniziato e resta correttamente bloccato fino ad approvazione esplicita.
+W0, W1 S1-S9 e W2 sono eseguiti. Ad-hoc è definitivamente scartato; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Il durable core W2 è verificato localmente; W3-W9, integrazione engine/UI, installer e canary restano aperti.
