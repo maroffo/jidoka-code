@@ -24,6 +24,7 @@ readonly S2_LOCK="$SPIKE_PARENT/S2.lock"
 readonly LOCK_DIR="$SPIKE_PARENT/S3.lock"
 readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
 readonly PI_CLI="/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+readonly EXPECTED_PI_VERSION="0.84.0"
 USER_DOMAIN="gui/$(/usr/bin/id -u)"
 readonly USER_DOMAIN
 MODE="live"
@@ -394,7 +395,7 @@ trap cleanup_on_exit EXIT
 /usr/bin/codesign --verify --strict --deep "$SOURCE_APP"
 [[ -x "$NODE_BIN" && -f "$PI_CLI" && ! -L "$NODE_BIN" && ! -L "$PI_CLI" ]]
 [[ "$($NODE_BIN --version)" == "v26.6.0" ]]
-[[ "$($NODE_BIN "$PI_CLI" --version)" == "0.83.0" ]]
+[[ "$($NODE_BIN "$PI_CLI" --version)" == "$EXPECTED_PI_VERSION" ]]
 "$NODE_BIN" --check "$ROOT/scripts/spikes/pi-keychain-denial-probe.mjs"
 "$NODE_BIN" --check "$ROOT/Resources/Pi/extensions/jidoka-deny-user-bash.js"
 [[ -f "$SOURCE_BASH_GATE" && ! -L "$SOURCE_BASH_GATE" ]]

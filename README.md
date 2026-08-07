@@ -20,12 +20,12 @@ Jidoka Code is designed to use the system-installed [Pi coding agent](https://gi
 Canonical setup begins with:
 
 ```sh
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.0
 pi
 # Run /login inside Pi and select a provider.
 ```
 
-The implementation plan gates on Pi `0.83.0`. W0 and W1 verified the exact installed package and pinned the reviewed runtime paths used by the packaged-context probes.
+W0 and W1 originally verified Pi `0.83.0`. The current compatibility policy accepts semantic versions `>=0.84.0 <0.90.0`, but still requires an exact digest allowlist entry for each installed build. Only `0.84.0` is currently attested; later versions fail closed until their runtime files pass the offline contract and are added explicitly.
 
 ## Development toolchain
 
@@ -59,21 +59,22 @@ Offline packaging defaults to an ad-hoc signature. Any lifecycle or distribution
 SIGN_IDENTITY=<40-character-codesigning-identity> make jidoka-code-package
 ```
 
-Identity signing uses hardened runtime, signs nested code before the app, and fails unless app and helper have the same concrete TeamIdentifier. The ad-hoc output is not accepted as lifecycle evidence.
+Identity signing uses hardened runtime, signs nested code before the app, and fails unless app and helpers have the same concrete TeamIdentifier. The ad-hoc output is not accepted as lifecycle evidence.
 
 ## Status
 
-W1 packaged-context spikes S1-S9 are complete and Checkpoint B is accepted. W2 provides the durable SQLite core and scheduler. W3 adds the closed GitHub REST broker, Keychain token boundary, byte-exact markers and revisions, prepared-before-send mutation reconciliation, and evidence-based discovery. No application release or supported installation exists yet.
+W1 packaged-context spikes S1-S9 are complete and Checkpoint B is accepted. W2 provides the durable SQLite core and scheduler. W3 adds the closed GitHub REST broker, Keychain token boundary, byte-exact markers and revisions, prepared-before-send mutation reconciliation, and evidence-based discovery. W4 adds app-managed Git mirrors and workspaces, packaged one-shot askpass and old-zero push guard, frozen verification commands, validated workspace import, and durable create-only branch publication. No application release or supported installation exists yet.
 
 The active implementation plan is:
 
 - [`docs/plans/active/2026-08-05_jidoka-code-macos-app.md`](docs/plans/active/2026-08-05_jidoka-code-macos-app.md)
 
-The spike report records the executable evidence, provider-call accounting, cleanup, and residual risks:
+The evidence reports record executable verification, provider-call accounting, cleanup, and residual risks:
 
 - [`docs/evidence/spike-report.md`](docs/evidence/spike-report.md)
+- [`docs/evidence/w4-git-transport-report.md`](docs/evidence/w4-git-transport-report.md)
 
-The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. W4-W9 remain unimplemented; the W3 broker has no live credential or GitHub canary evidence and is not yet connected to production job coordinators, Pi workflows, or the menu-bar UI.
+The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. W5-W9 remain unimplemented; the broker and Git transport have no live credential or GitHub canary evidence and are not yet connected to production job coordinators, Pi workflows, or the menu-bar UI.
 
 ## Scope boundary
 

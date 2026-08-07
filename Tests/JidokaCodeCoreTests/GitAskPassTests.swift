@@ -1,0 +1,220 @@
+import Darwin
+import Foundation
+import Testing
+
+@testable import JidokaCodeCore
+
+@Suite("One-shot Git askpass capability")
+struct GitAskPassTests {
+  @Test("brokered credential is host-bound, one-shot, and absent from disk and environment")
+  func oneShotRoundTrip() async throws {
+    let fixture = try GitTestRoot(prefix: "jc-ap")
+    defer { fixture.remove() }
+    let socketDirectory = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: socketDirectory) }
+    let token = Data(String(repeating: "t", count: 32).utf8)
+    let broker = GitHubBroker(
+      tokenProvider: AskPassTokenProvider(token: token),
+      transport: UnusedAskPassHTTPTransport(),
+      now: { Date(timeIntervalSince1970: 1_000) }
+    )
+    let remote = try #require(
+      URL(string: "https://x-access-token@github.com/owner/repo.git")
+    )
+    let session = try await broker.makeGitCredentialSession(
+      remoteURL: remote,
+      socketDirectory: socketDirectory,
+      timeoutSeconds: 5
+    )
+    let executable = fixture.root.appendingPathComponent("askpass")
+    try writeExecutable(executable, "#!/bin/sh\nexit 0\n")
+    let environment = try session.environment(
+      askPassExecutable: executable,
+      base: try CredentiallessEnvironment.make(
+        homeDirectory: fixture.root.path,
+        temporaryDirectory: fixture.root.path
+      )
+    )
+    #expect(!environment.values.contains(String(decoding: token, as: UTF8.self)))
+    var unsafeBase = environment
+    unsafeBase["GITHUB_TOKEN"] = "forbidden"
+    #expect(throws: GitAskPassError.unsafeEnvironment) {
+      _ = try session.environment(askPassExecutable: executable, base: unsafeBase)
+    }
+    let observed = try GitAskPassClient.credential(
+      prompt: "Password for 'https://x-access-token@github.com':",
+      environment: environment
+    )
+    #expect(observed == token)
+    try await session.wait()
+    #expect(!FileManager.default.fileExists(atPath: session.socketURL.path))
+    #expect(
+      try FileManager.default.contentsOfDirectory(atPath: socketDirectory.path).isEmpty
+    )
+    #expect(throws: GitAskPassError.self) {
+      _ = try GitAskPassClient.credential(
+        prompt: "Password for 'https://x-access-token@github.com':",
+        environment: environment
+      )
+    }
+  }
+
+  @Test("built askpass executable consumes the capability without token argv or env")
+  func executableRoundTrip() async throws {
+    let fixture = try GitTestRoot(prefix: "jc-ap-executable")
+    defer { fixture.remove() }
+    let socketDirectory = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: socketDirectory) }
+    let token = Data(repeating: 0x75, count: 32)
+    let broker = GitHubBroker(
+      tokenProvider: AskPassTokenProvider(token: token),
+      transport: UnusedAskPassHTTPTransport()
+    )
+    let remote = try #require(
+      URL(string: "https://x-access-token@github.com/owner/repo.git")
+    )
+    let session = try await broker.makeGitCredentialSession(
+      remoteURL: remote,
+      socketDirectory: socketDirectory,
+      timeoutSeconds: 5
+    )
+    let executable = try builtProduct(named: "JidokaCodeAskPass")
+    let environment = try session.environment(
+      askPassExecutable: executable,
+      base: try CredentiallessEnvironment.make(
+        homeDirectory: fixture.root.path,
+        temporaryDirectory: fixture.root.path
+      )
+    )
+    let result = try await BoundedProcessRunner().run(
+      GitProcessRequest(
+        executable: executable,
+        arguments: ["Password for 'https://x-access-token@github.com':"],
+        workingDirectory: fixture.root,
+        environment: environment,
+        timeoutSeconds: 5
+      ))
+    #expect(result.succeeded)
+    #expect(result.stdout == token + Data([0x0A]))
+    #expect(result.stderr.isEmpty)
+    try await session.wait()
+  }
+
+  @Test("partial clients cannot hold the one-shot server past its deadline")
+  func partialClientTimeout() async throws {
+    let socketDirectory = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: socketDirectory) }
+    let broker = GitHubBroker(
+      tokenProvider: AskPassTokenProvider(token: Data(repeating: 0x74, count: 32)),
+      transport: UnusedAskPassHTTPTransport()
+    )
+    let session = try await broker.makeGitCredentialSession(
+      remoteURL: try #require(
+        URL(string: "https://x-access-token@github.com/owner/repo.git")
+      ),
+      socketDirectory: socketDirectory,
+      timeoutSeconds: 1
+    )
+    let descriptor = try OneShotGitCredentialServer.connect(to: session.socketURL.path)
+    defer { Darwin.close(descriptor) }
+    await #expect(throws: GitAskPassError.timedOut) {
+      try await session.wait()
+    }
+    #expect(!FileManager.default.fileExists(atPath: session.socketURL.path))
+  }
+
+  @Test("wrong nonce or remote consumes the capability without releasing a token")
+  func bindingFailure() async throws {
+    let fixture = try GitTestRoot(prefix: "jc-ap-binding")
+    defer { fixture.remove() }
+    let socketDirectory = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: socketDirectory) }
+    let broker = GitHubBroker(
+      tokenProvider: AskPassTokenProvider(token: Data(repeating: 0x74, count: 32)),
+      transport: UnusedAskPassHTTPTransport()
+    )
+    let remote = try #require(
+      URL(string: "https://x-access-token@github.com/owner/repo.git")
+    )
+    let session = try await broker.makeGitCredentialSession(
+      remoteURL: remote,
+      socketDirectory: socketDirectory,
+      timeoutSeconds: 5
+    )
+    var environment = [
+      "JIDOKA_ASKPASS_NONCE": UUID().uuidString.lowercased(),
+      "JIDOKA_ASKPASS_REMOTE": remote.absoluteString,
+      "JIDOKA_ASKPASS_SOCKET": session.socketURL.path,
+    ]
+    #expect(throws: GitAskPassError.self) {
+      _ = try GitAskPassClient.credential(
+        prompt: "Password for 'https://x-access-token@github.com':",
+        environment: environment
+      )
+    }
+    await #expect(throws: GitAskPassError.credentialRejected) {
+      try await session.wait()
+    }
+
+    environment["JIDOKA_ASKPASS_NONCE"] = session.nonce
+    #expect(throws: GitAskPassError.self) {
+      _ = try GitAskPassClient.credential(
+        prompt: "Password for 'https://evil.example':",
+        environment: environment
+      )
+    }
+  }
+
+  @Test("unsafe socket directories and remote identities fail before token release")
+  func unsafeInputs() async throws {
+    let fixture = try GitTestRoot(prefix: "jc-ap-unsafe")
+    defer { fixture.remove() }
+    let unsafeDirectory = try makeShortSocketDirectory(mode: 0o755)
+    defer { try? FileManager.default.removeItem(at: unsafeDirectory) }
+    let broker = GitHubBroker(
+      tokenProvider: AskPassTokenProvider(token: Data(repeating: 0x74, count: 32)),
+      transport: UnusedAskPassHTTPTransport()
+    )
+    await #expect(throws: GitAskPassError.unsafeDirectory) {
+      _ = try await broker.makeGitCredentialSession(
+        remoteURL: try #require(
+          URL(string: "https://x-access-token@github.com/owner/repo.git")
+        ),
+        socketDirectory: unsafeDirectory
+      )
+    }
+    let safeDirectory = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: safeDirectory) }
+    await #expect(throws: GitAskPassError.invalidRemote) {
+      _ = try await broker.makeGitCredentialSession(
+        remoteURL: try #require(
+          URL(string: "https://x-access-token@example.com/owner/repo.git")
+        ),
+        socketDirectory: safeDirectory
+      )
+    }
+  }
+}
+
+private func makeShortSocketDirectory(mode: Int) throws -> URL {
+  let suffix = UUID().uuidString.prefix(8).lowercased()
+  let directory = URL(fileURLWithPath: "/tmp/jc-ap-\(suffix)", isDirectory: true)
+  try FileManager.default.createDirectory(
+    at: directory,
+    withIntermediateDirectories: false,
+    attributes: [.posixPermissions: mode]
+  )
+  return directory
+}
+
+private struct AskPassTokenProvider: GitHubTokenProviding {
+  let token: Data
+
+  func token() async throws -> Data { token }
+}
+
+private struct UnusedAskPassHTTPTransport: GitHubHTTPTransport {
+  func send(_ request: URLRequest) async throws -> GitHubHTTPResponse {
+    throw URLError(.unsupportedURL)
+  }
+}

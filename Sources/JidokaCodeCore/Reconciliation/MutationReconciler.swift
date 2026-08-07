@@ -198,7 +198,8 @@ public actor MutationIntentStore {
         case .attributableEffect: .attributed
         case .escalation: .escalated
         }
-      guard [.prepared, .sendStarted, .reconcileRequired].contains(current.state) else {
+      guard [.prepared, .sendStarted, .reconcileRequired, .retryAllowed].contains(current.state)
+      else {
         if current.state == next, current.readBackEvidence == evidenceDigest {
           return current
         }

@@ -14,6 +14,7 @@ readonly SOURCE_RUNNER="$ROOT/scripts/spikes/jidoka-local-spikes.mjs"
 readonly PACKAGED_RUNNER="$APP/Contents/Resources/Spikes/jidoka-local-spikes.mjs"
 readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
 readonly EXPECTED_RUNNER_SHA256="59a4b657195d443c49f9211d25978dcdb29e64da0baea7e172c59ff5605b32e7"
+readonly EXPECTED_PI_POLICY_SHA256="c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 MODE="live"
 TEMP_ROOT=""
@@ -61,7 +62,7 @@ run_app() {
         cd /
         /usr/bin/env -i \
             DEVELOPER_DIR="$DEVELOPER_DIR" \
-            HOME="$HOME" \
+            HOME="${PROBE_HOME:-$HOME}" \
             PATH="/Applications/Xcode.app/Contents/Developer/usr/bin:/usr/bin:/bin" \
             TMPDIR="${TMPDIR:-/tmp}" \
             "$APP_EXECUTABLE" "$@"
@@ -77,6 +78,8 @@ run_app() {
 
 TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-s5-s7.XXXXXX")"
 readonly TEMP_ROOT
+readonly PREFLIGHT_HOME="$TEMP_ROOT/preflight-home"
+/bin/mkdir -m 0700 "$PREFLIGHT_HOME"
 EVIDENCE_DIR="$ROOT/build/evidence/$(/usr/bin/basename "$TEMP_ROOT")"
 readonly EVIDENCE_DIR
 trap cleanup EXIT
@@ -108,10 +111,19 @@ fi
 /usr/bin/grep -Fq 'invalidArguments' "$closed_stderr" || fail "local-spike rejection was ambiguous"
 
 pi_preflight="$TEMP_ROOT/pi-preflight.json"
-run_app "$pi_preflight" "$TEMP_ROOT/pi-preflight.stderr" --pi-probe preflight
+PROBE_HOME="$PREFLIGHT_HOME" run_app \
+    "$pi_preflight" "$TEMP_ROOT/pi-preflight.stderr" --pi-probe preflight
 [[ "$(json_value "$pi_preflight" bashBlocked)" == "true" ]]
 [[ "$(json_value "$pi_preflight" providerCalls)" == "0" ]]
 [[ "$(json_value "$pi_preflight" childCleanup)" == "true" ]]
+[[ "$(json_value "$pi_preflight" credentialAccess)" == "false" ]]
+[[ "$(json_value "$pi_preflight" piVersion)" == "0.84.0" ]]
+[[ "$(json_value "$pi_preflight" piCompatibility.minimumVersion)" == "0.84.0" ]]
+[[ "$(json_value "$pi_preflight" piCompatibility.maximumVersionExclusive)" == "0.90.0" ]]
+[[ "$(json_value "$pi_preflight" piCompatibility.policySHA256)" == \
+    "$EXPECTED_PI_POLICY_SHA256" ]]
+[[ ! -e "$PREFLIGHT_HOME/.pi" && ! -L "$PREFLIGHT_HOME/.pi" ]] || \
+    fail "credential-free Pi preflight touched isolated HOME"
 /usr/bin/install -m 0600 "$pi_preflight" "$EVIDENCE_DIR/pi-preflight.json"
 
 security="$TEMP_ROOT/security.json"

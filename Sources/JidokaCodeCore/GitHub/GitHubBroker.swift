@@ -53,6 +53,27 @@ public actor GitHubBroker: GitHubReadAPI {
     decoder = JSONDecoder()
   }
 
+  public func makeGitCredentialSession(
+    remoteURL: URL,
+    socketDirectory: URL,
+    timeoutSeconds: TimeInterval = 30
+  ) async throws -> OneShotGitCredentialSession {
+    var token = try await tokenProvider.token()
+    defer { token.resetBytes(in: 0..<token.count) }
+    guard (20...2_048).contains(token.count),
+      token.allSatisfy({ (0x21...0x7E).contains($0) })
+    else {
+      throw GitHubBrokerError.invalidCredential
+    }
+    return try OneShotGitCredentialServer.start(
+      token: token,
+      remoteURL: remoteURL,
+      socketDirectory: socketDirectory,
+      timeoutSeconds: timeoutSeconds,
+      now: now()
+    )
+  }
+
   func perform(_ operation: GitHubOperation) async throws -> GitHubBrokerResponse {
     try await send(operation: operation, overrideURL: nil, beforeSend: nil)
   }

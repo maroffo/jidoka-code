@@ -17,6 +17,9 @@ readonly LAUNCH_AGENTS="$CONTENTS/Library/LaunchAgents"
 readonly RESOURCES="$CONTENTS/Resources"
 readonly APP_EXECUTABLE="$MACOS/Jidoka Code"
 readonly ENGINE_EXECUTABLE="$HELPERS/JidokaCodeEngineProbe"
+readonly ASKPASS_EXECUTABLE="$HELPERS/JidokaCodeAskPass"
+readonly GIT_HOOKS="$HELPERS/GitHooks"
+readonly PUSH_GUARD_EXECUTABLE="$GIT_HOOKS/pre-push"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
 fail() {
@@ -94,13 +97,19 @@ verify_signing_identity() {
 verify_signed_team() {
     local app_team
     local helper_team
+    local askpass_team
+    local push_guard_team
     if [[ "$SIGN_IDENTITY" == "-" ]]; then
         return 0
     fi
     app_team="$(/usr/bin/codesign -dvvv "$APP" 2>&1 | /usr/bin/awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
     helper_team="$(/usr/bin/codesign -dvvv "$ENGINE_EXECUTABLE" 2>&1 | /usr/bin/awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
-    [[ -n "$app_team" && "$app_team" != "not set" && "$app_team" == "$helper_team" ]] || \
-        fail "signed app and helper do not share a concrete TeamIdentifier"
+    askpass_team="$(/usr/bin/codesign -dvvv "$ASKPASS_EXECUTABLE" 2>&1 | /usr/bin/awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
+    push_guard_team="$(/usr/bin/codesign -dvvv "$PUSH_GUARD_EXECUTABLE" 2>&1 | /usr/bin/awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
+    [[ -n "$app_team" && "$app_team" != "not set" && \
+        "$app_team" == "$helper_team" && "$app_team" == "$askpass_team" && \
+        "$app_team" == "$push_guard_team" ]] || \
+        fail "signed app and helpers do not share a concrete TeamIdentifier"
 }
 
 verify_signing_identity
@@ -112,6 +121,7 @@ for input in \
     "$ROOT/Resources/Pi/manifest.json" \
     "$ROOT/Resources/Pi/extensions/jidoka-deny-user-bash.js" \
     "$ROOT/Resources/Pi/extensions/jidoka-runtime.ts" \
+    "$ROOT/Resources/Pi/runtime/pi-runtime-builds.json" \
     "$ROOT/Resources/Pi/skills/jidoka-code-issue-triage/SKILL.md" \
     "$ROOT/Resources/Pi/skills/jidoka-code-orchestrate/SKILL.md" \
     "$ROOT/Resources/Pi/skills/jidoka-code-plan/SKILL.md" \
@@ -121,6 +131,7 @@ for input in \
     "$ROOT/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity/SKILL.md" \
     "$ROOT/Resources/Pi/workflow-skills/jidoka-code-triage-fidelity/SKILL.md" \
     "$ROOT/scripts/spikes/jidoka-local-spikes.mjs" \
+    "$ROOT/scripts/spikes/pi-runtime-attestation.mjs" \
     "$ROOT/scripts/spikes/pi-rpc-profile-probe.mjs" \
     "$ROOT/scripts/spikes/pi-rpc-workflow-probe.mjs"
 do
@@ -137,6 +148,8 @@ fi
 cd "$ROOT"
 /usr/bin/xcrun swift build --configuration release --product JidokaCodeApp
 /usr/bin/xcrun swift build --configuration release --product JidokaCodeEngineProbe
+/usr/bin/xcrun swift build --configuration release --product JidokaCodeAskPass
+/usr/bin/xcrun swift build --configuration release --product JidokaCodePushGuard
 BIN_DIR="$(/usr/bin/xcrun swift build --configuration release --show-bin-path)"
 BIN_DIR="$(cd "$BIN_DIR" && pwd -P)"
 readonly BIN_DIR
@@ -145,7 +158,12 @@ case "$BIN_DIR" in
     *) fail "SwiftPM binary directory escapes .build: $BIN_DIR" ;;
 esac
 
-for executable in "$BIN_DIR/JidokaCodeApp" "$BIN_DIR/JidokaCodeEngineProbe"; do
+for executable in \
+    "$BIN_DIR/JidokaCodeApp" \
+    "$BIN_DIR/JidokaCodeEngineProbe" \
+    "$BIN_DIR/JidokaCodeAskPass" \
+    "$BIN_DIR/JidokaCodePushGuard"
+do
     [[ -f "$executable" && -x "$executable" && ! -L "$executable" ]] || \
         fail "missing regular SwiftPM product: $executable"
 done
@@ -157,6 +175,7 @@ fi
 /bin/mkdir -p \
     "$MACOS" \
     "$HELPERS" \
+    "$GIT_HOOKS" \
     "$LAUNCH_AGENTS" \
     "$RESOURCES/Spikes" \
     "$RESOURCES/Pi/extensions" \
@@ -172,6 +191,8 @@ fi
 
 /usr/bin/install -m 0755 "$BIN_DIR/JidokaCodeApp" "$APP_EXECUTABLE"
 /usr/bin/install -m 0755 "$BIN_DIR/JidokaCodeEngineProbe" "$ENGINE_EXECUTABLE"
+/usr/bin/install -m 0755 "$BIN_DIR/JidokaCodeAskPass" "$ASKPASS_EXECUTABLE"
+/usr/bin/install -m 0755 "$BIN_DIR/JidokaCodePushGuard" "$PUSH_GUARD_EXECUTABLE"
 /usr/bin/install -m 0644 "$ROOT/Packaging/Info.plist" "$CONTENTS/Info.plist"
 /usr/bin/install -m 0644 \
     "$ROOT/Packaging/com.maroffo.JidokaCode.EngineProbe.plist" \
@@ -204,6 +225,12 @@ do
         "$RESOURCES/Pi/workflow-skills/$skill/SKILL.md"
 done
 /usr/bin/install -m 0644 \
+    "$ROOT/Resources/Pi/runtime/pi-runtime-builds.json" \
+    "$RESOURCES/Pi/runtime/pi-runtime-builds.json"
+/usr/bin/install -m 0644 \
+    "$ROOT/scripts/spikes/pi-runtime-attestation.mjs" \
+    "$RESOURCES/Pi/runtime/pi-runtime-attestation.mjs"
+/usr/bin/install -m 0644 \
     "$ROOT/scripts/spikes/pi-rpc-profile-probe.mjs" \
     "$RESOURCES/Pi/runtime/pi-rpc-profile-probe.mjs"
 /usr/bin/install -m 0644 \
@@ -213,17 +240,26 @@ done
     "$ROOT/scripts/spikes/jidoka-local-spikes.mjs" \
     "$RESOURCES/Spikes/jidoka-local-spikes.mjs"
 
-/usr/bin/strip -S "$APP_EXECUTABLE" "$ENGINE_EXECUTABLE"
+/usr/bin/strip -S \
+    "$APP_EXECUTABLE" "$ENGINE_EXECUTABLE" "$ASKPASS_EXECUTABLE" "$PUSH_GUARD_EXECUTABLE"
 remove_developer_rpaths "$APP_EXECUTABLE"
 remove_developer_rpaths "$ENGINE_EXECUTABLE"
+remove_developer_rpaths "$ASKPASS_EXECUTABLE"
+remove_developer_rpaths "$PUSH_GUARD_EXECUTABLE"
 assert_portable_macho "$APP_EXECUTABLE"
 assert_portable_macho "$ENGINE_EXECUTABLE"
+assert_portable_macho "$ASKPASS_EXECUTABLE"
+assert_portable_macho "$PUSH_GUARD_EXECUTABLE"
 
 /usr/bin/plutil -lint "$CONTENTS/Info.plist"
 /usr/bin/plutil -lint "$LAUNCH_AGENTS/com.maroffo.JidokaCode.EngineProbe.plist"
 sign_path "$ENGINE_EXECUTABLE" com.maroffo.JidokaCode.EngineProbe
+sign_path "$ASKPASS_EXECUTABLE" com.maroffo.JidokaCode.AskPass
+sign_path "$PUSH_GUARD_EXECUTABLE" com.maroffo.JidokaCode.PushGuard
 sign_path "$APP" com.maroffo.JidokaCode.Probe
 /usr/bin/codesign --verify --strict "$ENGINE_EXECUTABLE"
+/usr/bin/codesign --verify --strict "$ASKPASS_EXECUTABLE"
+/usr/bin/codesign --verify --strict "$PUSH_GUARD_EXECUTABLE"
 /usr/bin/codesign --verify --strict --deep "$APP"
 verify_signed_team
 

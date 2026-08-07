@@ -11,6 +11,8 @@ let package = Package(
         .library(name: "JidokaCodeCore", targets: ["JidokaCodeCore"]),
         .executable(name: "JidokaCodeApp", targets: ["JidokaCodeApp"]),
         .executable(name: "JidokaCodeEngineProbe", targets: ["JidokaCodeEngineProbe"]),
+        .executable(name: "JidokaCodeAskPass", targets: ["JidokaCodeAskPass"]),
+        .executable(name: "JidokaCodePushGuard", targets: ["JidokaCodePushGuard"]),
     ],
     targets: [
         .target(
@@ -23,6 +25,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "JidokaCodeEngineProbe",
+            dependencies: ["JidokaCodeCore"]
+        ),
+        .executableTarget(
+            name: "JidokaCodeAskPass",
+            dependencies: ["JidokaCodeCore"]
+        ),
+        .executableTarget(
+            name: "JidokaCodePushGuard",
             dependencies: ["JidokaCodeCore"]
         ),
         .testTarget(
