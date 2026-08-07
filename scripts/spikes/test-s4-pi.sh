@@ -20,10 +20,12 @@ readonly CODEX_RUNTIME="/opt/homebrew/lib/node_modules/@earendil-works/pi-coding
 readonly MODEL="openai-codex/gpt-5.6-sol:max"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 readonly SHARED_LEDGER="$HOME/Library/Application Support/JidokaCode/Consent/provider-call-ledger.json"
-readonly EXPECTED_RUNNER_SHA256="748a14b739a910fa5318819ed5a9391ef0b0f0a13fb028f942477bc373976679"
+readonly EXPECTED_RUNNER_SHA256="3442ce513d1787cf7bffff6d6af7e4647c1ef9ff38eb203bdf5b7dbe8d5c2c30"
 readonly EXPECTED_SETTINGS_SHA256="e7ec0ba10fa91967345d69c328a9fefbc65a7a89a7aa98a522cd1a9697e96da4"
+readonly EXPECTED_PI_VERSION="0.84.0"
+readonly EXPECTED_PI_POLICY_SHA256="c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484"
 readonly EXPECTED_PI_SDK_SHA256="f6e72f33f44c708249c8d74931d816c36fe27175f7fa1639cba0a3d988592821"
-readonly EXPECTED_CODEX_RUNTIME_SHA256="5322b84033ac5c41faa49cba541262aeffc26a94d5cd3b55090a0dcb35730783"
+readonly EXPECTED_CODEX_RUNTIME_SHA256="f0699749b06045244fd6ced26aee4f2627e7218199fd2955b0003fe08592aead"
 MODE="live"
 TEMP_ROOT=""
 EVIDENCE_DIR=""
@@ -69,7 +71,7 @@ run_probe() {
     if ! (
         cd /
         /usr/bin/env -i \
-            HOME="$HOME" \
+            HOME="${PROBE_HOME:-$HOME}" \
             PATH="/opt/homebrew/bin:/usr/bin:/bin" \
             TMPDIR="${TMPDIR:-/tmp}" \
             "$APP_EXECUTABLE" --pi-probe "$@"
@@ -131,6 +133,8 @@ validate_live_ledger() {
 
 TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-s4.XXXXXX")"
 readonly TEMP_ROOT
+readonly PREFLIGHT_HOME="$TEMP_ROOT/preflight-home"
+/bin/mkdir -m 0700 "$PREFLIGHT_HOME"
 EVIDENCE_DIR="$ROOT/build/evidence/$(/usr/bin/basename "$TEMP_ROOT")"
 readonly EVIDENCE_DIR
 trap cleanup EXIT
@@ -147,7 +151,7 @@ done
 [[ "$(/usr/bin/shasum -a 256 "$CODEX_RUNTIME" | /usr/bin/awk '{print $1}')" == \
     "$EXPECTED_CODEX_RUNTIME_SHA256" ]] || fail "Codex transport implementation drift"
 [[ "$($NODE_BIN --version)" == "v26.6.0" ]] || fail "Node version drift"
-[[ "$($NODE_BIN "$PI_CLI" --version)" == "0.83.0" ]] || fail "Pi version drift"
+[[ "$($NODE_BIN "$PI_CLI" --version)" == "$EXPECTED_PI_VERSION" ]] || fail "Pi version drift"
 "$NODE_BIN" --check "$SOURCE_RUNNER"
 "$NODE_BIN" --check "$ROOT/scripts/spikes/pi-provider-gate-probe.mjs"
 "$NODE_BIN" --check "$ROOT/Resources/Pi/extensions/jidoka-runtime.ts"
@@ -177,9 +181,9 @@ gate_preflight="$TEMP_ROOT/provider-gate-preflight.json"
 /usr/bin/install -m 0600 "$gate_preflight" "$EVIDENCE_DIR/provider-gate-preflight.json"
 
 preflight="$TEMP_ROOT/preflight.json"
-run_probe "$preflight" "$TEMP_ROOT/preflight.stderr" preflight
+PROBE_HOME="$PREFLIGHT_HOME" run_probe "$preflight" "$TEMP_ROOT/preflight.stderr" preflight
 [[ "$(json_value "$preflight" mode)" == "preflight" ]]
-[[ "$(json_value "$preflight" authenticationProviders.0)" == "openai-codex" ]]
+[[ "$(json_value "$preflight" credentialAccess)" == "false" ]]
 [[ "$(json_value "$preflight" abortAcknowledged)" == "true" ]]
 [[ "$(json_value "$preflight" bashBlocked)" == "true" ]]
 [[ "$(json_value "$preflight" childCleanup)" == "true" ]]
@@ -188,13 +192,18 @@ run_probe "$preflight" "$TEMP_ROOT/preflight.stderr" preflight
 [[ "$(json_value "$preflight" observedCommandCount)" == "6" ]]
 [[ "$(json_value "$preflight" providerCalls)" == "0" ]]
 [[ "$(json_value "$preflight" isolatedSettingsSHA256)" == "$EXPECTED_SETTINGS_SHA256" ]]
+[[ "$(json_value "$preflight" piVersion)" == "$EXPECTED_PI_VERSION" ]]
+[[ "$(json_value "$preflight" piCompatibility.minimumVersion)" == "0.84.0" ]]
+[[ "$(json_value "$preflight" piCompatibility.maximumVersionExclusive)" == "0.90.0" ]]
+[[ "$(json_value "$preflight" piCompatibility.policySHA256)" == \
+    "$EXPECTED_PI_POLICY_SHA256" ]]
 [[ "$(json_value "$preflight" providerTransport)" == "sse" ]]
 /usr/bin/install -m 0600 "$preflight" "$EVIDENCE_DIR/preflight.json"
 
 timeout_output="$TEMP_ROOT/timeout.json"
-run_probe "$timeout_output" "$TEMP_ROOT/timeout.stderr" timeout
+PROBE_HOME="$PREFLIGHT_HOME" run_probe "$timeout_output" "$TEMP_ROOT/timeout.stderr" timeout
 [[ "$(json_value "$timeout_output" mode)" == "timeout" ]]
-[[ "$(json_value "$timeout_output" authenticationProviders.0)" == "openai-codex" ]]
+[[ "$(json_value "$timeout_output" credentialAccess)" == "false" ]]
 [[ "$(json_value "$timeout_output" abortAcknowledged)" == "true" ]]
 [[ "$(json_value "$timeout_output" activeCommandCancelled)" == "true" ]]
 [[ "$(json_value "$timeout_output" childCleanup)" == "true" ]]
@@ -204,7 +213,8 @@ run_probe "$timeout_output" "$TEMP_ROOT/timeout.stderr" timeout
 /usr/bin/install -m 0600 "$timeout_output" "$EVIDENCE_DIR/timeout.json"
 
 ledger_preflight="$TEMP_ROOT/ledger-preflight.json"
-run_probe "$ledger_preflight" "$TEMP_ROOT/ledger-preflight.stderr" ledger-preflight
+PROBE_HOME="$PREFLIGHT_HOME" run_probe \
+    "$ledger_preflight" "$TEMP_ROOT/ledger-preflight.stderr" ledger-preflight
 [[ "$(json_value "$ledger_preflight" mode)" == "ledger-preflight" ]]
 [[ "$(json_value "$ledger_preflight" attemptsAtCap)" == "19" ]]
 [[ "$(json_value "$ledger_preflight" attemptReplayBlocked)" == "true" ]]
@@ -212,6 +222,8 @@ run_probe "$ledger_preflight" "$TEMP_ROOT/ledger-preflight.stderr" ledger-prefli
 [[ "$(json_value "$ledger_preflight" fixtureReplayBlocked)" == "true" ]]
 [[ "$(json_value "$ledger_preflight" lockBlocked)" == "true" ]]
 [[ "$(json_value "$ledger_preflight" providerCalls)" == "0" ]]
+[[ ! -e "$PREFLIGHT_HOME/.pi" && ! -L "$PREFLIGHT_HOME/.pi" ]] || \
+    fail "credential-free preflight touched isolated HOME"
 /usr/bin/install -m 0600 "$ledger_preflight" "$EVIDENCE_DIR/ledger-preflight.json"
 
 printf '{"authorizedCallCap":19,"codexRuntimeSHA256":"%s","launcher":"packaged-app-closed-command","model":"%s","payload":"synthetic-only","piSDKRuntimeSHA256":"%s","providerRetry":false,"runnerSHA256":"%s","transport":"sse","workflowRetry":false}\n' \

@@ -6,7 +6,10 @@ import JidokaCodeCore
 private enum WorkflowProbeCLIConstants {
   static let nodeURL = URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node")
   static let runnerRelativePath = "runtime/pi-rpc-workflow-probe.mjs"
-  static let runnerSHA256 = "37ebfc816041f9242b5da4298e064dbb9bcde794ab192926fca6f73ca156c1dd"
+  static let runnerSHA256 = "bb351854777b033e9a0a319103fbab05b45e55be77adb28eadb6cb9525440b86"
+  static let runtimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs"
+  static let runtimeAttestationSHA256 =
+    "b11b3015c528ca7b18148ee45a29f02bb9920f92f73c1d13dae82b5d7f8082de"
   static let maximumOutputBytes = 1_048_576
 }
 
@@ -59,19 +62,35 @@ enum WorkflowProbeCLI {
   }
 
   private static func packagedRunner(in resourceRoot: URL) throws -> URL {
-    let runner = resourceRoot.appendingPathComponent(
-      WorkflowProbeCLIConstants.runnerRelativePath,
+    _ = try packagedRuntimeFile(
+      in: resourceRoot,
+      relativePath: WorkflowProbeCLIConstants.runtimeAttestationRelativePath,
+      expectedSHA256: WorkflowProbeCLIConstants.runtimeAttestationSHA256
+    )
+    return try packagedRuntimeFile(
+      in: resourceRoot,
+      relativePath: WorkflowProbeCLIConstants.runnerRelativePath,
+      expectedSHA256: WorkflowProbeCLIConstants.runnerSHA256
+    )
+  }
+
+  private static func packagedRuntimeFile(
+    in resourceRoot: URL,
+    relativePath: String,
+    expectedSHA256: String
+  ) throws -> URL {
+    let file = resourceRoot.appendingPathComponent(
+      relativePath,
       isDirectory: false
     ).standardizedFileURL
     let resolvedRoot = resourceRoot.resolvingSymlinksInPath().path
-    let resolvedRunner = runner.resolvingSymlinksInPath().path
-    let values = try runner.resourceValues(forKeys: [
+    let resolvedFile = file.resolvingSymlinksInPath().path
+    let values = try file.resourceValues(forKeys: [
       .fileSizeKey,
       .isRegularFileKey,
       .isSymbolicLinkKey,
     ])
-    guard
-      resolvedRunner.hasPrefix(resolvedRoot + "/"),
+    guard resolvedFile.hasPrefix(resolvedRoot + "/"),
       values.isRegularFile == true,
       values.isSymbolicLink == false,
       let fileSize = values.fileSize,
@@ -79,12 +98,12 @@ enum WorkflowProbeCLI {
     else {
       throw WorkflowProbeCLIError.invalidPackagedRunner
     }
-    let data = try Data(contentsOf: runner, options: [.mappedIfSafe])
+    let data = try Data(contentsOf: file, options: [.mappedIfSafe])
     let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    guard digest == WorkflowProbeCLIConstants.runnerSHA256 else {
+    guard digest == expectedSHA256 else {
       throw WorkflowProbeCLIError.invalidPackagedRunner
     }
-    return runner
+    return file
   }
 
   private static func canonicalProviderLedgerURL() throws -> URL {

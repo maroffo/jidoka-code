@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
+import { attestSystemRuntime } from "./pi-runtime-attestation.mjs";
 
 const nodePath = "/opt/homebrew/Cellar/node/26.6.0/bin/node";
 const piPath = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
@@ -31,19 +32,15 @@ const authorizedCallCap = 19;
 const maximumBufferBytes = 8 * 1024 * 1024;
 const expectedSettingsSHA256 =
   "e7ec0ba10fa91967345d69c328a9fefbc65a7a89a7aa98a522cd1a9697e96da4";
-const expectedSystemFiles = Object.freeze({
-  "/opt/homebrew/Cellar/node/26.6.0/bin/node":
-    "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040",
-  "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js":
-    "af302f231437eaf6f37691bce4b34234fcb626bcb5eb3910d4fc3f6519bf78ca",
-  "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/package.json":
-    "e02deae1cec07035807436c1864c88342e2f7d49050d03b858a3719f0c7aedbf",
-  "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.js":
-    "f6e72f33f44c708249c8d74931d816c36fe27175f7fa1639cba0a3d988592821",
-  "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js":
-    "5322b84033ac5c41faa49cba541262aeffc26a94d5cd3b55090a0dcb35730783",
-});
+const piRuntimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs";
+const expectedPiRuntimeAttestationSHA256 =
+  "b11b3015c528ca7b18148ee45a29f02bb9920f92f73c1d13dae82b5d7f8082de";
+const piRuntimePolicyRelativePath = "runtime/pi-runtime-builds.json";
+const expectedPiRuntimePolicySHA256 =
+  "c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484";
 const expectedFiles = Object.freeze({
+  [piRuntimeAttestationRelativePath]: expectedPiRuntimeAttestationSHA256,
+  [piRuntimePolicyRelativePath]: expectedPiRuntimePolicySHA256,
   "extensions/jidoka-deny-user-bash.js":
     "ba18988ad739c592920555515ee246e07d325f0e90df345a61de4e7f41a24995",
   "extensions/jidoka-runtime.ts":
@@ -248,20 +245,6 @@ function sleep(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
-function attestSystemRuntime() {
-  const digests = {};
-  for (const [path, expectedSHA256] of Object.entries(expectedSystemFiles)) {
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1_048_576) {
-      fail(`system runtime is not a bounded regular file: ${path}`);
-    }
-    const digest = sha256(readFileSync(path));
-    if (digest !== expectedSHA256) fail(`system runtime digest mismatch: ${path}`);
-    digests[path] = digest;
-  }
-  return digests;
-}
-
 function attestResources(requestedRoot) {
   const rootStat = lstatSync(requestedRoot);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -287,7 +270,7 @@ function attestResources(requestedRoot) {
   return { root, files };
 }
 
-function createIsolatedAgentDirectory() {
+function createIsolatedAgentDirectory(requiresAuthentication) {
   const requestedWorkspace = process.env.JIDOKA_WORKFLOW_WORKSPACE;
   if (
     typeof requestedWorkspace !== "string" ||
@@ -309,24 +292,28 @@ function createIsolatedAgentDirectory() {
   const directory = mkdtempSync(`${workspace}/jidoka-pi-agent-`);
   chmodSync(directory, 0o700);
   try {
-    const authSource = `${homedir()}/.pi/agent/auth.json`;
-    const authStat = lstatSync(authSource);
-    if (
-      !authStat.isFile() ||
-      authStat.isSymbolicLink() ||
-      (authStat.mode & 0o077) !== 0 ||
-      authStat.size > 1_048_576
-    ) {
-      fail("Pi authentication source is not a bounded private regular file");
-    }
-    const sourceAuthentication = JSON.parse(readFileSync(authSource, "utf8"));
-    const codexAuthentication = sourceAuthentication?.[modelProvider];
-    if (codexAuthentication === null || typeof codexAuthentication !== "object") {
-      fail("authorized model authentication is absent");
+    let authentication = {};
+    if (requiresAuthentication) {
+      const authSource = `${homedir()}/.pi/agent/auth.json`;
+      const authStat = lstatSync(authSource);
+      if (
+        !authStat.isFile() ||
+        authStat.isSymbolicLink() ||
+        (authStat.mode & 0o077) !== 0 ||
+        authStat.size > 1_048_576
+      ) {
+        fail("Pi authentication source is not a bounded private regular file");
+      }
+      const sourceAuthentication = JSON.parse(readFileSync(authSource, "utf8"));
+      const codexAuthentication = sourceAuthentication?.[modelProvider];
+      if (codexAuthentication === null || typeof codexAuthentication !== "object") {
+        fail("authorized model authentication is absent");
+      }
+      authentication = { [modelProvider]: codexAuthentication };
     }
     writeFileSync(
       `${directory}/auth.json`,
-      `${JSON.stringify({ [modelProvider]: codexAuthentication })}\n`,
+      `${JSON.stringify(authentication)}\n`,
       { mode: 0o600 },
     );
     const settings = {
@@ -488,7 +475,7 @@ class ProviderLedger {
 
 class RPCClient {
   constructor(attestation, contract, providerGate) {
-    this.agentDirectory = createIsolatedAgentDirectory();
+    this.agentDirectory = createIsolatedAgentDirectory(providerGate !== undefined);
     this.environment = {
       HOME: homedir(),
       PATH: "/opt/homebrew/bin:/usr/bin:/bin",
@@ -496,6 +483,7 @@ class RPCClient {
       PI_SKIP_VERSION_CHECK: "1",
       TMPDIR: tmpdir(),
     };
+    if (providerGate === undefined) this.environment.PI_OFFLINE = "1";
     if (providerGate !== undefined) {
       this.environment.JIDOKA_PROVIDER_ATTEMPT_ID = contract.fixtureId;
       this.environment.JIDOKA_PROVIDER_GATE = "1";
@@ -1029,6 +1017,7 @@ async function runPreflight(attestation, ledger, systemRuntimeSHA256) {
     schemaVersion: 1,
     mode: "preflight",
     commandProfiles,
+    credentialAccess: false,
     goldenInvariantCount: new Set(roleContracts.flatMap((contract) => contract.invariants)).size,
     ledger: summary,
     providerCalls: 0,
@@ -1187,6 +1176,7 @@ async function runLive(attestation, ledger, systemRuntimeSHA256) {
     mode: "live",
     callsConsumed: after.attempts,
     cleanupVerified: roles.every((role) => role.childCleanup),
+    credentialAccess: true,
     invariantEvidence: mapping,
     ledger: after,
     providerCalls: roles.reduce((sum, role) => sum + role.providerCalls, 0),
@@ -1215,12 +1205,18 @@ async function main() {
     fail("usage: pi-rpc-workflow-probe.mjs preflight|live RESOURCE_ROOT LEDGER");
   }
   const attestation = attestResources(process.argv[3]);
-  const systemRuntimeSHA256 = attestSystemRuntime();
+  const systemRuntime = attestSystemRuntime({
+    attestation,
+    expectedPolicySHA256: expectedPiRuntimePolicySHA256,
+    policyRelativePath: piRuntimePolicyRelativePath,
+  });
   const ledger = new ProviderLedger(process.argv[4]);
   const report =
     mode === "preflight"
-      ? await runPreflight(attestation, ledger, systemRuntimeSHA256)
-      : await runLive(attestation, ledger, systemRuntimeSHA256);
+      ? await runPreflight(attestation, ledger, systemRuntime.digests)
+      : await runLive(attestation, ledger, systemRuntime.digests);
+  report.piCompatibility = systemRuntime.compatibility;
+  report.piVersion = systemRuntime.version;
   process.stdout.write(`${JSON.stringify(report)}\n`);
 }
 

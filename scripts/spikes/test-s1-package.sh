@@ -11,6 +11,8 @@ readonly ROOT
 readonly SOURCE_APP="$ROOT/build/Jidoka Code.app"
 readonly SOURCE_EXECUTABLE="$SOURCE_APP/Contents/MacOS/Jidoka Code"
 readonly SOURCE_ENGINE="$SOURCE_APP/Contents/Helpers/JidokaCodeEngineProbe"
+readonly SOURCE_ASKPASS="$SOURCE_APP/Contents/Helpers/JidokaCodeAskPass"
+readonly SOURCE_PUSH_GUARD="$SOURCE_APP/Contents/Helpers/GitHooks/pre-push"
 TEMP_ROOT=""
 
 fail() {
@@ -143,6 +145,25 @@ assert_pi_runner_failure() {
         fail "mutated packaged Pi runner did not fail digest attestation"
 }
 
+assert_pi_policy_failure() {
+    local app="$1"
+    local stdout_path="$TEMP_ROOT/pi-policy-failure.stdout"
+    local stderr_path="$TEMP_ROOT/pi-policy-failure.stderr"
+    if (
+        cd /
+        /usr/bin/env -i \
+            HOME="$TEMP_ROOT/home" \
+            PATH="/opt/homebrew/bin:/usr/bin:/bin" \
+            TMPDIR="$TEMP_ROOT/runtime-tmp" \
+            "$app/Contents/MacOS/Jidoka Code" --pi-probe preflight
+    ) >"$stdout_path" 2>"$stderr_path"; then
+        fail "mutated packaged Pi policy unexpectedly executed"
+    fi
+    [[ ! -s "$stdout_path" ]] || fail "mutated packaged Pi policy wrote stdout"
+    /usr/bin/grep -Fq 'runnerFailed(1)' "$stderr_path" || \
+        fail "mutated packaged Pi policy did not fail runtime attestation"
+}
+
 assert_cleanup_guard() {
     local parent
     local owned
@@ -168,6 +189,8 @@ trap cleanup EXIT
 readonly COPIED_APP="$TEMP_ROOT/Jidoka Code.app"
 readonly MUTATED_APP="$TEMP_ROOT/Jidoka Code Mutated.app"
 readonly MUTATED_RUNNER_APP="$TEMP_ROOT/Jidoka Code Runner Mutated.app"
+readonly MUTATED_ATTESTATION_APP="$TEMP_ROOT/Jidoka Code Attestation Mutated.app"
+readonly MUTATED_POLICY_APP="$TEMP_ROOT/Jidoka Code Policy Mutated.app"
 
 "$ROOT/scripts/package-app.sh"
 
@@ -180,6 +203,9 @@ expected_inventory="$(cat <<'EOF'
 .
 ./Contents
 ./Contents/Helpers
+./Contents/Helpers/GitHooks
+./Contents/Helpers/GitHooks/pre-push
+./Contents/Helpers/JidokaCodeAskPass
 ./Contents/Helpers/JidokaCodeEngineProbe
 ./Contents/Info.plist
 ./Contents/Library
@@ -196,6 +222,8 @@ expected_inventory="$(cat <<'EOF'
 ./Contents/Resources/Pi/runtime
 ./Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs
 ./Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs
+./Contents/Resources/Pi/runtime/pi-runtime-attestation.mjs
+./Contents/Resources/Pi/runtime/pi-runtime-builds.json
 ./Contents/Resources/Pi/skills
 ./Contents/Resources/Pi/skills/jidoka-code-issue-triage
 ./Contents/Resources/Pi/skills/jidoka-code-issue-triage/SKILL.md
@@ -252,10 +280,16 @@ assert_resource_digest \
     b6bae1cb282d95b3c1a3e6e4f37c5b967aa5bd3885ec3050c5d7bddb72b4a19b
 assert_resource_digest \
     runtime/pi-rpc-profile-probe.mjs \
-    748a14b739a910fa5318819ed5a9391ef0b0f0a13fb028f942477bc373976679
+    3442ce513d1787cf7bffff6d6af7e4647c1ef9ff38eb203bdf5b7dbe8d5c2c30
 assert_resource_digest \
     runtime/pi-rpc-workflow-probe.mjs \
-    37ebfc816041f9242b5da4298e064dbb9bcde794ab192926fca6f73ca156c1dd
+    bb351854777b033e9a0a319103fbab05b45e55be77adb28eadb6cb9525440b86
+assert_resource_digest \
+    runtime/pi-runtime-attestation.mjs \
+    b11b3015c528ca7b18148ee45a29f02bb9920f92f73c1d13dae82b5d7f8082de
+assert_resource_digest \
+    runtime/pi-runtime-builds.json \
+    c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484
 assert_resource_digest \
     skills/jidoka-code-issue-triage/SKILL.md \
     04b3b248a86dffbde0a543ddf1276f7515454fa7311347f317ff980d5ad9c5f6
@@ -293,6 +327,8 @@ for path in \
     "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-runtime.ts" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs" \
+    "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-runtime-attestation.mjs" \
+    "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-runtime-builds.json" \
     "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-issue-triage/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-orchestrate/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-plan/SKILL.md" \
@@ -306,17 +342,25 @@ for path in \
 do
     [[ -f "$path" && ! -L "$path" ]] || fail "expected regular bundle file: $path"
 done
-for path in "$SOURCE_EXECUTABLE" "$SOURCE_ENGINE"; do
+for path in \
+    "$SOURCE_EXECUTABLE" "$SOURCE_ENGINE" "$SOURCE_ASKPASS" "$SOURCE_PUSH_GUARD"
+do
     [[ -f "$path" && -x "$path" && ! -L "$path" ]] || fail "expected executable: $path"
     assert_portable_macho "$path"
 done
 
 /usr/bin/codesign --verify --strict "$SOURCE_ENGINE"
+/usr/bin/codesign --verify --strict "$SOURCE_ASKPASS"
+/usr/bin/codesign --verify --strict "$SOURCE_PUSH_GUARD"
 /usr/bin/codesign --verify --strict --deep "$SOURCE_APP"
 
 app_minos="$(/usr/bin/otool -l "$SOURCE_EXECUTABLE" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
 engine_minos="$(/usr/bin/otool -l "$SOURCE_ENGINE" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
-[[ "$app_minos" == "14.0" && "$engine_minos" == "14.0" ]] || fail "unexpected minimum OS"
+askpass_minos="$(/usr/bin/otool -l "$SOURCE_ASKPASS" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
+push_guard_minos="$(/usr/bin/otool -l "$SOURCE_PUSH_GUARD" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
+[[ "$app_minos" == "14.0" && "$engine_minos" == "14.0" && \
+    "$askpass_minos" == "14.0" && "$push_guard_minos" == "14.0" ]] || \
+    fail "unexpected minimum OS"
 
 BIN_DIR="$(/usr/bin/xcrun swift build --configuration release --show-bin-path)"
 BIN_DIR="$(cd "$BIN_DIR" && pwd -P)"
@@ -332,10 +376,18 @@ normalize_unsigned_product "$BIN_DIR/JidokaCodeApp" "$TEMP_ROOT/expected-app"
 normalize_unsigned_product "$SOURCE_EXECUTABLE" "$TEMP_ROOT/actual-app"
 normalize_unsigned_product "$BIN_DIR/JidokaCodeEngineProbe" "$TEMP_ROOT/expected-engine"
 normalize_unsigned_product "$SOURCE_ENGINE" "$TEMP_ROOT/actual-engine"
+normalize_unsigned_product "$BIN_DIR/JidokaCodeAskPass" "$TEMP_ROOT/expected-askpass"
+normalize_unsigned_product "$SOURCE_ASKPASS" "$TEMP_ROOT/actual-askpass"
+normalize_unsigned_product "$BIN_DIR/JidokaCodePushGuard" "$TEMP_ROOT/expected-push-guard"
+normalize_unsigned_product "$SOURCE_PUSH_GUARD" "$TEMP_ROOT/actual-push-guard"
 /usr/bin/cmp -s "$TEMP_ROOT/expected-app" "$TEMP_ROOT/actual-app" || \
     fail "packaged app lacks build-product provenance"
 /usr/bin/cmp -s "$TEMP_ROOT/expected-engine" "$TEMP_ROOT/actual-engine" || \
-    fail "packaged helper lacks build-product provenance"
+    fail "packaged engine helper lacks build-product provenance"
+/usr/bin/cmp -s "$TEMP_ROOT/expected-askpass" "$TEMP_ROOT/actual-askpass" || \
+    fail "packaged askpass helper lacks build-product provenance"
+/usr/bin/cmp -s "$TEMP_ROOT/expected-push-guard" "$TEMP_ROOT/actual-push-guard" || \
+    fail "packaged push guard lacks build-product provenance"
 
 /usr/bin/ditto "$SOURCE_APP" "$COPIED_APP"
 [[ "$COPIED_APP" != "$ROOT"/* ]]
@@ -354,6 +406,32 @@ engine_stderr="$TEMP_ROOT/engine.stderr"
 run_packaged_command "$COPIED_APP/Contents/MacOS/Jidoka Code" --preflight "$preflight_stdout" "$preflight_stderr"
 run_packaged_command "$COPIED_APP/Contents/Helpers/JidokaCodeEngineProbe" --probe "$engine_stdout" "$engine_stderr"
 [[ ! -s "$preflight_stderr" && ! -s "$engine_stderr" ]] || fail "successful probe wrote stderr"
+askpass_stdout="$TEMP_ROOT/askpass.stdout"
+askpass_stderr="$TEMP_ROOT/askpass.stderr"
+if run_packaged_command \
+    "$COPIED_APP/Contents/Helpers/JidokaCodeAskPass" \
+    "Password for https://github.com" \
+    "$askpass_stdout" \
+    "$askpass_stderr"
+then
+    fail "packaged askpass succeeded without a one-shot capability"
+fi
+[[ ! -s "$askpass_stdout" ]] || fail "failed packaged askpass wrote stdout"
+[[ "$(<"$askpass_stderr")" == "JIDOKA_ASKPASS_FAILED" ]] || \
+    fail "failed packaged askpass disclosed unexpected diagnostics"
+push_guard_stdout="$TEMP_ROOT/push-guard.stdout"
+push_guard_stderr="$TEMP_ROOT/push-guard.stderr"
+if run_packaged_command \
+    "$COPIED_APP/Contents/Helpers/GitHooks/pre-push" \
+    "origin" \
+    "$push_guard_stdout" \
+    "$push_guard_stderr"
+then
+    fail "packaged push guard succeeded without an old-zero capability"
+fi
+[[ ! -s "$push_guard_stdout" ]] || fail "failed packaged push guard wrote stdout"
+[[ "$(<"$push_guard_stderr")" == "JIDOKA_PUSH_GUARD_FAILED" ]] || \
+    fail "failed packaged push guard disclosed unexpected diagnostics"
 
 assert_exact_json_keys "$preflight_stdout" bundleIdentifier manifestSHA256 resourceName schemaVersion status workingDirectory
 assert_exact_json_keys "$engine_stdout" identifier status workingDirectory
@@ -395,8 +473,22 @@ printf '\n' >>"$MUTATED_RUNNER_APP/Contents/Resources/Pi/runtime/pi-rpc-profile-
 /usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe "$MUTATED_RUNNER_APP"
 assert_pi_runner_failure "$MUTATED_RUNNER_APP"
 
+/usr/bin/ditto "$COPIED_APP" "$MUTATED_ATTESTATION_APP"
+printf '\n' \
+    >>"$MUTATED_ATTESTATION_APP/Contents/Resources/Pi/runtime/pi-runtime-attestation.mjs"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe \
+    "$MUTATED_ATTESTATION_APP"
+assert_pi_runner_failure "$MUTATED_ATTESTATION_APP"
+
+/usr/bin/ditto "$COPIED_APP" "$MUTATED_POLICY_APP"
+printf '\n' >>"$MUTATED_POLICY_APP/Contents/Resources/Pi/runtime/pi-runtime-builds.json"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe \
+    "$MUTATED_POLICY_APP"
+assert_pi_policy_failure "$MUTATED_POLICY_APP"
+
 printf 'S1 package E2E: PASS\n'
-printf 'app_minos=%s engine_minos=%s\n' "$app_minos" "$engine_minos"
+printf 'app_minos=%s engine_minos=%s askpass_minos=%s push_guard_minos=%s\n' \
+    "$app_minos" "$engine_minos" "$askpass_minos" "$push_guard_minos"
 printf 'manifest_sha256=%s mutated_sha256=%s\n' "$manifest_digest" "$mutated_digest"
 printf 'preflight=%s\n' "$(<"$preflight_stdout")"
 printf 'engine=%s\n' "$(<"$engine_stdout")"

@@ -14,7 +14,8 @@ readonly SOURCE_RUNNER="$ROOT/scripts/spikes/pi-rpc-workflow-probe.mjs"
 readonly PACKAGED_RUNNER="$APP/Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs"
 readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
 readonly SHARED_LEDGER="$HOME/Library/Application Support/JidokaCode/Consent/provider-call-ledger.json"
-readonly EXPECTED_RUNNER_SHA256="37ebfc816041f9242b5da4298e064dbb9bcde794ab192926fca6f73ca156c1dd"
+readonly EXPECTED_RUNNER_SHA256="bb351854777b033e9a0a319103fbab05b45e55be77adb28eadb6cb9525440b86"
+readonly EXPECTED_PI_POLICY_SHA256="c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 MODE="live"
 TEMP_ROOT=""
@@ -61,7 +62,7 @@ run_app() {
     if ! (
         cd /
         /usr/bin/env -i \
-            HOME="$HOME" \
+            HOME="${PROBE_HOME:-$HOME}" \
             PATH="/opt/homebrew/bin:/usr/bin:/bin" \
             TMPDIR="${TMPDIR:-/tmp}" \
             "$APP_EXECUTABLE" "$@"
@@ -119,6 +120,8 @@ validate_live_report() {
 
 TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-s8.XXXXXX")"
 readonly TEMP_ROOT
+readonly PREFLIGHT_HOME="$TEMP_ROOT/preflight-home"
+/bin/mkdir -m 0700 "$PREFLIGHT_HOME"
 EVIDENCE_DIR="$ROOT/build/evidence/$(/usr/bin/basename "$TEMP_ROOT")"
 readonly EVIDENCE_DIR
 trap cleanup EXIT
@@ -151,15 +154,24 @@ fi
 /usr/bin/grep -Fq 'invalidArguments' "$closed_stderr" || fail "workflow rejection was ambiguous"
 
 preflight="$TEMP_ROOT/preflight.json"
-run_app "$preflight" "$TEMP_ROOT/preflight.stderr" --workflow-probe preflight
+PROBE_HOME="$PREFLIGHT_HOME" run_app \
+    "$preflight" "$TEMP_ROOT/preflight.stderr" --workflow-probe preflight
 [[ "$(json_value "$preflight" mode)" == "preflight" ]]
+[[ "$(json_value "$preflight" credentialAccess)" == "false" ]]
 [[ "$(json_value "$preflight" goldenInvariantCount)" == "18" ]]
 [[ "$(json_value "$preflight" ledger.s4Settled)" == "4" ]]
 [[ "$(json_value "$preflight" providerCalls)" == "0" ]]
+[[ "$(json_value "$preflight" piVersion)" == "0.84.0" ]]
+[[ "$(json_value "$preflight" piCompatibility.minimumVersion)" == "0.84.0" ]]
+[[ "$(json_value "$preflight" piCompatibility.maximumVersionExclusive)" == "0.90.0" ]]
+[[ "$(json_value "$preflight" piCompatibility.policySHA256)" == \
+    "$EXPECTED_PI_POLICY_SHA256" ]]
 [[ "$(json_value "$preflight" roleMatrix.prReview)" == "4" ]]
 [[ "$(json_value "$preflight" roleMatrix.triage)" == "1" ]]
 [[ "$(json_value "$preflight" roleMatrix.planning)" == "5" ]]
 [[ "$(json_value "$preflight" roleMatrix.orchestration)" == "5" ]]
+[[ ! -e "$PREFLIGHT_HOME/.pi" && ! -L "$PREFLIGHT_HOME/.pi" ]] || \
+    fail "credential-free workflow preflight touched isolated HOME"
 /usr/bin/install -m 0600 "$preflight" "$EVIDENCE_DIR/preflight.json"
 
 s8_settled="$(json_value "$preflight" ledger.s8Settled)"

@@ -117,6 +117,7 @@ Append only. Reverse a decision with a new row that names the superseded row.
 | 51 | Signing gate, applica #37 | L’helper non può essere approvato con firma ad-hoc: W1 resta bloccato finché un’identità Apple Development o Developer ID valida non firma e ripete S2-S4/S8 | Dopo un S2 iniziale verde, qualunque rebuild con nuovo code identity è stato respinto da AMFI con `OS_REASON_CODESIGNING`; ripristinare il bundle byte-identico torna verde, mentre incrementare `CFBundleVersion` non basta | una firma valida supera update, relaunch, Keychain e packaged Pi context senza reset BTM |
 | 52 | Firma locale W1, soddisfa il gate #51 | Usare l’identità locale Apple Development Hikma tramite exact SHA-1 `SIGN_IDENTITY`, hardened runtime e timestamp disabilitato per i probe; non riutilizzare le label contaminate dai run ad-hoc | Un fresh signed probe passa S1, S2 completo incluso update generation, e S3 completo con stesso TeamIdentifier; cleanup exact passa senza reset BTM | il certificato scade, manca la chiave privata, cambia team o una build firmata fallisce i gate |
 | 53 | Topologia W1, supersedes #35 | Selezionare il LaunchAgent helper; rimuovere il probe monolith dal bundle finale W1 | Il monolith fallisce crash restart entro 30 s; il helper Apple Development passa exactly-one, XPC, restart, reconciliation-first, graceful reopen, Keychain, Pi, S5 composition e cleanup | il helper fallisce un threshold lifecycle/security o una topologia più semplice passa l'intera stessa matrice |
+| 54 | Pi compatibility corrente, supersedes #43 per il runtime futuro | Accettare versioni `>=0.84.0 <0.90.0` soltanto se la build esatta è presente nell'allowlist digest-pinned; inizialmente è attestata solo `0.84.0` | Decisione project owner; separa il range di API accettabile dalla provenance obbligatoria di ogni build | una build allowlisted fallisce i contract offline, oppure il project owner modifica il range |
 
 ## Architecture contract
 
@@ -592,15 +593,15 @@ Pass/falsifier/disposition normativi:
 
 - Scope: `Sources/JidokaCodeCore/Git/`, askpass target, fixture repositories e test.
 - Excluded: development checkout corrente e GitHub live non autorizzato.
-- [ ] Creare mirror per repository id in Application Support; clone/fetch via broker; validare owner/name/default branch.
-- [ ] Materializzare workspace da mirror con `origin` locale, permission e branch state registrati.
-- [ ] Implementare review fetch di `refs/pull/<N>/head` con exact SHA assertion.
-- [ ] Implementare submodule inventory, mirror e local URL override; unsupported/private failure escala prima di Pi.
-- [ ] Implementare askpass one-shot scelto da W1 con nonce, timeout, host/path binding e zero token persistence.
-- [ ] Implementare import local ref, ancestry/tree/changed-file validation e la primitive atomic create-only exact-SHA approvata da W1. Non sostituirla con pre-read più ordinary push.
-- [ ] Implementare `VerificationCommandRunner` argv-only, plan-digest lock, safe Git config, process-tree timeout, output bounds e evidence; usarlo anche per staging e commit hook-on.
-- [ ] Test branch traversal, shell metacharacter title, symlink/cwd escape, SHA mismatch, preexisting branch same/different, base-ref race, changed command digest, hook fail e concurrent publish.
-- [ ] Cleanup idempotente soltanto dopo reconciliation; test interruption in ogni fase.
+- [x] Creare mirror per repository id in Application Support; clone/fetch via broker; validare owner/name/default branch.
+- [x] Materializzare workspace da mirror con `origin` locale, permission e branch state registrati.
+- [x] Implementare review fetch di `refs/pull/<N>/head` con exact SHA assertion.
+- [x] Implementare submodule inventory, mirror e local URL override; unsupported/private failure escala prima di Pi.
+- [x] Implementare askpass one-shot scelto da W1 con nonce, timeout, host/path binding e zero token persistence.
+- [x] Implementare import local ref, ancestry/tree/changed-file validation e publication exact-SHA con pre-push old-zero guard più CAS old-zero server-side. Un pre-read seguito dal solo ordinary push resta insufficiente.
+- [x] Implementare `VerificationCommandRunner` argv-only, plan-digest lock, safe Git config, process-tree timeout, output bounds e evidence; usarlo anche per staging e commit hook-on.
+- [x] Test branch traversal, shell metacharacter title, symlink/cwd escape, SHA mismatch, preexisting branch same/different, base-ref race, changed command digest, hook fail e concurrent publish.
+- [x] Cleanup idempotente soltanto dopo reconciliation; test interruption in ogni fase.
 
 ### W5: Pi runner and app-versioned workflows
 
@@ -815,7 +816,9 @@ Pass/falsifier/disposition normativi:
 - [x] W2 durable core, persistence and scheduler.
 - [x] 2026-08-06: W3 GitHub broker implementato su `feat/jidoka-code-w3-github-broker` da `origin/main@97b1fad`: Keychain boundary, inventario REST chiuso, fixture HTTP offline, marker/revision byte-exact, mutation intents e reconciliation delayed, read-back e discovery. Suite funzionale, AddressSanitizer, ThreadSanitizer e package E2E passano senza provider call, credential access o GitHub live.
 - [x] W3 GitHub broker and operation reconciliation.
-- [ ] W4-W8 implementation.
+- [x] 2026-08-06: W4 repository/Git transport implementato su `feat/jidoka-code-w4-git-transport`: mirror e workspace app-managed, review exact-SHA, submodule localizzati, askpass packaged one-shot, pre-push old-zero guard, command registry frozen, import verificato e publication CAS durevole. `make check`, package E2E, ASan, TSan e preflight S4/S5-S7/S8 passano con Pi `0.84.0`, senza provider, credenziali reali o GitHub live.
+- [x] W4 repository store, Git transport and exact publication.
+- [ ] W5-W8 implementation.
 - [ ] W9 final verification, review e canary autorizzato.
 
 ## Surprises and discoveries
@@ -847,6 +850,10 @@ Pass/falsifier/disposition normativi:
 - Un `Retry-After` mancante o malformato non autorizza un delay arbitrario: il broker usa il reset di rate limit se valido, altrimenti escalation.
 - Gli status GitHub `404/406/409/410/422` non sono categorie globali. L’operation inventory deve autorizzare ogni coppia operation/status; una coppia non dichiarata escala.
 - Un initializer pubblico per iniettare token provider o transport trasformerebbe una seam di test in un bypass del Keychain/host boundary. Le seam restano `internal` e il package le prova con `@testable`.
+- Un process group non basta contro un child che esegue `setsid()`: il runner W4 conserva identità PID più timestamp di avvio, termina i discendenti osservati e abbandona pipe ostili entro il deadline senza colpire PID riutilizzati.
+- Il socket Unix askpass ha un limite di path molto inferiore ai path temporanei standard di macOS; il provider richiede una directory privata breve e fallisce prima di esporre il token.
+- Il system Pi è avanzato esternamente a `0.84.0` e include breaking changes RPC. La decisione #54 accetta il range `>=0.84.0 <0.90.0` senza fiducia semver cieca: solo build con digest esatti nell'allowlist packaged possono partire; oggi è presente soltanto `0.84.0`.
+- Il packet trace old-zero da solo copriva soltanto la race dopo advertisement: una ref fast-forwardable apparsa prima dell'advertisement veniva avanzata dall'ordinary push. W4 aggiunge un helper pre-push compilato che rifiuta ogni old SHA nonzero prima del transfer; la CAS old-zero del receive copre la finestra successiva.
 
 ## Execution decisions
 
@@ -871,7 +878,10 @@ Append-only.
 - 2026-08-06: W3 è fixture-only. Il Security backend e il transport production compilano, ma token provider/transport injection restano internal; non viene letto alcun Keychain reale e non parte alcuna request GitHub o provider.
 - 2026-08-06: pagination e marker input hanno ceiling espliciti con escalation, non truncation; una create con send iniziato non può mai essere inviata una seconda volta automaticamente.
 - 2026-08-06: il project owner autorizza un singolo commit W3 e il push non-force del branch dedicato; merge e ulteriori side effect restano non autorizzati.
+- 2026-08-06: W4 parte soltanto dopo fetch e prova che W3 `f635ceea10150de8618608d240ed4d5aa40f80c2` è antenato di `origin/main@2ab0cbfe4db43a22e970e53c122af18875d41263`; il worktree dedicato non tocca checkout di sviluppo.
+- 2026-08-06: W4 resta offline/local. La publication usa intent SQLite `prepared -> sendStarted -> settled`, pre-push guard sull'old SHA advertised, packet old-zero e read-back; recovery da send unknown è read-only. Nessun commit del worktree, push remoto, Keychain reale, request GitHub o provider call è autorizzato o eseguito.
+- 2026-08-06: il project owner approva la decisione #54. Il range Pi è `>=0.84.0 <0.90.0`, ma ogni build richiede provenance digest-pinned; `0.84.0` passa i preflight packaged S4, S5-S7 e S8 con auth isolata vuota, zero credential access, zero provider call e ledger canonico invariato 19/19.
 
 ## Outcomes and retrospective
 
-W0, W1 S1-S9, W2 e W3 sono eseguiti. Ad-hoc è definitivamente scartato; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Il durable core W2 e il broker/reconciliation W3 sono verificati localmente. W4-W9, integrazione engine/UI, credential e GitHub canary, installer e final review restano aperti.
+W0, W1 S1-S9 e W2-W4 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Il durable core, il broker/reconciliation GitHub e il transport Git app-managed sono verificati localmente. Pi `0.84.0` è la sola build corrente ammessa dalla policy `>=0.84.0 <0.90.0`; le build future restano bloccate finché non sono attestate. W5-W9, integrazione engine/UI, credential e GitHub canary, installer e final review restano aperti.
