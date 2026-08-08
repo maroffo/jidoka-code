@@ -114,6 +114,85 @@ struct GitHubDiscoveryTests {
         .durableDisposition(.inFlight),
       ])
   }
+
+  @Test("implementation discovery requires exact ready or approved label states")
+  func implementationDiscovery() async throws {
+    let fixture = try await DiscoveryFixture()
+    defer { fixture.remove() }
+    let ready = issue(number: 10, nodeID: "I_ready", labels: ["Agent:Ready"])
+    let approved = issue(
+      number: 11,
+      nodeID: "I_approved",
+      labels: ["plan:approved", "agent:plan-review"]
+    )
+    let extra = issue(
+      number: 12,
+      nodeID: "I_extra",
+      labels: ["agent:ready", "agent:human"]
+    )
+    let active = issue(number: 13, nodeID: "I_active", labels: ["agent:ready"])
+    let waiting = issue(
+      number: 14,
+      nodeID: "I_waiting",
+      labels: ["agent:plan-review", "plan:approved"]
+    )
+    _ = try await fixture.jobs.createJob(
+      identity: LogicalJobIdentity(
+        repositoryID: fixture.repositoryID,
+        kind: .issueImplementation,
+        objectNodeID: active.nodeID,
+        revisionKey: "claim-1"
+      ),
+      contractVersionUsed: "v1",
+      priority: .issueImplementation,
+      firstStep: .claimReady,
+      now: fixture.now
+    )
+    let waitingCreation = try await fixture.jobs.createJob(
+      identity: LogicalJobIdentity(
+        repositoryID: fixture.repositoryID,
+        kind: .issueImplementation,
+        objectNodeID: waiting.nodeID,
+        revisionKey: "claim-1"
+      ),
+      contractVersionUsed: "v1",
+      priority: .approvedComplex,
+      firstStep: .plan,
+      now: fixture.now
+    )
+    guard case .created(let waitingJob) = waitingCreation else {
+      Issue.record("waiting fixture was suppressed")
+      return
+    }
+    try await fixture.database.execute(
+      "UPDATE jobs SET state = 'waitingHuman' WHERE id = ?",
+      bindings: [.text(waitingJob.id.uuidString.lowercased())]
+    )
+    let discovery = GitHubDiscovery(
+      api: StaticGitHubReadAPI(
+        pullRequests: [],
+        issues: [ready, approved, extra, active, waiting]
+      ),
+      jobs: fixture.jobs,
+      reviewedRevisions: fixture.reviewed
+    )
+
+    let observations = try await discovery.implementationIssues(
+      owner: "owner",
+      repository: "repo",
+      repositoryID: fixture.repositoryID
+    )
+
+    #expect(
+      observations.map(\.disposition) == [
+        .candidate(.ready),
+        .candidate(.approvedComplex),
+        .unrelatedWorkflowLabels(["agent:human", "agent:ready"]),
+        .existingJob(.queued),
+        .candidate(.approvedComplex),
+      ]
+    )
+  }
 }
 
 private struct StaticGitHubReadAPI: GitHubReadAPI {

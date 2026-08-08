@@ -290,7 +290,7 @@ assert_resource_digest() {
 }
 assert_resource_digest \
     workflow-resources.json \
-    20362f6bb3e1a961cc15f560513ed25d240c6e1b77b4ce7db0f8258b2c0016be
+    4d7be2b7ed582f2195bf19953dc74420be12c9066c2a9565b64f09afc204d566
 assert_resource_digest \
     extensions/jidoka-code.ts \
     3312c65c0cb607f14012a75aad31062eebf817724e807cab4ed4379c31752c0b
@@ -308,16 +308,16 @@ assert_resource_digest \
     fd707070911b53f3930864c3ec6dcfabc7b4440bcf44c3012882751fb99bf906
 assert_resource_digest \
     runtime/pi-rpc-profile-probe.mjs \
-    a972045017dac2a0ee32478fd4f63ac0c51da7f738acd8994de58df5dfe92f2f
+    83d081f9337bc1531e8c516e4248c324de26e325a4f8ef3895eb3df3417d45e9
 assert_resource_digest \
     runtime/pi-rpc-workflow-probe.mjs \
-    bba864cfe69d5f5f8ebac05fce1e86da3ff5276577246e612a5003f6bbf7a9cb
+    731267cc54cf7018258afc4393ca3357166c10c43b23601c420c597eb196f772
 assert_resource_digest \
     runtime/pi-runtime-attestation.mjs \
     a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e
 assert_resource_digest \
     runtime/pi-runtime-builds.json \
-    eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27
+    324d6a1738c08fd7dfbc1ca8fb324ed64d8fc3ac5bd1e2c293062cf4d4238248
 assert_resource_digest \
     skills/jidoka-code-issue-triage/SKILL.md \
     c4200a92833135446a61f374467aeb8f35e4a25826fe7b34baa016c206c46f0f

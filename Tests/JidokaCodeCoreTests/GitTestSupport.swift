@@ -167,10 +167,10 @@ func makeFrozenPlan(
   _ commands: [ApprovedCommand],
   decisionEvidenceSeed: String = "fixture",
   planningFacts: ComplexityFacts? = nil,
-  proposedComplexity: WorkComplexity = .simple
+  proposedComplexity: WorkComplexity = .simple,
+  artifactSHA256: String = String(repeating: "a", count: 64),
+  planMarkdown: String = "# Test plan\n"
 ) throws -> FrozenCommandPlan {
-  let artifactSHA256 = String(repeating: "a", count: 64)
-  let planMarkdown = "# Test plan\n"
   let candidate = try FrozenCommandPlan(
     artifactSHA256: artifactSHA256,
     planMarkdown: planMarkdown,

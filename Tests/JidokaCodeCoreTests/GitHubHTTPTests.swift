@@ -22,6 +22,8 @@ struct GitHubHTTPTests {
       owner: "owner", repository: "repo", number: 1)
     let listPulls = GitHubOperation.listPullRequests(
       owner: "owner", repository: "repo", page: 1, head: nil, base: nil)
+    let listCommits = GitHubOperation.listPullRequestCommits(
+      owner: "owner", repository: "repo", number: 1, page: 1)
     let cases: [(GitHubOperation, Int, [String: String], Data, GitHubResponseDisposition)] = [
       (read, 200, [:], Data(), .success),
       (read, 304, [:], Data(), .escalation),
@@ -73,13 +75,16 @@ struct GitHubHTTPTests {
       (branch, 404, [:], Data(), .absent),
       (removeLabel, 404, [:], Data(), .reconcileRequired),
       (listComments, 404, [:], Data(), .targetGone),
+      (listCommits, 404, [:], Data(), .targetGone),
       (pullRead, 406, [:], Data(), .clientConfigurationBlocked),
       (read, 406, [:], Data(), .escalation),
       (branch, 409, [:], Data(), .reconcileRequired),
       (read, 409, [:], Data(), .escalation),
       (read, 410, [:], Data(), .targetGone),
       (.authenticatedIdentity, 410, [:], Data(), .escalation),
+      (listCommits, 410, [:], Data(), .targetGone),
       (listPulls, 422, [:], Data(), .validationBlocked),
+      (listCommits, 422, [:], Data(), .validationBlocked),
       (read, 422, [:], Data(), .escalation),
       (removeLabel, 422, [:], Data(), .escalation),
       (
@@ -276,6 +281,56 @@ struct GitHubHTTPTests {
     }
   }
 
+  @Test("pull request commits paginate in exact API order and reject duplicates")
+  func pullRequestCommitPagination() async throws {
+    let firstPage = try JSONSerialization.data(
+      withJSONObject: (1...100).map(pullRequestCommitJSON)
+    )
+    let secondPage = try JSONSerialization.data(
+      withJSONObject: [pullRequestCommitJSON(101)]
+    )
+    let token = Data(repeating: 0x74, count: 32)
+    let transport = ScriptedGitHubTransport(stubs: [
+      .response(status: 200, headers: [:], body: firstPage),
+      .response(status: 200, headers: [:], body: secondPage),
+    ])
+    let broker = GitHubBroker(
+      tokenProvider: StaticGitHubTokenProvider(value: token),
+      transport: transport
+    )
+
+    let commits = try await broker.listPullRequestCommits(
+      owner: "owner",
+      repository: "repo",
+      number: 7
+    )
+    #expect(commits.count == 101)
+    #expect(commits.map(\.sha) == (1...101).map { pullRequestCommitSHA($0) })
+    #expect(
+      (await transport.requests()).map(\.url?.path) == [
+        "/repos/owner/repo/pulls/7/commits",
+        "/repos/owner/repo/pulls/7/commits",
+      ]
+    )
+
+    let duplicate = try JSONSerialization.data(
+      withJSONObject: [pullRequestCommitJSON(1), pullRequestCommitJSON(1)]
+    )
+    let duplicateBroker = GitHubBroker(
+      tokenProvider: StaticGitHubTokenProvider(value: token),
+      transport: ScriptedGitHubTransport(stubs: [
+        .response(status: 200, headers: [:], body: duplicate)
+      ])
+    )
+    await #expect(throws: GitHubBrokerError.decodingFailed(.listPullRequestCommits)) {
+      _ = try await duplicateBroker.listPullRequestCommits(
+        owner: "owner",
+        repository: "repo",
+        number: 7
+      )
+    }
+  }
+
   @Test("repository redirect requires the expected node identity")
   func repositoryRedirectIdentity() async throws {
     let repository = try JSONSerialization.data(
@@ -469,6 +524,14 @@ private struct CrossHostGitHubTransport: GitHubHTTPTransport {
       body: Data("{}".utf8)
     )
   }
+}
+
+private func pullRequestCommitSHA(_ number: Int) -> String {
+  String(format: "%040llx", Int64(number))
+}
+
+private func pullRequestCommitJSON(_ number: Int) -> [String: Any] {
+  ["sha": pullRequestCommitSHA(number)]
 }
 
 private func pullRequestJSON(_ number: Int) -> [String: Any] {

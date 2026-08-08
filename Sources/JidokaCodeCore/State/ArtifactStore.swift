@@ -174,7 +174,7 @@ public actor ArtifactStore {
 
   public func records(jobID: UUID) async throws -> [ArtifactRecord] {
     try await database.query(
-      "SELECT * FROM artifacts WHERE job_id = ? ORDER BY created_at, id",
+      "SELECT * FROM artifacts WHERE job_id = ? ORDER BY created_at, rowid",
       bindings: [.text(jobID.uuidString.lowercased())]
     ).map(Self.decode)
   }

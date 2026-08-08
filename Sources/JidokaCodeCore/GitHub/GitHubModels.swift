@@ -82,6 +82,10 @@ public struct GitHubPullRequest: Decodable, Equatable, Sendable {
   }
 }
 
+public struct GitHubPullRequestCommit: Decodable, Equatable, Sendable {
+  public let sha: String
+}
+
 public struct GitHubLabel: Decodable, Equatable, Sendable {
   public let id: Int64
   public let nodeID: String

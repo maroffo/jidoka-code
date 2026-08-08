@@ -14,7 +14,7 @@ readonly SOURCE_RUNNER="$ROOT/scripts/spikes/jidoka-local-spikes.mjs"
 readonly PACKAGED_RUNNER="$APP/Contents/Resources/Spikes/jidoka-local-spikes.mjs"
 readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
 readonly EXPECTED_RUNNER_SHA256="59a4b657195d443c49f9211d25978dcdb29e64da0baea7e172c59ff5605b32e7"
-readonly EXPECTED_PI_POLICY_SHA256="eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27"
+readonly EXPECTED_PI_POLICY_SHA256="324d6a1738c08fd7dfbc1ca8fb324ed64d8fc3ac5bd1e2c293062cf4d4238248"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 MODE="live"
 TEMP_ROOT=""
@@ -117,7 +117,7 @@ PROBE_HOME="$PREFLIGHT_HOME" run_app \
 [[ "$(json_value "$pi_preflight" providerCalls)" == "0" ]]
 [[ "$(json_value "$pi_preflight" childCleanup)" == "true" ]]
 [[ "$(json_value "$pi_preflight" credentialAccess)" == "false" ]]
-[[ "$(json_value "$pi_preflight" piVersion)" == "0.84.0" ]]
+[[ "$(json_value "$pi_preflight" piVersion)" == "0.84.1" ]]
 [[ "$(json_value "$pi_preflight" piCompatibility.minimumVersion)" == "0.84.0" ]]
 [[ "$(json_value "$pi_preflight" piCompatibility.maximumVersionExclusive)" == "0.90.0" ]]
 [[ "$(json_value "$pi_preflight" piCompatibility.policySHA256)" == \

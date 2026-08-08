@@ -88,9 +88,19 @@ struct GitHubMutationObservationsTests {
       body: comments[0].body
     )
     #expect(
-      isConflict(
+      isIncomplete(
         GitHubMutationObservations.markerComment(
           comments: wrongAuthor,
+          expectation: expectation
+        ))
+    )
+    let foreignCollision = comments.map {
+      GitHubMarkerComment(id: $0.id + 1_000, authorID: 99, body: $0.body)
+    }
+    #expect(
+      isExact(
+        GitHubMutationObservations.markerComment(
+          comments: comments + foreignCollision,
           expectation: expectation
         ))
     )

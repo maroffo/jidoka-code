@@ -54,7 +54,7 @@ const manifestPath = resolve(resourceRoot, "workflow-resources.json");
 const manifestSHA256 = createHash("sha256").update(readFileSync(manifestPath)).digest("hex");
 assert.equal(
   manifestSHA256,
-  "20362f6bb3e1a961cc15f560513ed25d240c6e1b77b4ce7db0f8258b2c0016be",
+  "4d7be2b7ed582f2195bf19953dc74420be12c9066c2a9565b64f09afc204d566",
 );
 const configurationPath = resolve(temporary, "workflow.json");
 writeFileSync(

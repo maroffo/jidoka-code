@@ -14,9 +14,12 @@ public enum GitHubMutationExecutorError: Error, Equatable, Sendable {
 
 public actor GitHubMutationExecutor {
   private let intents: MutationIntentStore
-  private let broker: GitHubBroker
+  private let broker: any GitHubMutationSending
 
-  public init(intents: MutationIntentStore, broker: GitHubBroker) {
+  public init(
+    intents: MutationIntentStore,
+    broker: any GitHubMutationSending
+  ) {
     self.intents = intents
     self.broker = broker
   }

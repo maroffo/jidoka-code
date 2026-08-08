@@ -24,7 +24,7 @@ readonly S2_LOCK="$SPIKE_PARENT/S2.lock"
 readonly LOCK_DIR="$SPIKE_PARENT/S3.lock"
 readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
 readonly PI_CLI="/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
-readonly EXPECTED_PI_VERSION="0.84.0"
+readonly EXPECTED_PI_VERSION="0.84.1"
 USER_DOMAIN="gui/$(/usr/bin/id -u)"
 readonly USER_DOMAIN
 MODE="live"

@@ -65,7 +65,7 @@ const policySHA256 = createHash("sha256").update(policyData).digest("hex");
 const nodePolicySHA256 = createHash("sha256").update(nodePolicyData).digest("hex");
 assert.equal(
   policySHA256,
-  "eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27",
+  "324d6a1738c08fd7dfbc1ca8fb324ed64d8fc3ac5bd1e2c293062cf4d4238248",
 );
 assert.equal(
   nodePolicySHA256,
@@ -79,8 +79,13 @@ assert.deepEqual(validatePolicy(policy), {
   minimum: [0, 84, 0],
 });
 assert.equal(validateNodePolicy(nodePolicy), nodePolicy);
-const selected = selectAttestedBuild(policy, { name: packageName, version: "0.84.0" });
-assert.equal(selected.version, "0.84.0");
+const selectedPrevious = selectAttestedBuild(policy, {
+  name: packageName,
+  version: "0.84.0",
+});
+assert.equal(selectedPrevious.version, "0.84.0");
+const selected = selectAttestedBuild(policy, { name: packageName, version: "0.84.1" });
+assert.equal(selected.version, "0.84.1");
 assert.deepEqual(
   Object.keys(selected.build.criticalFiles).sort(),
   [...expectedPiRuntimePaths].sort(),
@@ -99,10 +104,7 @@ assert.throws(
   () => selectAttestedBuild(policy, { name: packageName, version: "0.89.9" }),
   /build is not attested/,
 );
-assert.throws(
-  () => selectAttestedBuild(policy, { name: packageName, version: "0.84.1" }),
-  /build is not attested/,
-);
+
 for (const version of ["0.84", "00.84.0", "0.84.0-beta.1", "v0.84.0"]) {
   assert.throws(
     () => selectAttestedBuild(policy, { name: packageName, version }),
@@ -234,7 +236,7 @@ const runtime = attestSystemRuntime({
   nodePolicyRelativePath,
   policyRelativePath,
 });
-assert.equal(runtime.version, "0.84.0");
+assert.equal(runtime.version, "0.84.1");
 assert.equal(runtime.nodeVersion, "26.6.0");
 assert.deepEqual(runtime.compatibility, {
   maximumVersionExclusive: "0.90.0",

@@ -35,7 +35,7 @@ const expectedPiRuntimeAttestationSHA256 =
   "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e";
 const piRuntimePolicyRelativePath = "runtime/pi-runtime-builds.json";
 const expectedPiRuntimePolicySHA256 =
-  "eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27";
+  "324d6a1738c08fd7dfbc1ca8fb324ed64d8fc3ac5bd1e2c293062cf4d4238248";
 const nodeRuntimePolicyRelativePath = "runtime/node-runtime-builds.json";
 const expectedNodeRuntimePolicySHA256 =
   "fd707070911b53f3930864c3ec6dcfabc7b4440bcf44c3012882751fb99bf906";

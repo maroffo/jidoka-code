@@ -11,6 +11,7 @@ public enum GitHubOperationKind: String, CaseIterable, Codable, Sendable {
   case repository
   case listPullRequests
   case pullRequest
+  case listPullRequestCommits
   case createPullRequest
   case listIssues
   case issue
@@ -81,6 +82,12 @@ public enum GitHubOperation: Equatable, Sendable {
     base: String?
   )
   case pullRequest(owner: String, repository: String, number: Int)
+  case listPullRequestCommits(
+    owner: String,
+    repository: String,
+    number: Int,
+    page: Int
+  )
   case createPullRequest(
     owner: String,
     repository: String,
@@ -108,6 +115,7 @@ public enum GitHubOperation: Equatable, Sendable {
     case .repository: .repository
     case .listPullRequests: .listPullRequests
     case .pullRequest: .pullRequest
+    case .listPullRequestCommits: .listPullRequestCommits
     case .createPullRequest: .createPullRequest
     case .listIssues: .listIssues
     case .issue: .issue
@@ -129,6 +137,7 @@ public enum GitHubOperation: Equatable, Sendable {
     case .repository: "repos/get"
     case .listPullRequests: "pulls/list"
     case .pullRequest: "pulls/get"
+    case .listPullRequestCommits: "pulls/list-commits"
     case .createPullRequest: "pulls/create"
     case .listIssues: "issues/list-for-repo"
     case .issue: "issues/get"
@@ -233,6 +242,12 @@ public enum GitHubRequestFactory {
       try validate(owner: owner, repository: repository)
       try validate(number: number)
       path = ["repos", owner, repository, "pulls", String(number)]
+    case .listPullRequestCommits(let owner, let repository, let number, let page):
+      try validate(owner: owner, repository: repository)
+      try validate(number: number)
+      try validate(page: page)
+      path = ["repos", owner, repository, "pulls", String(number), "commits"]
+      query = pagination(page: page)
     case .createPullRequest(let owner, let repository, let payload):
       try validate(owner: owner, repository: repository)
       try validate(pullRequest: payload)

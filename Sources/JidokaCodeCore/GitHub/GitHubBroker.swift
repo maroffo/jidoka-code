@@ -25,8 +25,46 @@ public protocol GitHubReadAPI: Sendable {
   func listIssues(owner: String, repository: String) async throws -> [GitHubIssue]
 }
 
-public actor GitHubBroker: GitHubReadAPI {
+public protocol GitHubPullRequestCommitAPI: Sendable {
+  func listPullRequestCommits(
+    owner: String,
+    repository: String,
+    number: Int
+  ) async throws -> [GitHubPullRequestCommit]
+}
+
+public protocol GitHubMutationReadAPI: Sendable {
+  func pullRequest(owner: String, repository: String, number: Int) async throws
+    -> GitHubPullRequest
+  func issue(owner: String, repository: String, number: Int) async throws -> GitHubIssue
+  func listComments(owner: String, repository: String, number: Int) async throws
+    -> [GitHubComment]
+  func listIssueLabels(owner: String, repository: String, number: Int) async throws
+    -> [GitHubLabel]
+  func lookupPullRequests(
+    owner: String,
+    repository: String,
+    head: String,
+    base: String
+  ) async throws -> [GitHubPullRequest]
+  func repositoryLabel(owner: String, repository: String, label: String) async throws
+    -> GitHubLabel?
+  func branchReference(owner: String, repository: String, branch: String) async throws
+    -> GitHubReference?
+}
+
+public protocol GitHubMutationSending: Sendable {
+  func performMutation(
+    _ operation: GitHubOperation,
+    beforeSend: @escaping @Sendable () async throws -> Void
+  ) async throws -> GitHubBrokerResponse
+}
+
+public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
+  GitHubMutationReadAPI, GitHubMutationSending
+{
   public static let maximumResponseBytes = 10 * 1_024 * 1_024
+  public static let maximumPaginatedBytes = 32 * 1_024 * 1_024
   public static let maximumPages = 1_000
   public static let maximumItems = 100_000
 
@@ -78,7 +116,7 @@ public actor GitHubBroker: GitHubReadAPI {
     try await send(operation: operation, overrideURL: nil, beforeSend: nil)
   }
 
-  func performMutation(
+  public func performMutation(
     _ operation: GitHubOperation,
     beforeSend: @escaping @Sendable () async throws -> Void
   ) async throws -> GitHubBrokerResponse {
@@ -192,6 +230,31 @@ public actor GitHubBroker: GitHubReadAPI {
       .pullRequest(owner: owner, repository: repository, number: number),
       as: GitHubPullRequest.self
     )
+  }
+
+  public func listPullRequestCommits(
+    owner: String,
+    repository: String,
+    number: Int
+  ) async throws -> [GitHubPullRequestCommit] {
+    let commits: [GitHubPullRequestCommit] = try await allPages(
+      kind: .listPullRequestCommits
+    ) { page in
+      .listPullRequestCommits(
+        owner: owner,
+        repository: repository,
+        number: number,
+        page: page
+      )
+    }
+    guard !commits.isEmpty,
+      commits.count <= 10_000,
+      Set(commits.map(\.sha)).count == commits.count,
+      commits.allSatisfy({ GitHubInputValidation.validGitSHA($0.sha) })
+    else {
+      throw GitHubBrokerError.decodingFailed(.listPullRequestCommits)
+    }
+    return commits
   }
 
   public func listIssues(
@@ -406,9 +469,18 @@ public actor GitHubBroker: GitHubReadAPI {
     operation: (Int) -> GitHubOperation
   ) async throws -> [T] {
     var all: [T] = []
+    var encodedBytes = 0
     for page in 1...Self.maximumPages {
       let current = operation(page)
-      let values: [T] = try await decoded(current, as: [T].self)
+      let response = try await perform(current)
+      guard response.disposition == .success else {
+        throw GitHubBrokerError.unexpectedDisposition(kind, response.disposition)
+      }
+      guard encodedBytes <= Self.maximumPaginatedBytes - response.body.count else {
+        throw GitHubBrokerError.responseTooLarge
+      }
+      encodedBytes += response.body.count
+      let values: [T] = try decode(response, as: [T].self)
       guard values.count <= 100 else {
         throw GitHubBrokerError.decodingFailed(kind)
       }

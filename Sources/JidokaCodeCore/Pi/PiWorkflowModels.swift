@@ -25,7 +25,7 @@ public enum PiWorkflowReportSeverity: String, CaseIterable, Codable, Sendable {
   }
 }
 
-public struct PiWorkflowFinding: Equatable, Sendable {
+public struct PiWorkflowFinding: Codable, Equatable, Sendable {
   public let severity: PiWorkflowFindingSeverity
   public let path: String
   public let line: Int
@@ -68,7 +68,7 @@ public enum WorkComplexity: String, CaseIterable, Codable, Comparable, Sendable 
   }
 }
 
-public struct ComplexityFacts: Equatable, Sendable {
+public struct ComplexityFacts: Codable, Equatable, Sendable {
   public let workstreamCount: Int
   public let publicAPI: Bool
   public let nonDestructiveSchema: Bool
@@ -127,7 +127,7 @@ public enum TriageHardRiskFlag: String, CaseIterable, Codable, Sendable {
   case unverifiable
 }
 
-public struct PiPRReviewPayload: Equatable, Sendable {
+public struct PiPRReviewPayload: Codable, Equatable, Sendable {
   public let verdict: String
   public let severity: PiWorkflowReportSeverity
   public let summary: String
@@ -137,14 +137,14 @@ public struct PiPRReviewPayload: Equatable, Sendable {
   public let findings: [PiWorkflowFinding]
 }
 
-public struct PiTriageRubric: Equatable, Sendable {
+public struct PiTriageRubric: Codable, Equatable, Sendable {
   public let specified: String
   public let testable: String
   public let bounded: String
   public let safe: String
 }
 
-public struct PiIssueTriagePayload: Equatable, Sendable {
+public struct PiIssueTriagePayload: Codable, Equatable, Sendable {
   public let verdict: String
   public let severity: PiWorkflowReportSeverity
   public let summary: String
@@ -155,7 +155,7 @@ public struct PiIssueTriagePayload: Equatable, Sendable {
   public let complexityGuess: WorkComplexity
 }
 
-public struct ApprovedCommandProposal: Equatable, Sendable {
+public struct ApprovedCommandProposal: Codable, Equatable, Sendable {
   public let id: String
   public let registryKind: ApprovedCommandRegistryKind
   public let executableOrRepositoryScript: String
@@ -192,7 +192,7 @@ public struct ApprovedCommandProposal: Equatable, Sendable {
   }
 }
 
-public struct PiPlanningPayload: Equatable, Sendable {
+public struct PiPlanningPayload: Codable, Equatable, Sendable {
   public let verdict: String
   public let severity: PiWorkflowReportSeverity
   public let summary: String
@@ -206,7 +206,7 @@ public struct PiPlanningPayload: Equatable, Sendable {
   public let planMarkdown: String
 }
 
-public struct PiOrchestrationPayload: Equatable, Sendable {
+public struct PiOrchestrationPayload: Codable, Equatable, Sendable {
   public let verdict: String
   public let severity: PiWorkflowReportSeverity
   public let summary: String
@@ -216,14 +216,14 @@ public struct PiOrchestrationPayload: Equatable, Sendable {
   public let requestedCommandIDs: [String]
 }
 
-public enum PiWorkflowPayload: Equatable, Sendable {
+public enum PiWorkflowPayload: Codable, Equatable, Sendable {
   case pullRequestReview(PiPRReviewPayload)
   case issueTriage(PiIssueTriagePayload)
   case planning(PiPlanningPayload)
   case orchestration(PiOrchestrationPayload)
 }
 
-public struct PiWorkflowRoleResult: Equatable, Sendable {
+public struct PiWorkflowRoleResult: Codable, Equatable, Sendable {
   public let workflow: PiWorkflowKind
   public let role: PiWorkflowRole
   public let artifactSHA256: String

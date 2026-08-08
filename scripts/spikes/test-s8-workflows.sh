@@ -14,8 +14,8 @@ readonly SOURCE_RUNNER="$ROOT/scripts/spikes/pi-rpc-workflow-probe.mjs"
 readonly PACKAGED_RUNNER="$APP/Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs"
 readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
 readonly SHARED_LEDGER="$HOME/Library/Application Support/JidokaCode/Consent/provider-call-ledger.json"
-readonly EXPECTED_RUNNER_SHA256="bba864cfe69d5f5f8ebac05fce1e86da3ff5276577246e612a5003f6bbf7a9cb"
-readonly EXPECTED_PI_POLICY_SHA256="eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27"
+readonly EXPECTED_RUNNER_SHA256="731267cc54cf7018258afc4393ca3357166c10c43b23601c420c597eb196f772"
+readonly EXPECTED_PI_POLICY_SHA256="324d6a1738c08fd7dfbc1ca8fb324ed64d8fc3ac5bd1e2c293062cf4d4238248"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 MODE="live"
 TEMP_ROOT=""
@@ -161,7 +161,7 @@ PROBE_HOME="$PREFLIGHT_HOME" run_app \
 [[ "$(json_value "$preflight" goldenInvariantCount)" == "18" ]]
 [[ "$(json_value "$preflight" ledger.s4Settled)" == "4" ]]
 [[ "$(json_value "$preflight" providerCalls)" == "0" ]]
-[[ "$(json_value "$preflight" piVersion)" == "0.84.0" ]]
+[[ "$(json_value "$preflight" piVersion)" == "0.84.1" ]]
 [[ "$(json_value "$preflight" piCompatibility.minimumVersion)" == "0.84.0" ]]
 [[ "$(json_value "$preflight" piCompatibility.maximumVersionExclusive)" == "0.90.0" ]]
 [[ "$(json_value "$preflight" piCompatibility.policySHA256)" == \

@@ -158,6 +158,25 @@ public struct IssueDiscoveryObservation: Equatable, Sendable {
   public let disposition: GitHubDiscoveryDisposition
 }
 
+public enum ImplementationCandidateKind: String, Equatable, Sendable {
+  case ready
+  case approvedComplex
+}
+
+public enum ImplementationDiscoveryDisposition: Equatable, Sendable {
+  case candidate(ImplementationCandidateKind)
+  case closed
+  case pullRequestEntry
+  case unrelatedWorkflowLabels([String])
+  case existingJob(JobState)
+  case invalidRemoteIdentity
+}
+
+public struct ImplementationIssueDiscoveryObservation: Equatable, Sendable {
+  public let issue: GitHubIssue
+  public let disposition: ImplementationDiscoveryDisposition
+}
+
 public actor GitHubDiscovery {
   private let api: any GitHubReadAPI
   private let jobs: DurableJobStore
@@ -254,6 +273,60 @@ public actor GitHubDiscovery {
       }
       observations.append(
         IssueDiscoveryObservation(issue: issue, disposition: disposition)
+      )
+    }
+    return observations
+  }
+
+  public func implementationIssues(
+    owner: String,
+    repository: String,
+    repositoryID: UUID
+  ) async throws -> [ImplementationIssueDiscoveryObservation] {
+    let issues = try await api.listIssues(owner: owner, repository: repository)
+    let activeJobs = try await jobs.jobs(nonTerminalOnly: true)
+    var observations: [ImplementationIssueDiscoveryObservation] = []
+    observations.reserveCapacity(issues.count)
+    for issue in issues {
+      let disposition: ImplementationDiscoveryDisposition
+      if issue.state != "open" {
+        disposition = .closed
+      } else if issue.isPullRequest {
+        disposition = .pullRequestEntry
+      } else if issue.nodeID.isEmpty {
+        disposition = .invalidRemoteIdentity
+      } else {
+        let workflowLabels = issue.labels.map(\.name).filter(Self.isWorkflowLabel)
+          .map { $0.lowercased() }.sorted()
+        let existing = activeJobs.first(where: {
+          $0.identity.repositoryID == repositoryID
+            && $0.identity.objectNodeID == issue.nodeID
+            && ($0.identity.kind == .issueImplementation || $0.identity.kind == .complexPlan)
+        })
+        if let existing {
+          if existing.state == .waitingHuman,
+            workflowLabels == ["agent:plan-review", "plan:approved"]
+          {
+            disposition = .candidate(.approvedComplex)
+          } else {
+            disposition = .existingJob(existing.state)
+          }
+        } else {
+          switch workflowLabels {
+          case ["agent:ready"]:
+            disposition = .candidate(.ready)
+          case ["agent:plan-review", "plan:approved"]:
+            disposition = .candidate(.approvedComplex)
+          default:
+            disposition = .unrelatedWorkflowLabels(workflowLabels)
+          }
+        }
+      }
+      observations.append(
+        ImplementationIssueDiscoveryObservation(
+          issue: issue,
+          disposition: disposition
+        )
       )
     }
     return observations

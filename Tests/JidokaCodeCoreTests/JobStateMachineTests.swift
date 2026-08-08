@@ -47,11 +47,14 @@ struct JobStateMachineTests {
   @Test("retry requires a future persisted deadline")
   func retryDeadlineValidation() throws {
     let now = Date(timeIntervalSince1970: 1_000)
-    for event in [JobEvent.transientSetupFailure, .transientPiFailure, .safeRetry] {
+    for event in [
+      JobEvent.transientSetupFailure, .transientPiFailure, .transientLocalFailure, .safeRetry,
+    ] {
       let state: JobState =
         switch event {
         case .transientSetupFailure: .preparing
         case .transientPiFailure: .runningPi
+        case .transientLocalFailure: .executing
         default: .reconciling
         }
       #expect(throws: JobStateMachineError.missingFutureDeadline) {
@@ -192,6 +195,17 @@ struct JobStateMachineTests {
       #expect(effect.stepDelta == 1)
       #expect(!effect.to.isTerminal)
     }
+    let routed = try JobStateMachine.transition(
+      from: .reconciling,
+      event: .effectAttributedMore,
+      context: JobTransitionContext(
+        now: now,
+        reason: "continue workflow",
+        nextStep: .publish
+      )
+    )
+    #expect(routed.nextStep == .publish)
+
     let feedback = try JobStateMachine.transition(
       from: .executing,
       event: .localFailureWithinBudget,
@@ -254,10 +268,13 @@ private let allowedTransitions: [ExpectedTransition] = [
   .init(.runningPi, .piInterruptedUnknown, .reconciliationQueued, lease: .clearStale),
   .init(.runningPi, .piPermanentFailure, .blocked, lease: .release),
   .init(.executing, .localStepCompletedMore, .preparing, lease: .retain, stepDelta: 1),
+  .init(.executing, .inputsInvalidated, .preparing, lease: .retain, nextStep: .triage),
   .init(.executing, .mutationNeedsAttribution, .reconciling, lease: .retain),
+  .init(.executing, .transientLocalFailure, .retryBackoff, lease: .release, attemptDelta: 1),
   .init(
     .executing, .localFailureWithinBudget, .preparing, lease: .retain, nextStep: .writerFeedback),
   .init(.executing, .localPermanentFailure, .blocked, lease: .release),
+  .init(.reconciling, .inputsInvalidated, .preparing, lease: .retain, nextStep: .triage),
   .init(.reconciling, .effectAttributedMore, .preparing, lease: .retain, stepDelta: 1),
   .init(.reconciling, .acceptanceComplete, .succeeded, lease: .release, disposition: .attributed),
   .init(.reconciling, .humanGatePublished, .waitingHuman, lease: .release, disposition: .inFlight),
@@ -267,11 +284,11 @@ private let allowedTransitions: [ExpectedTransition] = [
   .init(.reconciling, .reconciliationPermanentFailure, .blocked, lease: .release),
   .init(.retryBackoff, .retryDeadlineReached, .queued),
   .init(
-    .waitingHuman, .approvalFresh, .queued, attemptDelta: 1, nextStep: .claimApprovedPlan,
-    disposition: .inFlight),
+    .waitingHuman, .approvalFresh, .queued, attemptDelta: 1, stepDelta: 1,
+    nextStep: .claimApprovedPlan, disposition: .inFlight),
   .init(
-    .waitingHuman, .approvalStale, .queued, attemptDelta: 1, nextStep: .consumeStaleApproval,
-    disposition: .inFlight),
+    .waitingHuman, .approvalStale, .queued, attemptDelta: 1, stepDelta: 1,
+    nextStep: .consumeStaleApproval, disposition: .inFlight),
   .init(.awaitingResolution, .lateEffectAttributed, .reconciliationQueued, disposition: .inFlight),
   .init(
     .awaitingResolution, .humanRetryAuthorized, .queued, attemptDelta: 1,
