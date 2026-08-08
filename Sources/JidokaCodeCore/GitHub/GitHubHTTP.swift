@@ -213,8 +213,8 @@ public enum GitHubStatusClassifier {
       case .createPullRequest, .createComment, .addIssueLabels,
         .createRepositoryLabel:
         return .staleConflict
-      case .repository, .listIssues, .listComments, .listIssueLabels,
-        .listRepositoryLabels:
+      case .repository, .listPullRequestCommits, .listIssues, .listComments,
+        .listIssueLabels, .listRepositoryLabels:
         return .targetGone
       case .authenticatedIdentity, .listPullRequests:
         return .escalation
@@ -228,8 +228,8 @@ public enum GitHubStatusClassifier {
     }
     if status == 410 {
       switch kind {
-      case .issue, .listComments, .createComment,
-        .listIssueLabels, .addIssueLabels, .removeIssueLabel:
+      case .pullRequest, .listPullRequestCommits, .issue, .listComments,
+        .createComment, .listIssueLabels, .addIssueLabels, .removeIssueLabel:
         return .targetGone
       default:
         return .escalation
@@ -237,7 +237,7 @@ public enum GitHubStatusClassifier {
     }
     if status == 422 {
       switch kind {
-      case .listPullRequests, .listIssues:
+      case .listPullRequests, .listPullRequestCommits, .listIssues:
         return .validationBlocked
       case .createPullRequest, .createComment, .addIssueLabels,
         .createRepositoryLabel:

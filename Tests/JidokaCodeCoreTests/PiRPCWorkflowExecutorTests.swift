@@ -7,24 +7,16 @@ import Testing
 struct PiRPCWorkflowExecutorTests {
   private let artifact = String(repeating: "a", count: 64)
 
-  @Test("validated canonical launch becomes one settled typed workflow execution")
+  @Test("executor constructs the canonical launch from application-only preparation")
   func typedExecution() async throws {
-    let fixture = try RPCExecutorFixture(artifact: artifact)
+    let fixture = try RPCExecutorFixture()
     defer { fixture.remove() }
-    let processRequest = try fixture.makeProcessRequest(
-      workflow: .issueTriage,
-      role: .triage
+    let runner = CapturingRPCRunner()
+    let executor = fixture.executor(
+      preparation: fixture.preparation(role: .triage),
+      runner: runner
     )
-    let runner = FixedRPCRunner(result: makeProcessResult())
-    let executor = fixture.executor(request: processRequest, runner: runner)
-    let request = PiWorkflowExecutionRequest(
-      jobID: "rpc-adapter-1",
-      workflow: .issueTriage,
-      role: .triage,
-      round: 1,
-      artifactSHA256: artifact,
-      sessionDirective: .fresh
-    )
+    let request = workflowRequest()
 
     let execution = try await executor.execute(request)
 
@@ -36,147 +28,256 @@ struct PiRPCWorkflowExecutorTests {
       return
     }
     #expect(payload.verdict == "human")
+    let launched = try #require(await runner.lastRequest())
+    #expect(launched.executable == fixture.runtime.nodeURL)
+    #expect(launched.environmentPolicy == .locked)
+    #expect(launched.workingDirectory == fixture.workspace)
+    #expect(
+      launched.allowedToolNames
+        == PiWorkflowResourceCatalog.readOnlyToolNames
+    )
+    #expect(launched.arguments.first == fixture.runtime.piCLIURL.path)
+    #expect(!launched.arguments.contains("/tmp/arbitrary.mjs"))
+    #expect(launched.environment["PI_OFFLINE"] == "1")
+    #expect(launched.prompt.contains("Artifact SHA-256: \(artifact)."))
+    #expect(launched.prompt.contains("untrusted data"))
+    let configurationPath = try #require(launched.environment["JIDOKA_CODE_CONFIG"])
+    let configuration = try Data(contentsOf: URL(fileURLWithPath: configurationPath))
+    let object = try #require(
+      JSONSerialization.jsonObject(with: configuration) as? [String: Any]
+    )
+    #expect(object["workflow"] as? String == "issue-triage")
+    #expect(object["role"] as? String == "triage")
+    #expect(object["workspaceRoot"] as? String == fixture.workspace.path)
     #expect(await runner.callCount() == 1)
   }
 
-  @Test("preparer cannot change workflow, role, or artifact identity")
-  func preparationIdentityMismatch() async throws {
-    let fixture = try RPCExecutorFixture(artifact: artifact)
+  @Test("application preparation cannot select the wrong model profile")
+  func profileBoundary() async throws {
+    let fixture = try RPCExecutorFixture()
     defer { fixture.remove() }
-    let processRequest = try fixture.makeProcessRequest(workflow: .planning, role: .writer)
-    let runner = FixedRPCRunner(result: makeProcessResult())
-    let executor = fixture.executor(request: processRequest, runner: runner)
+    let runner = CapturingRPCRunner()
+    let executor = fixture.executor(
+      preparation: fixture.preparation(role: .review),
+      runner: runner
+    )
 
-    await #expect(throws: PiRPCWorkflowExecutorError.preparationIdentityMismatch) {
-      try await executor.execute(
-        PiWorkflowExecutionRequest(
-          jobID: "rpc-adapter-2",
-          workflow: .issueTriage,
-          role: .triage,
-          round: 1,
-          artifactSHA256: artifact,
-          sessionDirective: .fresh
-        )
-      )
+    await #expect(throws: PiRPCWorkflowExecutorError.preparationProfileMismatch) {
+      try await executor.execute(workflowRequest())
     }
     #expect(await runner.callCount() == 0)
   }
 
-  @Test("preparer cannot replace session, environment, or role tool policy")
-  func preparationSessionAndBoundaryMismatch() async throws {
-    let fixture = try RPCExecutorFixture(artifact: artifact)
+  @Test("read-only roles reject write paths and session directives stay canonical")
+  func toolAndSessionBoundary() async throws {
+    let fixture = try RPCExecutorFixture()
     defer { fixture.remove() }
-    let runner = FixedRPCRunner(result: makeProcessResult())
-    let workflowRequest = PiWorkflowExecutionRequest(
-      jobID: "rpc-adapter-boundary",
+    let rejectingRunner = CapturingRPCRunner()
+    let writePreparation = fixture.preparation(
+      role: .triage,
+      allowedWritePaths: ["Sources/Allowed.swift"]
+    )
+    await #expect(throws: PiWorkflowResourceError.invalidRuntimeConfiguration) {
+      try await fixture.executor(
+        preparation: writePreparation,
+        runner: rejectingRunner
+      ).execute(workflowRequest())
+    }
+    #expect(await rejectingRunner.callCount() == 0)
+
+    let resumedRunner = CapturingRPCRunner()
+    let sessionID = "12345678-1234-1234-1234-123456789abc"
+    let resumed = PiWorkflowExecutionRequest(
+      jobID: "rpc-adapter-resume",
       workflow: .issueTriage,
       role: .triage,
       round: 2,
       artifactSHA256: artifact,
-      sessionDirective: .resume("12345678-1234-1234-1234-123456789abc")
+      sessionDirective: .resume(sessionID)
     )
-
-    let freshRequest = try fixture.makeProcessRequest(workflow: .issueTriage, role: .triage)
-    await #expect(throws: PiRPCWorkflowExecutorError.preparationSessionMismatch) {
-      try await fixture.executor(request: freshRequest, runner: runner).execute(workflowRequest)
+    let execution = try await fixture.executor(
+      preparation: fixture.preparation(role: .triage),
+      runner: resumedRunner
+    ).execute(resumed)
+    #expect(execution.sessionID == sessionID)
+    let launched = try #require(await resumedRunner.lastRequest())
+    guard let sessionIndex = launched.arguments.firstIndex(of: "--session") else {
+      Issue.record("canonical resume flag is absent")
+      return
     }
+    #expect(launched.arguments[sessionIndex + 1] == sessionID)
+  }
 
-    let fixturePolicyRequest = try fixture.makeProcessRequest(
-      workflow: .issueTriage,
-      role: .triage,
-      environmentPolicy: .deterministicFixture
+  @Test("unsafe application directories fail before the process runner")
+  func directoryBoundary() async throws {
+    let fixture = try RPCExecutorFixture()
+    defer { fixture.remove() }
+    let runner = CapturingRPCRunner()
+    let outside = fixture.root.appendingPathComponent("outside", isDirectory: true)
+    let linked = fixture.root.appendingPathComponent("linked-sessions", isDirectory: true)
+    try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o700],
+      ofItemAtPath: outside.path
     )
+    try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: outside)
+    let preparation = PiRPCWorkflowPreparation(
+      profile: fixture.profile(role: .triage),
+      workspaceRoot: fixture.workspace,
+      sessionRoot: linked,
+      allowedWritePaths: [],
+      prompt: "fixture",
+      offline: true
+    )
+
     await #expect(throws: PiRPCWorkflowExecutorError.preparationBoundaryMismatch) {
-      try await fixture.executor(request: fixturePolicyRequest, runner: runner).execute(
-        PiWorkflowExecutionRequest(
-          jobID: "rpc-adapter-fixture",
-          workflow: .issueTriage,
-          role: .triage,
-          round: 1,
-          artifactSHA256: artifact,
-          sessionDirective: .fresh
-        )
+      try await fixture.executor(preparation: preparation, runner: runner).execute(
+        workflowRequest()
       )
     }
+    #expect(await runner.callCount() == 0)
 
-    let wrongToolsRequest = try fixture.makeProcessRequest(
-      workflow: .issueTriage,
-      role: .triage,
-      allowedToolNames: ["jidoka_code_result"]
+    let jobLink = fixture.sessionRoot.appendingPathComponent(
+      "rpc-adapter-1",
+      isDirectory: true
     )
+    try FileManager.default.createSymbolicLink(at: jobLink, withDestinationURL: outside)
     await #expect(throws: PiRPCWorkflowExecutorError.preparationBoundaryMismatch) {
-      try await fixture.executor(request: wrongToolsRequest, runner: runner).execute(
-        PiWorkflowExecutionRequest(
-          jobID: "rpc-adapter-tools",
-          workflow: .issueTriage,
-          role: .triage,
-          round: 1,
-          artifactSHA256: artifact,
-          sessionDirective: .fresh
-        )
-      )
+      try await fixture.executor(
+        preparation: fixture.preparation(role: .triage),
+        runner: runner
+      ).execute(workflowRequest())
     }
     #expect(await runner.callCount() == 0)
   }
 
-  @Test("arbitrary Node scripts and non-bundled provenance never reach the runner")
-  func canonicalLaunchBoundary() async throws {
-    let fixture = try RPCExecutorFixture(artifact: artifact)
-    defer { fixture.remove() }
-    let runner = FixedRPCRunner(result: makeProcessResult())
-    let workflowRequest = PiWorkflowExecutionRequest(
-      jobID: "rpc-adapter-launch",
+  private func workflowRequest() -> PiWorkflowExecutionRequest {
+    PiWorkflowExecutionRequest(
+      jobID: "rpc-adapter-1",
       workflow: .issueTriage,
       role: .triage,
       round: 1,
       artifactSHA256: artifact,
       sessionDirective: .fresh
     )
+  }
+}
 
-    let arbitrary = try fixture.makeProcessRequest(
-      workflow: .issueTriage,
-      role: .triage,
-      executable: URL(fileURLWithPath: "/bin/echo"),
-      arguments: ["/tmp/arbitrary.mjs", "--tools", "jidoka_code_result"]
-    )
-    await #expect(throws: PiRPCWorkflowExecutorError.preparationBoundaryMismatch) {
-      try await fixture.executor(request: arbitrary, runner: runner).execute(workflowRequest)
-    }
+private final class RPCExecutorFixture {
+  let root: URL
+  let resourceRoot: URL
+  let runtime: PiResolvedRuntime
+  let sessionRoot: URL
+  let workspace: URL
 
-    let foreignProvenance = PiRPCSessionExpectation(
-      provider: "fixture",
-      modelID: "fixture",
-      thinkingLevel: "off",
-      commands: [
-        PiRPCCommandProvenance(
-          name: "skill:foreign",
-          source: "skill",
-          path: "/not/a/bundled/skill",
-          scope: "temporary",
-          origin: "top-level"
-        )
-      ]
+  init() throws {
+    resourceRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .appendingPathComponent("Resources/Pi", isDirectory: true)
+      .resolvingSymlinksInPath()
+    root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "jidoka-rpc-executor-\(UUID().uuidString.lowercased())",
+      isDirectory: true
     )
-    let foreign = try fixture.makeProcessRequest(
-      workflow: .issueTriage,
-      role: .triage,
-      sessionExpectation: foreignProvenance
-    )
-    await #expect(throws: PiRPCWorkflowExecutorError.preparationBoundaryMismatch) {
-      try await fixture.executor(request: foreign, runner: runner).execute(workflowRequest)
+    sessionRoot = root.appendingPathComponent("sessions", isDirectory: true)
+    workspace = root.appendingPathComponent("workspace", isDirectory: true)
+    for directory in [root, sessionRoot, workspace] {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try FileManager.default.setAttributes(
+        [.posixPermissions: 0o700],
+        ofItemAtPath: directory.path
+      )
     }
-    #expect(await runner.callCount() == 0)
+    runtime = PiResolvedRuntime(
+      nodeURL: URL(fileURLWithPath: "/usr/bin/false"),
+      nodeVersion: try PiSemanticVersion("26.6.0"),
+      nodeSHA256: String(repeating: "a", count: 64),
+      piCLIURL: URL(fileURLWithPath: "/attested/pi-cli.js"),
+      piPackageRootURL: URL(fileURLWithPath: "/attested/pi-package", isDirectory: true),
+      piVersion: try PiSemanticVersion("0.84.0"),
+      piRuntimeSHA256: [:],
+      compatibility: PiRuntimeCompatibility(
+        minimumVersion: try PiSemanticVersion("0.84.0"),
+        maximumVersionExclusive: try PiSemanticVersion("0.90.0"),
+        policySHA256: String(repeating: "b", count: 64)
+      )
+    )
   }
 
-  private func makeProcessResult() -> PiRPCExecutionResult {
-    PiRPCExecutionResult(
-      sessionID: "typed-session",
+  func profile(role: ModelProfileRole) -> ModelProfileConfiguration {
+    ModelProfileConfiguration(
+      role: role,
+      provider: "fixture",
+      model: "fixture",
+      thinking: .off
+    )
+  }
+
+  func preparation(
+    role: ModelProfileRole,
+    allowedWritePaths: [String] = []
+  ) -> PiRPCWorkflowPreparation {
+    PiRPCWorkflowPreparation(
+      profile: profile(role: role),
+      workspaceRoot: workspace,
+      sessionRoot: sessionRoot,
+      allowedWritePaths: allowedWritePaths,
+      prompt: "Synthetic application artifact and normalized prior role evidence.",
+      offline: true,
+      timeoutSeconds: 30
+    )
+  }
+
+  func executor(
+    preparation: PiRPCWorkflowPreparation,
+    runner: CapturingRPCRunner
+  ) -> PiRPCWorkflowExecutor {
+    PiRPCWorkflowExecutor(
+      preparer: FixedRPCPreparer(preparation: preparation),
+      runtimeResolver: FixedRuntimeResolver(runtime: runtime),
+      resourceRoot: resourceRoot,
+      runner: runner,
+      nonce: { "nonce-adapter-1" }
+    )
+  }
+
+  func remove() {
+    try? FileManager.default.removeItem(at: root)
+  }
+}
+
+private struct FixedRuntimeResolver: PiRuntimeResolving {
+  let runtime: PiResolvedRuntime
+
+  func resolve() throws -> PiResolvedRuntime { runtime }
+}
+
+private struct FixedRPCPreparer: PiRPCWorkflowPreparing {
+  let preparation: PiRPCWorkflowPreparation
+
+  func prepare(_ request: PiWorkflowExecutionRequest) async throws -> PiRPCWorkflowPreparation {
+    preparation
+  }
+}
+
+private actor CapturingRPCRunner: PiRPCProcessRunning {
+  private var requests: [PiRPCProcessRequest] = []
+
+  func run(_ request: PiRPCProcessRequest) async throws -> PiRPCExecutionResult {
+    requests.append(request)
+    let resumedSession: String? = request.arguments.firstIndex(of: "--session").flatMap { index in
+      index + 1 < request.arguments.count ? request.arguments[index + 1] : nil
+    }
+    return PiRPCExecutionResult(
+      sessionID: resumedSession ?? "typed-session",
       terminalResult: PiRPCTerminalResult(
-        workflow: "issue-triage",
-        role: "triage",
-        nonce: "nonce-adapter-1",
-        artifactSHA256: artifact,
-        approvedCommandIDs: [],
+        workflow: request.terminalIdentity.workflow,
+        role: request.terminalIdentity.role,
+        nonce: request.terminalIdentity.nonce,
+        artifactSHA256: request.terminalIdentity.artifactSHA256,
+        approvedCommandIDs: request.terminalIdentity.allowedCommandIDs.sorted(),
         payload: [
           "complexityGuess": .string("complex"),
           "hardRiskFlags": .array([.string("security-or-secret-core")]),
@@ -201,175 +302,7 @@ struct PiRPCWorkflowExecutorTests {
       cleanupVerified: true
     )
   }
-}
 
-private final class RPCExecutorFixture {
-  let root: URL
-  let resourceRoot: URL
-  let runtime: PiResolvedRuntime
-  private let sessionDirectory: URL
-  private let homeDirectory: URL
-  private let agentDirectory: URL
-  private let temporaryDirectory: URL
-  private let workspace: URL
-  private let artifact: String
-  private let resources: PiWorkflowResourceCatalog
-
-  init(artifact: String) throws {
-    self.artifact = artifact
-    resourceRoot = URL(fileURLWithPath: #filePath)
-      .deletingLastPathComponent()
-      .deletingLastPathComponent()
-      .deletingLastPathComponent()
-      .appendingPathComponent("Resources/Pi", isDirectory: true)
-      .resolvingSymlinksInPath()
-    resources = try PiWorkflowResourceCatalog.inspect(resourceRoot: resourceRoot)
-    root = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "jidoka-rpc-executor-\(UUID().uuidString)",
-      isDirectory: true
-    ).resolvingSymlinksInPath()
-    sessionDirectory = root.appendingPathComponent("session", isDirectory: true)
-    homeDirectory = root.appendingPathComponent("home", isDirectory: true)
-    agentDirectory = root.appendingPathComponent("agent", isDirectory: true)
-    temporaryDirectory = root.appendingPathComponent("tmp", isDirectory: true)
-    workspace = root.appendingPathComponent("workspace", isDirectory: true)
-    for directory in [
-      root, sessionDirectory, homeDirectory, agentDirectory, temporaryDirectory, workspace,
-    ] {
-      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      try FileManager.default.setAttributes(
-        [.posixPermissions: 0o700],
-        ofItemAtPath: directory.path
-      )
-    }
-    runtime = PiResolvedRuntime(
-      nodeURL: URL(fileURLWithPath: "/usr/bin/false"),
-      nodeVersion: try PiSemanticVersion("26.6.0"),
-      nodeSHA256: String(repeating: "a", count: 64),
-      piCLIURL: URL(fileURLWithPath: "/attested/pi-cli.js"),
-      piPackageRootURL: URL(fileURLWithPath: "/attested/pi-package", isDirectory: true),
-      piVersion: try PiSemanticVersion("0.84.0"),
-      piRuntimeSHA256: [:],
-      compatibility: PiRuntimeCompatibility(
-        minimumVersion: try PiSemanticVersion("0.84.0"),
-        maximumVersionExclusive: try PiSemanticVersion("0.90.0"),
-        policySHA256: String(repeating: "b", count: 64)
-      )
-    )
-  }
-
-  func makeProcessRequest(
-    workflow: PiWorkflowKind,
-    role: PiWorkflowRole,
-    environmentPolicy: PiRPCEnvironmentPolicy = .locked,
-    allowedToolNames: [String]? = nil,
-    executable: URL? = nil,
-    arguments: [String]? = nil,
-    sessionExpectation: PiRPCSessionExpectation? = nil
-  ) throws -> PiRPCProcessRequest {
-    let tools = try PiWorkflowResourceCatalog.activeToolNames(workflow: workflow, role: role)
-    let configuration = try PiWorkflowRuntimeConfiguration(
-      workflow: workflow,
-      role: role,
-      nonce: "nonce-adapter-1",
-      artifactSHA256: artifact,
-      allowedCommandIDs: [],
-      allowedWritePaths: [],
-      workspaceRoot: workspace,
-      resources: resources
-    )
-    let configurationURL = temporaryDirectory.appendingPathComponent(
-      "configuration-\(UUID().uuidString).json"
-    )
-    try configuration.write(to: configurationURL)
-    let model = "fixture/fixture:off"
-    let canonicalArguments = try PiRPCInvocationBuilder.arguments(
-      runtime: runtime,
-      model: model,
-      sessionDirectory: sessionDirectory,
-      sessionName: "jidoka-code-rpc-adapter",
-      blockerExtension: resources.blockerExtensionURL,
-      runtimeExtension: resources.runtimeExtensionURL,
-      skills: resources.skillURLs(workflow: workflow, role: role),
-      activeTools: tools,
-      session: .fresh
-    )
-    let environment = try PiRPCInvocationBuilder.environment(
-      homeDirectory: homeDirectory,
-      agentDirectory: agentDirectory,
-      temporaryDirectory: temporaryDirectory,
-      workflowConfiguration: configurationURL,
-      offline: true
-    )
-    let canonicalSessionExpectation = PiRPCSessionExpectation(
-      provider: "fixture",
-      modelID: "fixture",
-      thinkingLevel: "off",
-      commands: try resources.expectedCommandProvenance(workflow: workflow, role: role)
-    )
-    return PiRPCProcessRequest(
-      executable: executable ?? runtime.nodeURL,
-      arguments: arguments ?? canonicalArguments,
-      workingDirectory: workspace,
-      environment: environment,
-      prompt: "fixture",
-      sessionExpectation: sessionExpectation ?? canonicalSessionExpectation,
-      terminalIdentity: PiRPCTerminalResultIdentity(
-        workflow: workflow.rawValue,
-        role: role.rawValue,
-        nonce: "nonce-adapter-1",
-        artifactSHA256: artifact,
-        allowedCommandIDs: []
-      ),
-      allowedToolNames: allowedToolNames ?? tools,
-      timeoutSeconds: 1,
-      environmentPolicy: environmentPolicy
-    )
-  }
-
-  func executor(
-    request: PiRPCProcessRequest,
-    runner: FixedRPCRunner
-  ) -> PiRPCWorkflowExecutor {
-    PiRPCWorkflowExecutor(
-      preparer: FixedRPCPreparer(request: request),
-      runtimeResolver: FixedRuntimeResolver(runtime: runtime),
-      resourceRoot: resourceRoot,
-      runner: runner
-    )
-  }
-
-  func remove() {
-    try? FileManager.default.removeItem(at: root)
-  }
-}
-
-private struct FixedRuntimeResolver: PiRuntimeResolving {
-  let runtime: PiResolvedRuntime
-
-  func resolve() throws -> PiResolvedRuntime { runtime }
-}
-
-private struct FixedRPCPreparer: PiRPCWorkflowPreparing {
-  let request: PiRPCProcessRequest
-
-  func prepare(_ request: PiWorkflowExecutionRequest) async throws -> PiRPCProcessRequest {
-    self.request
-  }
-}
-
-private actor FixedRPCRunner: PiRPCProcessRunning {
-  private let result: PiRPCExecutionResult
-  private var calls = 0
-
-  init(result: PiRPCExecutionResult) {
-    self.result = result
-  }
-
-  func run(_ request: PiRPCProcessRequest) async throws -> PiRPCExecutionResult {
-    calls += 1
-    return result
-  }
-
-  func callCount() -> Int { calls }
+  func callCount() -> Int { requests.count }
+  func lastRequest() -> PiRPCProcessRequest? { requests.last }
 }

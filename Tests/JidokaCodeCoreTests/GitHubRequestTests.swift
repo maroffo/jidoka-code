@@ -14,6 +14,7 @@ struct GitHubRequestTests {
       .repository: "repos/get",
       .listPullRequests: "pulls/list",
       .pullRequest: "pulls/get",
+      .listPullRequestCommits: "pulls/list-commits",
       .createPullRequest: "pulls/create",
       .listIssues: "issues/list-for-repo",
       .issue: "issues/get",
@@ -88,6 +89,24 @@ struct GitHubRequestTests {
           URLQueryItem(name: "page", value: "7"),
           URLQueryItem(name: "head", value: "owner:agent/topic"),
           URLQueryItem(name: "base", value: "main"),
+        ])
+
+    let commits = try GitHubRequestFactory.make(
+      .listPullRequestCommits(
+        owner: "owner",
+        repository: "repo",
+        number: 12,
+        page: 3
+      )
+    ).request
+    #expect(commits.httpMethod == "GET")
+    #expect(commits.url?.path == "/repos/owner/repo/pulls/12/commits")
+    #expect(
+      URLComponents(url: try #require(commits.url), resolvingAgainstBaseURL: false)?
+        .queryItems
+        == [
+          URLQueryItem(name: "per_page", value: "100"),
+          URLQueryItem(name: "page", value: "3"),
         ])
 
     let create = try GitHubRequestFactory.make(
@@ -173,6 +192,7 @@ private func fixtureOperations() -> [GitHubOperation] {
     .listPullRequests(
       owner: "owner", repository: "repo", page: 1, head: nil, base: nil),
     .pullRequest(owner: "owner", repository: "repo", number: 1),
+    .listPullRequestCommits(owner: "owner", repository: "repo", number: 1, page: 1),
     .createPullRequest(
       owner: "owner",
       repository: "repo",

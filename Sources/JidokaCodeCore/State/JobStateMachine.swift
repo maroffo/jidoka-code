@@ -41,9 +41,16 @@ public enum JobStepKind: String, CaseIterable, Codable, Sendable {
   case consumeStaleApproval
   case replan
   case publishPlan
+  case writePlan
   case writerFeedback
   case implement
+  case orchestrate
   case verify
+  case push
+  case openPullRequest
+  case linkPullRequest
+  case qa
+  case enqueueReview
   case publish
   case reconcile
 }
@@ -61,7 +68,9 @@ public enum JobEvent: String, CaseIterable, Codable, Sendable {
   case piInterruptedUnknown
   case piPermanentFailure
   case localStepCompletedMore
+  case inputsInvalidated
   case mutationNeedsAttribution
+  case transientLocalFailure
   case localFailureWithinBudget
   case localPermanentFailure
   case effectAttributedMore
@@ -110,19 +119,22 @@ public struct JobTransitionContext: Equatable, Sendable {
   public let notBefore: Date?
   public let acceptanceEvidenceDigest: String?
   public let artifactID: String?
+  public let nextStep: JobStepKind?
 
   public init(
     now: Date,
     reason: String,
     notBefore: Date? = nil,
     acceptanceEvidenceDigest: String? = nil,
-    artifactID: String? = nil
+    artifactID: String? = nil,
+    nextStep: JobStepKind? = nil
   ) {
     self.now = now
     self.reason = reason
     self.notBefore = notBefore
     self.acceptanceEvidenceDigest = acceptanceEvidenceDigest
     self.artifactID = artifactID
+    self.nextStep = nextStep
   }
 }
 
@@ -196,7 +208,13 @@ public enum JobStateMachine {
     case (.preparing, .permanentSetupFailure):
       return blockedEffect(from: state, context: context)
     case (.runningPi, .piCompleted):
-      return effect(state, .executing, lease: .retain, stepDelta: 1)
+      return effect(
+        state,
+        .executing,
+        lease: .retain,
+        stepDelta: 1,
+        nextStep: context.nextStep
+      )
     case (.runningPi, .transientPiFailure):
       return try retryEffect(from: state, context: context)
     case (.runningPi, .piInterruptedUnknown):
@@ -204,9 +222,19 @@ public enum JobStateMachine {
     case (.runningPi, .piPermanentFailure):
       return blockedEffect(from: state, context: context)
     case (.executing, .localStepCompletedMore):
-      return effect(state, .preparing, lease: .retain, stepDelta: 1)
+      return effect(
+        state,
+        .preparing,
+        lease: .retain,
+        stepDelta: 1,
+        nextStep: context.nextStep
+      )
+    case (.executing, .inputsInvalidated):
+      return effect(state, .preparing, lease: .retain, nextStep: .triage)
     case (.executing, .mutationNeedsAttribution):
       return effect(state, .reconciling, lease: .retain)
+    case (.executing, .transientLocalFailure):
+      return try retryEffect(from: state, context: context)
     case (.executing, .localFailureWithinBudget):
       return effect(
         state,
@@ -216,8 +244,16 @@ public enum JobStateMachine {
       )
     case (.executing, .localPermanentFailure):
       return blockedEffect(from: state, context: context)
+    case (.reconciling, .inputsInvalidated):
+      return effect(state, .preparing, lease: .retain, nextStep: .triage)
     case (.reconciling, .effectAttributedMore):
-      return effect(state, .preparing, lease: .retain, stepDelta: 1)
+      return effect(
+        state,
+        .preparing,
+        lease: .retain,
+        stepDelta: 1,
+        nextStep: context.nextStep
+      )
     case (.reconciling, .acceptanceComplete):
       guard isSHA256(context.acceptanceEvidenceDigest) else {
         throw JobStateMachineError.missingAcceptanceEvidence
@@ -253,6 +289,7 @@ public enum JobStateMachine {
         state,
         .queued,
         attemptDelta: 1,
+        stepDelta: 1,
         deadline: .clear,
         nextStep: .claimApprovedPlan,
         disposition: .inFlight
@@ -262,6 +299,7 @@ public enum JobStateMachine {
         state,
         .queued,
         attemptDelta: 1,
+        stepDelta: 1,
         deadline: .clear,
         nextStep: .consumeStaleApproval,
         disposition: .inFlight

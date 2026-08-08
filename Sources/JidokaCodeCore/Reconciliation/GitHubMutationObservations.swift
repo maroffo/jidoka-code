@@ -54,7 +54,9 @@ public enum GitHubMutationObservations {
     expectation: GitHubMarkerExpectation
   ) -> MutationObservation {
     let relevant = comments.filter { comment in
-      guard let parsed = try? GitHubMarkerCodec.parse(comment.body) else {
+      guard comment.authorID == expectation.authorID,
+        let parsed = try? GitHubMarkerCodec.parse(comment.body)
+      else {
         return false
       }
       return parsed.identity.idempotencyKey == expectation.identity.idempotencyKey

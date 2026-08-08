@@ -75,6 +75,17 @@ public struct JobTransitionRecord: Equatable, Sendable {
   public let createdAt: Date
 }
 
+public struct JobStepRecord: Equatable, Sendable {
+  public let jobID: UUID
+  public let ordinal: Int
+  public let kind: JobStepKind
+  public let inputDigest: String?
+  public let outputDigest: String?
+  public let mutationID: String?
+  public let acceptanceEvidence: String?
+  public let completedAt: Date
+}
+
 public struct RepositoryLease: Equatable, Sendable {
   public let repositoryID: UUID
   public let jobID: UUID
@@ -121,6 +132,7 @@ public enum DurableJobStoreError: Error, Equatable, Sendable {
   case invalidDigest
   case stepOrdinalMismatch(expected: Int, actual: Int)
   case stepKindMismatch(expected: JobStepKind?, actual: JobStepKind)
+  case completedStepCollision(jobID: UUID, ordinal: Int)
   case retryDeadlineNotReached
   case activeClaimExists(String)
   case claimNotFound(issueNodeID: String, generation: Int)
@@ -321,6 +333,23 @@ public actor DurableJobStore {
           actual: kind
         )
       }
+      if let existing = try database.query(
+        "SELECT * FROM job_steps WHERE job_id = ? AND ordinal = ?",
+        bindings: [
+          .text(jobID.uuidString.lowercased()),
+          .integer(Int64(ordinal)),
+        ]
+      ).first.map(Self.decodeStep) {
+        guard existing.kind == kind,
+          existing.inputDigest == inputDigest,
+          existing.outputDigest == outputDigest,
+          existing.mutationID == mutationID,
+          existing.acceptanceEvidence == acceptanceEvidence
+        else {
+          throw DurableJobStoreError.completedStepCollision(jobID: jobID, ordinal: ordinal)
+        }
+        return
+      }
       _ = try database.execute(
         """
         INSERT INTO job_steps(
@@ -347,6 +376,29 @@ public actor DurableJobStore {
       "SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id",
       bindings: [.text(jobID.uuidString.lowercased())]
     ).map(Self.decodeTransition)
+  }
+
+  public func steps(jobID: UUID) async throws -> [JobStepRecord] {
+    try await database.query(
+      "SELECT * FROM job_steps WHERE job_id = ? ORDER BY ordinal",
+      bindings: [.text(jobID.uuidString.lowercased())]
+    ).map(Self.decodeStep)
+  }
+
+  public func completedStep(
+    jobID: UUID,
+    ordinal: Int
+  ) async throws -> JobStepRecord? {
+    guard ordinal >= 0 else {
+      throw DurableJobStoreError.stepOrdinalMismatch(expected: 0, actual: ordinal)
+    }
+    return try await database.query(
+      "SELECT * FROM job_steps WHERE job_id = ? AND ordinal = ?",
+      bindings: [
+        .text(jobID.uuidString.lowercased()),
+        .integer(Int64(ordinal)),
+      ]
+    ).first.map(Self.decodeStep)
   }
 
   public func activeLeases() async throws -> [RepositoryLease] {
@@ -475,13 +527,18 @@ public actor DurableJobStore {
     }
     return try await database.transaction { database in
       _ = try Self.loadJob(jobID, database: database)
-      let active =
-        try database.scalarInt(
-          "SELECT COUNT(*) FROM issue_claims WHERE issue_node_id = ? AND state = 'active'",
-          bindings: [.text(issueNodeID)]
-        ) ?? 0
-      guard active == 0 else {
-        throw DurableJobStoreError.activeClaimExists(issueNodeID)
+      let activeRows = try database.query(
+        "SELECT * FROM issue_claims WHERE issue_node_id = ? AND state = 'active'",
+        bindings: [.text(issueNodeID)]
+      )
+      if let activeRow = activeRows.first {
+        let active = try Self.decodeClaim(activeRow)
+        guard activeRows.count == 1, active.jobID == jobID, active.marker == marker,
+          active.planDigest == planDigest
+        else {
+          throw DurableJobStoreError.activeClaimExists(issueNodeID)
+        }
+        return active
       }
       let prior = try database.scalarInt(
         "SELECT MAX(generation) FROM issue_claims WHERE issue_node_id = ?",
@@ -543,11 +600,18 @@ public actor DurableJobStore {
           .integer(Int64(generation)),
         ]
       )
-      guard changed == 1 else {
-        throw DurableJobStoreError.claimNotFound(
+      if changed == 0 {
+        let existing = try Self.loadClaim(
           issueNodeID: issueNodeID,
-          generation: generation
+          generation: generation,
+          database: database
         )
+        guard existing.state == state else {
+          throw DurableJobStoreError.claimNotFound(
+            issueNodeID: issueNodeID,
+            generation: generation
+          )
+        }
       }
     }
   }
@@ -557,6 +621,27 @@ public actor DurableJobStore {
       "SELECT * FROM issue_claims WHERE issue_node_id = ? ORDER BY generation",
       bindings: [.text(issueNodeID)]
     ).map(Self.decodeClaim)
+  }
+
+  public func nextClaimGeneration(issueNodeID: String) async throws -> Int {
+    guard !issueNodeID.isEmpty else {
+      throw DurableJobStoreError.invalidIdentity("claim")
+    }
+    return try await database.transaction { database in
+      let active =
+        try database.scalarInt(
+          "SELECT COUNT(*) FROM issue_claims WHERE issue_node_id = ? AND state = 'active'",
+          bindings: [.text(issueNodeID)]
+        ) ?? 0
+      guard active == 0 else {
+        throw DurableJobStoreError.activeClaimExists(issueNodeID)
+      }
+      let prior = try database.scalarInt(
+        "SELECT MAX(generation) FROM issue_claims WHERE issue_node_id = ?",
+        bindings: [.text(issueNodeID)]
+      ).map(Int.init)
+      return (prior ?? 0) + 1
+    }
   }
 
   public func supersedeDisposition(
@@ -906,6 +991,24 @@ public actor DurableJobStore {
       stepBefore: Int(try integer(row, "step_before")),
       stepAfter: Int(try integer(row, "step_after")),
       createdAt: Date(timeIntervalSince1970: try real(row, "created_at"))
+    )
+  }
+
+  private static func decodeStep(_ row: SQLiteRow) throws -> JobStepRecord {
+    guard let kind = JobStepKind(rawValue: try text(row, "kind")),
+      try text(row, "state") == "completed"
+    else {
+      throw DurableJobStoreError.decode("unknown job step value")
+    }
+    return JobStepRecord(
+      jobID: try uuid(row, "job_id"),
+      ordinal: Int(try integer(row, "ordinal")),
+      kind: kind,
+      inputDigest: try optionalText(row, "input_digest"),
+      outputDigest: try optionalText(row, "output_digest"),
+      mutationID: try optionalText(row, "mutation_id"),
+      acceptanceEvidence: try optionalText(row, "acceptance_evidence"),
+      completedAt: Date(timeIntervalSince1970: try real(row, "completed_at"))
     )
   }
 

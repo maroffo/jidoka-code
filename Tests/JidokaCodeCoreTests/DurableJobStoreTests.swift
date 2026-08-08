@@ -196,7 +196,19 @@ struct DurableJobStoreTests {
         now: fixture.now
       )
     }
-    await #expect(throws: SQLiteStoreError.self) {
+    try await fixture.jobs.appendCompletedStep(
+      jobID: job.id,
+      ordinal: 0,
+      kind: .review,
+      inputDigest: digest,
+      outputDigest: digest,
+      mutationID: nil,
+      acceptanceEvidence: "schema-valid",
+      now: fixture.now
+    )
+    await #expect(
+      throws: DurableJobStoreError.completedStepCollision(jobID: job.id, ordinal: 0)
+    ) {
       try await fixture.jobs.appendCompletedStep(
         jobID: job.id,
         ordinal: 0,
@@ -208,12 +220,17 @@ struct DurableJobStoreTests {
         now: fixture.now
       )
     }
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM job_steps WHERE job_id = ?",
-        bindings: [.text(job.id.uuidString.lowercased())]
-      ) == 1
-    )
+    let steps = try await fixture.jobs.steps(jobID: job.id)
+    let completed = try #require(steps.first)
+    #expect(steps.count == 1)
+    #expect(completed.jobID == job.id)
+    #expect(completed.ordinal == 0)
+    #expect(completed.kind == .review)
+    #expect(completed.inputDigest == digest)
+    #expect(completed.outputDigest == digest)
+    #expect(completed.acceptanceEvidence == "schema-valid")
+    #expect(try await fixture.jobs.completedStep(jobID: job.id, ordinal: 0) == completed)
+    #expect(try await fixture.jobs.completedStep(jobID: job.id, ordinal: 1) == nil)
   }
 
   @Test("attributed and ambiguous dispositions control rediscovery and retry")
@@ -572,7 +589,7 @@ struct DurableJobStoreTests {
       context: fixture.context("approval removal attributed")
     )
     #expect(try appliedJob(attributed).state == .preparing)
-    #expect(try appliedJob(attributed).currentStep == 1)
+    #expect(try appliedJob(attributed).currentStep == 2)
     #expect(try appliedJob(attributed).currentStepKind == .replan)
   }
 

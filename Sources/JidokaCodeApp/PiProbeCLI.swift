@@ -6,7 +6,7 @@ import JidokaCodeCore
 private enum PiProbeCLIConstants {
   static let nodeURL = URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node")
   static let runnerRelativePath = "runtime/pi-rpc-profile-probe.mjs"
-  static let runnerSHA256 = "a972045017dac2a0ee32478fd4f63ac0c51da7f738acd8994de58df5dfe92f2f"
+  static let runnerSHA256 = "83d081f9337bc1531e8c516e4248c324de26e325a4f8ef3895eb3df3417d45e9"
   static let runtimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs"
   static let runtimeAttestationSHA256 =
     "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e"

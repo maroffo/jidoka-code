@@ -11,7 +11,7 @@ public enum ApprovedCommandRegistryKind: String, CaseIterable, Codable, Sendable
   case gitCommit
 }
 
-public struct ApprovedCommand: Equatable, Sendable {
+public struct ApprovedCommand: Codable, Equatable, Sendable {
   public let id: String
   public let registryKind: ApprovedCommandRegistryKind
   public let executableOrRepositoryScript: String

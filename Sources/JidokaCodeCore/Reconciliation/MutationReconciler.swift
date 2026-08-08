@@ -217,6 +217,39 @@ public actor MutationIntentStore {
     }
   }
 
+  public func attributeLateVisibleEffect(
+    id: UUID,
+    evidenceDigest: String,
+    now: Date
+  ) async throws -> MutationIntentRecord {
+    guard GitHubInputValidation.validSHA256(evidenceDigest) else {
+      throw MutationIntentStoreError.invalidDigest
+    }
+    return try await database.transaction { database in
+      let current = try Self.load(id: id, database: database)
+      if current.state == .attributed, current.readBackEvidence == evidenceDigest {
+        return current
+      }
+      guard current.state == .escalated,
+        current.operation.isNonIdempotentCreate
+      else {
+        throw MutationIntentStoreError.transitionNotAllowed(
+          from: current.state,
+          to: .attributed
+        )
+      }
+      return try Self.transition(
+        current,
+        to: .attributed,
+        evidenceDigest: evidenceDigest,
+        observation: "late-visible-exact-effect",
+        reason: "read-only late attribution after visibility delay",
+        now: now,
+        database: database
+      )
+    }
+  }
+
   public func intent(id: UUID) async throws -> MutationIntentRecord? {
     try await database.query(
       "SELECT * FROM mutation_intents WHERE id = ?",

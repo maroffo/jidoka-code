@@ -6,7 +6,7 @@ import JidokaCodeCore
 private enum WorkflowProbeCLIConstants {
   static let nodeURL = URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node")
   static let runnerRelativePath = "runtime/pi-rpc-workflow-probe.mjs"
-  static let runnerSHA256 = "bba864cfe69d5f5f8ebac05fce1e86da3ff5276577246e612a5003f6bbf7a9cb"
+  static let runnerSHA256 = "731267cc54cf7018258afc4393ca3357166c10c43b23601c420c597eb196f772"
   static let runtimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs"
   static let runtimeAttestationSHA256 =
     "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e"

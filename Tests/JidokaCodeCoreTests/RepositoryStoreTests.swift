@@ -59,7 +59,7 @@ struct RepositoryStoreTests {
       objectNumber: 7,
       contractVersionUsed: "v1",
       priority: .issueImplementation,
-      firstStep: .implement,
+      firstStep: .publish,
       now: Date(timeIntervalSince1970: 1_000)
     )
     let job: JobRecord
@@ -68,6 +68,16 @@ struct RepositoryStoreTests {
       return
     }
     job = created
+    try await jobs.appendCompletedStep(
+      jobID: job.id,
+      ordinal: 0,
+      kind: .publish,
+      inputDigest: String(repeating: "a", count: 64),
+      outputDigest: String(repeating: "b", count: 64),
+      mutationID: "cleanup-fixture",
+      acceptanceEvidence: "blocked-publication",
+      now: Date(timeIntervalSince1970: 1_001)
+    )
 
     let remote = try GitRemoteRepository(
       repositoryID: repositoryID,

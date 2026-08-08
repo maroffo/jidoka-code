@@ -623,15 +623,15 @@ Pass/falsifier/disposition normativi:
 
 - Scope: `Sources/JidokaCodeCore/Jobs/`, integration test.
 - Excluded: SwiftUI rendering.
-- [ ] Implementare un preparer che fornisce soltanto dati applicativi compatibili con il launch descriptor canonico W5; `PiRPCWorkflowExecutor` deve continuare a risolvere runtime, catalogo, argv, environment, provenance, config, workspace e sessione prima del runner.
-- [ ] Derivare per ogni PR l'esatto set commit REST e, indipendentemente, il set base-to-head dal clone fetched; passarli entrambi al router W5 insieme a base/head e narrativa topologica completa.
-- [ ] Implementare PR review job dalla discovery al marker read-back e `reviewed_revisions`.
-- [ ] Implementare issue triage job con marker, verdict label e veto persistence.
-- [ ] Implementare ready claim e approved-complex claim come step/generation distinti, plan artifact, complex wait/resume/staleness, approval consumption e cleanup.
-- [ ] Implementare simple/moderate implementation loop, plan-digest lock, command-runner plan-first commit, final implementation commit, atomic publication, PR create, QA label e issue link.
-- [ ] Implementare post-open review enqueue senza exemption.
-- [ ] Implementare blocked escalation con evidence e senza cleanup prematuro.
-- [ ] Scenario E2E offline con fake GitHub, real local Git e deterministic Pi fixture/replayed RPC, inclusi crash/relaunch ai boundary. Real provider e source non sintetico sono riservati al CHECKPOINT D o a un nuovo consenso equivalente.
+- [x] Implementare un preparer che fornisce soltanto dati applicativi compatibili con il launch descriptor canonico W5; `PiRPCWorkflowExecutor` deve continuare a risolvere runtime, catalogo, argv, environment, provenance, config, workspace e sessione prima del runner.
+- [x] Derivare per ogni PR l'esatto set commit REST e, indipendentemente, il set base-to-head dal clone fetched; passarli entrambi al router W5 insieme a base/head e narrativa topologica completa.
+- [x] Implementare PR review job dalla discovery al marker read-back e `reviewed_revisions`.
+- [x] Implementare issue triage job con marker, verdict label e veto persistence.
+- [x] Implementare ready claim e approved-complex claim come step/generation distinti, plan artifact, complex wait/resume/staleness, approval consumption e cleanup.
+- [x] Implementare simple/moderate implementation loop, plan-digest lock, command-runner plan-first commit, final implementation commit, atomic publication, PR create, QA label e issue link.
+- [x] Implementare post-open review enqueue senza exemption.
+- [x] Implementare blocked escalation con evidence e senza cleanup prematuro.
+- [x] Scenario E2E offline con fake GitHub, real local Git e deterministic Pi fixture/replayed RPC, inclusi crash/relaunch ai boundary. Real provider e source non sintetico sono riservati al CHECKPOINT D o a un nuovo consenso equivalente.
 
 ### W7: Menu bar, onboarding and lifecycle
 
@@ -823,7 +823,9 @@ Pass/falsifier/disposition normativi:
 - [x] 2026-08-07: W5 Pi runner e workflow app-versioned implementati su `feat/jidoka-code-w5-pi-workflows` da `origin/main@23037624`: resolver Pi/Node attestato, RPC full-duplex bounded, estensione e skill packaged, router review/triage/planning/orchestration, classifier deterministico e replay fake-provider. Verifica locale offline documentata in `docs/evidence/w5-pi-workflows-report.md`; zero provider, credenziali reali o GitHub live.
 - [x] 2026-08-07: review indipendenti hanno riprodotto blocker non coperti dai primi gate: SIGPIPE, alias read, bootstrap find/grep, piano non vincolato, veto/synthesis/command order, causalità e status RPC, package/dylib closure, metadata case/nested, lifecycle reale Pi post-result, late child PGID e preparer arbitrario. Tutti hanno ricevuto falsificatori permanenti. Un secondo ciclo ha inoltre chiuso lifecycle iniziale/multi-turn, decisione planning opaca, hard link e fixture processi scheduling-sensitive; la matrice finale offline passa XCTest 1/1 e Swift Testing 232/232 in 38 suite, package E2E, S4/S8 con `providerCalls=0`, ASan e TSan.
 - [x] W5 Pi runner and app-versioned workflows.
-- [ ] W6-W8 implementation.
+- [x] 2026-08-08: W6 coordinator end-to-end implementati su `feat/jidoka-code-w6-job-coordinators` da `origin/main@12f49a2`: PR review dual-source, triage, claim/piano/implementation, mutation generation, recovery SQLite, exact-head publication, post-open review e cleanup. Verifica offline documentata in `docs/evidence/w6-job-coordinators-report.md`; `make check`, 302 test standard, ASan, TSan, package E2E e preflight packaged S4/S5-S7/S8 passano con Pi `0.84.1` exact-attested e `providerCalls=0`.
+- [x] W6 end-to-end job coordinators.
+- [ ] W7-W8 implementation.
 - [ ] W9 final verification, review e canary autorizzato.
 
 ## Surprises and discoveries
@@ -878,6 +880,9 @@ Pass/falsifier/disposition normativi:
 - Head-last e topologia non provano completezza della narrativa. Il router richiede ora base/head, uguaglianza esatta tra set narrativa, commit REST e traversal Git fetched, e almeno un percorso parent dalla head alla base dichiarata; W6 deve produrre le due fonti indipendentemente.
 - Una query `find` con path `-delete` e un Git diff con textconv/config locale sono execution surfaces, non semplici letture. W5 prefissa path relativi ostili, disabilita textconv, fsmonitor, hook, external diff e optional locks, e prova che il file `-delete` sopravvive.
 - Le risorse installate possono essere root-owned, mentre configurazione, workspace e directory Pi temporanee devono essere user-owned e private. L'attestation W5 distingue esplicitamente i due trust boundary.
+- Uno step completato e durable deve essere l'autorità di recovery: rieseguire Pi o una mutation dopo il commit dello step crea duplicate side effect. W6 avanza lo step già completato e conserva artifact, intent e attribution prima di appendere completion.
+- Una mutation generation autorizzata non rende invisibili le generazioni precedenti: marker e PR devono leggere ogni intent storico esistente prima di un resend, saltando soltanto le generazioni che non hanno mai preparato quell'operazione.
+- Il Pi globale è avanzato esternamente da `0.84.0` a `0.84.1` durante la verifica W6. La policy ha prima bloccato sia il test JavaScript del package tree sia il resolver Swift. Su indicazione del project owner, una copia isolata con policy temporanea exact-digest ha poi superato `make check`, package E2E e preflight packaged S4/S5-S7/S8 senza provider; soltanto dopo quella prova l'allowlist versionata ha aggiunto l'exact build 0.84.1 mantenendo 0.84.0.
 
 ## Execution decisions
 
@@ -908,7 +913,10 @@ Append-only.
 - 2026-08-07: W5 parte soltanto dopo fetch e verifica del merge PR #6 in `origin/main@23037624`; branch e worktree dedicati non modificano i checkout di sviluppo.
 - 2026-08-07: W5 mantiene un solo writer per job, reviewer e synthesis fresh, massimo tre round, e approvazioni command digest esatte. L'app canonicalizza argv e plan; nessun output modello può introdurre executable, argv, session resume o remote capability.
 - 2026-08-07: la verifica W5 resta offline. Il preflight usa HOME e agent directory isolati, auth vuota e `PI_OFFLINE=1`; fake-provider e replay sostituiscono call reali. Nessun provider, Keychain reale, GitHub, commit, push o firma Apple Development viene eseguito.
+- 2026-08-08: W6 parte dal merge W5 `12f49a2499c8ddc29311d19577b4b1dd06955950` in branch/worktree dedicati. Workflow production e recovery vengono verificati soltanto con fake GitHub, deterministic Pi fixture, SQLite temporanei e Git locali; nessun provider, credential reale o mutation GitHub live viene eseguito.
+- 2026-08-08: completed step, mutation intent e exact read-back sono le autorità di recovery. Retry umano incrementa la generation ma controlla tutte le generazioni precedenti; workspace con stato writer ignoto e modifiche locali viene bloccato e conservato.
+- 2026-08-08: il project owner autorizza un singolo commit W6, push non-force del branch dedicato e apertura PR. Il merge resta al project owner. Dopo il fail-closed sul Pi globale 0.84.1, autorizza integration test locali: la policy temporanea e poi quella versionata legano l'exact package tree e passano i gate offline senza credential o provider call.
 
 ## Outcomes and retrospective
 
-W0, W1 S1-S9 e W2-W5 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Il durable core, il broker/reconciliation GitHub, il transport Git app-managed e i workflow Pi W5 sono verificati localmente. Pi `0.84.0` è la sola build corrente ammessa dalla policy `>=0.84.0 <0.90.0`; le build future restano bloccate finché non sono attestate. W6-W9, integrazione coordinatori/UI, credential e GitHub canary, installer e final review restano aperti.
+W0, W1 S1-S9 e W2-W6 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5 e coordinator W6 sono verificati localmente. La policy ammette le exact build Pi `0.84.0` e `0.84.1`; per 0.84.1 passano root gate, package e preflight offline senza provider call. W7-W9, UI/lifecycle, credential e GitHub canary, installer e final review restano aperti.

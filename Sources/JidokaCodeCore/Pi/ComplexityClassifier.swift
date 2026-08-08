@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-public struct ComplexityReport: Equatable, Sendable {
+public struct ComplexityReport: Codable, Equatable, Sendable {
   public let reporter: PiWorkflowRole
   public let proposed: WorkComplexity
   public let facts: ComplexityFacts
@@ -42,7 +42,7 @@ public enum ComplexityReason: String, CaseIterable, Codable, Sendable {
   case downgradeRejected = "downgrade-rejected"
 }
 
-public struct ComplexityDecision: Equatable, Sendable {
+public struct ComplexityDecision: Codable, Equatable, Sendable {
   public static let classifierVersion = "1"
 
   public let classification: WorkComplexity

@@ -23,6 +23,11 @@ public struct RepositoryMaterialization: Equatable, Sendable {
   public let record: WorkspaceRecord
 }
 
+public struct PullRequestFetch: Equatable, Sendable {
+  public let mirrorURL: URL
+  public let headSHA: String
+}
+
 public enum RepositoryStoreError: Error, Equatable, Sendable {
   case unsafeRoot
   case invalidRepository
@@ -72,6 +77,25 @@ public actor WorkspaceStateStore {
         throw RepositoryStoreError.invalidJob
       }
       if let existing = try Self.load(jobID: jobID, database: database) {
+        if existing.cleanupState == .removed {
+          _ = try database.execute(
+            """
+            UPDATE workspaces
+            SET relative_path = ?, base_branch = ?, base_sha = ?, local_head_sha = ?,
+                cleanup_state = 'retained', updated_at = ?
+            WHERE job_id = ? AND cleanup_state = 'removed'
+            """,
+            bindings: [
+              .text(relativePath),
+              .text(baseBranch),
+              .text(baseSHA),
+              .text(localHeadSHA),
+              .real(now.timeIntervalSince1970),
+              .text(jobID.uuidString.lowercased()),
+            ]
+          )
+          return try Self.require(jobID: jobID, database: database)
+        }
         guard existing.relativePath == relativePath,
           existing.baseBranch == baseBranch,
           existing.baseSHA == baseSHA,
@@ -137,7 +161,21 @@ public actor WorkspaceStateStore {
         try database.scalarInt(
           """
           SELECT COUNT(*) FROM jobs
-          WHERE id = ? AND state IN ('succeeded', 'blocked')
+          WHERE id = ?
+            AND state IN ('reconciling', 'succeeded', 'blocked', 'waitingHuman')
+            AND EXISTS (
+              SELECT 1 FROM job_steps
+              WHERE job_steps.job_id = jobs.id
+                AND job_steps.ordinal = jobs.current_step
+                AND (
+                  (jobs.kind = 'prReview' AND job_steps.kind = 'publish')
+                  OR (jobs.kind = 'issueTriage' AND job_steps.kind = 'reconcile')
+                  OR (
+                    jobs.kind IN ('issueImplementation', 'complexPlan')
+                    AND job_steps.kind IN ('publish', 'publishPlan', 'qa')
+                  )
+                )
+            )
           """,
           bindings: [.text(jobID.uuidString.lowercased())]
         ) == 1
@@ -331,14 +369,161 @@ public actor RepositoryStore {
     remote: GitRemoteRepository,
     credentials: (any GitCredentialSessionProviding)? = nil
   ) async throws -> String {
+    try await fetchPullRequestMaterialization(
+      number: number,
+      expectedSHA: expectedSHA,
+      jobID: jobID,
+      remote: remote,
+      credentials: credentials
+    ).headSHA
+  }
+
+  public func fetchPullRequestMaterialization(
+    number: Int,
+    expectedSHA: String,
+    jobID: UUID,
+    remote: GitRemoteRepository,
+    credentials: (any GitCredentialSessionProviding)? = nil
+  ) async throws -> PullRequestFetch {
     let mirror = try await ensureMirror(remote: remote, credentials: credentials)
-    return try await transport.fetchPullRequest(
+    let head = try await transport.fetchPullRequest(
       number: number,
       expectedSHA: expectedSHA,
       jobID: jobID,
       remote: remote,
       mirror: mirror,
       credentials: credentials
+    )
+    return PullRequestFetch(mirrorURL: mirror, headSHA: head)
+  }
+
+  public func materializeReviewWorkspace(
+    jobID: UUID,
+    remote: GitRemoteRepository,
+    baseSHA: String,
+    headSHA: String,
+    mirrorURL: URL? = nil,
+    credentials: (any GitCredentialSessionProviding)? = nil,
+    now: Date = Date()
+  ) async throws -> RepositoryMaterialization {
+    guard GitHubInputValidation.validGitSHA(baseSHA),
+      GitHubInputValidation.validGitSHA(headSHA)
+    else {
+      throw RepositoryStoreError.invalidSHA
+    }
+    let mirror: URL
+    if let supplied = mirrorURL?.standardizedFileURL {
+      try Self.validateContained(supplied, root: repositoriesURL)
+      try await validateMirror(supplied, remote: remote)
+      mirror = supplied
+    } else {
+      mirror = try await ensureMirror(remote: remote, credentials: credentials)
+    }
+    let existing = try await workspaceStates.record(jobID: jobID)
+    let relativePath = "\(jobID.uuidString.lowercased())/repo"
+    let jobDirectory = workspacesURL.appendingPathComponent(
+      jobID.uuidString.lowercased(),
+      isDirectory: true
+    )
+    let workspace = jobDirectory.appendingPathComponent("repo", isDirectory: true)
+    if let existing {
+      guard existing.relativePath == relativePath,
+        existing.baseBranch == remote.defaultBranch,
+        existing.baseSHA == baseSHA,
+        existing.localHeadSHA == headSHA,
+        existing.cleanupState == .retained
+      else {
+        throw RepositoryStoreError.workspaceCollision
+      }
+      try await validateDetachedWorkspace(
+        workspace,
+        mirror: mirror,
+        headSHA: headSHA
+      )
+      return RepositoryMaterialization(
+        mirrorURL: mirror,
+        workspaceURL: workspace,
+        record: existing
+      )
+    }
+    guard !FileManager.default.fileExists(atPath: jobDirectory.path) else {
+      throw RepositoryStoreError.workspaceCollision
+    }
+
+    let temporaryJob = workspacesURL.appendingPathComponent(
+      "\(jobID.uuidString.lowercased()).pending-\(UUID().uuidString.lowercased())",
+      isDirectory: true
+    )
+    let temporaryWorkspace = temporaryJob.appendingPathComponent("repo", isDirectory: true)
+    try Self.ensurePrivateDirectory(temporaryJob)
+    var movedIntoPlace = false
+    do {
+      try await requireSuccess(
+        transport.runLocalGit(
+          arguments: [
+            "clone", "--no-hardlinks", "--no-checkout", "--", mirror.path,
+            temporaryWorkspace.path,
+          ],
+          workingDirectory: temporaryJob,
+          timeoutSeconds: 300,
+          maximumOutputBytes: 8 * 1_024 * 1_024,
+          environmentOverrides: [:]
+        ))
+      try await requireSuccess(
+        transport.runLocalGit(
+          arguments: ["-C", temporaryWorkspace.path, "checkout", "--detach", headSHA],
+          workingDirectory: temporaryWorkspace,
+          timeoutSeconds: 120,
+          maximumOutputBytes: 1_048_576,
+          environmentOverrides: [:]
+        ))
+      try Self.ensurePrivateDirectory(temporaryWorkspace)
+      try await validateDetachedWorkspace(
+        temporaryWorkspace,
+        mirror: mirror,
+        headSHA: headSHA
+      )
+      try FileManager.default.moveItem(at: temporaryJob, to: jobDirectory)
+      movedIntoPlace = true
+      let record = try await workspaceStates.recordMaterialized(
+        jobID: jobID,
+        relativePath: relativePath,
+        baseBranch: remote.defaultBranch,
+        baseSHA: baseSHA,
+        localHeadSHA: headSHA,
+        now: now
+      )
+      return RepositoryMaterialization(
+        mirrorURL: mirror,
+        workspaceURL: workspace,
+        record: record
+      )
+    } catch {
+      if movedIntoPlace {
+        try? Self.removeExactWorkspace(jobDirectory, jobID: jobID, parent: workspacesURL)
+      } else {
+        try? Self.removeExactTemporary(temporaryJob, parent: workspacesURL)
+      }
+      throw error
+    }
+  }
+
+  public func materializeSnapshotWorkspace(
+    jobID: UUID,
+    remote: GitRemoteRepository,
+    exactSHA: String,
+    mirrorURL: URL? = nil,
+    credentials: (any GitCredentialSessionProviding)? = nil,
+    now: Date = Date()
+  ) async throws -> RepositoryMaterialization {
+    try await materializeReviewWorkspace(
+      jobID: jobID,
+      remote: remote,
+      baseSHA: exactSHA,
+      headSHA: exactSHA,
+      mirrorURL: mirrorURL,
+      credentials: credentials,
+      now: now
     )
   }
 
@@ -364,11 +549,10 @@ public actor RepositoryStore {
       isDirectory: true
     )
     let workspace = jobDirectory.appendingPathComponent("repo", isDirectory: true)
-    if let existing {
+    if let existing, existing.cleanupState == .retained {
       guard existing.relativePath == relativePath,
         existing.baseBranch == remote.defaultBranch,
-        existing.baseSHA == baseSHA,
-        existing.cleanupState == .retained
+        existing.baseSHA == baseSHA
       else {
         throw RepositoryStoreError.workspaceCollision
       }
@@ -383,6 +567,9 @@ public actor RepositoryStore {
         workspaceURL: workspace,
         record: existing
       )
+    }
+    if let existing, existing.cleanupState != .removed {
+      throw RepositoryStoreError.workspaceCollision
     }
     guard !FileManager.default.fileExists(atPath: jobDirectory.path) else {
       throw RepositoryStoreError.workspaceCollision
@@ -541,6 +728,45 @@ public actor RepositoryStore {
     try await workspaceStates.record(jobID: jobID)
   }
 
+  public func workspaceIsCleanAtRecordedHead(jobID: UUID) async throws -> Bool {
+    guard let record = try await workspaceStates.record(jobID: jobID),
+      record.cleanupState == .retained
+    else { return false }
+    let workspace = try workspaceURL(record: record)
+    let head = try await output(
+      arguments: [
+        "--no-pager", "--no-optional-locks", "--no-replace-objects",
+        "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+        "-C", workspace.path, "rev-parse", "--verify", "HEAD",
+      ],
+      workingDirectory: workspace
+    )
+    guard head == record.localHeadSHA else { return false }
+    let status = try await transport.runLocalGit(
+      arguments: [
+        "--no-pager", "--no-optional-locks", "--no-replace-objects",
+        "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+        "-C", workspace.path, "status", "--porcelain=v1", "-z",
+        "--untracked-files=all",
+      ],
+      workingDirectory: workspace,
+      timeoutSeconds: 60,
+      maximumOutputBytes: 1_048_576,
+      environmentOverrides: [:]
+    )
+    try await requireSuccess(status)
+    return status.stdout.isEmpty
+  }
+
+  public func retainedWorkspaceURL(jobID: UUID) async throws -> URL {
+    guard let record = try await workspaceStates.record(jobID: jobID),
+      record.cleanupState == .retained
+    else {
+      throw RepositoryStoreError.workspaceNotFound
+    }
+    return try workspaceURL(record: record)
+  }
+
   private func validateMirror(
     _ mirror: URL,
     remote: GitRemoteRepository
@@ -562,6 +788,38 @@ public actor RepositoryStore {
       GitHubInputValidation.validGitSHA(defaultSHA)
     else {
       throw RepositoryStoreError.mirrorInvalid
+    }
+  }
+
+  private func validateDetachedWorkspace(
+    _ workspace: URL,
+    mirror: URL,
+    headSHA: String
+  ) async throws {
+    try Self.validateManagedDirectory(workspace)
+    let origin = try await output(
+      arguments: ["-C", workspace.path, "config", "--get", "remote.origin.url"],
+      workingDirectory: workspace
+    )
+    let observedHead = try await output(
+      arguments: ["-C", workspace.path, "rev-parse", "--verify", "HEAD"],
+      workingDirectory: workspace
+    )
+    let symbolic = try await transport.runLocalGit(
+      arguments: ["-C", workspace.path, "symbolic-ref", "-q", "HEAD"],
+      workingDirectory: workspace,
+      timeoutSeconds: 30,
+      maximumOutputBytes: 1_048_576,
+      environmentOverrides: [:]
+    )
+    guard URL(fileURLWithPath: origin).standardizedFileURL == mirror.standardizedFileURL,
+      observedHead == headSHA,
+      symbolic.exitCode == 1,
+      symbolic.terminationSignal == nil,
+      !symbolic.timedOut,
+      !symbolic.outputLimitExceeded
+    else {
+      throw RepositoryStoreError.workspaceInvalid
     }
   }
 

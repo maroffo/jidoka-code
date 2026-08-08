@@ -219,7 +219,7 @@ struct PiRuntimeResolverTests {
       configuration: .standard(resourceRoot: resourceRoot)
     ).resolve()
 
-    #expect(runtime.piVersion.description == "0.84.0")
+    #expect(runtime.piVersion.description == "0.84.1")
     #expect(runtime.nodeVersion.description == "26.6.0")
     #expect(runtime.piRuntimeSHA256.count == 5)
     #expect(runtime.nodeDynamicLibrarySHA256.count == 25)
