@@ -163,10 +163,110 @@ func makeApprovedCommand(
   )
 }
 
-func makeFrozenPlan(_ commands: [ApprovedCommand]) throws -> FrozenCommandPlan {
-  try FrozenCommandPlan(
+func makeFrozenPlan(
+  _ commands: [ApprovedCommand],
+  decisionEvidenceSeed: String = "fixture",
+  planningFacts: ComplexityFacts? = nil,
+  proposedComplexity: WorkComplexity = .simple
+) throws -> FrozenCommandPlan {
+  let artifactSHA256 = String(repeating: "a", count: 64)
+  let planMarkdown = "# Test plan\n"
+  let candidate = try FrozenCommandPlan(
+    artifactSHA256: artifactSHA256,
+    planMarkdown: planMarkdown,
     commands: commands,
-    expectedDigest: FrozenCommandPlan.digest(commands: commands)
+    planningDecision: nil,
+    expectedDigest: FrozenCommandPlan.digest(
+      artifactSHA256: artifactSHA256,
+      planMarkdown: planMarkdown,
+      commands: commands,
+      planningDecision: nil
+    )
+  )
+  let proposals = commands.map { command in
+    ApprovedCommandProposal(
+      id: command.id,
+      registryKind: command.registryKind,
+      executableOrRepositoryScript: command.executableOrRepositoryScript,
+      arguments: command.arguments,
+      workingDirectory: command.workingDirectory,
+      environmentOverrides: command.environmentOverrides,
+      timeoutSeconds: command.timeoutSeconds,
+      rationale: command.rationale,
+      sourceDigest: command.sourceDigest,
+      approvedHookPath: command.approvedHookPath
+    )
+  }
+  let facts =
+    planningFacts
+    ?? ComplexityFacts(
+      workstreamCount: 1,
+      publicAPI: false,
+      nonDestructiveSchema: false,
+      crossModuleConcurrency: false,
+      operationalRollback: false,
+      designAlternatives: false,
+      humanDecisionGap: false,
+      securityOrSecretCore: false,
+      dataLossMigration: false,
+      releaseOrTag: false,
+      infrastructureBlastRadius: false,
+      crossRepositoryCoordination: false,
+      unresolvedDesignDebate: false,
+      unverifiable: false
+    )
+  let roles: [PiWorkflowRole] = [.writer, .architecture, .security, .test, .synthesis]
+  let commandDigests = commands.map(\.definitionDigest).sorted()
+  let roleResults = roles.enumerated().map { index, role in
+    let payload = PiPlanningPayload(
+      verdict: "pass",
+      severity: .none,
+      summary: "validated test planning decision",
+      proposedComplexity: proposedComplexity,
+      classifierFacts: facts,
+      evidence: ["\(decisionEvidenceSeed)-evidence-\(role.rawValue)"],
+      findings: [],
+      commandDefinitions: role == .writer ? proposals : [],
+      approvedCommandDigests: role == .writer ? [] : commandDigests,
+      approvedPlanDigest: role == .writer ? nil : candidate.digest,
+      planMarkdown: role == .writer ? planMarkdown : ""
+    )
+    return PiWorkflowRoleResult(
+      workflow: .planning,
+      role: role,
+      artifactSHA256: artifactSHA256,
+      approvedCommandIDs: [],
+      payload: .planning(payload),
+      recordSHA256: sha256(
+        Data("\(decisionEvidenceSeed)-planning-role-\(index)-\(role.rawValue)".utf8)
+      )
+    )
+  }
+  let reports = roleResults.map { result -> ComplexityReport in
+    guard case .planning(let payload) = result.payload else { preconditionFailure() }
+    return ComplexityReport(
+      reporter: result.role,
+      proposed: payload.proposedComplexity,
+      facts: payload.classifierFacts,
+      evidence: payload.evidence
+    )
+  }
+  let planningDecision = try FrozenPlanningDecision(
+    candidatePlan: candidate,
+    complexity: ComplexityClassifier.classify(reports),
+    roleResults: roleResults
+  )
+  return try FrozenCommandPlan(
+    artifactSHA256: artifactSHA256,
+    planMarkdown: planMarkdown,
+    commands: commands,
+    planningDecision: planningDecision,
+    expectedDigest: FrozenCommandPlan.digest(
+      artifactSHA256: artifactSHA256,
+      planMarkdown: planMarkdown,
+      commands: commands,
+      planningDecision: planningDecision
+    )
   )
 }
 

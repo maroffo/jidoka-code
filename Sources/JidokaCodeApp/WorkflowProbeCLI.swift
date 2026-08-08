@@ -6,10 +6,10 @@ import JidokaCodeCore
 private enum WorkflowProbeCLIConstants {
   static let nodeURL = URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node")
   static let runnerRelativePath = "runtime/pi-rpc-workflow-probe.mjs"
-  static let runnerSHA256 = "bb351854777b033e9a0a319103fbab05b45e55be77adb28eadb6cb9525440b86"
+  static let runnerSHA256 = "bba864cfe69d5f5f8ebac05fce1e86da3ff5276577246e612a5003f6bbf7a9cb"
   static let runtimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs"
   static let runtimeAttestationSHA256 =
-    "b11b3015c528ca7b18148ee45a29f02bb9920f92f73c1d13dae82b5d7f8082de"
+    "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e"
   static let maximumOutputBytes = 1_048_576
 }
 

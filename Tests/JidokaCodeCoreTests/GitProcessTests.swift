@@ -110,7 +110,7 @@ struct GitProcessTests {
           homeDirectory: fixture.root.path,
           temporaryDirectory: fixture.root.path
         ),
-        timeoutSeconds: 1
+        timeoutSeconds: 3
       ))
     #expect(timeout.timedOut)
     #expect(!timeout.succeeded)

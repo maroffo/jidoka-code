@@ -1,0 +1,15 @@
+{"command":"prompt","id":"prompt-1","success":true,"type":"response"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"message":{"role":"user"},"type":"message_start"}
+{"message":{"role":"user"},"type":"message_end"}
+{"message":{"role":"assistant"},"type":"message_start"}
+{"assistantMessageEvent":{"contentIndex":0,"delta":"review","type":"text_delta"},"type":"message_update"}
+{"message":{"role":"assistant"},"type":"message_end"}
+{"args":{},"toolCallId":"result-pr","toolName":"jidoka_code_result","type":"tool_execution_start"}
+{"isError":false,"result":{"details":{"approvedCommandIDs":[],"artifactSHA256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","nonce":"nonce-pr-review","payload":{"commitNarrativeSHA256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","domain":"architecture","evidence":["oldest-first commit evidence"],"findings":[],"severity":"none","summary":"Architecture review passed.","verdict":"pass"},"resultSequence":1,"role":"architecture","schemaVersion":1,"workflow":"pr-review"}},"toolCallId":"result-pr","toolName":"jidoka_code_result","type":"tool_execution_end"}
+{"message":{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-pr","toolName":"jidoka_code_result"},"type":"message_start"}
+{"message":{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-pr","toolName":"jidoka_code_result"},"type":"message_end"}
+{"message":{},"toolResults":[{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-pr","toolName":"jidoka_code_result"}],"type":"turn_end"}
+{"messages":[],"type":"agent_end","willRetry":false}
+{"type":"agent_settled"}

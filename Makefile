@@ -19,10 +19,16 @@ jidoka-code-check:
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/pi-runtime-attestation.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/tests/test-pi-runtime-attestation.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node scripts/tests/test-pi-runtime-attestation.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/tests/test-jidoka-extension-contract.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node scripts/tests/test-jidoka-extension-contract.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/tests/test-jidoka-extension-rpc.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node scripts/tests/test-jidoka-extension-rpc.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/pi-rpc-profile-probe.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/pi-rpc-workflow-probe.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/extensions/jidoka-code.ts
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/extensions/jidoka-deny-user-bash.js
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/extensions/jidoka-runtime.ts
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/runtime/jidoka-extension-contract.mjs
 	xcrun swift-format lint --recursive --strict Sources Tests
 	xcrun swift build --configuration debug
 	xcrun swift build --configuration release

@@ -5,6 +5,125 @@ import Testing
 
 @Suite("Frozen argv-only verification command runner")
 struct VerificationCommandRunnerTests {
+  @Test("definition digest frames argument and environment domains independently")
+  func definitionDigestDomainSeparation() {
+    let common:
+      (
+        [String], [String: String]
+      ) -> String = { arguments, environment in
+        ApprovedCommand.digest(
+          id: "verify",
+          registryKind: .repositoryScript,
+          executableOrRepositoryScript: "verify.sh",
+          arguments: arguments,
+          workingDirectory: ".",
+          environmentOverrides: environment,
+          timeoutSeconds: 30,
+          rationale: "Verify one bounded condition.",
+          sourceDigest: String(repeating: "a", count: 64),
+          approvedHookPath: nil
+        )
+      }
+
+    #expect(common(["CI", "1"], [:]) != common([], ["CI": "1"]))
+  }
+
+  @Test("frozen plan digest binds artifact, plan bytes, classifier, and command order")
+  func frozenPlanDomainSeparation() {
+    let check = makeApprovedCommand(
+      id: "check",
+      kind: .makeTargets,
+      executable: "make",
+      arguments: ["check"]
+    )
+    let test = makeApprovedCommand(
+      id: "test",
+      kind: .makeTargets,
+      executable: "make",
+      arguments: ["test"]
+    )
+    let artifact = String(repeating: "a", count: 64)
+    let plan = try? makeFrozenPlan([check, test])
+    let baseline = plan?.digest
+    let planningDecision = plan?.planningDecision
+
+    #expect(
+      baseline
+        != FrozenCommandPlan.digest(
+          artifactSHA256: String(repeating: "b", count: 64),
+          planMarkdown: "# Test plan\n",
+          commands: [check, test],
+          planningDecision: planningDecision
+        ))
+    #expect(
+      baseline
+        != FrozenCommandPlan.digest(
+          artifactSHA256: artifact,
+          planMarkdown: "# Plan changed\n",
+          commands: [check, test],
+          planningDecision: planningDecision
+        ))
+    #expect(
+      baseline
+        != FrozenCommandPlan.digest(
+          artifactSHA256: artifact,
+          planMarkdown: "# Test plan\n",
+          commands: [test, check],
+          planningDecision: planningDecision
+        ))
+    #expect(
+      baseline
+        != (try? makeFrozenPlan(
+          [check, test],
+          decisionEvidenceSeed: "changed"
+        ).digest)
+    )
+    #expect(
+      baseline
+        != FrozenCommandPlan.digest(
+          artifactSHA256: artifact,
+          planMarkdown: "# Test plan\n",
+          commands: [check, test],
+          planningDecision: planningDecision,
+          classifierVersion: "2"
+        ))
+  }
+
+  @Test("human-owned planning decisions can never become executable plans")
+  func humanOwnedPlanRejected() {
+    let command = makeApprovedCommand(
+      id: "check",
+      kind: .makeTargets,
+      executable: "make",
+      arguments: ["check"]
+    )
+    let hardRisk = ComplexityFacts(
+      workstreamCount: 1,
+      publicAPI: false,
+      nonDestructiveSchema: false,
+      crossModuleConcurrency: false,
+      operationalRollback: false,
+      designAlternatives: false,
+      humanDecisionGap: false,
+      securityOrSecretCore: true,
+      dataLossMigration: false,
+      releaseOrTag: false,
+      infrastructureBlastRadius: false,
+      crossRepositoryCoordination: false,
+      unresolvedDesignDebate: false,
+      unverifiable: false
+    )
+
+    #expect(throws: VerificationCommandError.invalidPlan) {
+      try makeFrozenPlan(
+        [command],
+        decisionEvidenceSeed: "human-owned",
+        planningFacts: hardRisk,
+        proposedComplexity: .humanOwned
+      )
+    }
+  }
+
   @Test("repository script keeps metacharacters as data and locks source digest")
   func repositoryScript() async throws {
     let fixture = try GitTestRoot(prefix: "jidoka-command-script")
@@ -91,14 +210,8 @@ struct VerificationCommandRunnerTests {
       arguments: ["check"],
       overrideDigest: String(repeating: "b", count: 64)
     )
-    let badPlan = try makeFrozenPlan([badDigest])
-    await #expect(throws: VerificationCommandError.definitionDigestMismatch) {
-      _ = try await runner.execute(
-        commandID: badDigest.id,
-        expectedPlanDigest: badPlan.digest,
-        plan: badPlan,
-        workspace: fixture.root
-      )
+    #expect(throws: VerificationCommandError.definitionDigestMismatch) {
+      _ = try makeFrozenPlan([badDigest])
     }
 
     for command in [
@@ -113,6 +226,13 @@ struct VerificationCommandRunnerTests {
         kind: .gitRead,
         executable: "git",
         arguments: ["push"]
+      ),
+      makeApprovedCommand(
+        id: "git-read-hook",
+        kind: .gitRead,
+        executable: "git",
+        arguments: ["status", "--porcelain=v1"],
+        approvedHookPath: ".githooks"
       ),
       makeApprovedCommand(
         id: "git-long-option",
@@ -133,6 +253,26 @@ struct VerificationCommandRunnerTests {
         arguments: ["build", "-derivedDataPath", "/tmp/out"]
       ),
       makeApprovedCommand(
+        id: "git-stage-hook",
+        kind: .gitStage,
+        executable: "git",
+        arguments: ["file.txt"],
+        approvedHookPath: ".githooks"
+      ),
+      makeApprovedCommand(
+        id: "metadata-stage",
+        kind: .gitStage,
+        executable: "git",
+        arguments: [".GIT/config"]
+      ),
+      makeApprovedCommand(
+        id: "metadata-cwd",
+        kind: .makeTargets,
+        executable: "make",
+        arguments: ["check"],
+        workingDirectory: ".PI"
+      ),
+      makeApprovedCommand(
         id: "shell",
         kind: .repositoryScript,
         executable: "/bin/sh",
@@ -140,14 +280,8 @@ struct VerificationCommandRunnerTests {
         sourceDigest: String(repeating: "c", count: 64)
       ),
     ] {
-      let invalidPlan = try makeFrozenPlan([command])
-      await #expect(throws: VerificationCommandError.self) {
-        _ = try await runner.execute(
-          commandID: command.id,
-          expectedPlanDigest: invalidPlan.digest,
-          plan: invalidPlan,
-          workspace: fixture.root
-        )
+      #expect(throws: VerificationCommandError.self) {
+        _ = try makeFrozenPlan([command])
       }
     }
 
@@ -194,6 +328,133 @@ struct VerificationCommandRunnerTests {
       workspace: repository
     )
     #expect(evidence.succeeded)
+  }
+
+  @Test("Git commands reject gitdir indirection, core worktree overrides, and alternates")
+  func gitRepositoryIdentity() async throws {
+    let fixture = try GitTestRoot(prefix: "jidoka-command-git-identity")
+    defer { fixture.remove() }
+    let repository = try await fixture.initializeRepository()
+    let command = makeApprovedCommand(
+      id: "status",
+      kind: .gitRead,
+      executable: "git",
+      arguments: ["status", "--porcelain=v1"]
+    )
+    let plan = try makeFrozenPlan([command])
+    let runner = VerificationCommandRunner(
+      homeDirectory: fixture.root.path,
+      temporaryDirectory: fixture.root.path
+    )
+
+    let redirected = fixture.root.appendingPathComponent("redirected", isDirectory: true)
+    try FileManager.default.createDirectory(at: redirected, withIntermediateDirectories: false)
+    try "gitdir: \(repository.appendingPathComponent(".git").path)\n".write(
+      to: redirected.appendingPathComponent(".git"),
+      atomically: true,
+      encoding: .utf8
+    )
+    await #expect(throws: VerificationCommandError.unsafeGitRepository) {
+      _ = try await runner.execute(
+        commandID: command.id,
+        expectedPlanDigest: plan.digest,
+        plan: plan,
+        workspace: redirected
+      )
+    }
+
+    try await fixture.run([
+      "-C", repository.path, "config", "--local", "core.worktree", redirected.path,
+    ])
+    await #expect(throws: VerificationCommandError.unsafeGitConfiguration) {
+      _ = try await runner.execute(
+        commandID: command.id,
+        expectedPlanDigest: plan.digest,
+        plan: plan,
+        workspace: repository
+      )
+    }
+    try await fixture.run([
+      "-C", repository.path, "config", "--local", "--unset", "core.worktree",
+    ])
+
+    let alternates = repository.appendingPathComponent(".git/objects/info/alternates")
+    try "\(redirected.path)\n".write(
+      to: alternates,
+      atomically: true,
+      encoding: .utf8
+    )
+    await #expect(throws: VerificationCommandError.unsafeGitRepository) {
+      _ = try await runner.execute(
+        commandID: command.id,
+        expectedPlanDigest: plan.digest,
+        plan: plan,
+        workspace: repository
+      )
+    }
+  }
+
+  @Test("Git read and stage disable repository hooks and optional read locks")
+  func nonCommitGitCommandsDisableHooks() async throws {
+    let fixture = try GitTestRoot(prefix: "jidoka-command-no-read-hooks")
+    defer { fixture.remove() }
+    let repository = try await fixture.initializeRepository()
+    _ = try await fixture.commit(
+      repository: repository,
+      path: "tracked.txt",
+      contents: "tracked\n",
+      message: "test: seed repository"
+    )
+    let marker = fixture.root.appendingPathComponent("post-index-change-invoked")
+    let hook = repository.appendingPathComponent(".git/hooks/post-index-change")
+    try writeExecutable(
+      hook,
+      "#!/bin/sh\nprintf invoked >>'\(marker.path)'\n"
+    )
+    try FileManager.default.setAttributes(
+      [.modificationDate: Date()],
+      ofItemAtPath: repository.appendingPathComponent("tracked.txt").path
+    )
+    let runner = VerificationCommandRunner(
+      homeDirectory: fixture.root.path,
+      temporaryDirectory: fixture.root.path
+    )
+    let read = makeApprovedCommand(
+      id: "status",
+      kind: .gitRead,
+      executable: "git",
+      arguments: ["status", "--porcelain=v1"]
+    )
+    let readPlan = try makeFrozenPlan([read])
+    let readEvidence = try await runner.execute(
+      commandID: read.id,
+      expectedPlanDigest: readPlan.digest,
+      plan: readPlan,
+      workspace: repository
+    )
+    #expect(readEvidence.succeeded)
+    #expect(!FileManager.default.fileExists(atPath: marker.path))
+
+    try "new\n".write(
+      to: repository.appendingPathComponent("new.txt"),
+      atomically: true,
+      encoding: .utf8
+    )
+    let stage = makeApprovedCommand(
+      id: "stage",
+      kind: .gitStage,
+      executable: "git",
+      arguments: ["new.txt"]
+    )
+    let stagePlan = try makeFrozenPlan([stage])
+    let stageEvidence = try await runner.execute(
+      commandID: stage.id,
+      expectedPlanDigest: stagePlan.digest,
+      plan: stagePlan,
+      workspace: repository
+    )
+    #expect(stageEvidence.succeeded)
+    #expect(!FileManager.default.fileExists(atPath: marker.path))
   }
 
   @Test("normal Git commit runs approved hooks and unsafe local config blocks execution")

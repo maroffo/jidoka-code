@@ -1,0 +1,15 @@
+{"command":"prompt","id":"prompt-1","success":true,"type":"response"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"message":{"role":"user"},"type":"message_start"}
+{"message":{"role":"user"},"type":"message_end"}
+{"message":{"role":"assistant"},"type":"message_start"}
+{"assistantMessageEvent":{"contentIndex":0,"delta":"orchestration","type":"text_delta"},"type":"message_update"}
+{"message":{"role":"assistant"},"type":"message_end"}
+{"args":{},"toolCallId":"result-orchestrate","toolName":"jidoka_code_result","type":"tool_execution_start"}
+{"isError":false,"result":{"details":{"approvedCommandIDs":["check"],"artifactSHA256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","nonce":"nonce-orchestrate","payload":{"changedPaths":["Sources/Feature.swift"],"evidence":["Implementation is ready for the approved check."],"findings":[],"requestedCommandIDs":["check"],"severity":"none","summary":"Request frozen check command.","verdict":"pass"},"resultSequence":1,"role":"writer","schemaVersion":1,"workflow":"orchestration"}},"toolCallId":"result-orchestrate","toolName":"jidoka_code_result","type":"tool_execution_end"}
+{"message":{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-orchestrate","toolName":"jidoka_code_result"},"type":"message_start"}
+{"message":{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-orchestrate","toolName":"jidoka_code_result"},"type":"message_end"}
+{"message":{},"toolResults":[{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-orchestrate","toolName":"jidoka_code_result"}],"type":"turn_end"}
+{"messages":[],"type":"agent_end","willRetry":false}
+{"type":"agent_settled"}

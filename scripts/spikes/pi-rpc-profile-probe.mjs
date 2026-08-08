@@ -32,11 +32,15 @@ const authorizedCallCap = 19;
 const maximumBufferBytes = 8 * 1024 * 1024;
 const piRuntimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs";
 const expectedPiRuntimeAttestationSHA256 =
-  "b11b3015c528ca7b18148ee45a29f02bb9920f92f73c1d13dae82b5d7f8082de";
+  "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e";
 const piRuntimePolicyRelativePath = "runtime/pi-runtime-builds.json";
 const expectedPiRuntimePolicySHA256 =
-  "c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484";
+  "eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27";
+const nodeRuntimePolicyRelativePath = "runtime/node-runtime-builds.json";
+const expectedNodeRuntimePolicySHA256 =
+  "fd707070911b53f3930864c3ec6dcfabc7b4440bcf44c3012882751fb99bf906";
 const expectedFiles = Object.freeze({
+  [nodeRuntimePolicyRelativePath]: expectedNodeRuntimePolicySHA256,
   [piRuntimeAttestationRelativePath]: expectedPiRuntimeAttestationSHA256,
   [piRuntimePolicyRelativePath]: expectedPiRuntimePolicySHA256,
   "extensions/jidoka-deny-user-bash.js":
@@ -44,13 +48,13 @@ const expectedFiles = Object.freeze({
   "extensions/jidoka-runtime.ts":
     "b6bae1cb282d95b3c1a3e6e4f37c5b967aa5bd3885ec3050c5d7bddb72b4a19b",
   "skills/jidoka-code-issue-triage/SKILL.md":
-    "04b3b248a86dffbde0a543ddf1276f7515454fa7311347f317ff980d5ad9c5f6",
+    "c4200a92833135446a61f374467aeb8f35e4a25826fe7b34baa016c206c46f0f",
   "skills/jidoka-code-orchestrate/SKILL.md":
-    "7a7339c25f27134c443d389472c404a0e9ae161ddb826ee3b13921ee76522a22",
+    "4a6f1b39c86b21b820144c5dbb7fea5ea4f8ee4f8c5ea41a0f01a5ab9850ca07",
   "skills/jidoka-code-plan/SKILL.md":
-    "71fc244807117d61d2f335d7120c19e1d08bb04eab095013a86a3eaeb9bdfad9",
+    "251874083bfba1dd5ed9334200efced1bdab18518fb16e9dd3f43c270456564c",
   "skills/jidoka-code-pr-review/SKILL.md":
-    "3ec091bfc47124074ccf01496078460be9b1b42c01d5636d10ac6288930e832d",
+    "7e3af39ff6e211aa9c3d85c935eb7ff991ec88c9f0df9b152df2ef3977fa409b",
 });
 const profileContracts = Object.freeze({
   review: {
@@ -1131,7 +1135,9 @@ async function main() {
   const attestation = attestResources(requestedRoot);
   const systemRuntime = attestSystemRuntime({
     attestation,
+    expectedNodePolicySHA256: expectedNodeRuntimePolicySHA256,
     expectedPolicySHA256: expectedPiRuntimePolicySHA256,
+    nodePolicyRelativePath: nodeRuntimePolicyRelativePath,
     policyRelativePath: piRuntimePolicyRelativePath,
   });
   attestation.piCompatibility = systemRuntime.compatibility;

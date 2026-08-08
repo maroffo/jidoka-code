@@ -14,8 +14,8 @@ readonly SOURCE_RUNNER="$ROOT/scripts/spikes/pi-rpc-workflow-probe.mjs"
 readonly PACKAGED_RUNNER="$APP/Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs"
 readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
 readonly SHARED_LEDGER="$HOME/Library/Application Support/JidokaCode/Consent/provider-call-ledger.json"
-readonly EXPECTED_RUNNER_SHA256="bb351854777b033e9a0a319103fbab05b45e55be77adb28eadb6cb9525440b86"
-readonly EXPECTED_PI_POLICY_SHA256="c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484"
+readonly EXPECTED_RUNNER_SHA256="bba864cfe69d5f5f8ebac05fce1e86da3ff5276577246e612a5003f6bbf7a9cb"
+readonly EXPECTED_PI_POLICY_SHA256="eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 MODE="live"
 TEMP_ROOT=""
@@ -186,7 +186,8 @@ if [[ "$MODE" == "preflight" ]]; then
     [[ "$(workspace_inventory)" == "$workspace_baseline" ]] || \
         fail "workflow workspace survived preflight"
     printf 'S8 workflow preflight: PASS\n'
-    printf 'providerCalls=0 roles=15 s8Settled=%s evidence=%s\n' "$s8_settled" "$EVIDENCE_DIR"
+    printf 'providerCalls=0 commandProfiles=4 roleMatrix=15 historicalS8Settled=%s evidence=%s\n' \
+        "$s8_settled" "$EVIDENCE_DIR"
     exit 0
 fi
 
