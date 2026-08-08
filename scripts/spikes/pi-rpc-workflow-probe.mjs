@@ -34,11 +34,15 @@ const expectedSettingsSHA256 =
   "e7ec0ba10fa91967345d69c328a9fefbc65a7a89a7aa98a522cd1a9697e96da4";
 const piRuntimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs";
 const expectedPiRuntimeAttestationSHA256 =
-  "b11b3015c528ca7b18148ee45a29f02bb9920f92f73c1d13dae82b5d7f8082de";
+  "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e";
 const piRuntimePolicyRelativePath = "runtime/pi-runtime-builds.json";
 const expectedPiRuntimePolicySHA256 =
-  "c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484";
+  "eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27";
+const nodeRuntimePolicyRelativePath = "runtime/node-runtime-builds.json";
+const expectedNodeRuntimePolicySHA256 =
+  "fd707070911b53f3930864c3ec6dcfabc7b4440bcf44c3012882751fb99bf906";
 const expectedFiles = Object.freeze({
+  [nodeRuntimePolicyRelativePath]: expectedNodeRuntimePolicySHA256,
   [piRuntimeAttestationRelativePath]: expectedPiRuntimeAttestationSHA256,
   [piRuntimePolicyRelativePath]: expectedPiRuntimePolicySHA256,
   "extensions/jidoka-deny-user-bash.js":
@@ -1207,7 +1211,9 @@ async function main() {
   const attestation = attestResources(process.argv[3]);
   const systemRuntime = attestSystemRuntime({
     attestation,
+    expectedNodePolicySHA256: expectedNodeRuntimePolicySHA256,
     expectedPolicySHA256: expectedPiRuntimePolicySHA256,
+    nodePolicyRelativePath: nodeRuntimePolicyRelativePath,
     policyRelativePath: piRuntimePolicyRelativePath,
   });
   const ledger = new ProviderLedger(process.argv[4]);

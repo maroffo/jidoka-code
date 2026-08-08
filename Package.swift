@@ -37,7 +37,8 @@ let package = Package(
         ),
         .testTarget(
             name: "JidokaCodeCoreTests",
-            dependencies: ["JidokaCodeCore"]
+            dependencies: ["JidokaCodeCore"],
+            resources: [.copy("Fixtures")]
         ),
     ],
     swiftLanguageModes: [.v6]

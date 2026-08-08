@@ -119,13 +119,21 @@ for input in \
     "$ROOT/Packaging/Info.plist" \
     "$ROOT/Packaging/com.maroffo.JidokaCode.EngineProbe.plist" \
     "$ROOT/Resources/Pi/manifest.json" \
+    "$ROOT/Resources/Pi/workflow-resources.json" \
+    "$ROOT/Resources/Pi/extensions/jidoka-code.ts" \
     "$ROOT/Resources/Pi/extensions/jidoka-deny-user-bash.js" \
     "$ROOT/Resources/Pi/extensions/jidoka-runtime.ts" \
+    "$ROOT/Resources/Pi/runtime/jidoka-extension-contract.mjs" \
+    "$ROOT/Resources/Pi/runtime/node-runtime-builds.json" \
     "$ROOT/Resources/Pi/runtime/pi-runtime-builds.json" \
     "$ROOT/Resources/Pi/skills/jidoka-code-issue-triage/SKILL.md" \
     "$ROOT/Resources/Pi/skills/jidoka-code-orchestrate/SKILL.md" \
     "$ROOT/Resources/Pi/skills/jidoka-code-plan/SKILL.md" \
     "$ROOT/Resources/Pi/skills/jidoka-code-pr-review/SKILL.md" \
+    "$ROOT/Resources/Pi/skills/jidoka-code-review-architecture/SKILL.md" \
+    "$ROOT/Resources/Pi/skills/jidoka-code-review-security/SKILL.md" \
+    "$ROOT/Resources/Pi/skills/jidoka-code-review-test/SKILL.md" \
+    "$ROOT/Resources/Pi/skills/jidoka-code-synthesize/SKILL.md" \
     "$ROOT/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity/SKILL.md" \
     "$ROOT/Resources/Pi/workflow-skills/jidoka-code-planning-fidelity/SKILL.md" \
     "$ROOT/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity/SKILL.md" \
@@ -184,6 +192,10 @@ fi
     "$RESOURCES/Pi/skills/jidoka-code-orchestrate" \
     "$RESOURCES/Pi/skills/jidoka-code-plan" \
     "$RESOURCES/Pi/skills/jidoka-code-pr-review" \
+    "$RESOURCES/Pi/skills/jidoka-code-review-architecture" \
+    "$RESOURCES/Pi/skills/jidoka-code-review-security" \
+    "$RESOURCES/Pi/skills/jidoka-code-review-test" \
+    "$RESOURCES/Pi/skills/jidoka-code-synthesize" \
     "$RESOURCES/Pi/workflow-skills/jidoka-code-orchestration-fidelity" \
     "$RESOURCES/Pi/workflow-skills/jidoka-code-planning-fidelity" \
     "$RESOURCES/Pi/workflow-skills/jidoka-code-pr-fidelity" \
@@ -199,6 +211,12 @@ fi
     "$LAUNCH_AGENTS/com.maroffo.JidokaCode.EngineProbe.plist"
 /usr/bin/install -m 0644 "$ROOT/Resources/Pi/manifest.json" "$RESOURCES/Pi/manifest.json"
 /usr/bin/install -m 0644 \
+    "$ROOT/Resources/Pi/workflow-resources.json" \
+    "$RESOURCES/Pi/workflow-resources.json"
+/usr/bin/install -m 0644 \
+    "$ROOT/Resources/Pi/extensions/jidoka-code.ts" \
+    "$RESOURCES/Pi/extensions/jidoka-code.ts"
+/usr/bin/install -m 0644 \
     "$ROOT/Resources/Pi/extensions/jidoka-deny-user-bash.js" \
     "$RESOURCES/Pi/extensions/jidoka-deny-user-bash.js"
 /usr/bin/install -m 0644 \
@@ -208,7 +226,11 @@ for skill in \
     jidoka-code-issue-triage \
     jidoka-code-orchestrate \
     jidoka-code-plan \
-    jidoka-code-pr-review
+    jidoka-code-pr-review \
+    jidoka-code-review-architecture \
+    jidoka-code-review-security \
+    jidoka-code-review-test \
+    jidoka-code-synthesize
 do
     /usr/bin/install -m 0644 \
         "$ROOT/Resources/Pi/skills/$skill/SKILL.md" \
@@ -224,6 +246,12 @@ do
         "$ROOT/Resources/Pi/workflow-skills/$skill/SKILL.md" \
         "$RESOURCES/Pi/workflow-skills/$skill/SKILL.md"
 done
+/usr/bin/install -m 0644 \
+    "$ROOT/Resources/Pi/runtime/jidoka-extension-contract.mjs" \
+    "$RESOURCES/Pi/runtime/jidoka-extension-contract.mjs"
+/usr/bin/install -m 0644 \
+    "$ROOT/Resources/Pi/runtime/node-runtime-builds.json" \
+    "$RESOURCES/Pi/runtime/node-runtime-builds.json"
 /usr/bin/install -m 0644 \
     "$ROOT/Resources/Pi/runtime/pi-runtime-builds.json" \
     "$RESOURCES/Pi/runtime/pi-runtime-builds.json"

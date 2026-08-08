@@ -63,18 +63,27 @@ public struct ApprovedCommand: Equatable, Sendable {
     approvedHookPath: String?
   ) -> String {
     var fields = [
-      id,
-      registryKind.rawValue,
-      executableOrRepositoryScript,
-      workingDirectory,
-      String(timeoutSeconds),
-      rationale,
-      sourceDigest ?? "",
-      approvedHookPath ?? "",
+      "id", id,
+      "registryKind", registryKind.rawValue,
+      "executableOrRepositoryScript", executableOrRepositoryScript,
+      "workingDirectory", workingDirectory,
+      "timeoutSeconds", String(timeoutSeconds),
+      "rationale", rationale,
+      "sourceDigest", sourceDigest ?? "",
+      "approvedHookPath", approvedHookPath ?? "",
+      "argumentCount", String(arguments.count),
     ]
-    fields.append(contentsOf: arguments)
-    for (key, value) in environmentOverrides.sorted(by: { $0.key < $1.key }) {
+    for (index, argument) in arguments.enumerated() {
+      fields.append("argument[\(index)]")
+      fields.append(argument)
+    }
+    let environment = environmentOverrides.sorted(by: { $0.key < $1.key })
+    fields.append("environmentCount")
+    fields.append(String(environment.count))
+    for (key, value) in environment {
+      fields.append("environmentKey")
       fields.append(key)
+      fields.append("environmentValue")
       fields.append(value)
     }
     let framed = fields.map { "\($0.utf8.count):\($0)" }.joined(separator: "|")
@@ -83,30 +92,297 @@ public struct ApprovedCommand: Equatable, Sendable {
   }
 }
 
-public struct FrozenCommandPlan: Sendable {
+public struct FrozenPlanningDecision: Equatable, Sendable {
+  public let candidatePlanDigest: String
+  public let complexity: ComplexityDecision
+  public let roleResults: [PiWorkflowRoleResult]
   public let digest: String
+
+  public init(
+    candidatePlan: FrozenCommandPlan,
+    complexity: ComplexityDecision,
+    roleResults: [PiWorkflowRoleResult]
+  ) throws {
+    guard candidatePlan.planningDecision == nil else {
+      throw VerificationCommandError.invalidPlan
+    }
+    try Self.validate(
+      candidatePlanDigest: candidatePlan.digest,
+      artifactSHA256: candidatePlan.artifactSHA256,
+      planMarkdown: candidatePlan.planMarkdown,
+      commands: candidatePlan.commandOrder.compactMap { candidatePlan.commands[$0] },
+      complexity: complexity,
+      roleResults: roleResults
+    )
+    self.candidatePlanDigest = candidatePlan.digest
+    self.complexity = complexity
+    self.roleResults = roleResults
+    digest = Self.digest(
+      candidatePlanDigest: candidatePlan.digest,
+      complexity: complexity,
+      roleResults: roleResults
+    )
+  }
+
+  fileprivate func validate(
+    artifactSHA256: String,
+    planMarkdown: String,
+    commands: [ApprovedCommand]
+  ) throws {
+    try Self.validate(
+      candidatePlanDigest: candidatePlanDigest,
+      artifactSHA256: artifactSHA256,
+      planMarkdown: planMarkdown,
+      commands: commands,
+      complexity: complexity,
+      roleResults: roleResults
+    )
+    guard
+      digest
+        == Self.digest(
+          candidatePlanDigest: candidatePlanDigest,
+          complexity: complexity,
+          roleResults: roleResults
+        )
+    else {
+      throw VerificationCommandError.invalidPlan
+    }
+  }
+
+  private static func validate(
+    candidatePlanDigest: String,
+    artifactSHA256: String,
+    planMarkdown: String,
+    commands: [ApprovedCommand],
+    complexity: ComplexityDecision,
+    roleResults: [PiWorkflowRoleResult]
+  ) throws {
+    let expectedRoles: [PiWorkflowRole] = [
+      .writer, .architecture, .security, .test, .synthesis,
+    ]
+    let commandDigests = commands.map(\.definitionDigest).sorted()
+    guard !complexity.isHumanOwned,
+      GitHubInputValidation.validSHA256(candidatePlanDigest),
+      roleResults.map(\.role) == expectedRoles,
+      Set(roleResults.map(\.recordSHA256)).count == roleResults.count,
+      roleResults.allSatisfy({ result in
+        result.workflow == .planning
+          && result.artifactSHA256 == artifactSHA256
+          && result.approvedCommandIDs.isEmpty
+          && GitHubInputValidation.validSHA256(result.recordSHA256)
+      })
+    else {
+      throw VerificationCommandError.invalidPlan
+    }
+    var reports: [ComplexityReport] = []
+    for result in roleResults {
+      guard case .planning(let payload) = result.payload,
+        payload.verdict == "pass",
+        payload.severity.rank < PiWorkflowReportSeverity.major.rank,
+        !payload.findings.contains(where: {
+          $0.severity == .critical || $0.severity == .major
+        })
+      else {
+        throw VerificationCommandError.invalidPlan
+      }
+      if result.role == .writer {
+        let proposed = try ApprovedCommandCanonicalizer.canonicalize(
+          payload.commandDefinitions
+        )
+        guard payload.approvedPlanDigest == nil,
+          payload.approvedCommandDigests.isEmpty,
+          payload.planMarkdown == planMarkdown,
+          proposed == commands
+        else {
+          throw VerificationCommandError.invalidPlan
+        }
+      } else {
+        guard payload.commandDefinitions.isEmpty,
+          payload.approvedPlanDigest == candidatePlanDigest,
+          payload.approvedCommandDigests.sorted() == commandDigests
+        else {
+          throw VerificationCommandError.invalidPlan
+        }
+      }
+      reports.append(
+        ComplexityReport(
+          reporter: result.role,
+          proposed: payload.proposedComplexity,
+          facts: payload.classifierFacts,
+          evidence: payload.evidence
+        )
+      )
+    }
+    guard try ComplexityClassifier.classify(reports) == complexity else {
+      throw VerificationCommandError.invalidPlan
+    }
+  }
+
+  private static func digest(
+    candidatePlanDigest: String,
+    complexity: ComplexityDecision,
+    roleResults: [PiWorkflowRoleResult]
+  ) -> String {
+    var fields = [
+      "schemaVersion", "1",
+      "candidatePlanDigest", candidatePlanDigest,
+      "complexityDecisionDigest", complexity.digest,
+      "roleResultCount", String(roleResults.count),
+    ]
+    for (index, result) in roleResults.enumerated() {
+      fields += [
+        "roleResultIndex", String(index),
+        "workflow", result.workflow.rawValue,
+        "role", result.role.rawValue,
+        "artifactSHA256", result.artifactSHA256,
+        "recordSHA256", result.recordSHA256,
+      ]
+    }
+    let framed = fields.map { "\($0.utf8.count):\($0)" }.joined(separator: "|")
+    return SHA256.hash(data: Data(framed.utf8))
+      .map { String(format: "%02x", $0) }.joined()
+  }
+}
+
+public struct FrozenCommandPlan: Equatable, Sendable {
+  public let digest: String
+  public let artifactSHA256: String
+  public let classifierVersion: String
+  public let planningDecision: FrozenPlanningDecision?
+  public let planMarkdown: String
+  public let commandOrder: [String]
   public let commands: [String: ApprovedCommand]
 
-  public init(commands: [ApprovedCommand], expectedDigest: String) throws {
-    guard !commands.isEmpty,
+  public var planningDecisionSHA256: String? { planningDecision?.digest }
+
+  public init(
+    artifactSHA256: String,
+    planMarkdown: String,
+    commands: [ApprovedCommand],
+    planningDecision: FrozenPlanningDecision?,
+    expectedDigest: String,
+    classifierVersion: String = ComplexityDecision.classifierVersion
+  ) throws {
+    guard GitHubInputValidation.validSHA256(artifactSHA256),
+      classifierVersion == ComplexityDecision.classifierVersion,
+      !planMarkdown.isEmpty,
+      planMarkdown.utf8.count <= 262_144,
+      !commands.isEmpty,
       Set(commands.map(\.id)).count == commands.count,
       GitHubInputValidation.validSHA256(expectedDigest)
     else {
       throw VerificationCommandError.invalidPlan
     }
-    let values = Dictionary(uniqueKeysWithValues: commands.map { ($0.id, $0) })
-    let observed = Self.digest(commands: commands)
+    for command in commands {
+      try VerificationCommandRunner.validateDefinition(command)
+      let observedDefinition = ApprovedCommand.digest(
+        id: command.id,
+        registryKind: command.registryKind,
+        executableOrRepositoryScript: command.executableOrRepositoryScript,
+        arguments: command.arguments,
+        workingDirectory: command.workingDirectory,
+        environmentOverrides: command.environmentOverrides,
+        timeoutSeconds: command.timeoutSeconds,
+        rationale: command.rationale,
+        sourceDigest: command.sourceDigest,
+        approvedHookPath: command.approvedHookPath
+      )
+      guard observedDefinition == command.definitionDigest else {
+        throw VerificationCommandError.definitionDigestMismatch
+      }
+    }
+    let observed = Self.digest(
+      artifactSHA256: artifactSHA256,
+      planMarkdown: planMarkdown,
+      commands: commands,
+      planningDecision: planningDecision,
+      classifierVersion: classifierVersion
+    )
     guard observed == expectedDigest else {
       throw VerificationCommandError.planDigestMismatch
     }
     digest = expectedDigest
-    self.commands = values
+    self.artifactSHA256 = artifactSHA256
+    if let planningDecision {
+      try planningDecision.validate(
+        artifactSHA256: artifactSHA256,
+        planMarkdown: planMarkdown,
+        commands: commands
+      )
+      let candidateDigest = Self.digest(
+        artifactSHA256: artifactSHA256,
+        planMarkdown: planMarkdown,
+        commands: commands,
+        planningDecision: nil,
+        classifierVersion: classifierVersion
+      )
+      guard planningDecision.candidatePlanDigest == candidateDigest else {
+        throw VerificationCommandError.invalidPlan
+      }
+    }
+    self.classifierVersion = classifierVersion
+    self.planningDecision = planningDecision
+    self.planMarkdown = planMarkdown
+    commandOrder = commands.map(\.id)
+    self.commands = Dictionary(uniqueKeysWithValues: commands.map { ($0.id, $0) })
   }
 
-  public static func digest(commands: [ApprovedCommand]) -> String {
-    let framed = commands.sorted { $0.id < $1.id }.map {
-      "\($0.id.utf8.count):\($0.id):\($0.definitionDigest)"
-    }.joined(separator: "|")
+  public func validateFinalPlanningDecision() throws {
+    guard let planningDecision else { throw VerificationCommandError.invalidPlan }
+    let orderedCommands = commandOrder.compactMap { commands[$0] }
+    guard orderedCommands.count == commandOrder.count else {
+      throw VerificationCommandError.invalidPlan
+    }
+    try planningDecision.validate(
+      artifactSHA256: artifactSHA256,
+      planMarkdown: planMarkdown,
+      commands: orderedCommands
+    )
+    let candidateDigest = Self.digest(
+      artifactSHA256: artifactSHA256,
+      planMarkdown: planMarkdown,
+      commands: orderedCommands,
+      planningDecision: nil,
+      classifierVersion: classifierVersion
+    )
+    guard planningDecision.candidatePlanDigest == candidateDigest,
+      digest
+        == Self.digest(
+          artifactSHA256: artifactSHA256,
+          planMarkdown: planMarkdown,
+          commands: orderedCommands,
+          planningDecision: planningDecision,
+          classifierVersion: classifierVersion
+        )
+    else {
+      throw VerificationCommandError.invalidPlan
+    }
+  }
+
+  public static func digest(
+    artifactSHA256: String,
+    planMarkdown: String,
+    commands: [ApprovedCommand],
+    planningDecision: FrozenPlanningDecision?,
+    classifierVersion: String = ComplexityDecision.classifierVersion
+  ) -> String {
+    var fields = [
+      "schemaVersion", "2",
+      "artifactSHA256", artifactSHA256,
+      "classifierVersion", classifierVersion,
+      "planningDecisionSHA256", planningDecision?.digest ?? "pending",
+      "planMarkdown", planMarkdown,
+      "commandCount", String(commands.count),
+    ]
+    for (index, command) in commands.enumerated() {
+      fields.append("commandIndex")
+      fields.append(String(index))
+      fields.append("commandID")
+      fields.append(command.id)
+      fields.append("commandDefinitionDigest")
+      fields.append(command.definitionDigest)
+    }
+    let framed = fields.map { "\($0.utf8.count):\($0)" }.joined(separator: "|")
     return SHA256.hash(data: Data(framed.utf8))
       .map { String(format: "%02x", $0) }.joined()
   }
@@ -148,6 +424,7 @@ public enum VerificationCommandError: Error, Equatable, Sendable {
   case unsafeRepositoryScript
   case sourceDigestMismatch
   case unsafeGitConfiguration
+  case unsafeGitRepository
   case commitHeadUnavailable
 }
 
@@ -175,6 +452,7 @@ public actor VerificationCommandRunner {
     plan: FrozenCommandPlan,
     workspace: URL
   ) async throws -> VerificationCommandEvidence {
+    try plan.validateFinalPlanningDecision()
     guard expectedPlanDigest == plan.digest else {
       throw VerificationCommandError.planDigestMismatch
     }
@@ -267,7 +545,8 @@ public actor VerificationCommandRunner {
     let result = try await process.run(
       GitProcessRequest(
         executable: URL(fileURLWithPath: "/usr/bin/git"),
-        arguments: ["-C", repository.path, "rev-parse", "--verify", "HEAD"],
+        arguments: try Self.gitInvocationPrefix(repository: repository)
+          + ["rev-parse", "--verify", "HEAD"],
         workingDirectory: repository,
         environment: environment,
         timeoutSeconds: 30,
@@ -341,12 +620,13 @@ public actor VerificationCommandRunner {
       }
       try Self.validateGitRead(command.arguments)
       _ = try await validateGitConfiguration(
-        repository: workingDirectory,
-        approvedHookPath: command.approvedHookPath
+        repository: workspace,
+        approvedHookPath: nil
       )
       return (
         URL(fileURLWithPath: "/usr/bin/git"),
-        ["-C", workingDirectory.path] + command.arguments
+        try Self.gitInvocationPrefix(repository: workspace)
+          + ["--no-optional-locks"] + command.arguments
       )
 
     case .gitStage:
@@ -354,8 +634,8 @@ public actor VerificationCommandRunner {
         throw VerificationCommandError.invalidCommandShape
       }
       _ = try await validateGitConfiguration(
-        repository: workingDirectory,
-        approvedHookPath: command.approvedHookPath
+        repository: workspace,
+        approvedHookPath: nil
       )
       for path in command.arguments {
         guard Self.validRelativePath(path) else {
@@ -366,7 +646,8 @@ public actor VerificationCommandRunner {
       }
       return (
         URL(fileURLWithPath: "/usr/bin/git"),
-        ["-C", workingDirectory.path, "add", "--"] + command.arguments
+        try Self.gitInvocationPrefix(repository: workspace) + ["add", "--"]
+          + command.arguments
       )
 
     case .gitCommit:
@@ -376,20 +657,104 @@ public actor VerificationCommandRunner {
         throw VerificationCommandError.invalidCommandShape
       }
       _ = try await validateGitConfiguration(
-        repository: workingDirectory,
+        repository: workspace,
         approvedHookPath: command.approvedHookPath
       )
       return (
         URL(fileURLWithPath: "/usr/bin/git"),
-        ["-C", workingDirectory.path, "commit", "-m", command.arguments[0]]
+        try Self.gitInvocationPrefix(
+          repository: workspace,
+          allowHooks: command.approvedHookPath != nil
+        ) + ["commit", "-m", command.arguments[0]]
       )
     }
+  }
+
+  private static func gitInvocationPrefix(
+    repository: URL,
+    allowHooks: Bool = false
+  ) throws -> [String] {
+    let gitDirectory = try validateGitRepositoryMetadata(repository: repository)
+    var arguments = [
+      "--git-dir=\(gitDirectory.path)",
+      "--work-tree=\(repository.path)",
+      "-c", "core.worktree=\(repository.path)",
+      "-c", "core.bare=false",
+      "-c", "core.attributesFile=/dev/null",
+      "-c", "core.excludesFile=/dev/null",
+    ]
+    if !allowHooks {
+      arguments += ["-c", "core.hooksPath=/dev/null"]
+    }
+    return arguments
+  }
+
+  private static func validateGitRepositoryMetadata(repository: URL) throws -> URL {
+    let root = repository.standardizedFileURL
+    let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL
+    let gitDirectory = root.appendingPathComponent(".git", isDirectory: true)
+    let rootValues = try gitDirectory.resourceValues(forKeys: [
+      .isDirectoryKey, .isSymbolicLinkKey,
+    ])
+    let canonicalGitDirectory = gitDirectory.resolvingSymlinksInPath().standardizedFileURL
+    guard rootValues.isDirectory == true,
+      rootValues.isSymbolicLink != true,
+      canonicalGitDirectory.path == canonicalRoot.appendingPathComponent(".git").path
+    else {
+      throw VerificationCommandError.unsafeGitRepository
+    }
+    guard
+      let enumerator = FileManager.default.enumerator(
+        at: gitDirectory,
+        includingPropertiesForKeys: [
+          .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
+        ],
+        options: []
+      )
+    else {
+      throw VerificationCommandError.unsafeGitRepository
+    }
+    var entryCount = 0
+    for case let entry as URL in enumerator {
+      entryCount += 1
+      let canonicalEntry = entry.resolvingSymlinksInPath().standardizedFileURL
+      guard entryCount <= 1_000_000,
+        canonicalEntry.path.hasPrefix(canonicalGitDirectory.path + "/")
+      else {
+        throw VerificationCommandError.unsafeGitRepository
+      }
+      let values = try entry.resourceValues(forKeys: [
+        .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
+      ])
+      guard values.isSymbolicLink != true else {
+        throw VerificationCommandError.unsafeGitRepository
+      }
+      if values.isRegularFile == true {
+        let attributes = try FileManager.default.attributesOfItem(atPath: entry.path)
+        guard (attributes[.referenceCount] as? NSNumber)?.intValue == 1 else {
+          throw VerificationCommandError.unsafeGitRepository
+        }
+      } else if values.isDirectory != true {
+        throw VerificationCommandError.unsafeGitRepository
+      }
+    }
+    for relativePath in [
+      "commondir", "objects/info/alternates", "objects/info/http-alternates",
+    ] {
+      var metadata = stat()
+      let status = lstat(gitDirectory.appendingPathComponent(relativePath).path, &metadata)
+      if status == 0 || errno != ENOENT {
+        throw VerificationCommandError.unsafeGitRepository
+      }
+    }
+    return gitDirectory
   }
 
   private func validateGitConfiguration(
     repository: URL,
     approvedHookPath: String?
   ) async throws -> String {
+    let gitDirectory = try Self.validateGitRepositoryMetadata(repository: repository)
     let environment = try CredentiallessEnvironment.make(
       developerDirectory: developerDirectory,
       homeDirectory: homeDirectory,
@@ -398,7 +763,10 @@ public actor VerificationCommandRunner {
     let result = try await process.run(
       GitProcessRequest(
         executable: URL(fileURLWithPath: "/usr/bin/git"),
-        arguments: ["-C", repository.path, "config", "--local", "--null", "--list"],
+        arguments: [
+          "config", "--file", gitDirectory.appendingPathComponent("config").path,
+          "--no-includes", "--null", "--list",
+        ],
         workingDirectory: repository,
         environment: environment,
         timeoutSeconds: 30,
@@ -423,6 +791,7 @@ public actor VerificationCommandRunner {
       throw VerificationCommandError.unsafeGitConfiguration
     }
     let records = output.split(separator: "\u{0}", omittingEmptySubsequences: true)
+    var observedHookPath: String?
     for record in records {
       let value = String(record)
       guard let separator = value.firstIndex(of: "\n") else {
@@ -444,11 +813,15 @@ public actor VerificationCommandRunner {
         guard values.isDirectory == true, values.isSymbolicLink != true else {
           throw VerificationCommandError.unsafeGitConfiguration
         }
+        observedHookPath = setting
         continue
       }
       guard Self.safeGitSetting(key: key, value: setting, repository: repository) else {
         throw VerificationCommandError.unsafeGitConfiguration
       }
+    }
+    guard observedHookPath == approvedHookPath else {
+      throw VerificationCommandError.unsafeGitConfiguration
     }
     return Self.sha256(data)
   }
@@ -485,14 +858,85 @@ public actor VerificationCommandRunner {
     }
   }
 
-  private static func validateDefinition(_ command: ApprovedCommand) throws {
+  static func validateDefinition(_ command: ApprovedCommand) throws {
+    if let hookPath = command.approvedHookPath, !validRelativePath(hookPath) {
+      throw VerificationCommandError.invalidPlan
+    }
     guard validIdentifier(command.id), GitHubInputValidation.validSHA256(command.definitionDigest),
       (1...3_600).contains(command.timeoutSeconds),
       !command.rationale.isEmpty, command.rationale.utf8.count <= 2_000,
       validRelativeDirectory(command.workingDirectory),
-      command.arguments.count <= 256
+      command.arguments.count <= 256,
+      command.environmentOverrides.allSatisfy({ key, value in
+        allowedEnvironmentKeys.contains(key) && !value.contains("\u{0}")
+          && value.utf8.count <= 4_096
+      })
     else {
       throw VerificationCommandError.invalidPlan
+    }
+    switch command.registryKind {
+    case .makeTargets:
+      guard command.executableOrRepositoryScript == "make",
+        !command.arguments.isEmpty,
+        command.arguments.allSatisfy(validMakeTarget),
+        command.sourceDigest == nil,
+        command.approvedHookPath == nil
+      else {
+        throw VerificationCommandError.invalidCommandShape
+      }
+    case .swiftBuildTest:
+      guard command.executableOrRepositoryScript == "swift",
+        command.sourceDigest == nil,
+        command.approvedHookPath == nil
+      else {
+        throw VerificationCommandError.invalidCommandShape
+      }
+      try validateSwiftArguments(command.arguments)
+    case .xcodebuildBuildTest:
+      guard command.executableOrRepositoryScript == "xcodebuild",
+        command.sourceDigest == nil,
+        command.approvedHookPath == nil
+      else {
+        throw VerificationCommandError.invalidCommandShape
+      }
+      try validateXcodebuildArguments(command.arguments)
+    case .repositoryScript:
+      guard validRelativePath(command.executableOrRepositoryScript),
+        let sourceDigest = command.sourceDigest,
+        GitHubInputValidation.validSHA256(sourceDigest),
+        command.approvedHookPath == nil
+      else {
+        throw VerificationCommandError.unsafeRepositoryScript
+      }
+      try validateOpaqueArguments(command.arguments)
+    case .gitRead:
+      guard command.executableOrRepositoryScript == "git",
+        command.workingDirectory == ".",
+        command.sourceDigest == nil,
+        command.approvedHookPath == nil
+      else {
+        throw VerificationCommandError.invalidCommandShape
+      }
+      try validateGitRead(command.arguments)
+    case .gitStage:
+      guard command.executableOrRepositoryScript == "git",
+        command.workingDirectory == ".",
+        command.sourceDigest == nil,
+        command.approvedHookPath == nil,
+        !command.arguments.isEmpty,
+        command.arguments.allSatisfy(validRelativePath)
+      else {
+        throw VerificationCommandError.invalidCommandShape
+      }
+    case .gitCommit:
+      guard command.executableOrRepositoryScript == "git",
+        command.workingDirectory == ".",
+        command.sourceDigest == nil,
+        command.arguments.count == 1,
+        validCommitMessage(command.arguments[0])
+      else {
+        throw VerificationCommandError.invalidCommandShape
+      }
     }
   }
 
@@ -682,7 +1126,9 @@ public actor VerificationCommandRunner {
       return false
     }
     return value.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
-      !$0.isEmpty && $0 != "." && $0 != ".." && $0 != ".git"
+      let lowered = $0.lowercased()
+      return !$0.isEmpty && $0 != "." && $0 != ".."
+        && lowered != ".git" && lowered != ".pi" && lowered != ".agents"
     }
   }
 

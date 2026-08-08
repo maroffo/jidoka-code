@@ -59,7 +59,7 @@ Results:
 - a real system-Git test proved the previous pre-read plus ordinary-push window could fast-forward a branch created before advertisement, then proved the packaged guard rejects that same race before transfer while the competing ref remains unchanged;
 - the packaged S4 preflight passed with Pi `0.84.0`, exact runtime digests, auth-free isolated configuration, bounded timeout and ledger checks, cleanup, and zero provider calls;
 - packaged local fixtures S5, S6, and S7 passed through the combined gate: zero credential-helper or SSH invocation, expected-old zero packet observed, race rejected without ref advance, two receive requests, 120 recovery cases, zero second creates, zero success without attribution, and cleanup verified;
-- the packaged S8 workflow preflight passed all 15 role command inventories against the settled ledger, with no credential access and zero provider calls;
+- the packaged S8 workflow preflight passed four offline command-profile checks, validated the static 15-role matrix and 15 historical settled ledger records, with no credential access and zero provider calls;
 - fresh ignored evidence was written under `build/evidence/jidoka-code-s4.THodHL/`, `build/evidence/jidoka-code-s5-s7.MdH7Ne/`, and `build/evidence/jidoka-code-s8.w29euH/`, with mode `0700/0600` and no credential payload;
 - the canonical provider ledger remained byte-identical at SHA-256 `9bb94a32fac85a75a5365ed4578f205eaf7d4a55eeddf114b16c7cf4f3f79bc5`, 19 of 19 settled attempts and one request each;
 - no provider, live GitHub, real Keychain, installer, or ServiceManagement side effect was issued.

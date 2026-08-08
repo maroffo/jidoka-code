@@ -1,0 +1,15 @@
+{"command":"prompt","id":"prompt-1","success":true,"type":"response"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"message":{"role":"user"},"type":"message_start"}
+{"message":{"role":"user"},"type":"message_end"}
+{"message":{"role":"assistant"},"type":"message_start"}
+{"assistantMessageEvent":{"contentIndex":0,"delta":"triage","type":"text_delta"},"type":"message_update"}
+{"message":{"role":"assistant"},"type":"message_end"}
+{"args":{},"toolCallId":"result-triage","toolName":"jidoka_code_result","type":"tool_execution_start"}
+{"isError":false,"result":{"details":{"approvedCommandIDs":[],"artifactSHA256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","nonce":"nonce-triage-1","payload":{"complexityGuess":"complex","hardRiskFlags":["security-or-secret-core"],"questions":["Who owns the credential migration?"],"rationale":"Credential-core work remains human-owned.","rubric":{"bounded":"The requested migration spans credential state.","safe":"Security ownership is unresolved.","specified":"The target credential format is stated.","testable":"A destructive migration cannot be safely replayed here."},"severity":"major","summary":"Escalate credential migration.","verdict":"human"},"resultSequence":1,"role":"triage","schemaVersion":1,"workflow":"issue-triage"}},"toolCallId":"result-triage","toolName":"jidoka_code_result","type":"tool_execution_end"}
+{"message":{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-triage","toolName":"jidoka_code_result"},"type":"message_start"}
+{"message":{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-triage","toolName":"jidoka_code_result"},"type":"message_end"}
+{"message":{},"toolResults":[{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-triage","toolName":"jidoka_code_result"}],"type":"turn_end"}
+{"messages":[],"type":"agent_end","willRetry":false}
+{"type":"agent_settled"}

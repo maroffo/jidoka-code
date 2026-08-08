@@ -1,0 +1,15 @@
+{"command":"prompt","id":"prompt-1","success":true,"type":"response"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"message":{"role":"user"},"type":"message_start"}
+{"message":{"role":"user"},"type":"message_end"}
+{"message":{"role":"assistant"},"type":"message_start"}
+{"assistantMessageEvent":{"contentIndex":0,"delta":"planning","type":"text_delta"},"type":"message_update"}
+{"message":{"role":"assistant"},"type":"message_end"}
+{"args":{},"toolCallId":"result-plan","toolName":"jidoka_code_result","type":"tool_execution_start"}
+{"isError":false,"result":{"details":{"approvedCommandIDs":[],"artifactSHA256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","nonce":"nonce-planning","payload":{"approvedCommandDigests":[],"approvedPlanDigest":null,"classifierFacts":{"crossModuleConcurrency":false,"crossRepositoryCoordination":false,"dataLossMigration":false,"designAlternatives":false,"humanDecisionGap":false,"infrastructureBlastRadius":false,"nonDestructiveSchema":false,"operationalRollback":false,"publicAPI":false,"releaseOrTag":false,"securityOrSecretCore":false,"unresolvedDesignDebate":false,"unverifiable":false,"workstreamCount":1},"commandDefinitions":[{"approvedHookPath":null,"arguments":["check"],"environmentOverrides":{},"executableOrRepositoryScript":"make","id":"check","rationale":"Run the frozen repository check.","registryKind":"makeTargets","sourceDigest":null,"timeoutSeconds":120,"workingDirectory":"."}],"evidence":["One localized workstream with mechanical verification."],"findings":[],"planMarkdown":"# Plan\n\nRun the bounded implementation and check target.\n","proposedComplexity":"simple","severity":"none","summary":"Bounded plan ready for review.","verdict":"pass"},"resultSequence":1,"role":"writer","schemaVersion":1,"workflow":"planning"}},"toolCallId":"result-plan","toolName":"jidoka_code_result","type":"tool_execution_end"}
+{"message":{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-plan","toolName":"jidoka_code_result"},"type":"message_start"}
+{"message":{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-plan","toolName":"jidoka_code_result"},"type":"message_end"}
+{"message":{},"toolResults":[{"content":[],"details":{},"isError":false,"role":"toolResult","timestamp":1,"toolCallId":"result-plan","toolName":"jidoka_code_result"}],"type":"turn_end"}
+{"messages":[],"type":"agent_end","willRetry":false}
+{"type":"agent_settled"}

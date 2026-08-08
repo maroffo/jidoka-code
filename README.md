@@ -25,7 +25,7 @@ pi
 # Run /login inside Pi and select a provider.
 ```
 
-W0 and W1 originally verified Pi `0.83.0`. The current compatibility policy accepts semantic versions `>=0.84.0 <0.90.0`, but still requires an exact digest allowlist entry for each installed build. Only `0.84.0` is currently attested; later versions fail closed until their runtime files pass the offline contract and are added explicitly.
+W0 and W1 originally verified Pi `0.83.0`. The current compatibility policy accepts semantic versions `>=0.84.0 <0.90.0`, but still requires an exact attestation entry for each installed build. Only `0.84.0` is currently admitted; its complete package-tree inventory and digest must match. Later versions fail closed until they pass the offline contract and are added explicitly. W5 also binds Pi's shebang to the exact Node `26.6.0` executable and attests the ordered, non-system Mach-O dynamic-library closure, including `@rpath` search order.
 
 ## Development toolchain
 
@@ -63,7 +63,7 @@ Identity signing uses hardened runtime, signs nested code before the app, and fa
 
 ## Status
 
-W1 packaged-context spikes S1-S9 are complete and Checkpoint B is accepted. W2 provides the durable SQLite core and scheduler. W3 adds the closed GitHub REST broker, Keychain token boundary, byte-exact markers and revisions, prepared-before-send mutation reconciliation, and evidence-based discovery. W4 adds app-managed Git mirrors and workspaces, packaged one-shot askpass and old-zero push guard, frozen verification commands, validated workspace import, and durable create-only branch publication. No application release or supported installation exists yet.
+W1 packaged-context spikes S1-S9 are complete and Checkpoint B is accepted. W2 provides the durable SQLite core and scheduler. W3 adds the closed GitHub REST broker, Keychain token boundary, byte-exact markers and revisions, prepared-before-send mutation reconciliation, and evidence-based discovery. W4 adds app-managed Git mirrors and workspaces, packaged one-shot askpass and old-zero push guard, frozen verification commands, validated workspace import, and durable create-only branch publication. W5 adds the bounded Pi RPC runner, app-versioned and digest-attested workflow resources, app-owned exact-path file tools, a closed credentialless query surface, deterministic complexity authority, fresh reviewer routing, same-session writer revision, complexity- and approval-bound frozen plans, exact command execution, and fake-provider replay. No application release or supported installation exists yet.
 
 The active implementation plan is:
 
@@ -73,8 +73,9 @@ The evidence reports record executable verification, provider-call accounting, c
 
 - [`docs/evidence/spike-report.md`](docs/evidence/spike-report.md)
 - [`docs/evidence/w4-git-transport-report.md`](docs/evidence/w4-git-transport-report.md)
+- [`docs/evidence/w5-pi-workflows-report.md`](docs/evidence/w5-pi-workflows-report.md)
 
-The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. W5-W9 remain unimplemented; the broker and Git transport have no live credential or GitHub canary evidence and are not yet connected to production job coordinators, Pi workflows, or the menu-bar UI.
+The selected W1 topology is the signed LaunchAgent helper. The in-process monolith probe was removed after it failed the crash-restart threshold. W6-W9 remain unimplemented; the broker, Git transport, and W5 workflow engine have no live credential or GitHub canary evidence and are not yet connected through production job coordinators or the menu-bar UI.
 
 ## Scope boundary
 

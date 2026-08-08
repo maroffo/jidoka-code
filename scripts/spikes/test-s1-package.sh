@@ -191,8 +191,12 @@ readonly MUTATED_APP="$TEMP_ROOT/Jidoka Code Mutated.app"
 readonly MUTATED_RUNNER_APP="$TEMP_ROOT/Jidoka Code Runner Mutated.app"
 readonly MUTATED_ATTESTATION_APP="$TEMP_ROOT/Jidoka Code Attestation Mutated.app"
 readonly MUTATED_POLICY_APP="$TEMP_ROOT/Jidoka Code Policy Mutated.app"
+readonly MUTATED_WORKFLOW_APP="$TEMP_ROOT/Jidoka Code Workflow Mutated.app"
 
 "$ROOT/scripts/package-app.sh"
+JIDOKA_PI_RESOURCE_ROOT="$SOURCE_APP/Contents/Resources/Pi" \
+    /opt/homebrew/Cellar/node/26.6.0/bin/node \
+    "$ROOT/scripts/tests/test-jidoka-extension-rpc.mjs"
 
 /usr/bin/plutil -lint "$SOURCE_APP/Contents/Info.plist"
 [[ "$(/usr/bin/plutil -extract CFBundleIdentifier raw "$SOURCE_APP/Contents/Info.plist")" == \
@@ -216,10 +220,13 @@ expected_inventory="$(cat <<'EOF'
 ./Contents/Resources
 ./Contents/Resources/Pi
 ./Contents/Resources/Pi/extensions
+./Contents/Resources/Pi/extensions/jidoka-code.ts
 ./Contents/Resources/Pi/extensions/jidoka-deny-user-bash.js
 ./Contents/Resources/Pi/extensions/jidoka-runtime.ts
 ./Contents/Resources/Pi/manifest.json
 ./Contents/Resources/Pi/runtime
+./Contents/Resources/Pi/runtime/jidoka-extension-contract.mjs
+./Contents/Resources/Pi/runtime/node-runtime-builds.json
 ./Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs
 ./Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs
 ./Contents/Resources/Pi/runtime/pi-runtime-attestation.mjs
@@ -233,6 +240,15 @@ expected_inventory="$(cat <<'EOF'
 ./Contents/Resources/Pi/skills/jidoka-code-plan/SKILL.md
 ./Contents/Resources/Pi/skills/jidoka-code-pr-review
 ./Contents/Resources/Pi/skills/jidoka-code-pr-review/SKILL.md
+./Contents/Resources/Pi/skills/jidoka-code-review-architecture
+./Contents/Resources/Pi/skills/jidoka-code-review-architecture/SKILL.md
+./Contents/Resources/Pi/skills/jidoka-code-review-security
+./Contents/Resources/Pi/skills/jidoka-code-review-security/SKILL.md
+./Contents/Resources/Pi/skills/jidoka-code-review-test
+./Contents/Resources/Pi/skills/jidoka-code-review-test/SKILL.md
+./Contents/Resources/Pi/skills/jidoka-code-synthesize
+./Contents/Resources/Pi/skills/jidoka-code-synthesize/SKILL.md
+./Contents/Resources/Pi/workflow-resources.json
 ./Contents/Resources/Pi/workflow-skills
 ./Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity
 ./Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity/SKILL.md
@@ -273,35 +289,59 @@ assert_resource_digest() {
         "$expected_digest" ]] || fail "packaged Pi resource digest differs: $relative_path"
 }
 assert_resource_digest \
+    workflow-resources.json \
+    20362f6bb3e1a961cc15f560513ed25d240c6e1b77b4ce7db0f8258b2c0016be
+assert_resource_digest \
+    extensions/jidoka-code.ts \
+    3312c65c0cb607f14012a75aad31062eebf817724e807cab4ed4379c31752c0b
+assert_resource_digest \
     extensions/jidoka-deny-user-bash.js \
     ba18988ad739c592920555515ee246e07d325f0e90df345a61de4e7f41a24995
 assert_resource_digest \
     extensions/jidoka-runtime.ts \
     b6bae1cb282d95b3c1a3e6e4f37c5b967aa5bd3885ec3050c5d7bddb72b4a19b
 assert_resource_digest \
+    runtime/jidoka-extension-contract.mjs \
+    1a2a90b0b53bf68ead774b34b3b90045bd1ca8ffacf3f3a462b520a86d6498f8
+assert_resource_digest \
+    runtime/node-runtime-builds.json \
+    fd707070911b53f3930864c3ec6dcfabc7b4440bcf44c3012882751fb99bf906
+assert_resource_digest \
     runtime/pi-rpc-profile-probe.mjs \
-    3442ce513d1787cf7bffff6d6af7e4647c1ef9ff38eb203bdf5b7dbe8d5c2c30
+    a972045017dac2a0ee32478fd4f63ac0c51da7f738acd8994de58df5dfe92f2f
 assert_resource_digest \
     runtime/pi-rpc-workflow-probe.mjs \
-    bb351854777b033e9a0a319103fbab05b45e55be77adb28eadb6cb9525440b86
+    bba864cfe69d5f5f8ebac05fce1e86da3ff5276577246e612a5003f6bbf7a9cb
 assert_resource_digest \
     runtime/pi-runtime-attestation.mjs \
-    b11b3015c528ca7b18148ee45a29f02bb9920f92f73c1d13dae82b5d7f8082de
+    a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e
 assert_resource_digest \
     runtime/pi-runtime-builds.json \
-    c4e08dd03294cf3dcd0806f5331817dc836c3cf7d7cca5d0f7e970fe36362484
+    eeea3f11e4e352f2b772424dea1dd85273d7af559c6e9e69ff280abac9681f27
 assert_resource_digest \
     skills/jidoka-code-issue-triage/SKILL.md \
-    04b3b248a86dffbde0a543ddf1276f7515454fa7311347f317ff980d5ad9c5f6
+    c4200a92833135446a61f374467aeb8f35e4a25826fe7b34baa016c206c46f0f
 assert_resource_digest \
     skills/jidoka-code-orchestrate/SKILL.md \
-    7a7339c25f27134c443d389472c404a0e9ae161ddb826ee3b13921ee76522a22
+    4a6f1b39c86b21b820144c5dbb7fea5ea4f8ee4f8c5ea41a0f01a5ab9850ca07
 assert_resource_digest \
     skills/jidoka-code-plan/SKILL.md \
-    71fc244807117d61d2f335d7120c19e1d08bb04eab095013a86a3eaeb9bdfad9
+    251874083bfba1dd5ed9334200efced1bdab18518fb16e9dd3f43c270456564c
 assert_resource_digest \
     skills/jidoka-code-pr-review/SKILL.md \
-    3ec091bfc47124074ccf01496078460be9b1b42c01d5636d10ac6288930e832d
+    7e3af39ff6e211aa9c3d85c935eb7ff991ec88c9f0df9b152df2ef3977fa409b
+assert_resource_digest \
+    skills/jidoka-code-review-architecture/SKILL.md \
+    0ce9a9b66333f01714c5998624de5417f07590938c5ea0a9a1f9784941cc9213
+assert_resource_digest \
+    skills/jidoka-code-review-security/SKILL.md \
+    017c72a2f853096296aacca334bcb692feb4347f43be6f0ccdb3e1a36b7cb9da
+assert_resource_digest \
+    skills/jidoka-code-review-test/SKILL.md \
+    f67f49f3d2c668da2342457e76902448355bdaf84eab1e5a66bf9fc79e217fc1
+assert_resource_digest \
+    skills/jidoka-code-synthesize/SKILL.md \
+    abc9d42fcf495e7700feb02ae1362c7c382d029dd5d435de390bd864e669786d
 assert_resource_digest \
     workflow-skills/jidoka-code-orchestration-fidelity/SKILL.md \
     b836936c3b9f4b262669e51191f207b87d406f3a9add4e6bc091c182e18be79c
@@ -323,8 +363,12 @@ for path in \
     "$SOURCE_APP/Contents/Info.plist" \
     "$launch_agent_plist" \
     "$SOURCE_APP/Contents/Resources/Pi/manifest.json" \
+    "$SOURCE_APP/Contents/Resources/Pi/workflow-resources.json" \
+    "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-code.ts" \
     "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-deny-user-bash.js" \
     "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-runtime.ts" \
+    "$SOURCE_APP/Contents/Resources/Pi/runtime/jidoka-extension-contract.mjs" \
+    "$SOURCE_APP/Contents/Resources/Pi/runtime/node-runtime-builds.json" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-runtime-attestation.mjs" \
@@ -333,6 +377,10 @@ for path in \
     "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-orchestrate/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-plan/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-pr-review/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-review-architecture/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-review-security/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-review-test/SKILL.md" \
+    "$SOURCE_APP/Contents/Resources/Pi/skills/jidoka-code-synthesize/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-planning-fidelity/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity/SKILL.md" \
@@ -485,6 +533,19 @@ printf '\n' >>"$MUTATED_POLICY_APP/Contents/Resources/Pi/runtime/pi-runtime-buil
 /usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe \
     "$MUTATED_POLICY_APP"
 assert_pi_policy_failure "$MUTATED_POLICY_APP"
+
+/usr/bin/ditto "$COPIED_APP" "$MUTATED_WORKFLOW_APP"
+printf '\n' \
+    >>"$MUTATED_WORKFLOW_APP/Contents/Resources/Pi/skills/jidoka-code-plan/SKILL.md"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe \
+    "$MUTATED_WORKFLOW_APP"
+if JIDOKA_PI_RESOURCE_ROOT="$MUTATED_WORKFLOW_APP/Contents/Resources/Pi" \
+    /opt/homebrew/Cellar/node/26.6.0/bin/node \
+    "$ROOT/scripts/tests/test-jidoka-extension-rpc.mjs" \
+    >"$TEMP_ROOT/mutated-workflow.stdout" 2>"$TEMP_ROOT/mutated-workflow.stderr"
+then
+    fail "mutated packaged workflow resource passed extension attestation"
+fi
 
 printf 'S1 package E2E: PASS\n'
 printf 'app_minos=%s engine_minos=%s askpass_minos=%s push_guard_minos=%s\n' \

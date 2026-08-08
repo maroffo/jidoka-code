@@ -109,7 +109,7 @@ Append only. Reverse a decision with a new row that names the superseded row.
 | 43 | Pi compatibility iniziale | Fail-closed su exact Pi `0.83.0`; ampliare il range solo con contract test delle versioni boundary | È l’unica versione osservata | almeno due versioni boundary passano la stessa suite |
 | 44 | Verification execution | `VerificationCommandRunner` credentialless, argv-only, cwd-contained e plan-digest-bound | I comandi DoD e gli hook sono un secondo execution boundary | un repo richiede una capability incompatibile e project owner la approva |
 | 45 | Remote branch creation | W1 deve provare CAS create-only atomico; se l’unico meccanismo usa force-class semantics, stop e decisione project owner | Evita race tra read e push e preserva “never force-push” | Git/GitHub offre una primitive documentata equivalente |
-| 46 | Pi execution tools, supersedes la parte command-gate di #14 | Nessun generic Bash; fixed read-only workspace query, read/edit/write per ruolo e result tool | Impedisce bypass del command runner e remote command path | un workflow indispensabile non è esprimibile e project owner approva una nuova registry capability |
+| 46 | Pi execution tools, supersedes la parte command-gate di #14 | Nessun generic Bash o file tool built-in; `jidoka_code_read/edit/write` exact-path app-owned, fixed read-only workspace query e result tool per ruolo | Impedisce alias path, bootstrap di tool non attestati, bypass del command runner e remote command path | un workflow indispensabile non è esprimibile e project owner approva una nuova registry capability |
 | 47 | Ambiguous object disposition | Stessa job/object revision non viene rediscovered dopo unknown create; late read o humanRetryAuthorized soltanto | Evita duplicate indirette attraverso poll/restart | GitHub offre idempotency key documentata |
 | 48 | Complexity authority | Deterministic max severity dopo plan review; unknown/disagreement è complex, hard rail è humanOwned | Il triage guess non può bypassare `plan:approved` | rubric versionata cambia con evidence |
 | 49 | Contract bump and review identity | Un contract/app/skill bump non rivede lo stesso PR head SHA e non azzera disposition | Decisione #23 è contract-independent | project owner autorizza esplicitamente una one-off re-review campaign |
@@ -386,13 +386,13 @@ Invocazione concettuale, con path canonici risolti dal preflight:
 ```
 
 - Impostare `PI_SKIP_VERSION_CHECK=1`; nessun update check estraneo al job.
-- Il preflight risolve symlink Pi, shebang e Node, verifica semver contro un manifest di compatibilità bundled, lancia RPC nel contesto pacchettizzato, chiama `get_commands` e controlla path/provenance della sola skill esplicita.
+- Il preflight risolve symlink Pi, shebang e Node, verifica semver e intero package tree Pi contro il manifest bundled, attesta executable e closure Mach-O non-system Node nell'ordine dyld, lancia RPC nel contesto pacchettizzato, chiama `get_commands` e controlla path/provenance della sola skill esplicita.
 - Un probe modello schema-valid verifica anche auth reale. Un modello non autenticato disabilita soltanto i job associati e mostra errore actionable; non produce skip terminali.
 - Parser JSONL custom su byte LF, limite record, stderr separato, backpressure, timeout, abort RPC, grace period e terminate process tree.
 - `prompt success` registra `accepted`; soltanto `agent_settled`, assenza di `extension_error`, un unico result schema-valid e digest artifact possono registrare `settled` e successo.
 - Sessioni nuove per triage, reviewer e review post-open. Ripresa di una writer session soltanto all’interno dello stesso job e round, mai come prova di recovery dopo mutation ambigua.
 - L’estensione registra `jidoka_code_preflight`, `jidoka_code_workspace_query` e `jidoka_code_result`. `jidoka_code_result` usa schema specifico per job, approved command ids, nonce non segreto ma univoco, artifact digest e `terminate: true`.
-- Tool allowlist reviewer: read/find/grep/ls, fixed workspace query e result. Planning/implementation writer aggiungono edit/write. Generic Bash, broker e GitHub tool non sono attivi; `get_state/get_commands` e extension attestation lo provano.
+- Tool allowlist reviewer: `jidoka_code_preflight`, `jidoka_code_read`, fixed `jidoka_code_workspace_query` e `jidoka_code_result`. Planning/implementation writer aggiungono `jidoka_code_edit/write`. I built-in read/find/grep/ls/edit/write, generic Bash, broker e GitHub tool non sono attivi; `get_state/get_commands`, tool lifecycle RPC ed extension attestation lo provano.
 
 ### Scheduler and polling contract
 
@@ -607,22 +607,24 @@ Pass/falsifier/disposition normativi:
 
 - Scope: `Sources/JidokaCodeCore/Pi/`, `Resources/Pi/`, golden fixture e contract test.
 - Excluded: global `~/.pi` modification e project-local extension loading.
-- [ ] Implementare resolver Pi/Node robusto per Finder/launchd, compatibility manifest e actionable preflight.
-- [ ] Implementare RPC byte parser LF, correlation, event stream, result extraction, timeout, abort e process-tree cleanup.
-- [ ] Implementare extension `jidoka-code.ts`: resource attestation, generic Bash inattivo, fixed read-only workspace-query, write/edit path gate, approved-command-id result schema e terminal result.
-- [ ] Scrivere skill app-specific: `jidoka-code-pr-review`, `jidoka-code-issue-triage`, `jidoka-code-plan`, `jidoka-code-orchestrate`, reviewer roles e synthesizer. Ogni skill dichiara GitHub input come untrusted data e vieta side effect remote.
-- [ ] PR review router preserva commit narrative, domain routing, evidence e output format; synthesis non trasmette raw reviewer output al broker.
-- [ ] Planning router esegue writer più architecture/security/test fresh-context e synthesis, massimo 3 round. Il planner può proporre command definitions soltanto dai registry kind bundled; engine valida/canonicalizza in `ApprovedCommand`, reviewer approva definition/source digest e poi congela il plan digest.
-- [ ] Orchestration router mantiene un writer e può richiedere soltanto approved command id già congelati; non emette/modifica argv. Engine usa il command runner per checks, review routing, fix e re-verify massimo 3 round.
-- [ ] Triage schema include rubric completa, hard-risk flags, verdict, rationale, questions e non-authoritative complexity guess. Planning/reviewer schema include authoritative classifier flags/evidence.
-- [ ] Implementare deterministic complexity aggregation e fixture simple/moderate/complex/humanOwned/disagreement/unknown/downgrade.
-- [ ] Contract test controlla provenance path/hash, exact tool allowlist per role, generic Bash assente, workspace-query enum, nessun `gh`/broker tool e nessun secret env.
-- [ ] Golden E2E W5/W6 usa deterministic fake provider e replay dei transcript S8 per default; output non strutturato, extension error o `agent_settled` mancante fallisce. Qualunque nuovo real-provider run oltre CHECKPOINT A richiede un nuovo checkpoint con exact provider/model/payload/call cap/costo.
+- [x] Implementare resolver Pi/Node robusto per Finder/launchd, compatibility manifest, intero package-tree Pi, exact ordered Mach-O closure Node e actionable preflight.
+- [x] Implementare RPC byte parser LF, correlation, causal tool lifecycle, strict prompt/result/end/settled ordering, SIGPIPE-safe full-duplex I/O, exit-status validation, timeout, abort e process-tree cleanup.
+- [x] Implementare extension `jidoka-code.ts`: resource attestation, generic Bash e file/discovery built-in inattivi, file tool app-owned exact-path/no-follow, fixed read-only workspace-query con metadata prune, approved-command-id result schema e terminal result.
+- [x] Scrivere skill app-specific: `jidoka-code-pr-review`, `jidoka-code-issue-triage`, `jidoka-code-plan`, `jidoka-code-orchestrate`, reviewer roles e synthesizer. Ogni skill dichiara GitHub input come untrusted data e vieta side effect remote.
+- [x] PR review router preserva commit narrative, domain routing, evidence e output format; synthesis non trasmette raw reviewer output al broker.
+- [x] Planning router esegue writer più architecture/security/test fresh-context e synthesis, massimo 3 round. Il planner può proporre command definitions soltanto dai registry kind bundled; engine valida/canonicalizza in `ApprovedCommand`, reviewer approva candidate plan e definition/source digest, poi l'identità finale lega plan bytes, comandi ordinati, decisione di complessità completa e record di approvazione.
+- [x] Orchestration router mantiene un writer e richiede l'intera sequenza ordinata di approved command id già congelati; non emette/modifica argv. Un veto writer esegue zero comandi, un comando fallito ferma i successivi, e l'engine usa il command runner per checks, review routing, fix e re-verify massimo 3 round.
+- [x] Triage schema include rubric completa, hard-risk flags, verdict, rationale, questions e non-authoritative complexity guess. Planning/reviewer schema include authoritative classifier flags/evidence.
+- [x] Implementare deterministic complexity aggregation e fixture simple/moderate/complex/humanOwned/disagreement/unknown/downgrade.
+- [x] Contract test controlla provenance path/hash, exact tool allowlist per role, generic Bash assente, workspace-query enum, nessun `gh`/broker tool e nessun secret env.
+- [x] Golden E2E W5/W6 usa deterministic fake provider e replay dei transcript S8 per default; output non strutturato, extension error o `agent_settled` mancante fallisce. Qualunque nuovo real-provider run oltre CHECKPOINT A richiede un nuovo checkpoint con exact provider/model/payload/call cap/costo.
 
 ### W6: End-to-end job coordinators
 
 - Scope: `Sources/JidokaCodeCore/Jobs/`, integration test.
 - Excluded: SwiftUI rendering.
+- [ ] Implementare un preparer che fornisce soltanto dati applicativi compatibili con il launch descriptor canonico W5; `PiRPCWorkflowExecutor` deve continuare a risolvere runtime, catalogo, argv, environment, provenance, config, workspace e sessione prima del runner.
+- [ ] Derivare per ogni PR l'esatto set commit REST e, indipendentemente, il set base-to-head dal clone fetched; passarli entrambi al router W5 insieme a base/head e narrativa topologica completa.
 - [ ] Implementare PR review job dalla discovery al marker read-back e `reviewed_revisions`.
 - [ ] Implementare issue triage job con marker, verdict label e veto persistence.
 - [ ] Implementare ready claim e approved-complex claim come step/generation distinti, plan artifact, complex wait/resume/staleness, approval consumption e cleanup.
@@ -818,7 +820,10 @@ Pass/falsifier/disposition normativi:
 - [x] W3 GitHub broker and operation reconciliation.
 - [x] 2026-08-06: W4 repository/Git transport implementato su `feat/jidoka-code-w4-git-transport`: mirror e workspace app-managed, review exact-SHA, submodule localizzati, askpass packaged one-shot, pre-push old-zero guard, command registry frozen, import verificato e publication CAS durevole. `make check`, package E2E, ASan, TSan e preflight S4/S5-S7/S8 passano con Pi `0.84.0`, senza provider, credenziali reali o GitHub live.
 - [x] W4 repository store, Git transport and exact publication.
-- [ ] W5-W8 implementation.
+- [x] 2026-08-07: W5 Pi runner e workflow app-versioned implementati su `feat/jidoka-code-w5-pi-workflows` da `origin/main@23037624`: resolver Pi/Node attestato, RPC full-duplex bounded, estensione e skill packaged, router review/triage/planning/orchestration, classifier deterministico e replay fake-provider. Verifica locale offline documentata in `docs/evidence/w5-pi-workflows-report.md`; zero provider, credenziali reali o GitHub live.
+- [x] 2026-08-07: review indipendenti hanno riprodotto blocker non coperti dai primi gate: SIGPIPE, alias read, bootstrap find/grep, piano non vincolato, veto/synthesis/command order, causalità e status RPC, package/dylib closure, metadata case/nested, lifecycle reale Pi post-result, late child PGID e preparer arbitrario. Tutti hanno ricevuto falsificatori permanenti. Un secondo ciclo ha inoltre chiuso lifecycle iniziale/multi-turn, decisione planning opaca, hard link e fixture processi scheduling-sensitive; la matrice finale offline passa XCTest 1/1 e Swift Testing 232/232 in 38 suite, package E2E, S4/S8 con `providerCalls=0`, ASan e TSan.
+- [x] W5 Pi runner and app-versioned workflows.
+- [ ] W6-W8 implementation.
 - [ ] W9 final verification, review e canary autorizzato.
 
 ## Surprises and discoveries
@@ -854,6 +859,25 @@ Pass/falsifier/disposition normativi:
 - Il socket Unix askpass ha un limite di path molto inferiore ai path temporanei standard di macOS; il provider richiede una directory privata breve e fallisce prima di esporre il token.
 - Il system Pi è avanzato esternamente a `0.84.0` e include breaking changes RPC. La decisione #54 accetta il range `>=0.84.0 <0.90.0` senza fiducia semver cieca: solo build con digest esatti nell'allowlist packaged possono partire; oggi è presente soltanto `0.84.0`.
 - Il packet trace old-zero da solo copriva soltanto la race dopo advertisement: una ref fast-forwardable apparsa prima dell'advertisement veniva avanzata dall'ordinary push. W4 aggiunge un helper pre-push compilato che rifiuta ogni old SHA nonzero prima del transfer; la CAS old-zero del receive copre la finestra successiva.
+- Il Pi RPC writer può inviare prompt molto più grandi della pipe. W5 rende anche stdin nonblocking e include il write nel deadline monotonic; un fake child che smette di leggere non può bloccare il runner oltre timeout, abort e cleanup bounded.
+- Un digest che concatenava argomenti e environment senza domain count permetteva collisioni semantiche. W5 usa framing tipizzato con count e indice prima che reviewer e plan congelino la definizione.
+- Pi `0.84.0` emette dopo il terminal tool end anche il tool-result `message_start/message_end` e `turn_end`; saltare quel suffisso rendeva impossibile un risultato reale. La state machine e le fixture ora richiedono l'ordine completo.
+- Per `@rpath`, attestare un candidato valido successivo non basta: dyld carica il primo file esistente. Resolver Swift e probe JS falliscono sul primo shadow non allowlisted.
+- Un leader può uscire subito dopo `agent_settled` lasciando un child non ancora osservato nello stesso PGID. Il cleanup ora termina sempre il process group dedicato prima della verifica finale.
+- I pathspec Git root-only non escludono metadata nested mixed-case. Status e diff usano exclusion `glob,icase` a ogni profondità; search/list applicano prune app-owned equivalente.
+- Containment lessicale, `realpath` e `O_NOFOLLOW` non fermano un hard link verso un inode esterno. Read/edit/search rifiutano file regolari con `nlink != 1` e il contratto contiene un falsificatore con sentinel esterno.
+- Un hash planning non opaco non dimostra approvazione. Il piano finale contiene la decisione di complessità e i cinque role result ordinati; constructor, orchestration e command runner rivalidano candidate digest, payload, command definitions, approval digests e record identity.
+- Le deadline da 0.2/0.3 secondi misuravano anche startup Node e potevano scadere prima del falsificatore. Le fixture pubblicano readiness prima del blocco e usano tre secondi; gli eventi fixture usano write sincrone prima dell'exit. Il runner ridrena output/error dopo aver osservato l'exit prima di classificare un settlement mancante. La suite processi passa dieci ripetizioni standard e dieci ASan consecutive oltre ai gate completi.
+- `humanOwned` deve restare non eseguibile anche se cinque payload appaiono coerenti e `pass`. La validazione strutturale del planning decision lo rifiuta prima di creare un piano finale, oltre al gate del planning router.
+- Una sequenza PR oldest-first non è necessariamente una catena lineare: merge e branch sibling sono validi. Il digest ora richiede ordine topologico dei parent inclusi e raggiungibilità di tutti i commit dalla head esatta.
+- Verificare solo il file finale di una skill permette ancestor symlink. Swift apre ogni componente con `openat` no-follow e richiede `nlink == 1`; il contratto JS applica lo stesso vincolo a manifest e risorse.
+- Bloccare hard link in read/search non protegge `git diff`, che legge direttamente il working tree. Ogni diff esegue prima un inventario bounded e rifiuta qualsiasi file regolare multiply linked.
+- Prunare `.git` dall'output non vincola la repository che Git scopre. Query e command gate richiedono `.git` directory interna, metadata recursively contained, nessun hard/symlink, common-dir, alternates, include o `core.worktree`, poi usano git-dir/work-tree espliciti.
+- `--no-ext-diff` e `--no-textconv` non disattivano i clean filter. Prima di Git, il contratto legge la config locale con includes disabilitati e ammette soltanto le chiavi benign allowlisted; un filter che scrive un marker viene rifiutato prima dello spawn.
+- Anche `git status` può eseguire `post-index-change` durante refresh. Git read/stage forzano `core.hooksPath=/dev/null`, read aggiunge `--no-optional-locks`; solo commit può abilitare un path hook esatto, presente in config e approvato nel piano.
+- Head-last e topologia non provano completezza della narrativa. Il router richiede ora base/head, uguaglianza esatta tra set narrativa, commit REST e traversal Git fetched, e almeno un percorso parent dalla head alla base dichiarata; W6 deve produrre le due fonti indipendentemente.
+- Una query `find` con path `-delete` e un Git diff con textconv/config locale sono execution surfaces, non semplici letture. W5 prefissa path relativi ostili, disabilita textconv, fsmonitor, hook, external diff e optional locks, e prova che il file `-delete` sopravvive.
+- Le risorse installate possono essere root-owned, mentre configurazione, workspace e directory Pi temporanee devono essere user-owned e private. L'attestation W5 distingue esplicitamente i due trust boundary.
 
 ## Execution decisions
 
@@ -881,7 +905,10 @@ Append-only.
 - 2026-08-06: W4 parte soltanto dopo fetch e prova che W3 `f635ceea10150de8618608d240ed4d5aa40f80c2` è antenato di `origin/main@2ab0cbfe4db43a22e970e53c122af18875d41263`; il worktree dedicato non tocca checkout di sviluppo.
 - 2026-08-06: W4 resta offline/local. La publication usa intent SQLite `prepared -> sendStarted -> settled`, pre-push guard sull'old SHA advertised, packet old-zero e read-back; recovery da send unknown è read-only. Nessun commit del worktree, push remoto, Keychain reale, request GitHub o provider call è autorizzato o eseguito.
 - 2026-08-06: il project owner approva la decisione #54. Il range Pi è `>=0.84.0 <0.90.0`, ma ogni build richiede provenance digest-pinned; `0.84.0` passa i preflight packaged S4, S5-S7 e S8 con auth isolata vuota, zero credential access, zero provider call e ledger canonico invariato 19/19.
+- 2026-08-07: W5 parte soltanto dopo fetch e verifica del merge PR #6 in `origin/main@23037624`; branch e worktree dedicati non modificano i checkout di sviluppo.
+- 2026-08-07: W5 mantiene un solo writer per job, reviewer e synthesis fresh, massimo tre round, e approvazioni command digest esatte. L'app canonicalizza argv e plan; nessun output modello può introdurre executable, argv, session resume o remote capability.
+- 2026-08-07: la verifica W5 resta offline. Il preflight usa HOME e agent directory isolati, auth vuota e `PI_OFFLINE=1`; fake-provider e replay sostituiscono call reali. Nessun provider, Keychain reale, GitHub, commit, push o firma Apple Development viene eseguito.
 
 ## Outcomes and retrospective
 
-W0, W1 S1-S9 e W2-W4 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Il durable core, il broker/reconciliation GitHub e il transport Git app-managed sono verificati localmente. Pi `0.84.0` è la sola build corrente ammessa dalla policy `>=0.84.0 <0.90.0`; le build future restano bloccate finché non sono attestate. W5-W9, integrazione engine/UI, credential e GitHub canary, installer e final review restano aperti.
+W0, W1 S1-S9 e W2-W5 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Il durable core, il broker/reconciliation GitHub, il transport Git app-managed e i workflow Pi W5 sono verificati localmente. Pi `0.84.0` è la sola build corrente ammessa dalla policy `>=0.84.0 <0.90.0`; le build future restano bloccate finché non sono attestate. W6-W9, integrazione coordinatori/UI, credential e GitHub canary, installer e final review restano aperti.
