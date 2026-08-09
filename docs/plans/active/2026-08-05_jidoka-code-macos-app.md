@@ -637,14 +637,14 @@ Pass/falsifier/disposition normativi:
 
 - Scope: `Sources/JidokaCodeApp/`, helper/XPC target scelto, UI testable view models.
 - Excluded: dashboard, updater e history browser.
-- [ ] `MenuBarExtra` con status active/paused/running/warning, ultime attività concise, Poll now, Pause/Resume, Settings, Open Logs, Quit.
-- [ ] `@Observable @MainActor` view models e protocol DI; niente network/DB nelle view.
-- [ ] Onboarding: duplicate-instance check, disclosure di automazioni esterne, Pi path/preflight, token SecureField/import/validation, provider/source disclosure, repository add, toggle e login enabled default. Unit/UI flow usa Keychain, GitHub, Pi e ServiceManagement fake finché una side effect non è autorizzata.
-- [ ] Settings: repository/toggle, quattro model profile, max concurrency, login status, replace/delete token con conferma e diagnostics redatti. Un warning per disposition ambiguous offre soltanto late recheck o dialog `Authorize retry` con exact repo/object/revision/evidence; non è un dashboard.
-- [ ] Pause non interrompe mutation in flight: ferma nuovi dispatch e lascia reconciliation completare. Quit richiede checkpoint durabile; con LaunchAgent `KeepAlive` distinguere exit 0 intenzionale da crash nonzero e provare niente crash-loop.
-- [ ] Implementare topology scelta W1 dietro `EngineClient`; XPC message types versionati e `Sendable` se helper.
-- [ ] Verificare VoiceOver labels, keyboard navigation, Dynamic Type ragionevole, contrasto e nessun token copiato in accessibility/log.
-- [ ] Eseguire prima un user flow bundle con injected fakes. Il flow con Keychain/SMAppService/Pi reali riusa soltanto l’autorizzazione esatta del CHECKPOINT A o richiede una nuova autorizzazione se payload/target sono cambiati. Catturare screenshot redatti e crash/runtime logs; nessun claim UI-only da unit test.
+- [x] `MenuBarExtra` con status active/paused/running/warning, ultime attività concise, Poll now, Pause/Resume, Settings, Open Logs, Quit.
+- [x] `@Observable @MainActor` view models e protocol DI; niente network/DB nelle view.
+- [x] Onboarding: duplicate-instance check, disclosure di automazioni esterne, Pi path/preflight, token SecureField/import/validation, provider/source disclosure, repository add, toggle e login enabled default. Unit/UI flow usa Keychain, GitHub, Pi e ServiceManagement fake finché una side effect non è autorizzata.
+- [x] Settings: repository/toggle, quattro model profile, max concurrency, login status, replace/delete token con conferma e diagnostics redatti. Un warning per disposition ambiguous offre soltanto late recheck o dialog `Authorize retry` con exact repo/object/revision/evidence; non è un dashboard.
+- [x] Pause non interrompe mutation in flight: ferma nuovi dispatch e lascia reconciliation completare. Quit richiede checkpoint durabile; con LaunchAgent `KeepAlive` distingue exit 0 intenzionale da crash nonzero nel contract e nei fake. La riprova installata Apple Development resta authorization-gated.
+- [x] Implementare topology scelta W1 dietro `EngineClient`; XPC message types versionati e `Sendable` se helper.
+- [x] Verificare accessibility label e identifier secret-free, keyboard action, Dynamic Type ragionevole e contrasto tramite contract production, unit test e screenshot full-size. Il fixture offscreen non espone i child SwiftUI al runtime AX; VoiceOver foreground resta canary installato dichiarato.
+- [x] Eseguire prima un user flow bundle con injected fakes. S10 cattura screenshot e report redatti sotto sandbox deny-network con Keychain, GitHub, Pi e ServiceManagement a zero side effect. Il flow reale richiede una nuova autorizzazione perché payload e target W7 differiscono dal CHECKPOINT A.
 
 ### W8: Packaging, installer, documentation and repository gates
 
@@ -825,7 +825,9 @@ Pass/falsifier/disposition normativi:
 - [x] W5 Pi runner and app-versioned workflows.
 - [x] 2026-08-08: W6 coordinator end-to-end implementati su `feat/jidoka-code-w6-job-coordinators` da `origin/main@12f49a2`: PR review dual-source, triage, claim/piano/implementation, mutation generation, recovery SQLite, exact-head publication, post-open review e cleanup. Verifica offline documentata in `docs/evidence/w6-job-coordinators-report.md`; `make check`, 302 test standard, ASan, TSan, package E2E e preflight packaged S4/S5-S7/S8 passano con Pi `0.84.1` exact-attested e `providerCalls=0`.
 - [x] W6 end-to-end job coordinators.
-- [ ] W7-W8 implementation.
+- [x] 2026-08-09: W7 menu bar, onboarding, settings e lifecycle production implementati su `feat/jidoka-code-w7-menu-onboarding-lifecycle` da `origin/main@bec6629`: `EngineClient` async/XPC versionato, helper più bootstrap control plane, pause recovery-first, quit e handoff checkpointed, single-instance, exact ambiguous evidence, credential journal, log redatto e fixture UI separata. Evidenza in `docs/evidence/w7-menu-onboarding-lifecycle-report.md`; acceptance finale, package E2E, 344 test standard, ASan, TSan e S10 passano senza side effect reali.
+- [x] W7 menu bar, onboarding and lifecycle.
+- [ ] W8 packaging, installer, documentation and repository gates.
 - [ ] W9 final verification, review e canary autorizzato.
 
 ## Surprises and discoveries
@@ -883,6 +885,10 @@ Pass/falsifier/disposition normativi:
 - Uno step completato e durable deve essere l'autorità di recovery: rieseguire Pi o una mutation dopo il commit dello step crea duplicate side effect. W6 avanza lo step già completato e conserva artifact, intent e attribution prima di appendere completion.
 - Una mutation generation autorizzata non rende invisibili le generazioni precedenti: marker e PR devono leggere ogni intent storico esistente prima di un resend, saltando soltanto le generazioni che non hanno mai preparato quell'operazione.
 - Il Pi globale è avanzato esternamente da `0.84.0` a `0.84.1` durante la verifica W6. La policy ha prima bloccato sia il test JavaScript del package tree sia il resolver Swift. Su indicazione del project owner, una copia isolata con policy temporanea exact-digest ha poi superato `make check`, package E2E e preflight packaged S4/S5-S7/S8 senza provider; soltanto dopo quella prova l'allowlist versionata ha aggiunto l'exact build 0.84.1 mantenendo 0.84.0.
+- Un `NSHostingView` offscreen rende layout SwiftUI full-size ma non enumera i child accessibility identifier. S10 separa quindi il contract production dichiarato dall'osservazione runtime, conserva screenshot non tagliati e rinvia il VoiceOver foreground all'installed canary senza trasformare l'assenza di AX runtime in un falso pass.
+- La pausa non può essere soltanto un flag del scheduler: discovery e lease admission devono leggere atomicamente lo stato SQLite, mentre recovery, reconciliation, cleanup e retry già dovuti restano eseguibili. Il falsificatore W7 prova un pass già in flight e la chiusura immediata dei nuovi dispatch.
+- Una sostituzione Keychain non è recuperabile usando soltanto old e new account. Il journal W7 lega l'exact SHA-256 del valore pending, distingue i boundary prima e dopo la write, completa cleanup dopo reopen e non persiste credential bytes.
+- `NSApplication.terminate` può arrivare dal menu, dal delegate o da una notifica lifecycle. Tutti i path convergono su un solo checkpoint gate; terminare direttamente da un callback separato falsificava il contratto di quit durabile.
 
 ## Execution decisions
 
@@ -916,7 +922,12 @@ Append-only.
 - 2026-08-08: W6 parte dal merge W5 `12f49a2499c8ddc29311d19577b4b1dd06955950` in branch/worktree dedicati. Workflow production e recovery vengono verificati soltanto con fake GitHub, deterministic Pi fixture, SQLite temporanei e Git locali; nessun provider, credential reale o mutation GitHub live viene eseguito.
 - 2026-08-08: completed step, mutation intent e exact read-back sono le autorità di recovery. Retry umano incrementa la generation ma controlla tutte le generazioni precedenti; workspace con stato writer ignoto e modifiche locali viene bloccato e conservato.
 - 2026-08-08: il project owner autorizza un singolo commit W6, push non-force del branch dedicato e apertura PR. Il merge resta al project owner. Dopo il fail-closed sul Pi globale 0.84.1, autorizza integration test locali: la policy temporanea e poi quella versionata legano l'exact package tree e passano i gate offline senza credential o provider call.
+- 2026-08-08: W7 parte dal merge W6 `bec66293350fb5813923677bd1604b5c806c64a9` in branch/worktree dedicati. L'engine W2-W6 resta dietro un `EngineClient` async versionato; UI e view model non importano gli adapter di persistenza, credenziali, GitHub, Git o Pi.
+- 2026-08-08: la topology production usa il LaunchAgent selezionato in W1, ma mantiene un bootstrap control plane locale solo finché ServiceManagement non è enabled. Checkpoint precede register, unregister, helper handoff e quit; quit intenzionale non unregistera il login item.
+- 2026-08-09: W7 resta fake-first per Keychain, GitHub, Pi e ServiceManagement. S10 usa un executable fixture separato e sandbox deny-network, non un flag nel bundle production. CHECKPOINT A non autorizza il nuovo payload W7 installato; Apple Development, XPC reale, runtime AX e ServiceManagement richiedono un canary separato.
+- 2026-08-09: tre cicli review/fix esauriscono il budget W7. Il blocker meccanico finale `pending_replacement_digest` è rinominato `pending_replacement_sha256`; acceptance, package E2E, ASan e TSan sono ripetuti dopo l'ultimo source edit.
+- 2026-08-09: il project owner autorizza un singolo commit W7, push non-force del branch dedicato e apertura PR. Il merge resta non autorizzato.
 
 ## Outcomes and retrospective
 
-W0, W1 S1-S9 e W2-W6 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle; Apple Development Hikma soddisfa package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper è l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53; il monolith è rimosso. Checkpoint B è accettato. Il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5 e coordinator W6 sono verificati localmente. La policy ammette le exact build Pi `0.84.0` e `0.84.1`; per 0.84.1 passano root gate, package e preflight offline senza provider call. W7-W9, UI/lifecycle, credential e GitHub canary, installer e final review restano aperti.
+W0, W1 S1-S9 e W2-W7 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle installate; Apple Development Hikma ha soddisfatto in W1 package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper resta l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53. Checkpoint B è accettato e il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5, coordinator W6 e UI/lifecycle W7 fake-first sono verificati localmente. W7 aggiunge il production `EngineClient` XPC, onboarding/settings, pause recovery-first, checkpointed quit, single-instance, credential journal, logging redatto e S10 sandboxed. La policy ammette le exact build Pi `0.84.0` e `0.84.1`. W8-W9, installer, Apple Development installed W7 lifecycle, runtime VoiceOver, credential e GitHub canary restano aperti e richiedono le autorizzazioni documentate.

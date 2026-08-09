@@ -1,6 +1,6 @@
 import Foundation
 
-public struct RepositoryConfiguration: Equatable, Sendable {
+public struct RepositoryConfiguration: Codable, Equatable, Identifiable, Sendable {
   public let id: UUID
   public let nodeID: String
   public let owner: String
@@ -34,14 +34,14 @@ public struct RepositoryConfiguration: Equatable, Sendable {
   }
 }
 
-public enum ModelProfileRole: String, CaseIterable, Codable, Sendable {
+public enum ModelProfileRole: String, CaseIterable, Codable, Hashable, Sendable {
   case review
   case triage
   case planning
   case orchestration
 }
 
-public enum ModelThinkingLevel: String, CaseIterable, Codable, Sendable {
+public enum ModelThinkingLevel: String, CaseIterable, Codable, Hashable, Sendable {
   case off
   case minimal
   case low
@@ -51,7 +51,8 @@ public enum ModelThinkingLevel: String, CaseIterable, Codable, Sendable {
   case max
 }
 
-public struct ModelProfileConfiguration: Equatable, Sendable {
+public struct ModelProfileConfiguration: Codable, Equatable, Identifiable, Sendable {
+  public var id: ModelProfileRole { role }
   public let role: ModelProfileRole
   public let provider: String
   public let model: String
@@ -70,15 +71,88 @@ public struct ModelProfileConfiguration: Equatable, Sendable {
   }
 }
 
-public struct AppConfiguration: Equatable, Sendable {
+public struct AppConfiguration: Codable, Equatable, Sendable {
   public let maxConcurrency: Int
   public let paused: Bool
+  public let onboardingComplete: Bool
+  public let externalAutomationAcknowledged: Bool
+  public let providerDisclosureAcknowledged: Bool
+  public let githubAccount: String?
+  public let githubAuthorID: Int64?
+  public let pendingGitHubAccount: String?
+  public let pendingGitHubAuthorID: Int64?
+  public let pendingGitHubTokenSHA256: String?
+  public let previousGitHubAccount: String?
+  public let credentialDeletionPending: Bool
+  public let loginItemSelected: Bool
+  public let loginItemStatus: LifecycleServiceStatus
+
+  public init(maxConcurrency: Int, paused: Bool) {
+    self.init(
+      maxConcurrency: maxConcurrency,
+      paused: paused,
+      onboardingComplete: false,
+      externalAutomationAcknowledged: false,
+      providerDisclosureAcknowledged: false,
+      githubAccount: nil,
+      githubAuthorID: nil,
+      pendingGitHubAccount: nil,
+      pendingGitHubAuthorID: nil,
+      pendingGitHubTokenSHA256: nil,
+      previousGitHubAccount: nil,
+      credentialDeletionPending: false,
+      loginItemSelected: false,
+      loginItemStatus: .notRegistered
+    )
+  }
+
+  public init(
+    maxConcurrency: Int,
+    paused: Bool,
+    onboardingComplete: Bool,
+    externalAutomationAcknowledged: Bool,
+    providerDisclosureAcknowledged: Bool,
+    githubAccount: String?,
+    githubAuthorID: Int64?,
+    pendingGitHubAccount: String?,
+    pendingGitHubAuthorID: Int64?,
+    pendingGitHubTokenSHA256: String?,
+    previousGitHubAccount: String?,
+    credentialDeletionPending: Bool,
+    loginItemSelected: Bool,
+    loginItemStatus: LifecycleServiceStatus
+  ) {
+    self.maxConcurrency = maxConcurrency
+    self.paused = paused
+    self.onboardingComplete = onboardingComplete
+    self.externalAutomationAcknowledged = externalAutomationAcknowledged
+    self.providerDisclosureAcknowledged = providerDisclosureAcknowledged
+    self.githubAccount = githubAccount
+    self.githubAuthorID = githubAuthorID
+    self.pendingGitHubAccount = pendingGitHubAccount
+    self.pendingGitHubAuthorID = pendingGitHubAuthorID
+    self.pendingGitHubTokenSHA256 = pendingGitHubTokenSHA256
+    self.previousGitHubAccount = previousGitHubAccount
+    self.credentialDeletionPending = credentialDeletionPending
+    self.loginItemSelected = loginItemSelected
+    self.loginItemStatus = loginItemStatus
+  }
 }
 
-public struct ConfigurationSnapshot: Equatable, Sendable {
+public struct ConfigurationSnapshot: Codable, Equatable, Sendable {
   public let repositories: [RepositoryConfiguration]
   public let profiles: [ModelProfileConfiguration]
   public let app: AppConfiguration
+
+  public init(
+    repositories: [RepositoryConfiguration],
+    profiles: [ModelProfileConfiguration],
+    app: AppConfiguration
+  ) {
+    self.repositories = repositories
+    self.profiles = profiles
+    self.app = app
+  }
 }
 
 public enum ConfigurationStoreError: Error, Equatable, Sendable {
@@ -90,6 +164,9 @@ public enum ConfigurationStoreError: Error, Equatable, Sendable {
   case invalidModel
   case credentialLikeValue
   case invalidMaxConcurrency
+  case invalidCredentialIdentity
+  case credentialReplacementMismatch
+  case invalidLoginItemStatus
   case decode(String)
 }
 
@@ -151,6 +228,13 @@ public actor ConfigurationStore {
     ).map(Self.decodeRepository)
   }
 
+  public func removeRepository(id: UUID) async throws {
+    try await database.execute(
+      "DELETE FROM repositories WHERE id = ?",
+      bindings: [.text(id.uuidString.lowercased())]
+    )
+  }
+
   public func setProfile(
     _ profile: ModelProfileConfiguration,
     now: Date
@@ -174,6 +258,41 @@ public actor ConfigurationStore {
         .real(now.timeIntervalSince1970),
       ]
     )
+  }
+
+  public func setProfileAndInvalidateProviderDisclosure(
+    _ profile: ModelProfileConfiguration,
+    now: Date
+  ) async throws {
+    try Self.validate(profile)
+    try await database.transaction { database in
+      _ = try database.execute(
+        """
+        INSERT INTO model_profiles(role, provider, model, thinking, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(role) DO UPDATE SET
+          provider = excluded.provider,
+          model = excluded.model,
+          thinking = excluded.thinking,
+          updated_at = excluded.updated_at
+        """,
+        bindings: [
+          .text(profile.role.rawValue),
+          .text(profile.provider),
+          .text(profile.model),
+          .text(profile.thinking.rawValue),
+          .real(now.timeIntervalSince1970),
+        ]
+      )
+      _ = try database.execute(
+        """
+        UPDATE app_settings
+        SET provider_disclosure_acknowledged = 0, onboarding_complete = 0, updated_at = ?
+        WHERE singleton = 1
+        """,
+        bindings: [.real(now.timeIntervalSince1970)]
+      )
+    }
   }
 
   public func profiles() async throws -> [ModelProfileConfiguration] {
@@ -206,18 +325,223 @@ public actor ConfigurationStore {
     )
   }
 
+  public func setExternalAutomationAcknowledged(_ acknowledged: Bool, now: Date) async throws {
+    try await setBooleanSetting(
+      column: "external_automation_acknowledged",
+      value: acknowledged,
+      now: now
+    )
+  }
+
+  public func setProviderDisclosureAcknowledged(_ acknowledged: Bool, now: Date) async throws {
+    try await setBooleanSetting(
+      column: "provider_disclosure_acknowledged",
+      value: acknowledged,
+      now: now
+    )
+  }
+
+  public func setOnboardingComplete(_ complete: Bool, now: Date) async throws {
+    try await database.execute(
+      "UPDATE app_settings SET onboarding_complete = ?, updated_at = ? WHERE singleton = 1",
+      bindings: [
+        .integer(complete ? 1 : 0),
+        .real(now.timeIntervalSince1970),
+      ]
+    )
+  }
+
+  @discardableResult
+  public func prepareCredentialReplacement(
+    account: String,
+    authorID: Int64,
+    tokenSHA256: String,
+    now: Date
+  ) async throws -> String? {
+    guard Self.validOwner(account), authorID > 0,
+      GitHubInputValidation.validSHA256(tokenSHA256)
+    else {
+      throw ConfigurationStoreError.invalidCredentialIdentity
+    }
+    return try await database.transaction { database in
+      guard
+        let row = try database.query(
+          "SELECT * FROM app_settings WHERE singleton = 1"
+        ).first
+      else {
+        throw ConfigurationStoreError.decode("app settings are absent")
+      }
+      guard try Self.optionalText(row, "pending_github_account") == nil,
+        try Self.optionalText(row, "previous_github_account") == nil,
+        try Self.integer(row, "credential_deletion_pending") == 0
+      else {
+        throw ConfigurationStoreError.credentialReplacementMismatch
+      }
+      let previous = try Self.optionalText(row, "github_account")
+      _ = try database.execute(
+        """
+        UPDATE app_settings
+        SET pending_github_account = ?, pending_github_author_id = ?,
+            pending_replacement_sha256 = ?, previous_github_account = ?, updated_at = ?
+        WHERE singleton = 1
+        """,
+        bindings: [
+          .text(account),
+          .integer(authorID),
+          .text(tokenSHA256),
+          previous == account ? .null : previous.map(SQLiteValue.text) ?? .null,
+          .real(now.timeIntervalSince1970),
+        ]
+      )
+      return previous == account ? nil : previous
+    }
+  }
+
+  public func commitCredentialReplacement(
+    account: String,
+    authorID: Int64,
+    tokenSHA256: String,
+    now: Date
+  ) async throws {
+    guard Self.validOwner(account), authorID > 0,
+      GitHubInputValidation.validSHA256(tokenSHA256)
+    else {
+      throw ConfigurationStoreError.invalidCredentialIdentity
+    }
+    let changed = try await database.execute(
+      """
+      UPDATE app_settings
+      SET github_account = pending_github_account,
+          github_author_id = pending_github_author_id,
+          pending_github_account = NULL,
+          pending_github_author_id = NULL,
+          pending_replacement_sha256 = NULL,
+          updated_at = ?
+      WHERE singleton = 1
+        AND pending_github_account = ?
+        AND pending_github_author_id = ?
+        AND pending_replacement_sha256 = ?
+      """,
+      bindings: [
+        .real(now.timeIntervalSince1970),
+        .text(account),
+        .integer(authorID),
+        .text(tokenSHA256),
+      ]
+    )
+    guard changed == 1 else {
+      throw ConfigurationStoreError.credentialReplacementMismatch
+    }
+  }
+
+  public func cancelCredentialReplacement(now: Date) async throws {
+    try await database.execute(
+      """
+      UPDATE app_settings
+      SET pending_github_account = NULL, pending_github_author_id = NULL,
+          pending_replacement_sha256 = NULL,
+          previous_github_account = NULL, updated_at = ?
+      WHERE singleton = 1
+      """,
+      bindings: [.real(now.timeIntervalSince1970)]
+    )
+  }
+
+  public func completeCredentialCleanup(account: String, now: Date) async throws {
+    guard Self.validOwner(account) else {
+      throw ConfigurationStoreError.invalidCredentialIdentity
+    }
+    try await database.execute(
+      """
+      UPDATE app_settings
+      SET previous_github_account = NULL, updated_at = ?
+      WHERE singleton = 1 AND previous_github_account = ?
+      """,
+      bindings: [
+        .real(now.timeIntervalSince1970),
+        .text(account),
+      ]
+    )
+  }
+
+  public func prepareCredentialDeletion(now: Date) async throws -> String? {
+    try await database.transaction { database in
+      guard
+        let row = try database.query(
+          "SELECT * FROM app_settings WHERE singleton = 1"
+        ).first
+      else {
+        throw ConfigurationStoreError.decode("app settings are absent")
+      }
+      guard try Self.optionalText(row, "pending_github_account") == nil,
+        try Self.optionalText(row, "previous_github_account") == nil
+      else {
+        throw ConfigurationStoreError.credentialReplacementMismatch
+      }
+      guard let account = try Self.optionalText(row, "github_account") else { return nil }
+      _ = try database.execute(
+        """
+        UPDATE app_settings
+        SET credential_deletion_pending = 1, updated_at = ?
+        WHERE singleton = 1
+        """,
+        bindings: [.real(now.timeIntervalSince1970)]
+      )
+      return account
+    }
+  }
+
+  public func completeCredentialDeletion(account: String, now: Date) async throws {
+    guard Self.validOwner(account) else {
+      throw ConfigurationStoreError.invalidCredentialIdentity
+    }
+    let changed = try await database.execute(
+      """
+      UPDATE app_settings
+      SET github_account = NULL, github_author_id = NULL,
+          pending_github_account = NULL, pending_github_author_id = NULL,
+          pending_replacement_sha256 = NULL, previous_github_account = NULL,
+          credential_deletion_pending = 0, updated_at = ?
+      WHERE singleton = 1 AND credential_deletion_pending = 1 AND github_account = ?
+      """,
+      bindings: [
+        .real(now.timeIntervalSince1970),
+        .text(account),
+      ]
+    )
+    guard changed == 1 else {
+      throw ConfigurationStoreError.credentialReplacementMismatch
+    }
+  }
+
+  public func setLoginItem(
+    selected: Bool,
+    status: LifecycleServiceStatus,
+    now: Date
+  ) async throws {
+    try await database.execute(
+      """
+      UPDATE app_settings
+      SET login_item_selected = ?, login_item_status = ?, updated_at = ?
+      WHERE singleton = 1
+      """,
+      bindings: [
+        .integer(selected ? 1 : 0),
+        .text(status.rawValue),
+        .real(now.timeIntervalSince1970),
+      ]
+    )
+  }
+
   public func appConfiguration() async throws -> AppConfiguration {
     guard
       let row = try await database.query(
-        "SELECT max_concurrency, paused FROM app_settings WHERE singleton = 1"
+        "SELECT * FROM app_settings WHERE singleton = 1"
       ).first
     else {
       throw ConfigurationStoreError.decode("app settings are absent")
     }
-    return AppConfiguration(
-      maxConcurrency: Int(try Self.integer(row, "max_concurrency")),
-      paused: try Self.integer(row, "paused") == 1
-    )
+    return try Self.decodeAppConfiguration(row)
   }
 
   public func snapshot() async throws -> ConfigurationSnapshot {
@@ -232,7 +556,7 @@ public actor ConfigurationStore {
       }
       guard
         let row = try database.query(
-          "SELECT max_concurrency, paused FROM app_settings WHERE singleton = 1"
+          "SELECT * FROM app_settings WHERE singleton = 1"
         ).first
       else {
         throw ConfigurationStoreError.decode("app settings are absent")
@@ -240,12 +564,37 @@ public actor ConfigurationStore {
       return ConfigurationSnapshot(
         repositories: repositories,
         profiles: profiles,
-        app: AppConfiguration(
-          maxConcurrency: Int(try Self.integer(row, "max_concurrency")),
-          paused: try Self.integer(row, "paused") == 1
-        )
+        app: try Self.decodeAppConfiguration(row)
       )
     }
+  }
+
+  private func setBooleanSetting(
+    column: String,
+    value: Bool,
+    now: Date
+  ) async throws {
+    let allowed = [
+      "external_automation_acknowledged",
+      "provider_disclosure_acknowledged",
+    ]
+    guard allowed.contains(column) else {
+      throw ConfigurationStoreError.decode("invalid boolean setting")
+    }
+    try await database.execute(
+      """
+      UPDATE app_settings
+      SET \(column) = ?,
+          onboarding_complete = CASE WHEN ? = 0 THEN 0 ELSE onboarding_complete END,
+          updated_at = ?
+      WHERE singleton = 1
+      """,
+      bindings: [
+        .integer(value ? 1 : 0),
+        .integer(value ? 1 : 0),
+        .real(now.timeIntervalSince1970),
+      ]
+    )
   }
 
   private static func validate(_ repository: RepositoryConfiguration) throws {
@@ -375,6 +724,34 @@ public actor ConfigurationStore {
     )
   }
 
+  private static func decodeAppConfiguration(_ row: SQLiteRow) throws -> AppConfiguration {
+    guard
+      let loginItemStatus = LifecycleServiceStatus(
+        rawValue: try text(row, "login_item_status")
+      )
+    else {
+      throw ConfigurationStoreError.invalidLoginItemStatus
+    }
+    return AppConfiguration(
+      maxConcurrency: Int(try integer(row, "max_concurrency")),
+      paused: try integer(row, "paused") == 1,
+      onboardingComplete: try integer(row, "onboarding_complete") == 1,
+      externalAutomationAcknowledged:
+        try integer(row, "external_automation_acknowledged") == 1,
+      providerDisclosureAcknowledged:
+        try integer(row, "provider_disclosure_acknowledged") == 1,
+      githubAccount: try optionalText(row, "github_account"),
+      githubAuthorID: try optionalInteger(row, "github_author_id"),
+      pendingGitHubAccount: try optionalText(row, "pending_github_account"),
+      pendingGitHubAuthorID: try optionalInteger(row, "pending_github_author_id"),
+      pendingGitHubTokenSHA256: try optionalText(row, "pending_replacement_sha256"),
+      previousGitHubAccount: try optionalText(row, "previous_github_account"),
+      credentialDeletionPending: try integer(row, "credential_deletion_pending") == 1,
+      loginItemSelected: try integer(row, "login_item_selected") == 1,
+      loginItemStatus: loginItemStatus
+    )
+  }
+
   private static func roleOrder(_ role: ModelProfileRole) -> Int {
     switch role {
     case .review: 0
@@ -391,11 +768,27 @@ public actor ConfigurationStore {
     return value
   }
 
+  private static func optionalText(_ row: SQLiteRow, _ column: String) throws -> String? {
+    switch row[column] {
+    case .text(let value): value
+    case .null: nil
+    default: throw ConfigurationStoreError.decode("expected optional text column \(column)")
+    }
+  }
+
   private static func integer(_ row: SQLiteRow, _ column: String) throws -> Int64 {
     guard case .integer(let value)? = row[column] else {
       throw ConfigurationStoreError.decode("expected integer column \(column)")
     }
     return value
+  }
+
+  private static func optionalInteger(_ row: SQLiteRow, _ column: String) throws -> Int64? {
+    switch row[column] {
+    case .integer(let value): value
+    case .null: nil
+    default: throw ConfigurationStoreError.decode("expected optional integer column \(column)")
+    }
   }
 
   private static func uuid(_ row: SQLiteRow, _ column: String) throws -> UUID {

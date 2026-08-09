@@ -203,7 +203,7 @@ struct LifecycleProbeTests {
   }
 }
 
-private struct WrongIdentityClient: EngineClient {
+private struct WrongIdentityClient: LifecycleProbeClient {
   private let snapshotValue = EngineSnapshot(
     generation: 1,
     launchID: "wrong-identity",
@@ -219,7 +219,7 @@ private struct WrongIdentityClient: EngineClient {
   }
 }
 
-private struct UnorderedClient: EngineClient {
+private struct UnorderedClient: LifecycleProbeClient {
   private let snapshotValue = EngineSnapshot(
     generation: 1,
     launchID: "unordered",

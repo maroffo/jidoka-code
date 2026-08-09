@@ -84,7 +84,8 @@ private final class MutableCredential: @unchecked Sendable {
   }
 
   func zero() {
-    bytes.resetBytes(in: 0..<bytes.count)
+    let byteCount = bytes.count
+    bytes.resetBytes(in: 0..<byteCount)
   }
 }
 
@@ -178,7 +179,8 @@ enum OneShotGitCredentialServer {
       }
       var response = token
       response.append(0x0A)
-      defer { response.resetBytes(in: 0..<response.count) }
+      let responseCount = response.count
+      defer { response.resetBytes(in: 0..<responseCount) }
       try writeAll(connection, data: response)
       return
     }

@@ -126,6 +126,7 @@ public enum DurableJobStoreError: Error, Equatable, Sendable {
   case dispositionNotFound
   case decode(String)
   case globalConcurrencyReached
+  case dispatchSuppressed
   case repositoryAlreadyLeased(UUID)
   case leaseMissing(UUID)
   case leaseOwnedByAnotherJob
@@ -141,9 +142,14 @@ public enum DurableJobStoreError: Error, Equatable, Sendable {
 
 public actor DurableJobStore {
   private let database: SQLiteStore
+  private let enforceApplicationDispatchGate: Bool
 
-  public init(database: SQLiteStore) {
+  public init(
+    database: SQLiteStore,
+    enforceApplicationDispatchGate: Bool = false
+  ) {
     self.database = database
+    self.enforceApplicationDispatchGate = enforceApplicationDispatchGate
   }
 
   public func createJob(
@@ -153,10 +159,14 @@ public actor DurableJobStore {
     contractVersionUsed: String,
     priority: JobPriority,
     firstStep: JobStepKind,
-    now: Date
+    now: Date,
+    requiresDispatchEligibility: Bool = false
   ) async throws -> JobCreationResult {
     try Self.validate(identity: identity, contractVersion: contractVersionUsed)
     return try await database.transaction { database in
+      if requiresDispatchEligibility {
+        try Self.requireNewDispatchEligibility(database: database)
+      }
       if let disposition = try Self.loadDisposition(identity, database: database),
         disposition.state.suppressesDiscovery
       {
@@ -253,6 +263,16 @@ public actor DurableJobStore {
     ).first.map(Self.decodeDisposition)
   }
 
+  public func ambiguousDispositions() async throws -> [ObjectDispositionRecord] {
+    try await database.query(
+      """
+      SELECT * FROM object_dispositions
+      WHERE state = 'ambiguous'
+      ORDER BY updated_at, repository_id, kind, object_node_id, revision_key
+      """
+    ).map(Self.decodeDisposition)
+  }
+
   public func transition(
     jobID: UUID,
     eventKey: String,
@@ -292,6 +312,7 @@ public actor DurableJobStore {
         effect.lease,
         job: current,
         now: context.now,
+        enforceApplicationDispatchGate: enforceApplicationDispatchGate,
         database: database
       )
       return .applied(
@@ -785,16 +806,38 @@ public actor DurableJobStore {
     return try loadJob(current.id, database: database)
   }
 
+  private static func requireNewDispatchEligibility(
+    database: isolated SQLiteStore
+  ) throws {
+    guard
+      let settings = try database.query(
+        "SELECT * FROM app_settings WHERE singleton = 1"
+      ).first,
+      try integer(settings, "paused") == 0,
+      try integer(settings, "onboarding_complete") == 1,
+      try integer(settings, "external_automation_acknowledged") == 1,
+      try integer(settings, "provider_disclosure_acknowledged") == 1,
+      try integer(settings, "login_item_selected") == 1,
+      try text(settings, "login_item_status") == LifecycleServiceStatus.enabled.rawValue
+    else {
+      throw DurableJobStoreError.dispatchSuppressed
+    }
+  }
+
   private static func applyLeaseEffect(
     _ effect: JobLeaseEffect,
     job: JobRecord,
     now: Date,
+    enforceApplicationDispatchGate: Bool,
     database: isolated SQLiteStore
   ) throws {
     switch effect {
     case .none:
       return
     case .acquire, .acquireRecovery:
+      if effect == .acquire, enforceApplicationDispatchGate {
+        try requireNewDispatchEligibility(database: database)
+      }
       let maxConcurrency = Int(
         try database.scalarInt(
           "SELECT max_concurrency FROM app_settings WHERE singleton = 1"

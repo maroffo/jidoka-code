@@ -1,13 +1,61 @@
 import AppKit
 import Darwin
 import Foundation
+import JidokaCodeAppSupport
 import JidokaCodeCore
 import SwiftUI
 
 @main
+@MainActor
 struct JidokaCodeApp: App {
+  @NSApplicationDelegateAdaptor(JidokaApplicationDelegate.self)
+  private var applicationDelegate
+
+  private let composition: ApplicationComposition
+
   init() {
-    let arguments = Array(CommandLine.arguments.dropFirst())
+    Self.dispatchCLIIfRequested(arguments: Array(CommandLine.arguments.dropFirst()))
+    do {
+      let applicationSupport = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/JidokaCode", isDirectory: true)
+      try PrivateDirectoryBoundary.ensure(applicationSupport)
+      let instanceLock = try SingleInstanceLock(
+        directoryURL: applicationSupport.appendingPathComponent("IPC", isDirectory: true)
+      )
+      guard instanceLock.ownsLock else {
+        JidokaApplicationInstance.activateExisting()
+        exit(EXIT_SUCCESS)
+      }
+      let composition = ApplicationComposition(instanceLock: instanceLock)
+      self.composition = composition
+      applicationDelegate.composition = composition
+    } catch {
+      FileHandle.standardError.write(
+        Data("Jidoka Code startup failed: INSTANCE_GATE_FAILED\n".utf8))
+      exit(EXIT_FAILURE)
+    }
+  }
+
+  var body: some Scene {
+    MenuBarExtra {
+      MenuBarContentView(
+        model: composition.appViewModel,
+        openOnboarding: { composition.windows.showOnboarding() },
+        openSettings: { composition.windows.showSettings() },
+        openLogs: { composition.openLogs() },
+        quit: { composition.quitDurably() }
+      )
+    } label: {
+      Label(
+        "Jidoka Code, \(composition.appViewModel.statusTitle)",
+        systemImage: composition.appViewModel.statusSystemImage
+      )
+      .accessibilityLabel("Jidoka Code status: \(composition.appViewModel.statusTitle)")
+    }
+    .menuBarExtraStyle(.menu)
+  }
+
+  private static func dispatchCLIIfRequested(arguments: [String]) {
     if arguments.first == "--pi-probe" {
       do {
         PiProbeCLI.write(try PiProbeCLI.run(arguments: Array(arguments.dropFirst())))
@@ -53,8 +101,7 @@ struct JidokaCodeApp: App {
         try LifecycleCLI.write(LifecycleCLI.run(arguments: Array(arguments.dropFirst())))
         exit(EXIT_SUCCESS)
       } catch {
-        let message = "lifecycle probe failed: \(error)\n"
-        FileHandle.standardError.write(Data(message.utf8))
+        FileHandle.standardError.write(Data("lifecycle probe failed: \(error)\n".utf8))
         exit(EXIT_FAILURE)
       }
     }
@@ -73,23 +120,9 @@ struct JidokaCodeApp: App {
         FileHandle.standardOutput.write(Data([0x0A]))
         exit(EXIT_SUCCESS)
       } catch {
-        let message = "packaged preflight failed: \(error)\n"
-        FileHandle.standardError.write(Data(message.utf8))
+        FileHandle.standardError.write(Data("packaged preflight failed: \(error)\n".utf8))
         exit(EXIT_FAILURE)
       }
     }
-
-    startMainQuitObserver()
-  }
-
-  var body: some Scene {
-    MenuBarExtra("Jidoka Code", systemImage: "checkmark.shield") {
-      Text("W1 lifecycle probe")
-      Divider()
-      Button("Quit") {
-        NSApplication.shared.terminate(nil)
-      }
-    }
-    .menuBarExtraStyle(.menu)
   }
 }

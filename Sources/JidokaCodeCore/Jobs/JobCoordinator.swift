@@ -102,6 +102,7 @@ public actor JobCoordinator: SchedulerPassRunner {
   private let workflows: JobWorkflowRegistry
   private let contractVersion: String
   private let failureClassifier: any JobWorkflowFailureClassifying
+  private let newDispatchAllowed: @Sendable () async -> Bool
   private let now: @Sendable () -> Date
   private var lastPass: SchedulerPass?
   private var failures: [JobCoordinatorFailure] = []
@@ -116,6 +117,7 @@ public actor JobCoordinator: SchedulerPassRunner {
     workflows: JobWorkflowRegistry,
     contractVersion: String,
     failureClassifier: any JobWorkflowFailureClassifying = DefaultJobWorkflowFailureClassifier(),
+    newDispatchAllowed: @escaping @Sendable () async -> Bool = { true },
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.configuration = configuration
@@ -126,6 +128,7 @@ public actor JobCoordinator: SchedulerPassRunner {
     self.workflows = workflows
     self.contractVersion = contractVersion
     self.failureClassifier = failureClassifier
+    self.newDispatchAllowed = newDispatchAllowed
     self.now = now
   }
 
@@ -140,15 +143,21 @@ public actor JobCoordinator: SchedulerPassRunner {
       let snapshot = try await configuration.snapshot()
       try await dispatchCleanupRecovery()
       try await dispatchRecovery()
+      // Deadline promotion is durable bookkeeping only. The lease and workflow remain
+      // behind the pause and dispatch gates below.
       try await dispatchDueRetries()
-      if snapshot.app.paused {
+      let dispatchAllowed = await newDispatchAllowed()
+      if snapshot.app.paused || !dispatchAllowed {
         try await dispatchCleanupRecovery()
         return
       }
       for repository in snapshot.repositories where repository.enabled {
+        guard await newDispatchAllowed() else { break }
         await discover(repository)
       }
-      try await dispatchQueuedJobs()
+      if await newDispatchAllowed() {
+        try await dispatchQueuedJobs()
+      }
       try await dispatchCleanupRecovery()
     } catch {
       failures.append(
@@ -251,12 +260,15 @@ public actor JobCoordinator: SchedulerPassRunner {
         return
       }
       if repository.reviewEnabled {
-        for observation in try await discovery.pullRequests(
+        let observations = try await discovery.pullRequests(
           owner: repository.owner,
           repository: repository.name,
           repositoryID: repository.id,
           repositoryNodeID: repository.nodeID
-        ) where observation.disposition == .candidate {
+        )
+        guard await newDispatchAllowed() else { return }
+        for observation in observations where observation.disposition == .candidate {
+          guard await newDispatchAllowed() else { return }
           _ = try await jobs.createJob(
             identity: LogicalJobIdentity(
               repositoryID: repository.id,
@@ -268,16 +280,20 @@ public actor JobCoordinator: SchedulerPassRunner {
             contractVersionUsed: contractVersion,
             priority: .prReview,
             firstStep: .review,
-            now: instant
+            now: instant,
+            requiresDispatchEligibility: true
           )
         }
       }
       if repository.triageEnabled {
-        for observation in try await discovery.issues(
+        let observations = try await discovery.issues(
           owner: repository.owner,
           repository: repository.name,
           repositoryID: repository.id
-        ) where observation.disposition == .candidate {
+        )
+        guard await newDispatchAllowed() else { return }
+        for observation in observations where observation.disposition == .candidate {
+          guard await newDispatchAllowed() else { return }
           _ = try await jobs.createJob(
             identity: LogicalJobIdentity(
               repositoryID: repository.id,
@@ -289,14 +305,17 @@ public actor JobCoordinator: SchedulerPassRunner {
             contractVersionUsed: contractVersion,
             priority: .triage,
             firstStep: .triage,
-            now: instant
+            now: instant,
+            requiresDispatchEligibility: true
           )
         }
       }
-      if repository.implementationEnabled {
+      if repository.implementationEnabled, await newDispatchAllowed() {
         try await discoverImplementation(repository, now: instant)
       }
       try await schedulerPersistence.recordSuccess(repositoryID: repository.id)
+    } catch DurableJobStoreError.dispatchSuppressed {
+      return
     } catch {
       _ = try? await schedulerPersistence.recordFailure(
         repositoryID: repository.id,
@@ -323,7 +342,9 @@ public actor JobCoordinator: SchedulerPassRunner {
       repository: repository.name,
       repositoryID: repository.id
     )
+    guard await newDispatchAllowed() else { return }
     for observation in observations {
+      guard await newDispatchAllowed() else { return }
       guard case .candidate(let kind) = observation.disposition else { continue }
       switch kind {
       case .ready:
@@ -341,7 +362,8 @@ public actor JobCoordinator: SchedulerPassRunner {
           contractVersionUsed: contractVersion,
           priority: .issueImplementation,
           firstStep: .claimReady,
-          now: instant
+          now: instant,
+          requiresDispatchEligibility: true
         )
       case .approvedComplex:
         let waiting = try await jobs.jobs(nonTerminalOnly: true).filter {
@@ -367,6 +389,7 @@ public actor JobCoordinator: SchedulerPassRunner {
       .filter { $0.state == .queued }
       .sorted(by: Self.precedes)
     for original in queued {
+      guard await newDispatchAllowed() else { return }
       do {
         let leased = try await jobs.transition(
           jobID: original.id,
@@ -390,7 +413,9 @@ public actor JobCoordinator: SchedulerPassRunner {
         try await workflows.workflow(for: original.identity.kind).run(
           jobID: Self.job(from: preparing).id
         )
-      } catch DurableJobStoreError.globalConcurrencyReached {
+      } catch DurableJobStoreError.globalConcurrencyReached,
+        DurableJobStoreError.dispatchSuppressed
+      {
         return
       } catch DurableJobStoreError.repositoryAlreadyLeased {
         continue

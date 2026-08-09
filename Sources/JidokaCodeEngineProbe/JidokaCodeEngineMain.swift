@@ -1,0 +1,481 @@
+import AppKit
+import Darwin
+import Foundation
+import JidokaCodeCore
+import Network
+
+private struct EngineProbeReport: Codable {
+  let identifier: String
+  let status: String
+  let workingDirectory: String
+}
+
+private final class LifecycleEventRecorder: @unchecked Sendable {
+  private let fileURL: URL
+  private let lock = NSLock()
+  private var nextSequence = 0
+
+  init() throws {
+    let directoryURL = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Application Support/JidokaCode/Spike/S2", isDirectory: true)
+    try PrivateDirectoryBoundary.ensure(directoryURL)
+    fileURL = directoryURL.appendingPathComponent("helper-events.jsonl", isDirectory: false)
+    if !FileManager.default.fileExists(atPath: fileURL.path) {
+      guard
+        FileManager.default.createFile(
+          atPath: fileURL.path,
+          contents: nil,
+          attributes: [.posixPermissions: 0o600]
+        )
+      else {
+        throw LifecycleProbeError.remoteFailure("cannot create lifecycle event log")
+      }
+    }
+    var metadata = stat()
+    guard lstat(fileURL.path, &metadata) == 0,
+      (metadata.st_mode & S_IFMT) == S_IFREG,
+      metadata.st_uid == geteuid(),
+      (metadata.st_mode & 0o077) == 0
+    else {
+      throw LifecycleProbeError.remoteFailure("unsafe lifecycle event log")
+    }
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+  }
+
+  func record(_ kind: LifecycleEventKind, snapshot: EngineSnapshot) throws {
+    lock.lock()
+    defer { lock.unlock() }
+    let event = LifecycleEvent(
+      event: kind,
+      generation: snapshot.generation,
+      launchID: snapshot.launchID,
+      pid: snapshot.pid,
+      sequence: nextSequence
+    )
+    nextSequence += 1
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    var data = try encoder.encode(event)
+    data.append(0x0A)
+    let descriptor = open(
+      fileURL.path,
+      O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard descriptor >= 0 else {
+      throw LifecycleProbeError.remoteFailure("cannot open lifecycle event log")
+    }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    defer { try? handle.close() }
+    try handle.write(contentsOf: data)
+    try handle.synchronize()
+  }
+}
+
+private final class XPCReplyBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var reply: ((Data?, String?) -> Void)?
+
+  init(reply: @escaping (Data?, String?) -> Void) {
+    self.reply = reply
+  }
+
+  func send(data: Data?, error: String?) {
+    lock.lock()
+    let callback = reply
+    reply = nil
+    lock.unlock()
+    callback?(data, error)
+  }
+}
+
+private actor NetworkRegainState {
+  private var previouslySatisfied: Bool?
+
+  func update(isSatisfied: Bool) -> Bool {
+    defer { previouslySatisfied = isSatisfied }
+    return previouslySatisfied == false && isSatisfied
+  }
+}
+
+@MainActor
+private final class EngineLifecycleMonitor {
+  private let application: EngineService
+  private let networkMonitor = NWPathMonitor()
+  private let networkState = NetworkRegainState()
+  private let networkQueue = DispatchQueue(label: "com.maroffo.JidokaCode.network-monitor")
+  private var wakeObserver: NSObjectProtocol?
+
+  init(application: EngineService) {
+    self.application = application
+  }
+
+  func start() {
+    let application = application
+    wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.didWakeNotification,
+      object: nil,
+      queue: .main
+    ) { _ in
+      Task { await application.notifyLifecycleEvent(.wake) }
+    }
+    let networkState = networkState
+    networkMonitor.pathUpdateHandler = { path in
+      let isSatisfied = path.status == .satisfied
+      Task {
+        if await networkState.update(isSatisfied: isSatisfied) {
+          await application.notifyLifecycleEvent(.networkRegained)
+        }
+      }
+    }
+    networkMonitor.start(queue: networkQueue)
+  }
+}
+
+private final class EngineServiceContainer: @unchecked Sendable {
+  let application: EngineService
+  let database: SQLiteStore
+
+  init(application: EngineService, database: SQLiteStore) {
+    self.application = application
+    self.database = database
+  }
+}
+
+private final class EngineProbeService: NSObject, EngineProbeXPCProtocol, @unchecked Sendable {
+  private let application: EngineServiceContainer
+  private let messageHandler: EngineXPCMessageHandler
+  private let recorder: LifecycleEventRecorder
+  private let snapshotValue: EngineSnapshot
+
+  init(
+    generation: Int,
+    recorder: LifecycleEventRecorder,
+    application: EngineServiceContainer
+  ) {
+    snapshotValue = EngineSnapshot(
+      generation: generation,
+      launchID: UUID().uuidString.lowercased(),
+      pid: ProcessInfo.processInfo.processIdentifier,
+      reconciled: true,
+      topology: .helper
+    )
+    self.recorder = recorder
+    self.application = application
+    messageHandler = EngineXPCMessageHandler(
+      client: application.application,
+      allowedCommands: [
+        .snapshot,
+        .acknowledgeExternalAutomation,
+        .acknowledgeProviderDisclosure,
+        .runPiPreflight,
+        .replaceCredential,
+        .deleteCredential,
+        .addRepository,
+        .updateRepository,
+        .removeRepository,
+        .setProfile,
+        .setMaxConcurrency,
+        .setPaused,
+        .pollNow,
+        .recheckAmbiguousMutation,
+        .authorizeRetry,
+        .synchronizeLoginStatus,
+        .completeOnboarding,
+        .rollbackOnboarding,
+        .prepareForQuit,
+      ]
+    )
+  }
+
+  func reconcileBeforeListening() throws {
+    try recorder.record(.reconciliation, snapshot: snapshotValue)
+  }
+
+  func handle(_ requestData: Data, withReply reply: @escaping (Data?, String?) -> Void) {
+    let box = XPCReplyBox(reply: reply)
+    do {
+      guard
+        let object = try JSONSerialization.jsonObject(with: requestData) as? [String: Any]
+      else {
+        throw LifecycleProbeError.invalidRequest
+      }
+      if object["command"] != nil {
+        handleApplication(requestData, reply: box)
+      } else {
+        try handleLifecycleProbe(requestData, reply: box)
+      }
+    } catch {
+      box.send(data: nil, error: "ENGINE_REQUEST_REJECTED")
+    }
+  }
+
+  private func handleApplication(_ requestData: Data, reply: XPCReplyBox) {
+    let application = application
+    let handler = messageHandler
+    let recorder = recorder
+    let snapshot = snapshotValue
+    Task {
+      let request = try? JSONDecoder().decode(EngineXPCRequest.self, from: requestData)
+      if let request, (try? request.validate()) != nil {
+        try? recorder.record(.dispatch, snapshot: snapshot)
+      }
+      let responseData = await handler.handle(requestData)
+      reply.send(data: responseData, error: nil)
+      guard request?.command.kind == .prepareForQuit,
+        let request,
+        let response = try? JSONDecoder().decode(EngineXPCResponse.self, from: responseData),
+        let result = try? response.validate(for: request),
+        result.checkpoint?.databaseCheckpointed == true
+      else {
+        return
+      }
+      try? await Task.sleep(nanoseconds: 250_000_000)
+      await application.database.close()
+      exit(EXIT_SUCCESS)
+    }
+  }
+
+  private func handleLifecycleProbe(_ requestData: Data, reply: XPCReplyBox) throws {
+    let request = try JSONDecoder().decode(EngineProbeXPCRequest.self, from: requestData)
+    try request.validate()
+    try recorder.record(.dispatch, snapshot: snapshotValue)
+
+    let roundTrip: EngineRoundTripResponse?
+    if let requestRoundTrip = request.roundTrip {
+      roundTrip = EngineRoundTripResponse(
+        requestID: requestRoundTrip.requestID,
+        sequence: requestRoundTrip.sequence,
+        snapshot: snapshotValue
+      )
+    } else {
+      roundTrip = nil
+    }
+    let keychainSHA256: String?
+    if request.operation == .keychainDigest {
+      keychainSHA256 = try KeychainProbeStore().readDigest().sentinelSHA256
+    } else {
+      keychainSHA256 = nil
+    }
+    let response = EngineProbeXPCResponse(
+      operation: request.operation,
+      keychainSHA256: keychainSHA256,
+      roundTrip: roundTrip,
+      snapshot: snapshotValue
+    )
+
+    switch request.operation {
+    case .gracefulQuit:
+      let application = application
+      Task {
+        do {
+          _ = try await application.application.send(.prepareForQuit)
+          reply.send(data: try Self.encoder().encode(response), error: nil)
+          try? await Task.sleep(nanoseconds: 250_000_000)
+          await application.database.close()
+          exit(EXIT_SUCCESS)
+        } catch {
+          reply.send(data: nil, error: "ENGINE_CHECKPOINT_FAILED")
+        }
+      }
+    case .crash:
+      reply.send(data: try Self.encoder().encode(response), error: nil)
+      DispatchQueue.global().asyncAfter(deadline: .now() + 0.25) {
+        exit(EXIT_FAILURE)
+      }
+    case .snapshot, .roundTrip, .keychainDigest:
+      reply.send(data: try Self.encoder().encode(response), error: nil)
+    }
+  }
+
+  private static func encoder() -> JSONEncoder {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return encoder
+  }
+}
+
+private final class EngineProbeListenerDelegate: NSObject, NSXPCListenerDelegate,
+  @unchecked Sendable
+{
+  private let service: EngineProbeService
+  private let peerValidator: EngineXPCPeerValidator
+
+  init(service: EngineProbeService) {
+    self.service = service
+    peerValidator = EngineXPCPeerValidator(
+      helperExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0])
+    )
+  }
+
+  func listener(
+    _ listener: NSXPCListener,
+    shouldAcceptNewConnection newConnection: NSXPCConnection
+  ) -> Bool {
+    guard
+      peerValidator.accepts(
+        processID: newConnection.processIdentifier,
+        effectiveUserID: newConnection.effectiveUserIdentifier
+      )
+    else {
+      newConnection.invalidate()
+      return false
+    }
+    newConnection.exportedInterface = NSXPCInterface(with: EngineProbeXPCProtocol.self)
+    newConnection.exportedObject = service
+    newConnection.resume()
+    return true
+  }
+}
+
+private enum EngineServiceFactory {
+  static func make() async throws -> EngineServiceContainer {
+    let paths = try enginePaths()
+    let database = try SQLiteStore(
+      databaseURL: paths.applicationSupport.appendingPathComponent(
+        "jidoka-code.sqlite3", isDirectory: false)
+    )
+    let configuration = ConfigurationStore(database: database)
+    let jobs = DurableJobStore(
+      database: database,
+      enforceApplicationDispatchGate: true
+    )
+    let intents = MutationIntentStore(database: database)
+    let resolver = PiRuntimeResolver(
+      configuration: .standard(resourceRoot: paths.piResources)
+    )
+    let external = ProductionEngineExternalServices(
+      configuration: configuration,
+      runtimeResolver: resolver
+    )
+    let runtimeConfiguration = try ProductionEngineRuntimeConfiguration(
+      applicationSupportRoot: paths.applicationSupport,
+      piResourceRoot: paths.piResources,
+      askPassExecutable: paths.askPass,
+      pushGuardExecutable: paths.pushGuard,
+      contractVersion: "jidoka-code-v1"
+    )
+    let runtime = ProductionEngineJobRuntime(
+      runtimeConfiguration: runtimeConfiguration,
+      database: database,
+      configuration: configuration,
+      jobs: jobs,
+      intents: intents
+    )
+    let service = EngineService(
+      configuration: configuration,
+      jobs: jobs,
+      intents: intents,
+      database: database,
+      external: external,
+      runtime: runtime,
+      logger: try EngineRedactedLogger(
+        rootURL: paths.applicationSupport.appendingPathComponent("Logs", isDirectory: true),
+        filename: "engine.jsonl"
+      ),
+      duplicateInstanceCheckPassed: true
+    )
+    try await service.initialize()
+    return EngineServiceContainer(application: service, database: database)
+  }
+
+  private struct Paths {
+    let applicationSupport: URL
+    let piResources: URL
+    let askPass: URL
+    let pushGuard: URL
+  }
+
+  private static func enginePaths() throws -> Paths {
+    let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+    let helperDirectory = executable.deletingLastPathComponent()
+    let contents = helperDirectory.deletingLastPathComponent()
+    let packagedResources = contents.appendingPathComponent("Resources/Pi", isDirectory: true)
+    let sourceResources = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+      .appendingPathComponent("Resources/Pi", isDirectory: true)
+    let piResources =
+      FileManager.default.fileExists(atPath: packagedResources.path)
+      ? packagedResources : sourceResources
+    guard FileManager.default.fileExists(atPath: piResources.path) else {
+      throw EngineClientError(.piBlocked)
+    }
+    let packagedPushGuard = helperDirectory.appendingPathComponent(
+      "GitHooks/pre-push", isDirectory: false)
+    let developmentPushGuard = helperDirectory.appendingPathComponent(
+      "JidokaCodePushGuard", isDirectory: false)
+    return Paths(
+      applicationSupport: FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/JidokaCode", isDirectory: true),
+      piResources: piResources,
+      askPass: helperDirectory.appendingPathComponent("JidokaCodeAskPass", isDirectory: false),
+      pushGuard: FileManager.default.fileExists(atPath: packagedPushGuard.path)
+        ? packagedPushGuard : developmentPushGuard
+    )
+  }
+}
+
+private func runOneShotProbe() throws -> Never {
+  let report = EngineProbeReport(
+    identifier: LifecycleProbeConstants.helperIdentifier,
+    status: "ok",
+    workingDirectory: FileManager.default.currentDirectoryPath
+  )
+  let encoder = JSONEncoder()
+  encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+  FileHandle.standardOutput.write(try encoder.encode(report))
+  FileHandle.standardOutput.write(Data([0x0A]))
+  exit(EXIT_SUCCESS)
+}
+
+private func runService(arguments: [String]) async throws -> Never {
+  let configuration = try EngineServiceArguments.parse(arguments)
+  let applicationSupport = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support/JidokaCode", isDirectory: true)
+  try PrivateDirectoryBoundary.ensure(applicationSupport)
+  let engineLock = try SingleInstanceLock(
+    directoryURL: applicationSupport.appendingPathComponent("IPC", isDirectory: true),
+    filename: "engine-instance.lock"
+  )
+  guard engineLock.ownsLock else {
+    throw EngineClientError(.busy)
+  }
+  let recorder = try LifecycleEventRecorder()
+  let application = try await EngineServiceFactory.make()
+  let service = EngineProbeService(
+    generation: configuration.generation,
+    recorder: recorder,
+    application: application
+  )
+  try service.reconcileBeforeListening()
+  let lifecycleMonitor = await MainActor.run {
+    let monitor = EngineLifecycleMonitor(application: application.application)
+    monitor.start()
+    return monitor
+  }
+  let delegate = EngineProbeListenerDelegate(service: service)
+  let listener = NSXPCListener(machServiceName: LifecycleProbeConstants.helperIdentifier)
+  listener.delegate = delegate
+  listener.resume()
+  withExtendedLifetime((delegate, listener, engineLock, lifecycleMonitor)) {
+    dispatchMain()
+  }
+}
+
+@main
+private struct JidokaCodeEngineMain {
+  static func main() async {
+    do {
+      let arguments = Array(CommandLine.arguments.dropFirst())
+      if arguments == ["--probe"] {
+        try runOneShotProbe()
+      }
+      if arguments.first == "--service" {
+        try await runService(arguments: arguments)
+      }
+      throw LifecycleProbeError.invalidArguments
+    } catch {
+      FileHandle.standardError.write(Data("engine probe failed: ENGINE_START_FAILED\n".utf8))
+      exit(EXIT_FAILURE)
+    }
+  }
+}

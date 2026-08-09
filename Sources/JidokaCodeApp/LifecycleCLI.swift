@@ -153,7 +153,7 @@ private final class XPCResultBox: @unchecked Sendable {
   }
 }
 
-private struct HelperEngineClient: EngineClient {
+private struct HelperEngineClient: LifecycleProbeClient {
   func snapshot() throws -> EngineSnapshot {
     try send(EngineProbeXPCRequest(operation: .snapshot)).snapshot
   }
@@ -190,8 +190,8 @@ private struct HelperEngineClient: EngineClient {
     connection.remoteObjectInterface = NSXPCInterface(with: EngineProbeXPCProtocol.self)
     let semaphore = DispatchSemaphore(value: 0)
     let box = XPCResultBox()
-    let proxy = connection.remoteObjectProxyWithErrorHandler { error in
-      box.store(.failure(LifecycleProbeError.remoteFailure(error.localizedDescription)))
+    let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+      box.store(.failure(LifecycleProbeError.remoteFailure("XPC_REMOTE_FAILURE")))
       semaphore.signal()
     }
     guard let service = proxy as? EngineProbeXPCProtocol else {

@@ -85,6 +85,102 @@ struct JobCoordinatorTests {
     #expect(try await fixture.jobs.job(id: job.id)?.state == .blocked)
   }
 
+  @Test("dispatch gate preserves recovery but suppresses discovery and new jobs")
+  func dispatchGate() async throws {
+    let fixture = try await JobCoordinatorFixture()
+    defer { fixture.remove() }
+    let repository = try await fixture.addRepository()
+    let creation = try await fixture.jobs.createJob(
+      identity: LogicalJobIdentity(
+        repositoryID: repository.id,
+        kind: .prReview,
+        objectNodeID: "gated-recovery-pr",
+        revisionKey: String(repeating: "d", count: 40)
+      ),
+      objectNumber: 19,
+      contractVersionUsed: "w6-test",
+      priority: .prReview,
+      firstStep: .review,
+      now: fixture.now
+    )
+    guard case .created(let recoveryJob) = creation else {
+      Issue.record("gated recovery job was suppressed")
+      return
+    }
+    try await fixture.database.execute(
+      "UPDATE jobs SET state = 'reconciliationQueued' WHERE id = ?",
+      bindings: [.text(recoveryJob.id.uuidString.lowercased())]
+    )
+    try await fixture.configuration.setPaused(true, now: fixture.now)
+    await fixture.api.configure(
+      pullRequests: [pullRequest(number: 4)],
+      issues: [issue(number: 10, labels: [])]
+    )
+    let coordinator = fixture.coordinator(newDispatchAllowed: { false })
+
+    await coordinator.run(
+      pass: SchedulerPass(reasons: [.startup], startedAt: fixture.now)
+    )
+
+    let jobs = try await fixture.jobs.jobs()
+    #expect(jobs.count == 1)
+    #expect(jobs.first?.id == recoveryJob.id)
+    #expect(jobs.first?.state == .blocked)
+    #expect((await fixture.events.values()).contains("workflow:prReview:reconciling"))
+    #expect(!(await fixture.events.values()).contains("api:pulls"))
+    #expect(!(await fixture.events.values()).contains("api:issues"))
+    #expect((await coordinator.snapshot()).failures.isEmpty)
+  }
+
+  @Test("durable pause atomically rejects discovery creation and new leases")
+  func durablePauseGate() async throws {
+    let fixture = try await JobCoordinatorFixture()
+    defer { fixture.remove() }
+    let repository = try await fixture.addRepository()
+    try await fixture.configuration.setPaused(true, now: fixture.now)
+    await #expect(throws: DurableJobStoreError.dispatchSuppressed) {
+      _ = try await fixture.jobs.createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repository.id,
+          kind: .prReview,
+          objectNodeID: "paused-discovery",
+          revisionKey: String(repeating: "e", count: 40)
+        ),
+        objectNumber: 20,
+        contractVersionUsed: "w7-pause-test",
+        priority: .prReview,
+        firstStep: .review,
+        now: fixture.now,
+        requiresDispatchEligibility: true
+      )
+    }
+    let queued = try await fixture.jobs.createJob(
+      identity: LogicalJobIdentity(
+        repositoryID: repository.id,
+        kind: .prReview,
+        objectNodeID: "paused-lease",
+        revisionKey: String(repeating: "f", count: 40)
+      ),
+      objectNumber: 21,
+      contractVersionUsed: "w7-pause-test",
+      priority: .prReview,
+      firstStep: .review,
+      now: fixture.now
+    )
+    guard case .created(let job) = queued else {
+      Issue.record("pause lease fixture was suppressed")
+      return
+    }
+    await #expect(throws: DurableJobStoreError.dispatchSuppressed) {
+      _ = try await fixture.jobs.transition(
+        jobID: job.id,
+        eventKey: "pause-gate:lease",
+        event: .acquireLease,
+        context: JobTransitionContext(now: fixture.now, reason: "must be suppressed")
+      )
+    }
+  }
+
   @Test("startup sweep finishes cleanup stranded by a terminal crash boundary")
   func startupCleanupSweep() async throws {
     let fixture = try await JobCoordinatorFixture()
@@ -449,7 +545,10 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
     configuration = ConfigurationStore(database: database)
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(
+      database: database,
+      enforceApplicationDispatchGate: true
+    )
     repositories = try RepositoryStore(
       rootURL: root.appendingPathComponent("ApplicationSupport", isDirectory: true),
       database: database
@@ -459,6 +558,10 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
     events = CoordinatorEventLog()
     api = CoordinatorGitHubAPI(events: events)
     workflows = CoordinatorWorkflowRunner(jobs: jobs, events: events, now: now)
+    try await configuration.setExternalAutomationAcknowledged(true, now: now)
+    try await configuration.setProviderDisclosureAcknowledged(true, now: now)
+    try await configuration.setLoginItem(selected: true, status: .enabled, now: now)
+    try await configuration.setOnboardingComplete(true, now: now)
   }
 
   func addRepository() async throws -> RepositoryConfiguration {
@@ -477,7 +580,9 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
     return repository
   }
 
-  func coordinator() -> JobCoordinator {
+  func coordinator(
+    newDispatchAllowed: @escaping @Sendable () async -> Bool = { true }
+  ) -> JobCoordinator {
     let discovery = GitHubDiscovery(api: api, jobs: jobs, reviewedRevisions: reviewed)
     let registry = JobWorkflowRegistry(
       pullRequestReview: workflows,
@@ -493,6 +598,7 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
       schedulerPersistence: persistence,
       workflows: registry,
       contractVersion: "w6-test",
+      newDispatchAllowed: newDispatchAllowed,
       now: { self.now }
     )
   }
