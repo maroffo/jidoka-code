@@ -93,6 +93,135 @@ struct ConfigurationStoreTests {
     await reopenedDatabase.close()
   }
 
+  @Test("W7 settings migrate from W6 and credential replacement metadata is durable")
+  func applicationSettingsMigration() async throws {
+    let fixture = try ConfigurationFixture()
+    defer { fixture.remove() }
+    let firstMigration = try #require(DatabaseSchema.migrations.first)
+    let legacy = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: [firstMigration]
+    )
+    let now = Date(timeIntervalSince1970: 31_000)
+    let legacyConfiguration = ConfigurationStore(database: legacy)
+    let legacyRepository = RepositoryConfiguration(
+      id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+      nodeID: "R_legacy",
+      owner: "owner",
+      name: "legacy",
+      defaultBranch: "main",
+      reviewEnabled: true,
+      triageEnabled: false,
+      implementationEnabled: false,
+      enabled: true
+    )
+    try await legacyConfiguration.upsertRepository(legacyRepository, now: now)
+    try await legacyConfiguration.setMaxConcurrency(4, now: now)
+    try await legacyConfiguration.setPaused(true, now: now)
+    let legacyJob = try await DurableJobStore(database: legacy).createJob(
+      id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+      identity: LogicalJobIdentity(
+        repositoryID: legacyRepository.id,
+        kind: .prReview,
+        objectNodeID: "PR_legacy",
+        revisionKey: String(repeating: "c", count: 40)
+      ),
+      objectNumber: 9,
+      contractVersionUsed: "w6-migration-fixture",
+      priority: .prReview,
+      firstStep: .review,
+      now: now
+    )
+    guard case .created(let legacyJobRecord) = legacyJob else {
+      Issue.record("legacy migration job was suppressed")
+      return
+    }
+    #expect(try await legacy.schemaVersion() == 1)
+    await legacy.close()
+
+    let upgraded = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let backupURL = try #require(upgraded.migrationBackups.first)
+    #expect(upgraded.migrationBackups.count == 1)
+    let backup = try SQLiteStore(databaseURL: backupURL, migrations: [firstMigration])
+    #expect(try await backup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
+    #expect(try await backup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    #expect(try await backup.scalarInt("SELECT max_concurrency FROM app_settings") == 4)
+    #expect(try await backup.scalarInt("SELECT paused FROM app_settings") == 1)
+    await backup.close()
+
+    let store = ConfigurationStore(database: upgraded)
+    var snapshot = try await store.snapshot()
+    #expect(Set(snapshot.profiles.map(\.role)) == Set(ModelProfileRole.allCases))
+    #expect(
+      snapshot.profiles.allSatisfy {
+        $0.provider == "openai-codex" && $0.model == "gpt-5.6-sol" && $0.thinking == .max
+      })
+    #expect(snapshot.repositories == [legacyRepository])
+    #expect(snapshot.app.maxConcurrency == 4)
+    #expect(snapshot.app.paused)
+    #expect(try await DurableJobStore(database: upgraded).job(id: legacyJobRecord.id) != nil)
+    #expect(!snapshot.app.onboardingComplete)
+    #expect(!snapshot.app.externalAutomationAcknowledged)
+    #expect(!snapshot.app.providerDisclosureAcknowledged)
+    #expect(snapshot.app.githubAccount == nil)
+    #expect(!snapshot.app.credentialDeletionPending)
+    #expect(snapshot.app.loginItemStatus == .notRegistered)
+
+    try await store.setExternalAutomationAcknowledged(true, now: now)
+    try await store.setProviderDisclosureAcknowledged(true, now: now)
+    #expect(
+      try await store.prepareCredentialReplacement(
+        account: "octocat",
+        authorID: 7,
+        tokenSHA256: String(repeating: "a", count: 64),
+        now: now
+      ) == nil
+    )
+    snapshot = try await store.snapshot()
+    #expect(snapshot.app.pendingGitHubAccount == "octocat")
+    #expect(snapshot.app.pendingGitHubTokenSHA256 == String(repeating: "a", count: 64))
+    #expect(snapshot.app.githubAccount == nil)
+    try await store.commitCredentialReplacement(
+      account: "octocat",
+      authorID: 7,
+      tokenSHA256: String(repeating: "a", count: 64),
+      now: now
+    )
+    #expect(
+      try await store.prepareCredentialReplacement(
+        account: "hubot",
+        authorID: 8,
+        tokenSHA256: String(repeating: "b", count: 64),
+        now: now
+      ) == "octocat"
+    )
+    try await store.commitCredentialReplacement(
+      account: "hubot",
+      authorID: 8,
+      tokenSHA256: String(repeating: "b", count: 64),
+      now: now
+    )
+    try await store.completeCredentialCleanup(account: "octocat", now: now)
+    try await store.setLoginItem(selected: true, status: .requiresApproval, now: now)
+    try await store.setOnboardingComplete(true, now: now)
+    await upgraded.close()
+
+    let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let reopened = try await ConfigurationStore(database: reopenedDatabase).snapshot()
+    #expect(reopened.app.onboardingComplete)
+    #expect(reopened.app.externalAutomationAcknowledged)
+    #expect(reopened.app.providerDisclosureAcknowledged)
+    #expect(reopened.app.githubAccount == "hubot")
+    #expect(reopened.app.githubAuthorID == 8)
+    #expect(reopened.app.pendingGitHubAccount == nil)
+    #expect(reopened.app.pendingGitHubTokenSHA256 == nil)
+    #expect(reopened.app.previousGitHubAccount == nil)
+    #expect(!reopened.app.credentialDeletionPending)
+    #expect(reopened.app.loginItemSelected)
+    #expect(reopened.app.loginItemStatus == .requiresApproval)
+    await reopenedDatabase.close()
+  }
+
   @Test("repository and branch validation fail closed")
   func repositoryValidation() async throws {
     let fixture = try ConfigurationFixture()

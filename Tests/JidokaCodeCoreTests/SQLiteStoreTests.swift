@@ -11,7 +11,7 @@ struct SQLiteStoreTests {
     defer { fixture.remove() }
 
     let store = try SQLiteStore(databaseURL: fixture.databaseURL)
-    #expect(try await store.schemaVersion() == 1)
+    #expect(try await store.schemaVersion() == DatabaseSchema.migrations.last?.version)
     let pragmas = try await store.pragmas()
     #expect(pragmas.journalMode == "wal")
     #expect(pragmas.foreignKeysEnabled)
@@ -203,8 +203,31 @@ struct SQLiteStoreTests {
     await #expect(throws: SQLiteStoreError.self) {
       try await store.execute("DELETE FROM schema_migrations")
     }
-    #expect(try await store.schemaVersion() == 1)
+    #expect(try await store.schemaVersion() == DatabaseSchema.migrations.last?.version)
     await store.close()
+  }
+
+  @Test("explicit WAL checkpoint is durable and closed stores reject it")
+  func checkpointAndClose() async throws {
+    let fixture = try DatabaseFixture()
+    defer { fixture.remove() }
+    let store = try SQLiteStore(databaseURL: fixture.databaseURL)
+    try await store.execute(
+      "INSERT INTO repositories(id, node_id, owner, name, default_branch, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      bindings: repositoryBindings(id: "checkpoint")
+    )
+    let checkpoint = try await store.checkpoint()
+    #expect(checkpoint.logFrameCount >= 0)
+    #expect(checkpoint.checkpointedFrameCount >= 0)
+    #expect(
+      try await store.scalarInt(
+        "SELECT COUNT(*) FROM repositories WHERE id = 'checkpoint'"
+      ) == 1
+    )
+    await store.close()
+    await #expect(throws: SQLiteStoreError.closed) {
+      _ = try await store.checkpoint()
+    }
   }
 
   @Test("explicit backup is consistent and closed stores fail closed")

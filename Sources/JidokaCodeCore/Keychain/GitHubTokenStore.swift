@@ -33,7 +33,7 @@ protocol GitHubTokenKeychainBackend: Sendable {
   func delete(service: String, account: String) throws -> Bool
 }
 
-protocol GitHubTokenProviding: Sendable {
+public protocol GitHubTokenProviding: Sendable {
   func token() async throws -> Data
 }
 
@@ -60,7 +60,7 @@ public actor GitHubTokenStore: GitHubTokenProviding {
     self.backend = backend
   }
 
-  func token() async throws -> Data {
+  public func token() async throws -> Data {
     guard
       let value = try backend.read(
         service: GitHubTokenConstants.service,
@@ -71,6 +71,21 @@ public actor GitHubTokenStore: GitHubTokenProviding {
     }
     try Self.validate(token: value)
     return value
+  }
+
+  public func containsCredential() throws -> Bool {
+    guard
+      var value = try backend.read(
+        service: GitHubTokenConstants.service,
+        account: account
+      )
+    else {
+      return false
+    }
+    let count = value.count
+    defer { value.resetBytes(in: 0..<count) }
+    try Self.validate(token: value)
+    return true
   }
 
   public func replace(with value: Data) throws {

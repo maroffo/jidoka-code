@@ -100,12 +100,12 @@ public enum LifecycleProbeError: Error, Equatable, Sendable {
   case noEligibleTopology
 }
 
-public protocol EngineClient: Sendable {
+public protocol LifecycleProbeClient: Sendable {
   func snapshot() throws -> EngineSnapshot
   func roundTrip(_ request: EngineRoundTripRequest) throws -> EngineRoundTripResponse
 }
 
-extension EngineClient {
+extension LifecycleProbeClient {
   public func run(roundTrips count: Int) throws -> EngineRoundTripReport {
     guard (1...LifecycleProbeConstants.maximumRoundTrips).contains(count) else {
       throw LifecycleProbeError.invalidRoundTripCount(count)
@@ -145,7 +145,7 @@ extension EngineClient {
   }
 }
 
-public struct DirectEngineClient: EngineClient {
+public struct DirectEngineClient: LifecycleProbeClient {
   private let currentSnapshot: EngineSnapshot
 
   public init(
@@ -269,15 +269,24 @@ public enum EngineProbeXPCOperation: String, Codable, Sendable {
 }
 
 public struct EngineProbeXPCRequest: Codable, Equatable, Sendable {
+  public let protocolVersion: Int
   public let operation: EngineProbeXPCOperation
   public let roundTrip: EngineRoundTripRequest?
 
-  public init(operation: EngineProbeXPCOperation, roundTrip: EngineRoundTripRequest? = nil) {
+  public init(
+    protocolVersion: Int = EngineProtocolVersion.current,
+    operation: EngineProbeXPCOperation,
+    roundTrip: EngineRoundTripRequest? = nil
+  ) {
+    self.protocolVersion = protocolVersion
     self.operation = operation
     self.roundTrip = roundTrip
   }
 
   public func validate() throws {
+    guard protocolVersion == EngineProtocolVersion.current else {
+      throw LifecycleProbeError.invalidRequest
+    }
     switch operation {
     case .roundTrip:
       guard let roundTrip,
@@ -295,17 +304,20 @@ public struct EngineProbeXPCRequest: Codable, Equatable, Sendable {
 }
 
 public struct EngineProbeXPCResponse: Codable, Equatable, Sendable {
+  public let protocolVersion: Int
   public let keychainSHA256: String?
   public let operation: EngineProbeXPCOperation
   public let roundTrip: EngineRoundTripResponse?
   public let snapshot: EngineSnapshot
 
   public init(
+    protocolVersion: Int = EngineProtocolVersion.current,
     operation: EngineProbeXPCOperation,
     keychainSHA256: String? = nil,
     roundTrip: EngineRoundTripResponse? = nil,
     snapshot: EngineSnapshot
   ) {
+    self.protocolVersion = protocolVersion
     self.keychainSHA256 = keychainSHA256
     self.operation = operation
     self.roundTrip = roundTrip
@@ -313,7 +325,12 @@ public struct EngineProbeXPCResponse: Codable, Equatable, Sendable {
   }
 
   public func validate(for request: EngineProbeXPCRequest) throws {
-    guard operation == request.operation, snapshot.reconciled, snapshot.topology == .helper else {
+    guard protocolVersion == request.protocolVersion,
+      protocolVersion == EngineProtocolVersion.current,
+      operation == request.operation,
+      snapshot.reconciled,
+      snapshot.topology == .helper
+    else {
       throw LifecycleProbeError.invalidResponse
     }
     switch request.operation {

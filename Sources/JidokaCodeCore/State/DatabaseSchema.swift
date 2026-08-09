@@ -262,7 +262,97 @@ public enum DatabaseSchema {
         VALUES (1, 2, 0, unixepoch('subsec'))
         """,
       ]
-    )
+    ),
+    SQLiteMigration(
+      version: 2,
+      name: "application-ui-settings",
+      requiresBackup: true,
+      statements: [
+        """
+        ALTER TABLE app_settings
+        ADD COLUMN onboarding_complete INTEGER NOT NULL DEFAULT 0
+          CHECK (onboarding_complete IN (0, 1))
+        """,
+        """
+        ALTER TABLE app_settings
+        ADD COLUMN external_automation_acknowledged INTEGER NOT NULL DEFAULT 0
+          CHECK (external_automation_acknowledged IN (0, 1))
+        """,
+        """
+        ALTER TABLE app_settings
+        ADD COLUMN provider_disclosure_acknowledged INTEGER NOT NULL DEFAULT 0
+          CHECK (provider_disclosure_acknowledged IN (0, 1))
+        """,
+        """
+        ALTER TABLE app_settings ADD COLUMN github_account TEXT
+        """,
+        """
+        ALTER TABLE app_settings ADD COLUMN github_author_id INTEGER
+          CHECK (github_author_id IS NULL OR github_author_id > 0)
+        """,
+        """
+        ALTER TABLE app_settings ADD COLUMN pending_github_account TEXT
+        """,
+        """
+        ALTER TABLE app_settings ADD COLUMN pending_github_author_id INTEGER
+          CHECK (pending_github_author_id IS NULL OR pending_github_author_id > 0)
+        """,
+        """
+        ALTER TABLE app_settings ADD COLUMN pending_replacement_sha256 TEXT
+          CHECK (
+            pending_replacement_sha256 IS NULL
+            OR (
+              length(pending_replacement_sha256) = 64
+              AND pending_replacement_sha256 NOT GLOB '*[^0-9a-f]*'
+            )
+          )
+        """,
+        """
+        ALTER TABLE app_settings ADD COLUMN previous_github_account TEXT
+        """,
+        """
+        ALTER TABLE app_settings
+        ADD COLUMN credential_deletion_pending INTEGER NOT NULL DEFAULT 0
+          CHECK (credential_deletion_pending IN (0, 1))
+        """,
+        """
+        ALTER TABLE app_settings
+        ADD COLUMN login_item_selected INTEGER NOT NULL DEFAULT 0
+          CHECK (login_item_selected IN (0, 1))
+        """,
+        """
+        ALTER TABLE app_settings
+        ADD COLUMN login_item_status TEXT NOT NULL DEFAULT 'notRegistered'
+          CHECK (login_item_status IN ('notRegistered', 'enabled', 'requiresApproval', 'notFound'))
+        """,
+        """
+        CREATE TRIGGER app_settings_credential_identity_consistent
+        BEFORE UPDATE ON app_settings
+        WHEN ((NEW.github_account IS NULL) != (NEW.github_author_id IS NULL))
+          OR ((NEW.pending_github_account IS NULL) != (NEW.pending_github_author_id IS NULL))
+          OR ((NEW.pending_github_account IS NULL) != (NEW.pending_replacement_sha256 IS NULL))
+          OR (
+            NEW.credential_deletion_pending = 1
+            AND (
+              NEW.github_account IS NULL
+              OR NEW.pending_github_account IS NOT NULL
+              OR NEW.previous_github_account IS NOT NULL
+            )
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'credential identity is incomplete');
+        END
+        """,
+        """
+        INSERT OR IGNORE INTO model_profiles(role, provider, model, thinking, updated_at)
+        VALUES
+          ('review', 'openai-codex', 'gpt-5.6-sol', 'max', unixepoch('subsec')),
+          ('triage', 'openai-codex', 'gpt-5.6-sol', 'max', unixepoch('subsec')),
+          ('planning', 'openai-codex', 'gpt-5.6-sol', 'max', unixepoch('subsec')),
+          ('orchestration', 'openai-codex', 'gpt-5.6-sol', 'max', unixepoch('subsec'))
+        """,
+      ]
+    ),
   ]
 
   private static func appendOnlyTrigger(table: String, operation: String) -> String {

@@ -80,7 +80,7 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
     decoder = JSONDecoder()
   }
 
-  init(
+  public init(
     tokenProvider: any GitHubTokenProviding,
     transport: any GitHubHTTPTransport,
     now: @escaping @Sendable () -> Date = Date.init
@@ -97,7 +97,8 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
     timeoutSeconds: TimeInterval = 30
   ) async throws -> OneShotGitCredentialSession {
     var token = try await tokenProvider.token()
-    defer { token.resetBytes(in: 0..<token.count) }
+    let tokenCount = token.count
+    defer { token.resetBytes(in: 0..<tokenCount) }
     guard (20...2_048).contains(token.count),
       token.allSatisfy({ (0x21...0x7E).contains($0) })
     else {

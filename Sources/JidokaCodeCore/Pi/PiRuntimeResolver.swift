@@ -1076,7 +1076,7 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }
 
-  private static func actionableIssue(
+  public static func actionableIssue(
     for error: PiRuntimeResolutionError
   ) -> PiRuntimePreflightIssue {
     switch error.code {

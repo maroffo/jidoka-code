@@ -50,6 +50,16 @@ public struct SQLitePragmas: Equatable, Sendable {
   public let busyTimeoutMilliseconds: Int
 }
 
+public struct SQLiteCheckpoint: Equatable, Sendable {
+  public let logFrameCount: Int
+  public let checkpointedFrameCount: Int
+
+  public init(logFrameCount: Int, checkpointedFrameCount: Int) {
+    self.logFrameCount = logFrameCount
+    self.checkpointedFrameCount = checkpointedFrameCount
+  }
+}
+
 public enum SQLiteStoreError: Error, Equatable, Sendable {
   case unsafePath(String)
   case openFailed(String)
@@ -127,6 +137,31 @@ public actor SQLiteStore {
 
   public func close() {
     connection.close()
+  }
+
+  public func checkpoint() throws -> SQLiteCheckpoint {
+    guard !transactionActive else {
+      throw SQLiteStoreError.transactionAlreadyActive
+    }
+    guard let handle = connection.handle else {
+      throw SQLiteStoreError.closed
+    }
+    var logFrameCount: Int32 = 0
+    var checkpointedFrameCount: Int32 = 0
+    let result = sqlite3_wal_checkpoint_v2(
+      handle,
+      nil,
+      SQLITE_CHECKPOINT_TRUNCATE,
+      &logFrameCount,
+      &checkpointedFrameCount
+    )
+    guard result == SQLITE_OK else {
+      throw Self.statementError(connection)
+    }
+    return SQLiteCheckpoint(
+      logFrameCount: Int(logFrameCount),
+      checkpointedFrameCount: Int(checkpointedFrameCount)
+    )
   }
 
   @discardableResult

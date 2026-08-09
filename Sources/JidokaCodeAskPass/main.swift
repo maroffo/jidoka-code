@@ -13,7 +13,8 @@ struct JidokaCodeAskPass {
         prompt: CommandLine.arguments[1],
         environment: ProcessInfo.processInfo.environment
       )
-      defer { credential.resetBytes(in: 0..<credential.count) }
+      let credentialCount = credential.count
+      defer { credential.resetBytes(in: 0..<credentialCount) }
       FileHandle.standardOutput.write(credential)
       FileHandle.standardOutput.write(Data([0x0A]))
     } catch {
