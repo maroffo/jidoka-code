@@ -120,10 +120,13 @@ for input in \
     "$ROOT/Packaging/com.maroffo.JidokaCode.EngineProbe.plist" \
     "$ROOT/Resources/Pi/manifest.json" \
     "$ROOT/Resources/Pi/workflow-resources.json" \
+    "$ROOT/Resources/Pi/tui-resources.json" \
     "$ROOT/Resources/Pi/extensions/jidoka-code.ts" \
     "$ROOT/Resources/Pi/extensions/jidoka-deny-user-bash.js" \
     "$ROOT/Resources/Pi/extensions/jidoka-runtime.ts" \
+    "$ROOT/Resources/Pi/extensions/jidoka-tui-runtime.ts" \
     "$ROOT/Resources/Pi/runtime/jidoka-extension-contract.mjs" \
+    "$ROOT/Resources/Pi/runtime/jidoka-tui-contract.mjs" \
     "$ROOT/Resources/Pi/runtime/node-runtime-builds.json" \
     "$ROOT/Resources/Pi/runtime/pi-runtime-builds.json" \
     "$ROOT/Resources/Pi/skills/jidoka-code-issue-triage/SKILL.md" \
@@ -214,6 +217,9 @@ fi
     "$ROOT/Resources/Pi/workflow-resources.json" \
     "$RESOURCES/Pi/workflow-resources.json"
 /usr/bin/install -m 0644 \
+    "$ROOT/Resources/Pi/tui-resources.json" \
+    "$RESOURCES/Pi/tui-resources.json"
+/usr/bin/install -m 0644 \
     "$ROOT/Resources/Pi/extensions/jidoka-code.ts" \
     "$RESOURCES/Pi/extensions/jidoka-code.ts"
 /usr/bin/install -m 0644 \
@@ -222,6 +228,9 @@ fi
 /usr/bin/install -m 0644 \
     "$ROOT/Resources/Pi/extensions/jidoka-runtime.ts" \
     "$RESOURCES/Pi/extensions/jidoka-runtime.ts"
+/usr/bin/install -m 0644 \
+    "$ROOT/Resources/Pi/extensions/jidoka-tui-runtime.ts" \
+    "$RESOURCES/Pi/extensions/jidoka-tui-runtime.ts"
 for skill in \
     jidoka-code-issue-triage \
     jidoka-code-orchestrate \
@@ -249,6 +258,9 @@ done
 /usr/bin/install -m 0644 \
     "$ROOT/Resources/Pi/runtime/jidoka-extension-contract.mjs" \
     "$RESOURCES/Pi/runtime/jidoka-extension-contract.mjs"
+/usr/bin/install -m 0644 \
+    "$ROOT/Resources/Pi/runtime/jidoka-tui-contract.mjs" \
+    "$RESOURCES/Pi/runtime/jidoka-tui-contract.mjs"
 /usr/bin/install -m 0644 \
     "$ROOT/Resources/Pi/runtime/node-runtime-builds.json" \
     "$RESOURCES/Pi/runtime/node-runtime-builds.json"

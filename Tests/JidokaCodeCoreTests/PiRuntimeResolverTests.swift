@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Testing
 
@@ -102,6 +103,29 @@ struct PiRuntimeResolverTests {
     }
   }
 
+  @Test("Pi package rejects writable roots and hard-linked imported files")
+  func unsafePiFilesystemAuthority() throws {
+    let writableRoot = try RuntimeResolverFixture()
+    defer { writableRoot.remove() }
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o777],
+      ofItemAtPath: writableRoot.packageRootURL.path
+    )
+    #expect(throws: PiRuntimeResolutionError.self) {
+      _ = try writableRoot.resolver().resolve()
+    }
+
+    let linkedRuntime = try RuntimeResolverFixture()
+    defer { linkedRuntime.remove() }
+    try FileManager.default.linkItem(
+      at: linkedRuntime.cliURL,
+      to: linkedRuntime.rootURL.appendingPathComponent("linked-cli.js")
+    )
+    #expect(throws: PiRuntimeResolutionError.self) {
+      _ = try linkedRuntime.resolver().resolve()
+    }
+  }
+
   @Test("Node executable must match an exact packaged digest")
   func unattestedNode() throws {
     let fixture = try RuntimeResolverFixture(attestNode: false)
@@ -112,6 +136,29 @@ struct PiRuntimeResolverTests {
       Issue.record("unattested Node passed")
     } catch let error as PiRuntimeResolutionError {
       #expect(error.code == .unattestedNodeBuild)
+    }
+  }
+
+  @Test("Node rejects writable executables and hard-linked dynamic libraries")
+  func unsafeNodeFilesystemAuthority() throws {
+    let writableNode = try RuntimeResolverFixture()
+    defer { writableNode.remove() }
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o777],
+      ofItemAtPath: writableNode.nodeURL.path
+    )
+    #expect(throws: PiRuntimeResolutionError.self) {
+      _ = try writableNode.resolver().resolve()
+    }
+
+    let linkedLibrary = try RuntimeResolverFixture()
+    defer { linkedLibrary.remove() }
+    try FileManager.default.linkItem(
+      at: linkedLibrary.nodeLibraryURL,
+      to: linkedLibrary.rootURL.appendingPathComponent("linked-node-library.dylib")
+    )
+    #expect(throws: PiRuntimeResolutionError.self) {
+      _ = try linkedLibrary.resolver().resolve()
     }
   }
 
@@ -207,6 +254,126 @@ struct PiRuntimeResolverTests {
     }
   }
 
+  @Test("private runtime snapshot removes unsafe source ancestors from reopen authority")
+  func privateRuntimeSnapshot() throws {
+    let fixture = try RuntimeResolverFixture()
+    defer { fixture.remove() }
+    let runtime = try fixture.resolver().resolve()
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o777],
+      ofItemAtPath: fixture.rootURL.path
+    )
+    let requestedSnapshotParent = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "jidoka-runtime-snapshot-test-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: requestedSnapshotParent,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    let snapshotParent = requestedSnapshotParent.resolvingSymlinksInPath()
+    defer { try? FileManager.default.removeItem(at: snapshotParent) }
+
+    let snapshot = try PiRuntimeResolver.materializePrivateSnapshot(
+      of: runtime,
+      in: snapshotParent
+    )
+    #expect(PiTUIFileProtocol.isChild(snapshot.nodeURL, of: snapshotParent))
+    #expect(PiTUIFileProtocol.isChild(snapshot.piCLIURL, of: snapshotParent))
+    #expect(
+      snapshot.nodeDynamicLibraryDirectoryURL.map {
+        PiTUIFileProtocol.isChild($0, of: snapshotParent)
+      } == true
+    )
+    #expect(snapshot.nodeDynamicLibrarySHA256.count == 1)
+    #expect(
+      try PiRuntimeResolver.attestPackageTree(
+        snapshot.piPackageRootURL,
+        requireSafeAncestors: true
+      ).sha256 == runtime.piRuntimeSHA256["package-tree-v1"]
+    )
+
+    try FileManager.default.linkItem(
+      at: snapshot.piCLIURL,
+      to: snapshotParent.appendingPathComponent("hostile-runtime-link")
+    )
+    let repaired = try PiRuntimeResolver.materializePrivateSnapshot(
+      of: runtime,
+      in: snapshotParent
+    )
+    #expect(repaired == snapshot)
+    #expect(
+      (try FileManager.default.attributesOfItem(atPath: repaired.piCLIURL.path)[.referenceCount]
+        as? NSNumber)?.intValue == 1
+    )
+
+    try FileManager.default.removeItem(at: fixture.cliURL)
+    try FileManager.default.createSymbolicLink(
+      at: fixture.cliURL,
+      withDestinationURL: fixture.packageRootURL.appendingPathComponent("dist/main.js")
+    )
+    let reopened = try PiRuntimeResolver.materializePrivateSnapshot(
+      of: runtime,
+      in: snapshotParent
+    )
+    #expect(reopened == repaired)
+    #expect(reopened.piCLIRelativePath == "dist/cli.js")
+    #expect(reopened.piCLIURL.lastPathComponent == "cli.js")
+  }
+
+  @Test("Darwin allow ACLs cannot authorize runtime source or snapshot mutation")
+  func runtimeACLAuthority() throws {
+    let sourceFixture = try RuntimeResolverFixture()
+    defer { sourceFixture.remove() }
+    try addEveryoneWriteACL(to: sourceFixture.cliURL)
+    #expect(throws: PiRuntimeResolutionError.self) {
+      _ = try sourceFixture.resolver().resolve()
+    }
+
+    let fixture = try RuntimeResolverFixture()
+    defer { fixture.remove() }
+    let runtime = try fixture.resolver().resolve()
+    let requestedParent = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "jidoka-runtime-acl-test-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: requestedParent,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    defer { try? FileManager.default.removeItem(at: requestedParent) }
+    try addEveryoneDirectoryACL(to: requestedParent)
+    #expect(try !PiTUIFileProtocol.safePrivateDirectory(requestedParent))
+    #expect(throws: PiRuntimeResolutionError.self) {
+      _ = try PiRuntimeResolver.materializePrivateSnapshot(
+        of: runtime,
+        in: requestedParent
+      )
+    }
+
+    try removeACL(from: requestedParent)
+    let snapshot = try PiRuntimeResolver.materializePrivateSnapshot(
+      of: runtime,
+      in: requestedParent
+    )
+    try addEveryoneWriteACL(to: snapshot.nodeURL)
+    let repaired = try PiRuntimeResolver.materializePrivateSnapshot(
+      of: runtime,
+      in: requestedParent
+    )
+    let nodeDescriptor = Darwin.open(
+      repaired.nodeURL.path,
+      O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+    )
+    #expect(nodeDescriptor >= 0)
+    if nodeDescriptor >= 0 {
+      #expect(DarwinACLAuthority.hasNoAllowEntries(nodeDescriptor))
+      _ = Darwin.close(nodeDescriptor)
+    }
+  }
+
   @Test("system Pi and Node resolve through the packaged compatibility policies")
   func systemRuntime() throws {
     let resourceRoot = URL(fileURLWithPath: #filePath)
@@ -223,10 +390,65 @@ struct PiRuntimeResolverTests {
     #expect(runtime.nodeVersion.description == "26.6.0")
     #expect(runtime.piRuntimeSHA256.count == 5)
     #expect(runtime.nodeDynamicLibrarySHA256.count == 25)
+    #expect(runtime.nodeDynamicLibraryLoadPaths.count == 25)
     #expect(
       runtime.nodeSHA256
         == "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040"
     )
+  }
+
+  @Test("private Node and Pi snapshot supplies the complete non-system dyld closure")
+  func privateNodeDynamicLibraryClosure() throws {
+    let resourceRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .appendingPathComponent("Resources/Pi", isDirectory: true)
+      .resolvingSymlinksInPath()
+    let runtime = try PiRuntimeResolver(
+      configuration: .standard(resourceRoot: resourceRoot)
+    ).resolve()
+    let requestedRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "jidoka-node-snapshot-test-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: requestedRoot,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    let root = requestedRoot.resolvingSymlinksInPath()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let snapshot = try PiRuntimeResolver.materializePrivateSnapshot(
+      of: runtime,
+      in: root
+    )
+    let libraryDirectory = try #require(snapshot.nodeDynamicLibraryDirectoryURL)
+    let dyldLog = root.appendingPathComponent("dyld.log")
+    #expect(FileManager.default.createFile(atPath: dyldLog.path, contents: nil))
+    let logHandle = try FileHandle(forWritingTo: dyldLog)
+    let process = Process()
+    process.executableURL = snapshot.nodeURL
+    process.arguments = [snapshot.piCLIURL.path, "--version"]
+    process.environment = [
+      "DYLD_LIBRARY_PATH": libraryDirectory.path,
+      "DYLD_PRINT_LIBRARIES": "1",
+      "HOME": root.path,
+      "PATH": "/usr/bin:/bin",
+    ]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = logHandle
+    try process.run()
+    process.waitUntilExit()
+    try logHandle.close()
+
+    let log = try String(contentsOf: dyldLog, encoding: .utf8)
+    #expect(process.terminationStatus == 0)
+    #expect(!log.contains("/opt/homebrew/"))
+    #expect(snapshot.nodeDynamicLibrarySHA256.count == 25)
+    for path in snapshot.nodeDynamicLibrarySHA256.keys {
+      #expect(log.contains(path))
+    }
   }
 
   @Test("semantic versions reject prefixes, prereleases, and leading zeroes")
@@ -236,6 +458,33 @@ struct PiRuntimeResolverTests {
         try PiSemanticVersion(value)
       }
     }
+  }
+}
+
+private func addEveryoneWriteACL(to url: URL) throws {
+  try runChmod(["+a", "everyone allow write", url.path])
+}
+
+private func addEveryoneDirectoryACL(to url: URL) throws {
+  try runChmod([
+    "+a", "everyone allow list,search,add_file,delete_child", url.path,
+  ])
+}
+
+private func removeACL(from url: URL) throws {
+  try runChmod(["-N", url.path])
+}
+
+private func runChmod(_ arguments: [String]) throws {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+  process.arguments = arguments
+  process.standardOutput = FileHandle.nullDevice
+  process.standardError = FileHandle.nullDevice
+  try process.run()
+  process.waitUntilExit()
+  guard process.terminationStatus == 0 else {
+    throw CocoaError(.fileWriteNoPermission)
   }
 }
 

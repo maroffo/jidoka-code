@@ -259,11 +259,15 @@ public struct PiWorkflowResourceCatalog: Equatable, Sendable {
     }
   }
 
-  private static func readBoundedRegularFile(
+  fileprivate static func readBoundedRegularFile(
     relativePath: String,
     in root: URL
   ) throws -> Data {
-    guard validRelativeResourcePath(relativePath) else {
+    guard validRelativeResourcePath(relativePath),
+      (try? PiTUIFileProtocol.safeRegularFile(
+        root.appendingPathComponent(relativePath, isDirectory: false)
+      )) == true
+    else {
       throw PiWorkflowResourceError.unsafeResource(relativePath)
     }
     let components = relativePath.split(separator: "/").map(String.init)
@@ -342,8 +346,71 @@ public struct PiWorkflowResourceCatalog: Equatable, Sendable {
     return Data(bytes)
   }
 
-  private static func sha256(_ data: Data) -> String {
+  fileprivate static func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+  }
+}
+
+public struct PiTUIResourceCatalog: Equatable, Sendable {
+  public static let manifestSHA256 =
+    "5392fec5eb544dbe0c721692440e8445604d3c05509a39b450f2bb964245f07f"
+  public static let expectedResourcePaths: Set<String> = [
+    "extensions/jidoka-tui-runtime.ts",
+    "runtime/jidoka-tui-contract.mjs",
+  ]
+
+  public let workflowResources: PiWorkflowResourceCatalog
+  public let manifestURL: URL
+  public let manifestSHA256: String
+  public let resourceSHA256: [String: String]
+
+  public static func inspect(resourceRoot: URL) throws -> Self {
+    let workflowResources = try PiWorkflowResourceCatalog.inspect(resourceRoot: resourceRoot)
+    let manifestURL = workflowResources.resourceRoot.appendingPathComponent("tui-resources.json")
+    let manifestData: Data
+    do {
+      manifestData = try PiWorkflowResourceCatalog.readBoundedRegularFile(
+        relativePath: "tui-resources.json",
+        in: workflowResources.resourceRoot
+      )
+    } catch {
+      throw PiWorkflowResourceError.missingManifest
+    }
+    let observedDigest = PiWorkflowResourceCatalog.sha256(manifestData)
+    guard observedDigest == manifestSHA256,
+      let manifest = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+      Set(manifest.keys) == Set(["contractVersion", "resources", "schemaVersion"]),
+      manifest["schemaVersion"] as? Int == 1,
+      manifest["contractVersion"] as? String == PiWorkflowResourceCatalog.contractVersion,
+      let resources = manifest["resources"] as? [String: String],
+      Set(resources.keys) == expectedResourcePaths,
+      resources.values.allSatisfy(GitHubInputValidation.validSHA256)
+    else {
+      throw PiWorkflowResourceError.manifestDigestMismatch
+    }
+    for relativePath in expectedResourcePaths.sorted() {
+      let data = try PiWorkflowResourceCatalog.readBoundedRegularFile(
+        relativePath: relativePath,
+        in: workflowResources.resourceRoot
+      )
+      guard PiWorkflowResourceCatalog.sha256(data) == resources[relativePath] else {
+        throw PiWorkflowResourceError.resourceDigestMismatch(relativePath)
+      }
+    }
+    return Self(
+      workflowResources: workflowResources,
+      manifestURL: manifestURL,
+      manifestSHA256: observedDigest,
+      resourceSHA256: resources
+    )
+  }
+
+  public var tuiRuntimeExtensionURL: URL {
+    workflowResources.resourceRoot.appendingPathComponent("extensions/jidoka-tui-runtime.ts")
+  }
+
+  public var tuiContractURL: URL {
+    workflowResources.resourceRoot.appendingPathComponent("runtime/jidoka-tui-contract.mjs")
   }
 }
 
@@ -432,61 +499,76 @@ public struct PiWorkflowRuntimeConfiguration: Equatable, Sendable {
     return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) + Data([0x0A])
   }
 
-  public func write(to destination: URL) throws {
-    guard destination.isFileURL,
-      destination.path.hasPrefix("/"),
-      destination.standardizedFileURL.path == destination.path,
-      !FileManager.default.fileExists(atPath: destination.path)
-    else {
-      throw PiWorkflowResourceError.configurationAlreadyExists
-    }
-    let parent = destination.deletingLastPathComponent().standardizedFileURL
-    let values = try parent.resourceValues(forKeys: [
-      .isDirectoryKey, .isSymbolicLinkKey,
-    ])
-    let attributes = try FileManager.default.attributesOfItem(atPath: parent.path)
-    let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
-    guard values.isDirectory == true,
-      values.isSymbolicLink != true,
-      parent.resolvingSymlinksInPath().path == parent.path,
-      let permissions,
-      permissions & 0o077 == 0
-    else {
-      throw PiWorkflowResourceError.unsafeConfigurationDestination
-    }
-    let parentDescriptor = Darwin.open(parent.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-    guard parentDescriptor >= 0 else {
-      throw PiWorkflowResourceError.configurationWriteFailed(errno)
-    }
-    defer { Darwin.close(parentDescriptor) }
-    let descriptor = Darwin.open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
-    guard descriptor >= 0 else {
-      if errno == EEXIST { throw PiWorkflowResourceError.configurationAlreadyExists }
-      throw PiWorkflowResourceError.configurationWriteFailed(errno)
-    }
-    defer { Darwin.close(descriptor) }
-    let data = try encoded()
+  public static func load(from source: URL) throws -> Self {
+    let data: Data
     do {
-      try data.withUnsafeBytes { bytes in
-        guard let base = bytes.baseAddress else { return }
-        var offset = 0
-        while offset < bytes.count {
-          let count = Darwin.write(descriptor, base.advanced(by: offset), bytes.count - offset)
-          if count > 0 {
-            offset += count
-          } else if count == -1, errno == EINTR {
-            continue
-          } else {
-            throw PiWorkflowResourceError.configurationWriteFailed(errno)
-          }
-        }
-      }
-      guard fsync(descriptor) == 0, fsync(parentDescriptor) == 0 else {
-        throw PiWorkflowResourceError.configurationWriteFailed(errno)
-      }
+      data = try PiTUIFileProtocol.readPrivateFile(source, maximumBytes: 1_048_576)
     } catch {
-      try? FileManager.default.removeItem(at: destination)
-      throw error
+      throw PiWorkflowResourceError.invalidRuntimeConfiguration
+    }
+    guard data.last == 0x0A,
+      let object = try? JSONSerialization.jsonObject(with: Data(data.dropLast())) as? [String: Any],
+      Set(object.keys)
+        == Set([
+          "allowedCommandIDs", "allowedWritePaths", "artifactSHA256", "contractVersion",
+          "nonce", "resourceManifestPath", "resourceManifestSHA256", "resourceRoot", "role",
+          "schemaVersion", "toolPolicy", "workflow", "workspaceRoot",
+        ]),
+      object["schemaVersion"] as? Int == 1,
+      object["contractVersion"] as? String == PiWorkflowResourceCatalog.contractVersion,
+      let workflowValue = object["workflow"] as? String,
+      let workflow = PiWorkflowKind(rawValue: workflowValue),
+      let roleValue = object["role"] as? String,
+      let role = PiWorkflowRole(rawValue: roleValue),
+      let nonce = object["nonce"] as? String,
+      let artifactSHA256 = object["artifactSHA256"] as? String,
+      let allowedCommandIDs = object["allowedCommandIDs"] as? [String],
+      let allowedWritePaths = object["allowedWritePaths"] as? [String],
+      let workspacePath = object["workspaceRoot"] as? String,
+      let resourceRootPath = object["resourceRoot"] as? String,
+      let manifestPath = object["resourceManifestPath"] as? String,
+      let manifestSHA256 = object["resourceManifestSHA256"] as? String,
+      let toolPolicyValue = object["toolPolicy"] as? String
+    else {
+      throw PiWorkflowResourceError.invalidRuntimeConfiguration
+    }
+    let resources = try PiWorkflowResourceCatalog.inspect(
+      resourceRoot: URL(fileURLWithPath: resourceRootPath, isDirectory: true)
+    )
+    let configuration = try Self(
+      workflow: workflow,
+      role: role,
+      nonce: nonce,
+      artifactSHA256: artifactSHA256,
+      allowedCommandIDs: allowedCommandIDs,
+      allowedWritePaths: allowedWritePaths,
+      workspaceRoot: URL(fileURLWithPath: workspacePath, isDirectory: true),
+      resources: resources
+    )
+    guard manifestPath == resources.manifestURL.path,
+      manifestSHA256 == resources.manifestSHA256,
+      toolPolicyValue == configuration.toolPolicy.rawValue,
+      try configuration.encoded() == data
+    else {
+      throw PiWorkflowResourceError.invalidRuntimeConfiguration
+    }
+    return configuration
+  }
+
+  public func write(to destination: URL) throws {
+    do {
+      try PiTUIFileProtocol.createPrivateFile(data: encoded(), at: destination)
+    } catch PiTUIRuntimeError.fileAlreadyExists {
+      throw PiWorkflowResourceError.configurationAlreadyExists
+    } catch let error as PiTUIRuntimeError {
+      switch error {
+      case .unsafePath:
+        throw PiWorkflowResourceError.unsafeConfigurationDestination
+      case .writeFailed(let code):
+        throw PiWorkflowResourceError.configurationWriteFailed(code)
+      default:
+        throw PiWorkflowResourceError.invalidRuntimeConfiguration
+      }
     }
   }
 

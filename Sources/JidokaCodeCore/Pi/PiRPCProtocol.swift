@@ -231,6 +231,7 @@ public struct PiRPCTerminalResult: Equatable, Sendable {
   public let approvedCommandIDs: [String]
   public let payload: [String: PiJSONValue]
   public let recordSHA256: String
+  public let sessionBoundarySHA256: String?
 
   public init(
     workflow: String,
@@ -239,7 +240,8 @@ public struct PiRPCTerminalResult: Equatable, Sendable {
     artifactSHA256: String,
     approvedCommandIDs: [String],
     payload: [String: PiJSONValue],
-    recordSHA256: String
+    recordSHA256: String,
+    sessionBoundarySHA256: String? = nil
   ) {
     self.workflow = workflow
     self.role = role
@@ -248,6 +250,7 @@ public struct PiRPCTerminalResult: Equatable, Sendable {
     self.approvedCommandIDs = approvedCommandIDs
     self.payload = payload
     self.recordSHA256 = recordSHA256
+    self.sessionBoundarySHA256 = sessionBoundarySHA256
   }
 }
 

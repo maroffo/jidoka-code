@@ -2,18 +2,23 @@ SHELL := /bin/bash
 override DEVELOPER_DIR := /Applications/Xcode.app/Contents/Developer
 export DEVELOPER_DIR
 
-.PHONY: check test-e2e jidoka-code-check jidoka-code-test jidoka-code-test-ui jidoka-code-w7-acceptance jidoka-code-app jidoka-code-package jidoka-code-test-s2-preflight jidoka-code-test-s3-preflight jidoka-code-test-s4-preflight jidoka-code-test-s5-s7-preflight jidoka-code-test-s8-preflight jidoka-code-test-s9-preflight
+.PHONY: check test-e2e jidoka-code-check jidoka-code-test jidoka-code-test-herdr jidoka-code-test-ui jidoka-code-test-s11-herdr jidoka-code-test-s12-pi-tui jidoka-code-w7-acceptance jidoka-code-app jidoka-code-package jidoka-code-test-s2-preflight jidoka-code-test-s3-preflight jidoka-code-test-s4-preflight jidoka-code-test-s5-s7-preflight jidoka-code-test-s8-preflight jidoka-code-test-s9-preflight
 
 check: jidoka-code-check
 
 test-e2e:
 	./scripts/spikes/test-s1-package.sh
 	./scripts/spikes/test-s10-ui.sh
+	./scripts/spikes/test-s11-herdr.sh
+	./scripts/spikes/test-s12-pi-tui.sh
 
 jidoka-code-check:
 	./scripts/verify-toolchain.sh
 	@if DEVELOPER_DIR=/tmp ./scripts/verify-toolchain.sh >/dev/null 2>&1; then echo "toolchain verifier accepted an invalid path" >&2; exit 1; fi
-	shellcheck scripts/verify-toolchain.sh scripts/package-app.sh scripts/spikes/test-s1-package.sh scripts/spikes/test-s2-lifecycle.sh scripts/spikes/test-s3-keychain.sh scripts/spikes/test-s4-pi.sh scripts/spikes/test-s5-s7-local.sh scripts/spikes/test-s8-workflows.sh scripts/spikes/test-s9-topology.sh scripts/spikes/test-s10-ui.sh
+	shellcheck scripts/verify-toolchain.sh scripts/package-app.sh scripts/spikes/test-s1-package.sh scripts/spikes/test-s2-lifecycle.sh scripts/spikes/test-s3-keychain.sh scripts/spikes/test-s4-pi.sh scripts/spikes/test-s5-s7-local.sh scripts/spikes/test-s8-workflows.sh scripts/spikes/test-s9-topology.sh scripts/spikes/test-s10-ui.sh scripts/spikes/test-s11-herdr.sh scripts/spikes/test-s12-pi-tui.sh
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/herdr-s11-fixture.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/herdr-s12-fixture.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/pi-tui-fixture-provider.ts
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/jidoka-local-spikes.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/pi-keychain-denial-probe.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/pi-provider-gate-probe.mjs
@@ -24,12 +29,16 @@ jidoka-code-check:
 	/opt/homebrew/Cellar/node/26.6.0/bin/node scripts/tests/test-jidoka-extension-contract.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/tests/test-jidoka-extension-rpc.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node scripts/tests/test-jidoka-extension-rpc.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/tests/test-jidoka-tui-contract.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node scripts/tests/test-jidoka-tui-contract.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/pi-rpc-profile-probe.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check scripts/spikes/pi-rpc-workflow-probe.mjs
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/extensions/jidoka-code.ts
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/extensions/jidoka-deny-user-bash.js
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/extensions/jidoka-runtime.ts
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/extensions/jidoka-tui-runtime.ts
 	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/runtime/jidoka-extension-contract.mjs
+	/opt/homebrew/Cellar/node/26.6.0/bin/node --check Resources/Pi/runtime/jidoka-tui-contract.mjs
 	xcrun swift-format lint --recursive --strict Sources Tests
 	xcrun swift build --configuration debug
 	xcrun swift build --configuration release
@@ -39,8 +48,18 @@ jidoka-code-test:
 	./scripts/verify-toolchain.sh
 	xcrun swift test
 
+jidoka-code-test-herdr:
+	./scripts/verify-toolchain.sh
+	xcrun swift test --filter Herdr
+
 jidoka-code-test-ui:
 	./scripts/spikes/test-s10-ui.sh
+
+jidoka-code-test-s11-herdr:
+	./scripts/spikes/test-s11-herdr.sh
+
+jidoka-code-test-s12-pi-tui:
+	./scripts/spikes/test-s12-pi-tui.sh
 
 jidoka-code-w7-acceptance: jidoka-code-check jidoka-code-test-ui
 
