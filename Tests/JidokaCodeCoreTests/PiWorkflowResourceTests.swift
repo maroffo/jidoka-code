@@ -14,6 +14,11 @@ struct PiWorkflowResourceTests {
     #expect(Set(catalog.resourceSHA256.keys) == PiWorkflowResourceCatalog.expectedResourcePaths)
     #expect(catalog.runtimeExtensionURL.lastPathComponent == "jidoka-code.ts")
     #expect(catalog.blockerExtensionURL.lastPathComponent == "jidoka-deny-user-bash.js")
+    let tuiCatalog = try PiTUIResourceCatalog.inspect(resourceRoot: sourceResourceRoot())
+    #expect(tuiCatalog.workflowResources == catalog)
+    #expect(tuiCatalog.manifestSHA256 == PiTUIResourceCatalog.manifestSHA256)
+    #expect(tuiCatalog.resourceSHA256.count == 2)
+    #expect(Set(tuiCatalog.resourceSHA256.keys) == PiTUIResourceCatalog.expectedResourcePaths)
     #expect(
       PiWorkflowResourceCatalog.readOnlyToolNames == [
         "jidoka_code_preflight",
@@ -79,7 +84,7 @@ struct PiWorkflowResourceTests {
     #expect(commands.allSatisfy { !$0.path.contains("/.pi/") && !$0.path.contains("/.agents/") })
   }
 
-  @Test("mutated manifest, resource byte, and resource symlink fail closed")
+  @Test("mutated, redirected, linked, or writable resources fail closed")
   func resourceMutation() throws {
     let fixture = try WorkflowResourceFixture()
     defer { fixture.remove() }
@@ -144,6 +149,34 @@ struct PiWorkflowResourceTests {
       )
     ) {
       try PiWorkflowResourceCatalog.inspect(resourceRoot: fixture.root)
+    }
+
+    try fixture.reset()
+    let extensionContract = fixture.root.appendingPathComponent(
+      "runtime/jidoka-extension-contract.mjs"
+    )
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o666],
+      ofItemAtPath: extensionContract.path
+    )
+    #expect(
+      throws: PiWorkflowResourceError.unsafeResource(
+        "runtime/jidoka-extension-contract.mjs"
+      )
+    ) {
+      try PiWorkflowResourceCatalog.inspect(resourceRoot: fixture.root)
+    }
+
+    try fixture.reset()
+    let tuiContract = fixture.root.appendingPathComponent("runtime/jidoka-tui-contract.mjs")
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o666],
+      ofItemAtPath: tuiContract.path
+    )
+    #expect(
+      throws: PiWorkflowResourceError.unsafeResource("runtime/jidoka-tui-contract.mjs")
+    ) {
+      try PiTUIResourceCatalog.inspect(resourceRoot: fixture.root)
     }
   }
 

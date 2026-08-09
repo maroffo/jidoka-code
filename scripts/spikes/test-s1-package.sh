@@ -223,9 +223,11 @@ expected_inventory="$(cat <<'EOF'
 ./Contents/Resources/Pi/extensions/jidoka-code.ts
 ./Contents/Resources/Pi/extensions/jidoka-deny-user-bash.js
 ./Contents/Resources/Pi/extensions/jidoka-runtime.ts
+./Contents/Resources/Pi/extensions/jidoka-tui-runtime.ts
 ./Contents/Resources/Pi/manifest.json
 ./Contents/Resources/Pi/runtime
 ./Contents/Resources/Pi/runtime/jidoka-extension-contract.mjs
+./Contents/Resources/Pi/runtime/jidoka-tui-contract.mjs
 ./Contents/Resources/Pi/runtime/node-runtime-builds.json
 ./Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs
 ./Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs
@@ -248,6 +250,7 @@ expected_inventory="$(cat <<'EOF'
 ./Contents/Resources/Pi/skills/jidoka-code-review-test/SKILL.md
 ./Contents/Resources/Pi/skills/jidoka-code-synthesize
 ./Contents/Resources/Pi/skills/jidoka-code-synthesize/SKILL.md
+./Contents/Resources/Pi/tui-resources.json
 ./Contents/Resources/Pi/workflow-resources.json
 ./Contents/Resources/Pi/workflow-skills
 ./Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity
@@ -292,6 +295,9 @@ assert_resource_digest \
     workflow-resources.json \
     4d7be2b7ed582f2195bf19953dc74420be12c9066c2a9565b64f09afc204d566
 assert_resource_digest \
+    tui-resources.json \
+    5392fec5eb544dbe0c721692440e8445604d3c05509a39b450f2bb964245f07f
+assert_resource_digest \
     extensions/jidoka-code.ts \
     3312c65c0cb607f14012a75aad31062eebf817724e807cab4ed4379c31752c0b
 assert_resource_digest \
@@ -301,8 +307,14 @@ assert_resource_digest \
     extensions/jidoka-runtime.ts \
     b6bae1cb282d95b3c1a3e6e4f37c5b967aa5bd3885ec3050c5d7bddb72b4a19b
 assert_resource_digest \
+    extensions/jidoka-tui-runtime.ts \
+    d7c46bf43840613d932c19db36196f741f783d99f666f3b6e89629feb887a031
+assert_resource_digest \
     runtime/jidoka-extension-contract.mjs \
     1a2a90b0b53bf68ead774b34b3b90045bd1ca8ffacf3f3a462b520a86d6498f8
+assert_resource_digest \
+    runtime/jidoka-tui-contract.mjs \
+    3019e69f4e92356b55b8c149a420d2ab9816014a6be670ccd4db6887553d64ac
 assert_resource_digest \
     runtime/node-runtime-builds.json \
     fd707070911b53f3930864c3ec6dcfabc7b4440bcf44c3012882751fb99bf906
@@ -364,10 +376,13 @@ for path in \
     "$launch_agent_plist" \
     "$SOURCE_APP/Contents/Resources/Pi/manifest.json" \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-resources.json" \
+    "$SOURCE_APP/Contents/Resources/Pi/tui-resources.json" \
     "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-code.ts" \
     "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-deny-user-bash.js" \
     "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-runtime.ts" \
+    "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-tui-runtime.ts" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/jidoka-extension-contract.mjs" \
+    "$SOURCE_APP/Contents/Resources/Pi/runtime/jidoka-tui-contract.mjs" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/node-runtime-builds.json" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs" \

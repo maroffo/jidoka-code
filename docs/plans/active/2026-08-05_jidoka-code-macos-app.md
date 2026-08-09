@@ -118,6 +118,10 @@ Append only. Reverse a decision with a new row that names the superseded row.
 | 52 | Firma locale W1, soddisfa il gate #51 | Usare l’identità locale Apple Development Hikma tramite exact SHA-1 `SIGN_IDENTITY`, hardened runtime e timestamp disabilitato per i probe; non riutilizzare le label contaminate dai run ad-hoc | Un fresh signed probe passa S1, S2 completo incluso update generation, e S3 completo con stesso TeamIdentifier; cleanup exact passa senza reset BTM | il certificato scade, manca la chiave privata, cambia team o una build firmata fallisce i gate |
 | 53 | Topologia W1, supersedes #35 | Selezionare il LaunchAgent helper; rimuovere il probe monolith dal bundle finale W1 | Il monolith fallisce crash restart entro 30 s; il helper Apple Development passa exactly-one, XPC, restart, reconciliation-first, graceful reopen, Keychain, Pi, S5 composition e cleanup | il helper fallisce un threshold lifecycle/security o una topologia più semplice passa l'intera stessa matrice |
 | 54 | Pi compatibility corrente, supersedes #43 per il runtime futuro | Accettare versioni `>=0.84.0 <0.90.0` soltanto se la build esatta è presente nell'allowlist digest-pinned; inizialmente è attestata solo `0.84.0` | Decisione project owner; separa il range di API accettabile dalla provenance obbligatoria di ogni build | una build allowlisted fallisce i contract offline, oppure il project owner modifica il range |
+| 55 | Sessione agenti production | Usare l'unica sessione Herdr default globale dell'utente, un workspace per repository e un tab per job generation | Il project owner usa Herdr al posto di tmux e richiede piena visibilità della flotta | Herdr offre namespace isolati con una vista globale equivalente |
+| 56 | Herdr execution boundary | Host packaged Jidoka con exact Pi TUI child; vietati `agent.start`, native auto-resume e terminal output come acceptance | Herdr 0.8.0 avvia/riprende bare `pi`; il contract W5 richiede exact argv, risorse e result settlement | Herdr offre exact executable, immutable launch digest e run-scoped result protocol |
+| 57 | Agent topology | Ogni logical role è un agente Herdr top-level in un pane; nessun child agent nascosto o fallback RPC invisibile production | Requisito di piena osservabilità | Herdr rende i child first-class e Jidoka li registra tutti |
+| 58 | Herdr ownership | Herdr resta runtime globale esterno gestito dall'utente; Jidoka non lo installa, aggiorna, riconfigura o ferma | La sessione contiene terminali non Jidoka e il socket non offre ACL per workspace | il project owner amplia esplicitamente l'autorità operativa dell'app |
 
 ## Architecture contract
 
@@ -646,6 +650,18 @@ Pass/falsifier/disposition normativi:
 - [x] Verificare accessibility label e identifier secret-free, keyboard action, Dynamic Type ragionevole e contrasto tramite contract production, unit test e screenshot full-size. Il fixture offscreen non espone i child SwiftUI al runtime AX; VoiceOver foreground resta canary installato dichiarato.
 - [x] Eseguire prima un user flow bundle con injected fakes. S10 cattura screenshot e report redatti sotto sandbox deny-network con Keychain, GitHub, Pi e ServiceManagement a zero side effect. Il flow reale richiede una nuova autorizzazione perché payload e target W7 differiscono dal CHECKPOINT A.
 
+### H: Visible Herdr agent runtime, prerequisite to W8
+
+- Plan autorevole: `docs/plans/active/2026-08-09_jidoka-code-herdr-runtime.md`.
+- Scope: typed Herdr client, host packaged, Pi TUI parity, result side channel, durable ownership/recovery, readiness e test isolated.
+- Excluded: sessione production privata, fallback RPC invisibile, modifica della config globale Herdr e default-session canary non autorizzato.
+- [x] Congelare decisioni, nomenclatura, threat boundary e acceptance dopo tre analisi Pi read-only visibili in Herdr.
+- [x] H1 typed protocol e fake NDJSON socket, senza production composition. Evidence: `docs/evidence/herdr-h1-protocol-boundary-report.md`.
+- [x] H2 topology più host synthetic a due ruoli in una sessione Herdr temporanea. Evidence: `docs/evidence/herdr-h2-topology-host-report.md`.
+- [x] H3 exact Pi TUI e result/settlement channel con parity W5. Evidence: `docs/evidence/herdr-h3-pi-tui-settlement-report.md`.
+- [ ] H4 durable mapping, recovery-first e production integration; nessun direct-RPC fallback production.
+- [ ] H5 readiness, observer UX, package e operations, poi riprendere W8.
+
 ### W8: Packaging, installer, documentation and repository gates
 
 - Scope: `Packaging/`, `scripts/`, `docs/operations.md`, `Makefile`, `.gitignore` se necessario.
@@ -785,6 +801,7 @@ Pass/falsifier/disposition normativi:
 - Il 2026-08-05 il project owner ha autorizzato la creazione e l’uso di una identità locale Apple Development Hikma e, dopo il constraint storico della label ad-hoc, i target temporanei esatti `com.maroffo.JidokaCode.SignedProbe` e `com.maroffo.JidokaCode.SignedEngineProbe`. Il probe è stato disregistrato e rimosso; il certificato locale resta intenzionalmente nel login Keychain.
 - Provider model prompt dal processo app: CHECKPOINT A autorizza esclusivamente 19 call senza retry a `openai-codex/gpt-5.6-sol:max`, per i quattro profili e workflow S4/S8, con soli workflow pubblici e fixture sintetiche, envelope stimato 152k token input e 39,5k output, costo metadata massimo stimato 2,15 USD.
 - GitHub canary comments, labels, branch e PR, incluso l’head update del fixture actor: non autorizzati; richiedono repository, object e target esatti. Merge non autorizzabile da questa V1.
+- Herdr design tranche 2026-08-09: autorizzati branch/worktree locali, source edit e verifica fixture necessari; il workspace `maroffo/jidoka-code`, il tab `j/herdr-runtime/g1` e tre pane analyst sono stati creati nella sessione globale senza cambiare focus. Commit, push, PR e default-session canary restano non autorizzati.
 - Nessun deploy, publication, release o notarization autorizzato.
 
 ## Progress
@@ -827,6 +844,8 @@ Pass/falsifier/disposition normativi:
 - [x] W6 end-to-end job coordinators.
 - [x] 2026-08-09: W7 menu bar, onboarding, settings e lifecycle production implementati su `feat/jidoka-code-w7-menu-onboarding-lifecycle` da `origin/main@bec6629`: `EngineClient` async/XPC versionato, helper più bootstrap control plane, pause recovery-first, quit e handoff checkpointed, single-instance, exact ambiguous evidence, credential journal, log redatto e fixture UI separata. Evidenza in `docs/evidence/w7-menu-onboarding-lifecycle-report.md`; acceptance finale, package E2E, 344 test standard, ASan, TSan e S10 passano senza side effect reali.
 - [x] W7 menu bar, onboarding and lifecycle.
+- [x] 2026-08-09: H3 exact visible Pi TUI, private runtime snapshot e result/ack/release settlement completati. Full gate 396 test, S1/S10/S11/S12, ASan/TSan 83 test e review finali passano; evidence in `docs/evidence/herdr-h3-pi-tui-settlement-report.md`.
+- [ ] H visible Herdr agent runtime, prerequisite to W8.
 - [ ] W8 packaging, installer, documentation and repository gates.
 - [ ] W9 final verification, review e canary autorizzato.
 
@@ -886,6 +905,7 @@ Pass/falsifier/disposition normativi:
 - Una mutation generation autorizzata non rende invisibili le generazioni precedenti: marker e PR devono leggere ogni intent storico esistente prima di un resend, saltando soltanto le generazioni che non hanno mai preparato quell'operazione.
 - Il Pi globale è avanzato esternamente da `0.84.0` a `0.84.1` durante la verifica W6. La policy ha prima bloccato sia il test JavaScript del package tree sia il resolver Swift. Su indicazione del project owner, una copia isolata con policy temporanea exact-digest ha poi superato `make check`, package E2E e preflight packaged S4/S5-S7/S8 senza provider; soltanto dopo quella prova l'allowlist versionata ha aggiunto l'exact build 0.84.1 mantenendo 0.84.0.
 - Un `NSHostingView` offscreen rende layout SwiftUI full-size ma non enumera i child accessibility identifier. S10 separa quindi il contract production dichiarato dall'osservazione runtime, conserva screenshot non tagliati e rinvia il VoiceOver foreground all'installed canary senza trasformare l'assenza di AX runtime in un falso pass.
+- Herdr 0.8.0 rende Pi visibile con lifecycle autorevole, ma `agent.start` e native restore usano il canonical bare `pi` e non preservano l'exact launch descriptor Jidoka. I pane production richiedono quindi un host packaged, lifecycle custom senza Herdr session reference e resume controllato dalla recovery Jidoka.
 - La pausa non può essere soltanto un flag del scheduler: discovery e lease admission devono leggere atomicamente lo stato SQLite, mentre recovery, reconciliation, cleanup e retry già dovuti restano eseguibili. Il falsificatore W7 prova un pass già in flight e la chiusura immediata dei nuovi dispatch.
 - Una sostituzione Keychain non è recuperabile usando soltanto old e new account. Il journal W7 lega l'exact SHA-256 del valore pending, distingue i boundary prima e dopo la write, completa cleanup dopo reopen e non persiste credential bytes.
 - `NSApplication.terminate` può arrivare dal menu, dal delegate o da una notifica lifecycle. Tutti i path convergono su un solo checkpoint gate; terminare direttamente da un callback separato falsificava il contratto di quit durabile.
@@ -927,7 +947,8 @@ Append-only.
 - 2026-08-09: W7 resta fake-first per Keychain, GitHub, Pi e ServiceManagement. S10 usa un executable fixture separato e sandbox deny-network, non un flag nel bundle production. CHECKPOINT A non autorizza il nuovo payload W7 installato; Apple Development, XPC reale, runtime AX e ServiceManagement richiedono un canary separato.
 - 2026-08-09: tre cicli review/fix esauriscono il budget W7. Il blocker meccanico finale `pending_replacement_digest` è rinominato `pending_replacement_sha256`; acceptance, package E2E, ASan e TSan sono ripetuti dopo l'ultimo source edit.
 - 2026-08-09: il project owner autorizza un singolo commit W7, push non-force del branch dedicato e apertura PR. Il merge resta non autorizzato.
+- 2026-08-09: il project owner ha mergiato PR #9 e richiede che Jidoka usi l'unica sessione Herdr globale con piena visibilità di ogni agente. La tranche H parte da `origin/main@282e849bdb4fdf573a1cf4f9bddb35c6fffebeed`; il piano dedicato governa client, host, parity, recovery e package prima di W8.
 
 ## Outcomes and retrospective
 
-W0, W1 S1-S9 e W2-W7 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle installate; Apple Development Hikma ha soddisfatto in W1 package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper resta l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53. Checkpoint B è accettato e il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5, coordinator W6 e UI/lifecycle W7 fake-first sono verificati localmente. W7 aggiunge il production `EngineClient` XPC, onboarding/settings, pause recovery-first, checkpointed quit, single-instance, credential journal, logging redatto e S10 sandboxed. La policy ammette le exact build Pi `0.84.0` e `0.84.1`. W8-W9, installer, Apple Development installed W7 lifecycle, runtime VoiceOver, credential e GitHub canary restano aperti e richiedono le autorizzazioni documentate.
+W0, W1 S1-S9 e W2-W7 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle installate; Apple Development Hikma ha soddisfatto in W1 package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper resta l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53. Checkpoint B è accettato e il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5, coordinator W6 e UI/lifecycle W7 fake-first sono verificati localmente. W7 aggiunge il production `EngineClient` XPC, onboarding/settings, pause recovery-first, checkpointed quit, single-instance, credential journal, logging redatto e S10 sandboxed. La policy ammette le exact build Pi `0.84.0` e `0.84.1`. La tranche H per il runtime agente visibile in Herdr è aperta e precede W8; W8-W9, installer, Apple Development installed W7 lifecycle, runtime VoiceOver, credential e GitHub canary restano aperti e richiedono le autorizzazioni documentate.

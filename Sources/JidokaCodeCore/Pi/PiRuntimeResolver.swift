@@ -2,6 +2,30 @@ import CryptoKit
 import Darwin
 import Foundation
 
+enum DarwinACLAuthority {
+  // Deny-only ACLs are harmless; any extended allow ACE expands the POSIX mode boundary.
+  static func hasNoAllowEntries(_ descriptor: Int32) -> Bool {
+    errno = 0
+    guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+      return errno == ENOENT
+    }
+    defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+    var entry: acl_entry_t?
+    var selector = ACL_FIRST_ENTRY
+    while acl_get_entry(acl, Int32(selector.rawValue), &entry) == 0 {
+      var tag = acl_tag_t(0)
+      guard acl_get_tag_type(entry, &tag) == 0,
+        tag == ACL_EXTENDED_ALLOW || tag == ACL_EXTENDED_DENY
+      else {
+        return false
+      }
+      if tag == ACL_EXTENDED_ALLOW { return false }
+      selector = ACL_NEXT_ENTRY
+    }
+    return true
+  }
+}
+
 public struct PiSemanticVersion: Comparable, Codable, CustomStringConvertible, Sendable {
   public let major: Int
   public let minor: Int
@@ -62,7 +86,10 @@ public struct PiResolvedRuntime: Equatable, Sendable {
   public let nodeVersion: PiSemanticVersion
   public let nodeSHA256: String
   public let nodeDynamicLibrarySHA256: [String: String]
+  public let nodeDynamicLibraryLoadPaths: [String: String]
+  public let nodeDynamicLibraryDirectoryURL: URL?
   public let piCLIURL: URL
+  public let piCLIRelativePath: String
   public let piPackageRootURL: URL
   public let piVersion: PiSemanticVersion
   public let piRuntimeSHA256: [String: String]
@@ -73,7 +100,10 @@ public struct PiResolvedRuntime: Equatable, Sendable {
     nodeVersion: PiSemanticVersion,
     nodeSHA256: String,
     nodeDynamicLibrarySHA256: [String: String] = [:],
+    nodeDynamicLibraryLoadPaths: [String: String] = [:],
+    nodeDynamicLibraryDirectoryURL: URL? = nil,
     piCLIURL: URL,
+    piCLIRelativePath: String = "dist/cli.js",
     piPackageRootURL: URL,
     piVersion: PiSemanticVersion,
     piRuntimeSHA256: [String: String],
@@ -83,7 +113,10 @@ public struct PiResolvedRuntime: Equatable, Sendable {
     self.nodeVersion = nodeVersion
     self.nodeSHA256 = nodeSHA256
     self.nodeDynamicLibrarySHA256 = nodeDynamicLibrarySHA256
+    self.nodeDynamicLibraryLoadPaths = nodeDynamicLibraryLoadPaths
+    self.nodeDynamicLibraryDirectoryURL = nodeDynamicLibraryDirectoryURL
     self.piCLIURL = piCLIURL
+    self.piCLIRelativePath = piCLIRelativePath
     self.piPackageRootURL = piPackageRootURL
     self.piVersion = piVersion
     self.piRuntimeSHA256 = piRuntimeSHA256
@@ -240,6 +273,7 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
       nodeVersion: nodeResolution.version,
       nodeSHA256: nodeResolution.digest,
       nodeDynamicLibrarySHA256: nodeResolution.dynamicLibraryDigests,
+      nodeDynamicLibraryLoadPaths: nodeResolution.dynamicLibraryLoadPaths,
       piCLIURL: piResolution.cliURL,
       piPackageRootURL: piResolution.packageRoot,
       piVersion: piResolution.version,
@@ -400,7 +434,12 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
           url: resolved,
           version: version,
           digest: digest,
-          dynamicLibraryDigests: dynamicLibraryDigests
+          dynamicLibraryDigests: dynamicLibraryDigests,
+          dynamicLibraryLoadPaths: Dictionary(
+            uniqueKeysWithValues: match.value.dynamicLibraries.map {
+              ($0.loadPath, $0.canonicalPath)
+            }
+          )
         )
       } catch {
         continue
@@ -726,30 +765,579 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
 
   private static func readRegularFile(
     _ url: URL,
-    maximumBytes: Int
+    maximumBytes: Int,
+    requireSafeAncestors: Bool = false
   ) throws -> Data {
-    guard url.isFileURL, url.path.hasPrefix("/") else { throw CocoaError(.fileReadInvalidFileName) }
-    let sourceValues = try url.standardizedFileURL.resourceValues(forKeys: [.isSymbolicLinkKey])
-    guard sourceValues.isSymbolicLink != true else { throw CocoaError(.fileReadCorruptFile) }
-    let resolved = url.resolvingSymlinksInPath().standardizedFileURL
-    let values = try resolved.resourceValues(forKeys: [
-      .fileSizeKey,
-      .isRegularFileKey,
-      .isSymbolicLinkKey,
-    ])
-    guard values.isRegularFile == true,
-      values.isSymbolicLink != true,
-      let size = values.fileSize,
-      (0...maximumBytes).contains(size)
+    guard url.isFileURL, url.path.hasPrefix("/"), maximumBytes >= 0,
+      let canonicalPath = canonicalExistingPath(url.path),
+      !requireSafeAncestors
+        || safeRuntimeAncestorChain(
+          URL(fileURLWithPath: canonicalPath).deletingLastPathComponent().path
+        )
+    else {
+      throw CocoaError(.fileReadInvalidFileName)
+    }
+    let descriptor = Darwin.open(canonicalPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard descriptor >= 0 else { throw CocoaError(.fileReadNoSuchFile) }
+    defer { _ = Darwin.close(descriptor) }
+    var before = stat()
+    guard fstat(descriptor, &before) == 0,
+      DarwinACLAuthority.hasNoAllowEntries(descriptor),
+      before.st_mode & S_IFMT == S_IFREG,
+      before.st_uid == 0 || before.st_uid == geteuid(),
+      before.st_mode & 0o022 == 0,
+      before.st_nlink == 1,
+      before.st_size >= 0,
+      before.st_size <= maximumBytes
     else {
       throw CocoaError(.fileReadCorruptFile)
     }
-    return try Data(contentsOf: resolved, options: [.mappedIfSafe])
+    var bytes = [UInt8](repeating: 0, count: Int(before.st_size))
+    var offset = 0
+    try bytes.withUnsafeMutableBytes { buffer in
+      while offset < buffer.count {
+        let count = Darwin.read(
+          descriptor,
+          buffer.baseAddress!.advanced(by: offset),
+          buffer.count - offset
+        )
+        if count > 0 {
+          offset += count
+        } else if count == -1, errno == EINTR {
+          continue
+        } else {
+          throw CocoaError(.fileReadUnknown)
+        }
+      }
+    }
+    var after = stat()
+    guard fstat(descriptor, &after) == 0,
+      DarwinACLAuthority.hasNoAllowEntries(descriptor),
+      before.st_dev == after.st_dev,
+      before.st_ino == after.st_ino,
+      before.st_mode == after.st_mode,
+      before.st_uid == after.st_uid,
+      before.st_nlink == after.st_nlink,
+      before.st_size == after.st_size
+    else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    return Data(bytes)
+  }
+
+  private static func safeRuntimeNode(
+    _ path: String,
+    requireSafeAncestors: Bool = false
+  ) -> Bool {
+    guard let canonical = canonicalExistingPath(path), canonical == path,
+      !requireSafeAncestors
+        || safeRuntimeAncestorChain(
+          URL(fileURLWithPath: path).deletingLastPathComponent().path
+        )
+    else {
+      return false
+    }
+    let descriptor = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard descriptor >= 0 else { return false }
+    defer { _ = Darwin.close(descriptor) }
+    var value = stat()
+    guard fstat(descriptor, &value) == 0,
+      DarwinACLAuthority.hasNoAllowEntries(descriptor),
+      value.st_uid == 0 || value.st_uid == geteuid()
+    else {
+      return false
+    }
+    switch value.st_mode & S_IFMT {
+    case S_IFDIR:
+      return value.st_mode & 0o022 == 0
+    case S_IFREG:
+      return value.st_mode & 0o022 == 0 && value.st_nlink == 1
+    default:
+      return false
+    }
+  }
+
+  private static func safeRuntimeDirectory(
+    _ path: String,
+    requireSafeAncestors: Bool = false
+  ) -> Bool {
+    guard let canonical = canonicalExistingPath(path), canonical == path,
+      !requireSafeAncestors
+        || safeRuntimeAncestorChain(
+          URL(fileURLWithPath: path).deletingLastPathComponent().path
+        )
+    else {
+      return false
+    }
+    return safeRuntimeDirectoryDescriptor(path, allowStickyWrite: false)
+  }
+
+  private static func safeRuntimeAncestorChain(_ path: String) -> Bool {
+    var current = path
+    while true {
+      guard safeRuntimeDirectoryDescriptor(current, allowStickyWrite: true) else {
+        return false
+      }
+      if current == "/" { return true }
+      let parent = (current as NSString).deletingLastPathComponent
+      guard !parent.isEmpty, parent != current else { return false }
+      current = parent
+    }
+  }
+
+  private static func safeRuntimeDirectoryDescriptor(
+    _ path: String,
+    allowStickyWrite: Bool
+  ) -> Bool {
+    let descriptor = Darwin.open(
+      path,
+      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    )
+    guard descriptor >= 0 else { return false }
+    defer { _ = Darwin.close(descriptor) }
+    var value = stat()
+    guard fstat(descriptor, &value) == 0,
+      DarwinACLAuthority.hasNoAllowEntries(descriptor),
+      value.st_mode & S_IFMT == S_IFDIR,
+      value.st_uid == 0 || value.st_uid == geteuid()
+    else {
+      return false
+    }
+    let writable = value.st_mode & 0o022 != 0
+    return !writable || (allowStickyWrite && value.st_mode & S_ISVTX != 0)
+  }
+
+  static func materializePrivateSnapshot(
+    of runtime: PiResolvedRuntime,
+    in parentDirectory: URL
+  ) throws -> PiResolvedRuntime {
+    do {
+      return try materializePrivateSnapshotUnchecked(
+        of: runtime,
+        in: parentDirectory
+      )
+    } catch let error as PiRuntimeResolutionError {
+      throw error
+    } catch {
+      throw PiRuntimeResolutionError(
+        code: .unattestedPiBuild,
+        detail: "private runtime snapshot could not be materialized"
+      )
+    }
+  }
+
+  private static func materializePrivateSnapshotUnchecked(
+    of runtime: PiResolvedRuntime,
+    in parentDirectory: URL
+  ) throws -> PiResolvedRuntime {
+    guard parentDirectory.isFileURL,
+      let canonicalParentPath = canonicalExistingPath(parentDirectory.path),
+      safeRuntimeDirectory(canonicalParentPath, requireSafeAncestors: true),
+      let packageTreeSHA256 = runtime.piRuntimeSHA256["package-tree-v1"]
+    else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    let parent = URL(fileURLWithPath: canonicalParentPath, isDirectory: true)
+    let snapshotIdentity = sha256(
+      Data(
+        ([runtime.nodeSHA256, packageTreeSHA256, runtime.piCLIRelativePath]
+          + runtime.nodeDynamicLibrarySHA256.values.sorted()
+          + runtime.nodeDynamicLibraryLoadPaths.map { "\($0.key)=\($0.value)" }.sorted())
+          .joined(separator: "\u{0}").utf8
+      )
+    )
+    let destination = parent.appendingPathComponent(
+      "runtime-snapshot-\(snapshotIdentity.prefix(24))",
+      isDirectory: true
+    )
+    let expectedMarker = try privateSnapshotMarker(
+      runtime: runtime,
+      packageTreeSHA256: packageTreeSHA256
+    )
+    if FileManager.default.fileExists(atPath: destination.path) {
+      do {
+        return try verifyPrivateSnapshot(
+          at: destination,
+          source: runtime,
+          expectedMarker: expectedMarker,
+          packageTreeSHA256: packageTreeSHA256
+        )
+      } catch {
+        try FileManager.default.removeItem(at: destination)
+      }
+    }
+
+    let staging = parent.appendingPathComponent(
+      ".runtime-snapshot-\(UUID().uuidString.lowercased())",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: staging,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    var keepStaging = true
+    defer {
+      if keepStaging {
+        try? FileManager.default.removeItem(at: staging)
+      }
+    }
+
+    let nodeDestination = staging.appendingPathComponent("node")
+    try copyRuntimeFile(
+      from: runtime.nodeURL,
+      to: nodeDestination,
+      maximumBytes: 512 * 1_048_576
+    )
+    let libraryDirectory = staging.appendingPathComponent("lib", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: libraryDirectory,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    var libraryNames = Set<String>()
+    for sourcePath in runtime.nodeDynamicLibrarySHA256.keys.sorted() {
+      let name = URL(fileURLWithPath: sourcePath).lastPathComponent
+      guard !name.isEmpty, libraryNames.insert(name).inserted else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      try copyRuntimeFile(
+        from: URL(fileURLWithPath: sourcePath),
+        to: libraryDirectory.appendingPathComponent(name),
+        maximumBytes: 512 * 1_048_576
+      )
+    }
+    for (alias, target) in try privateSnapshotLibraryAliases(runtime: runtime) {
+      guard !libraryNames.contains(alias) else { throw CocoaError(.fileReadCorruptFile) }
+      try FileManager.default.createSymbolicLink(
+        atPath: libraryDirectory.appendingPathComponent(alias).path,
+        withDestinationPath: target
+      )
+    }
+    let packageDestination = staging.appendingPathComponent("pi", isDirectory: true)
+    try copyRuntimePackage(
+      from: runtime.piPackageRootURL,
+      to: packageDestination
+    )
+    try writePrivateSnapshotFile(
+      expectedMarker,
+      to: staging.appendingPathComponent("snapshot.json"),
+      permissions: 0o400
+    )
+    guard rename(staging.path, destination.path) == 0 else {
+      throw CocoaError(.fileWriteFileExists)
+    }
+    keepStaging = false
+    return try verifyPrivateSnapshot(
+      at: destination,
+      source: runtime,
+      expectedMarker: expectedMarker,
+      packageTreeSHA256: packageTreeSHA256
+    )
+  }
+
+  private static func privateSnapshotMarker(
+    runtime: PiResolvedRuntime,
+    packageTreeSHA256: String
+  ) throws -> Data {
+    var libraries: [String: String] = [:]
+    for (path, digest) in runtime.nodeDynamicLibrarySHA256 {
+      let name = URL(fileURLWithPath: path).lastPathComponent
+      guard !name.isEmpty, libraries[name] == nil else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      libraries[name] = digest
+    }
+    return try JSONSerialization.data(
+      withJSONObject: [
+        "schemaVersion": 1,
+        "nodeVersion": runtime.nodeVersion.description,
+        "nodeSHA256": runtime.nodeSHA256,
+        "piVersion": runtime.piVersion.description,
+        "piCLIRelativePath": runtime.piCLIRelativePath,
+        "piPackageTreeSHA256": packageTreeSHA256,
+        "dynamicLibraries": libraries,
+        "dynamicLibraryAliases": try privateSnapshotLibraryAliases(runtime: runtime),
+      ],
+      options: [.sortedKeys]
+    )
+  }
+
+  private static func privateSnapshotLibraryAliases(
+    runtime: PiResolvedRuntime
+  ) throws -> [String: String] {
+    let canonicalNames = Set(
+      runtime.nodeDynamicLibrarySHA256.keys.map {
+        URL(fileURLWithPath: $0).lastPathComponent
+      }
+    )
+    var aliases: [String: String] = [:]
+    for (loadPath, canonicalPath) in runtime.nodeDynamicLibraryLoadPaths {
+      guard runtime.nodeDynamicLibrarySHA256[canonicalPath] != nil else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      let alias = (loadPath as NSString).lastPathComponent
+      let target = URL(fileURLWithPath: canonicalPath).lastPathComponent
+      guard !alias.isEmpty, !target.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+      if alias == target { continue }
+      guard !canonicalNames.contains(alias), aliases[alias] == nil else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      aliases[alias] = target
+    }
+    return aliases
+  }
+
+  private static func copyRuntimePackage(
+    from source: URL,
+    to destination: URL
+  ) throws {
+    guard let canonicalSourcePath = canonicalExistingPath(source.path) else {
+      throw CocoaError(.fileReadNoSuchFile)
+    }
+    let canonicalSource = URL(fileURLWithPath: canonicalSourcePath, isDirectory: true)
+    let entries = try collectPackageEntries(canonicalSource)
+    try FileManager.default.createDirectory(
+      at: destination,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    for entry in entries where entry.kind == .directory {
+      let target = destination.appendingPathComponent(entry.relativePath, isDirectory: true)
+      try FileManager.default.createDirectory(
+        at: target,
+        withIntermediateDirectories: false,
+        attributes: [.posixPermissions: NSNumber(value: entry.permissions)]
+      )
+      guard chmod(target.path, mode_t(entry.permissions)) == 0 else {
+        throw CocoaError(.fileWriteUnknown)
+      }
+    }
+    for entry in entries where entry.kind != .directory {
+      let sourceURL = canonicalSource.appendingPathComponent(entry.relativePath)
+      let target = destination.appendingPathComponent(entry.relativePath)
+      switch entry.kind {
+      case .regularFile:
+        try copyRuntimeFile(
+          from: sourceURL,
+          to: target,
+          maximumBytes: 64 * 1_048_576
+        )
+      case .symbolicLink:
+        guard let linkTarget = entry.symbolicLinkTarget,
+          !linkTarget.hasPrefix("/")
+        else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+        try FileManager.default.createSymbolicLink(
+          atPath: target.path,
+          withDestinationPath: linkTarget
+        )
+      case .directory:
+        preconditionFailure("directories are copied first")
+      }
+    }
+  }
+
+  private static func copyRuntimeFile(
+    from source: URL,
+    to destination: URL,
+    maximumBytes: Int
+  ) throws {
+    var value = stat()
+    guard let canonicalSource = canonicalExistingPath(source.path),
+      lstat(canonicalSource, &value) == 0,
+      value.st_mode & S_IFMT == S_IFREG
+    else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    let data = try readRegularFile(source, maximumBytes: maximumBytes)
+    try writePrivateSnapshotFile(
+      data,
+      to: destination,
+      permissions: Int(value.st_mode & 0o7777)
+    )
+  }
+
+  private static func writePrivateSnapshotFile(
+    _ data: Data,
+    to destination: URL,
+    permissions: Int
+  ) throws {
+    let descriptor = Darwin.open(
+      destination.path,
+      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+      mode_t(permissions)
+    )
+    guard descriptor >= 0, DarwinACLAuthority.hasNoAllowEntries(descriptor) else {
+      if descriptor >= 0 { _ = Darwin.close(descriptor) }
+      throw CocoaError(.fileWriteNoPermission)
+    }
+    var succeeded = false
+    defer {
+      _ = Darwin.close(descriptor)
+      if !succeeded {
+        _ = unlink(destination.path)
+      }
+    }
+    try data.withUnsafeBytes { buffer in
+      var offset = 0
+      while offset < buffer.count {
+        let count = Darwin.write(
+          descriptor,
+          buffer.baseAddress!.advanced(by: offset),
+          buffer.count - offset
+        )
+        if count > 0 {
+          offset += count
+        } else if count == -1, errno == EINTR {
+          continue
+        } else {
+          throw CocoaError(.fileWriteUnknown)
+        }
+      }
+    }
+    guard fchmod(descriptor, mode_t(permissions)) == 0 else {
+      throw CocoaError(.fileWriteUnknown)
+    }
+    succeeded = true
+  }
+
+  private static func verifyPrivateSnapshot(
+    at root: URL,
+    source: PiResolvedRuntime,
+    expectedMarker: Data,
+    packageTreeSHA256: String
+  ) throws -> PiResolvedRuntime {
+    guard safeRuntimeDirectory(root.path, requireSafeAncestors: true),
+      try FileManager.default.contentsOfDirectory(atPath: root.path).sorted()
+        == ["lib", "node", "pi", "snapshot.json"]
+    else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    let marker = try readRegularFile(
+      root.appendingPathComponent("snapshot.json"),
+      maximumBytes: 64 * 1_024,
+      requireSafeAncestors: true
+    )
+    guard marker == expectedMarker else { throw CocoaError(.fileReadCorruptFile) }
+    let node = root.appendingPathComponent("node")
+    guard
+      sha256(
+        try readRegularFile(
+          node,
+          maximumBytes: 512 * 1_048_576,
+          requireSafeAncestors: true
+        )
+      ) == source.nodeSHA256
+    else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    let packageRoot = root.appendingPathComponent("pi", isDirectory: true)
+    let packageTree = try attestPackageTree(
+      packageRoot,
+      maximumFileBytes: 64 * 1_048_576,
+      requireSafeAncestors: true
+    )
+    guard packageTree.sha256 == packageTreeSHA256 else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    let libraryDirectory = root.appendingPathComponent("lib", isDirectory: true)
+    guard safeRuntimeDirectory(libraryDirectory.path, requireSafeAncestors: true) else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    var expectedLibraries: [String: String] = [:]
+    for (path, digest) in source.nodeDynamicLibrarySHA256 {
+      let name = URL(fileURLWithPath: path).lastPathComponent
+      guard !name.isEmpty, expectedLibraries[name] == nil else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      expectedLibraries[name] = digest
+    }
+    let aliases = try privateSnapshotLibraryAliases(runtime: source)
+    guard
+      try FileManager.default.contentsOfDirectory(atPath: libraryDirectory.path).sorted()
+        == (Array(expectedLibraries.keys) + Array(aliases.keys)).sorted()
+    else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    for (alias, target) in aliases {
+      let aliasURL = libraryDirectory.appendingPathComponent(alias)
+      var status = stat()
+      guard lstat(aliasURL.path, &status) == 0,
+        status.st_mode & S_IFMT == S_IFLNK,
+        status.st_uid == 0 || status.st_uid == geteuid(),
+        status.st_nlink == 1,
+        try FileManager.default.destinationOfSymbolicLink(atPath: aliasURL.path) == target,
+        let resolvedTarget = canonicalExistingPath(aliasURL.path),
+        safeRuntimeNode(resolvedTarget, requireSafeAncestors: true)
+      else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+    }
+    var snapshotLibraries: [String: String] = [:]
+    for (name, digest) in expectedLibraries {
+      let library = libraryDirectory.appendingPathComponent(name)
+      guard
+        sha256(
+          try readRegularFile(
+            library,
+            maximumBytes: 512 * 1_048_576,
+            requireSafeAncestors: true
+          )
+        ) == digest
+      else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      snapshotLibraries[library.path] = digest
+    }
+    guard source.piCLIRelativePath == "dist/cli.js",
+      let cliSHA256 = source.piRuntimeSHA256[source.piCLIRelativePath]
+    else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    let cli = packageRoot.appendingPathComponent(source.piCLIRelativePath)
+    guard
+      sha256(
+        try readRegularFile(
+          cli,
+          maximumBytes: 64 * 1_048_576,
+          requireSafeAncestors: true
+        )
+      ) == cliSHA256
+    else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    var snapshotLoadPaths: [String: String] = [:]
+    for (loadPath, sourcePath) in source.nodeDynamicLibraryLoadPaths {
+      let library = libraryDirectory.appendingPathComponent(
+        URL(fileURLWithPath: sourcePath).lastPathComponent
+      )
+      guard snapshotLibraries[library.path] != nil else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      snapshotLoadPaths[loadPath] = library.path
+    }
+    return PiResolvedRuntime(
+      nodeURL: node,
+      nodeVersion: source.nodeVersion,
+      nodeSHA256: source.nodeSHA256,
+      nodeDynamicLibrarySHA256: snapshotLibraries,
+      nodeDynamicLibraryLoadPaths: snapshotLoadPaths,
+      nodeDynamicLibraryDirectoryURL: libraryDirectory,
+      piCLIURL: cli,
+      piCLIRelativePath: source.piCLIRelativePath,
+      piPackageRootURL: packageRoot,
+      piVersion: source.piVersion,
+      piRuntimeSHA256: source.piRuntimeSHA256,
+      compatibility: source.compatibility
+    )
   }
 
   public static func attestPackageTree(
     _ packageRoot: URL,
-    maximumFileBytes: Int = 16 * 1_048_576
+    maximumFileBytes: Int = 16 * 1_048_576,
+    requireSafeAncestors: Bool = false
   ) throws -> PiRuntimeTreeAttestation {
     guard (1...64 * 1_048_576).contains(maximumFileBytes),
       packageRoot.isFileURL,
@@ -761,16 +1349,18 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
       throw CocoaError(.fileReadNoSuchFile)
     }
     let standardizedRoot = URL(fileURLWithPath: canonicalRootPath, isDirectory: true)
-    let rootValues = try standardizedRoot.resourceValues(forKeys: [
-      .isDirectoryKey, .isSymbolicLinkKey,
-    ])
-    guard rootValues.isDirectory == true,
-      rootValues.isSymbolicLink != true,
-      canonicalExistingPath(standardizedRoot.path) == standardizedRoot.path
+    guard
+      safeRuntimeDirectory(
+        standardizedRoot.path,
+        requireSafeAncestors: requireSafeAncestors
+      )
     else {
       throw CocoaError(.fileReadCorruptFile)
     }
-    let entries = try collectPackageEntries(standardizedRoot)
+    let entries = try collectPackageEntries(
+      standardizedRoot,
+      requireSafeAncestors: requireSafeAncestors
+    )
     var hasher = SHA256()
     func update(_ fields: [String]) {
       let framed = fields.map { "\($0.utf8.count):\($0)" }.joined(separator: "|") + "\n"
@@ -794,7 +1384,11 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
         ])
       case .regularFile:
         let url = standardizedRoot.appendingPathComponent(entry.relativePath, isDirectory: false)
-        let data = try readRegularFile(url, maximumBytes: maximumFileBytes)
+        let data = try readRegularFile(
+          url,
+          maximumBytes: maximumFileBytes,
+          requireSafeAncestors: requireSafeAncestors
+        )
         update([
           "regularFile", entry.relativePath,
           "permissions", String(entry.permissions),
@@ -803,14 +1397,22 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
         ])
       }
     }
-    guard try collectPackageEntries(standardizedRoot) == entries else {
+    guard
+      try collectPackageEntries(
+        standardizedRoot,
+        requireSafeAncestors: requireSafeAncestors
+      ) == entries
+    else {
       throw CocoaError(.fileReadCorruptFile)
     }
     let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
     return PiRuntimeTreeAttestation(entryCount: entries.count, sha256: digest)
   }
 
-  private static func collectPackageEntries(_ root: URL) throws -> [PackageTreeEntry] {
+  private static func collectPackageEntries(
+    _ root: URL,
+    requireSafeAncestors: Bool = false
+  ) throws -> [PackageTreeEntry] {
     var enumerationError: Error?
     guard
       let enumerator = FileManager.default.enumerator(
@@ -830,11 +1432,8 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
     let prefix = root.path + "/"
     var entries: [PackageTreeEntry] = []
     while let url = enumerator.nextObject() as? URL {
-      guard entries.count < 100_000,
-        url.path.hasPrefix(prefix)
-      else {
-        throw CocoaError(.fileReadTooLarge)
-      }
+      guard entries.count < 100_000 else { throw CocoaError(.fileReadTooLarge) }
+      guard url.path.hasPrefix(prefix) else { throw CocoaError(.fileReadCorruptFile) }
       let relativePath = String(url.path.dropFirst(prefix.count))
       guard !relativePath.isEmpty,
         !relativePath.contains("\u{0}"),
@@ -843,19 +1442,28 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
       else {
         throw CocoaError(.fileReadInvalidFileName)
       }
-      let values = try url.resourceValues(forKeys: [
-        .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
-      ])
-      let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-      let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1
-      if values.isSymbolicLink == true {
+      var status = stat()
+      guard lstat(url.path, &status) == 0 else { throw CocoaError(.fileReadCorruptFile) }
+      let permissions = Int(status.st_mode & 0o7777)
+      switch status.st_mode & S_IFMT {
+      case S_IFLNK:
         let target = try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
         let targetURL =
           target.hasPrefix("/")
           ? URL(fileURLWithPath: target)
           : url.deletingLastPathComponent().appendingPathComponent(target)
-        let canonicalTarget = targetURL.standardizedFileURL.resolvingSymlinksInPath().path
-        guard canonicalTarget == root.path || canonicalTarget.hasPrefix(prefix),
+        guard let canonicalTarget = canonicalExistingPath(targetURL.path),
+          canonicalTarget == root.path || canonicalTarget.hasPrefix(prefix),
+          status.st_uid == 0 || status.st_uid == geteuid(),
+          status.st_nlink == 1,
+          safeRuntimeDirectory(
+            url.deletingLastPathComponent().path,
+            requireSafeAncestors: requireSafeAncestors
+          ),
+          safeRuntimeNode(
+            canonicalTarget,
+            requireSafeAncestors: requireSafeAncestors
+          ),
           try FileManager.default.destinationOfSymbolicLink(atPath: url.path) == target
         else {
           throw CocoaError(.fileReadCorruptFile)
@@ -867,7 +1475,13 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
             permissions: 0,
             symbolicLinkTarget: target
           ))
-      } else if values.isDirectory == true {
+      case S_IFDIR:
+        guard
+          safeRuntimeDirectory(
+            url.path,
+            requireSafeAncestors: requireSafeAncestors
+          )
+        else { throw CocoaError(.fileReadCorruptFile) }
         entries.append(
           PackageTreeEntry(
             relativePath: relativePath,
@@ -875,7 +1489,13 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
             permissions: permissions,
             symbolicLinkTarget: nil
           ))
-      } else if values.isRegularFile == true {
+      case S_IFREG:
+        guard
+          safeRuntimeNode(
+            url.path,
+            requireSafeAncestors: requireSafeAncestors
+          )
+        else { throw CocoaError(.fileReadCorruptFile) }
         entries.append(
           PackageTreeEntry(
             relativePath: relativePath,
@@ -883,7 +1503,7 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
             permissions: permissions,
             symbolicLinkTarget: nil
           ))
-      } else {
+      default:
         throw CocoaError(.fileReadCorruptFile)
       }
     }
@@ -1174,6 +1794,7 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
     let version: PiSemanticVersion
     let digest: String
     let dynamicLibraryDigests: [String: String]
+    let dynamicLibraryLoadPaths: [String: String]
   }
 
   private enum PackageTreeEntryKind: Equatable {
