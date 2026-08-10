@@ -84,6 +84,12 @@ public struct MenuBarContentView: View {
       .disabled(!model.canPauseOrResume)
       .accessibilityIdentifier(JidokaAccessibilityID.pauseResume)
 
+      Button("Open in Herdr", systemImage: "rectangle.inset.focused") {
+        Task { await model.focusInHerdr() }
+      }
+      .disabled(!model.canFocusInHerdr)
+      .accessibilityIdentifier(JidokaAccessibilityID.focusInHerdr)
+
       Divider()
       Button("Settings…", systemImage: "gearshape", action: openSettings)
         .keyboardShortcut(",", modifiers: [.command])
@@ -185,6 +191,21 @@ public struct OnboardingView: View {
         .accessibilityIdentifier(JidokaAccessibilityID.piPreflight)
       }
 
+      Section("Herdr runtime") {
+        Text(
+          "Jidoka Code uses your existing global Herdr session. Agent terminals and "
+            + "transcripts are observable there. Jidoka Code never installs, updates, "
+            + "reconfigures, or stops Herdr."
+        )
+        .foregroundStyle(.secondary)
+        herdrStatus
+        Button("Run Herdr Preflight", systemImage: "rectangle.connected.to.line.below") {
+          Task { await model.runHerdrPreflight() }
+        }
+        .disabled(model.isWorking)
+        .accessibilityIdentifier(JidokaAccessibilityID.herdrPreflight)
+      }
+
       Section("GitHub credential") {
         Text("The token is validated, then stored only in Keychain. It is never sent to Pi.")
           .foregroundStyle(.secondary)
@@ -256,7 +277,7 @@ public struct OnboardingView: View {
       }
     }
     .formStyle(.grouped)
-    .frame(minWidth: 620, minHeight: 650)
+    .frame(minWidth: 620, minHeight: 760)
     .accessibilityIdentifier(JidokaAccessibilityID.onboardingWindow)
     .task {
       if model.state == nil {
@@ -295,6 +316,27 @@ public struct OnboardingView: View {
         systemImage: "xmark.octagon"
       )
       Text(model.state?.onboarding.pi.recovery ?? "Run preflight again after recovery.")
+        .foregroundStyle(.secondary)
+    }
+  }
+
+  @ViewBuilder
+  private var herdrStatus: some View {
+    switch model.state?.onboarding.herdr.state ?? .unchecked {
+    case .unchecked:
+      Label("Herdr preflight has not run.", systemImage: "questionmark.circle")
+    case .ready:
+      Label(
+        "Herdr \(model.state?.onboarding.herdr.version ?? "validated") protocol "
+          + "\(model.state?.onboarding.herdr.protocolVersion ?? 0) passed attestation.",
+        systemImage: "checkmark.circle"
+      )
+    case .blocked:
+      Label(
+        model.state?.onboarding.herdr.summary ?? "Herdr readiness is blocked.",
+        systemImage: "xmark.octagon"
+      )
+      Text(model.state?.onboarding.herdr.recovery ?? "Run preflight again after recovery.")
         .foregroundStyle(.secondary)
     }
   }
@@ -405,6 +447,25 @@ public struct SettingsView: View {
           .foregroundStyle(.secondary)
       }
 
+      Section("Herdr runtime") {
+        Text(
+          "Herdr is an external shared-session prerequisite. Its visible panes may include "
+            + "Jidoka Code transcripts and user-owned terminals."
+        )
+        .foregroundStyle(.secondary)
+        settingsHerdrStatus
+        Button("Run Herdr Preflight") {
+          Task { await model.runHerdrPreflight() }
+        }
+        .disabled(model.isWorking)
+        .accessibilityIdentifier(JidokaAccessibilityID.settingsHerdrPreflight)
+        Button("Open Most Recent Jidoka Pane in Herdr") {
+          Task { await model.focusInHerdr() }
+        }
+        .disabled(model.isWorking || model.herdrStatus.state != .ready)
+        .accessibilityIdentifier(JidokaAccessibilityID.settingsFocusInHerdr)
+      }
+
       Section("GitHub credential") {
         Text("Status: \(model.credentialStatus.state.rawValue)")
         SecureField("Replacement token", text: $model.replacementToken)
@@ -441,7 +502,7 @@ public struct SettingsView: View {
       }
     }
     .formStyle(.grouped)
-    .frame(minWidth: 680, minHeight: 720)
+    .frame(minWidth: 680, minHeight: 820)
     .accessibilityIdentifier(JidokaAccessibilityID.settingsWindow)
     .task { await model.refresh() }
     .alert(item: $model.message) { message in
@@ -479,6 +540,27 @@ public struct SettingsView: View {
       Button("Cancel", role: .cancel) {}
     } message: {
       Text("Deletion is blocked while active or ambiguous jobs still require reconciliation.")
+    }
+  }
+
+  @ViewBuilder
+  private var settingsHerdrStatus: some View {
+    switch model.herdrStatus.state {
+    case .unchecked:
+      Label("Preflight has not run.", systemImage: "questionmark.circle")
+    case .ready:
+      Label(
+        "Herdr \(model.herdrStatus.version ?? "validated") protocol "
+          + "\(model.herdrStatus.protocolVersion ?? 0) is ready.",
+        systemImage: "checkmark.circle"
+      )
+    case .blocked:
+      Label(
+        model.herdrStatus.summary ?? "Herdr readiness is blocked.",
+        systemImage: "xmark.octagon"
+      )
+      Text(model.herdrStatus.recovery ?? "Run preflight again after recovery.")
+        .foregroundStyle(.secondary)
     }
   }
 

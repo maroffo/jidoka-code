@@ -65,6 +65,37 @@ struct HerdrPiWorkflowRuntimeTests {
     }
   }
 
+  @Test("explicit focus revalidates exact ownership before changing shared-session focus")
+  func explicitFocus() async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make(kind: .issueTriage)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    try await fixture.prepareActiveTriageTopology()
+    #expect(await fixture.herdr.recordedFocusMutations().isEmpty)
+    try await fixture.runtime.focusMostRecentOwnedPane()
+    #expect(
+      await fixture.herdr.recordedFocusMutations()
+        == ["workspace:workspace-runtime", "tab:tab-job", "pane:pane-role-1"]
+    )
+
+    _ = try await fixture.herdr.takeOverRolePane()
+    await #expect(throws: HerdrPiWorkflowError.roleHostUnavailable) {
+      try await fixture.runtime.focusMostRecentOwnedPane()
+    }
+    #expect(await fixture.herdr.recordedFocusMutations().count == 3)
+  }
+
+  @Test("durable result import remains local when the Herdr socket is unavailable")
+  func durableResultImportDoesNotHandshake() async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make(kind: .issueTriage)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let recovered = try fixture.reopenedRuntime()
+    await fixture.herdr.failNextHandshake()
+    try await recovered.recoverDurableResults()
+    await #expect(throws: HerdrSocketClientError.connectionClosed) {
+      try await recovered.recoverDurableState()
+    }
+  }
+
   @Test("every production workflow fails closed when Herdr is unavailable")
   func herdrFailureHasNoFallback() async throws {
     let cases: [(JobKind, PiWorkflowKind, PiWorkflowRole)] = [
@@ -564,7 +595,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
       roles = [.writer, .architecture, .security, .test, .synthesis]
       workflows = [.planning, .orchestration]
     }
-    guard (0..<roles.count).contains(startedCount) else {
+    guard (0...roles.count).contains(startedCount) else {
       throw HerdrTopologyError.invalidPlan
     }
     let canonicalApplicationSupport = applicationSupport.standardizedFileURL
@@ -678,6 +709,18 @@ private struct HerdrPiRuntimeFixture: Sendable {
           .appendingPathComponent("host-start.json")
       )
     }
+  }
+
+  func prepareActiveTriageTopology() async throws {
+    try await preparePartialTopology(kind: .issueTriage, startedCount: 1)
+    let activations = await herdr.roleHostActivations()
+    guard activations.count == 1 else { throw HerdrTopologyError.invalidResponse }
+    try await runStore.activateTopology(
+      jobID: jobID,
+      tabID: "tab-job",
+      hosts: activations,
+      now: Date(timeIntervalSince1970: 3)
+    )
   }
 
   func reopenedRuntime() throws -> HerdrPiWorkflowRuntime {
@@ -963,6 +1006,10 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
   private var roleHostsByPane: [String: String] = [:]
   private var failHandshake = false
   private var failedProcessInfoPaneID: String?
+  private var focusedWorkspaceID: String?
+  private var focusedTabID: String?
+  private var focusedPaneID: String?
+  private var focusMutations: [String] = []
 
   init(descriptorRoot: URL, hostExecutable: URL) throws {
     self.descriptorRoot = descriptorRoot
@@ -1174,6 +1221,103 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
     )
   }
 
+  func focusWorkspace(
+    workspaceID: String,
+    attestedBy _: HerdrHandshake
+  ) throws {
+    guard workspace?.workspaceID == workspaceID else {
+      throw HerdrTopologyError.bindingLost
+    }
+    focusedWorkspaceID = workspaceID
+    focusMutations.append("workspace:\(workspaceID)")
+    workspace = workspace.map {
+      HerdrWorkspaceSnapshot(
+        workspaceID: $0.workspaceID,
+        activeTabID: $0.activeTabID,
+        label: $0.label,
+        number: $0.number,
+        paneCount: $0.paneCount,
+        tabCount: $0.tabCount,
+        focused: true,
+        agentStatus: $0.agentStatus,
+        tokens: $0.tokens,
+        worktree: $0.worktree
+      )
+    }
+  }
+
+  func focusTab(
+    tabID: String,
+    attestedBy _: HerdrHandshake
+  ) throws {
+    guard focusedWorkspaceID != nil,
+      tabs.contains(where: { $0.tabID == tabID && $0.workspaceID == focusedWorkspaceID })
+    else {
+      throw HerdrTopologyError.bindingLost
+    }
+    focusedTabID = tabID
+    focusMutations.append("tab:\(tabID)")
+    tabs = tabs.map {
+      HerdrTabSnapshot(
+        tabID: $0.tabID,
+        workspaceID: $0.workspaceID,
+        label: $0.label,
+        number: $0.number,
+        paneCount: $0.paneCount,
+        focused: $0.tabID == tabID,
+        agentStatus: $0.agentStatus
+      )
+    }
+    workspace = workspace.map {
+      HerdrWorkspaceSnapshot(
+        workspaceID: $0.workspaceID,
+        activeTabID: tabID,
+        label: $0.label,
+        number: $0.number,
+        paneCount: $0.paneCount,
+        tabCount: $0.tabCount,
+        focused: true,
+        agentStatus: $0.agentStatus,
+        tokens: $0.tokens,
+        worktree: $0.worktree
+      )
+    }
+  }
+
+  func focusPane(
+    paneID: String,
+    attestedBy _: HerdrHandshake
+  ) throws {
+    guard let pane = panes.first(where: { $0.paneID == paneID }),
+      pane.workspaceID == focusedWorkspaceID,
+      pane.tabID == focusedTabID
+    else {
+      throw HerdrTopologyError.bindingLost
+    }
+    focusedPaneID = paneID
+    focusMutations.append("pane:\(paneID)")
+    panes = panes.map { current in
+      HerdrPaneSnapshot(
+        paneID: current.paneID,
+        terminalID: current.terminalID,
+        workspaceID: current.workspaceID,
+        tabID: current.tabID,
+        revision: current.revision,
+        focused: current.paneID == paneID,
+        agentStatus: current.agentStatus,
+        cwd: current.cwd,
+        foregroundCWD: current.foregroundCWD,
+        label: current.label,
+        agent: current.agent,
+        displayAgent: current.displayAgent,
+        title: current.title,
+        stateLabels: current.stateLabels,
+        tokens: current.tokens,
+        agentSession: current.agentSession
+      )
+    }
+  }
+
   func closePane(
     paneID: String,
     terminalID: String,
@@ -1186,6 +1330,22 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
   }
 
   func launchedCommands() -> [[String]] { commands }
+
+  func recordedFocusMutations() -> [String] { focusMutations }
+
+  func roleHostActivations() -> [HerdrRoleHostActivation] {
+    roleHostsByPane.sorted { $0.key < $1.key }.compactMap { paneID, roleHostID in
+      guard let pane = panes.first(where: { $0.paneID == paneID }) else { return nil }
+      return HerdrRoleHostActivation(
+        roleHostID: roleHostID,
+        workspaceID: pane.workspaceID,
+        tabID: pane.tabID,
+        paneID: pane.paneID,
+        terminalID: pane.terminalID,
+        processIdentity: identity
+      )
+    }
+  }
 
   func failNextHandshake() { failHandshake = true }
 
@@ -1281,9 +1441,9 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
     HerdrSessionSnapshot(
       version: "0.8.0",
       protocolVersion: 19,
-      focusedWorkspaceID: nil,
-      focusedTabID: nil,
-      focusedPaneID: nil,
+      focusedWorkspaceID: focusedWorkspaceID,
+      focusedTabID: focusedTabID,
+      focusedPaneID: focusedPaneID,
       workspaces: workspace.map { [$0] } ?? [],
       tabs: tabs,
       panes: panes,

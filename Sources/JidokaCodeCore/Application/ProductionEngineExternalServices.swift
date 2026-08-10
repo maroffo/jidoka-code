@@ -54,6 +54,7 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
   private let transport: any GitHubHTTPTransport
   private let credentialVault: any EngineCredentialVaulting
   private let runtimeResolver: any PiRuntimeResolving
+  private let herdrReadiness: any HerdrRuntimeReadinessChecking
   private let now: @Sendable () -> Date
 
   public init(
@@ -61,12 +62,14 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
     transport: any GitHubHTTPTransport = GitHubURLSessionTransport(),
     credentialVault: any EngineCredentialVaulting = SystemEngineCredentialVault(),
     runtimeResolver: any PiRuntimeResolving,
+    herdrReadiness: any HerdrRuntimeReadinessChecking,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.configuration = configuration
     self.transport = transport
     self.credentialVault = credentialVault
     self.runtimeResolver = runtimeResolver
+    self.herdrReadiness = herdrReadiness
     self.now = now
   }
 
@@ -191,6 +194,10 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
       implementationEnabled: draft.implementationEnabled,
       enabled: true
     )
+  }
+
+  public func preflightHerdr() async -> EngineHerdrStatus {
+    await herdrReadiness.preflight()
   }
 
   public func preflightPi() async -> EnginePiStatus {

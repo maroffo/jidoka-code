@@ -74,6 +74,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   private let jobs: DurableJobStore
   private let intents: MutationIntentStore
   private let dispatchGate = EngineDispatchGate()
+  private let herdrReadiness: any HerdrRuntimeReadinessChecking
   private let commandRuns: ApprovedCommandRunStore
   private let commandGate = ApprovedCommandExecutionGate()
   private let clock: any SchedulerClock
@@ -93,6 +94,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     configuration: ConfigurationStore,
     jobs: DurableJobStore,
     intents: MutationIntentStore,
+    herdrReadiness: any HerdrRuntimeReadinessChecking,
     clock: any SchedulerClock = SystemSchedulerClock(),
     now: @escaping @Sendable () -> Date = Date.init
   ) {
@@ -101,6 +103,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     self.configuration = configuration
     self.jobs = jobs
     self.intents = intents
+    self.herdrReadiness = herdrReadiness
     commandRuns = ApprovedCommandRunStore(database: database, now: now)
     self.clock = clock
     self.now = now
@@ -118,6 +121,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     paused = snapshot.app.paused
     let account = snapshot.app.githubAccount
     let authorID = snapshot.app.githubAuthorID
+    let readiness = await herdrReadiness.preflight()
     let durableOwnershipCount =
       try await database.scalarInt(
         """
@@ -145,6 +149,12 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
         now: now
       )
       ownershipRuntime = herdrRuntime
+    }
+    guard readiness.state == .ready else {
+      try await herdrRuntime.recoverDurableResults()
+      _ = try await commandRuns.recoverAtStartup()
+      components = nil
+      return
     }
     try await herdrRuntime.recoverDurableState()
     _ = try await commandRuns.recoverAtStartup()
@@ -270,6 +280,19 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     await components?.coordinator.snapshot()
   }
 
+  public func focusInHerdr() async throws {
+    guard await herdrReadiness.preflight().state == .ready,
+      let ownershipRuntime
+    else {
+      throw EngineClientError(.herdrBlocked)
+    }
+    do {
+      try await ownershipRuntime.focusMostRecentOwnedPane()
+    } catch {
+      throw EngineClientError(.herdrBlocked)
+    }
+  }
+
   public func prepareForCheckpoint() async throws {
     checkpointing = true
     await dispatchGate.set(false)
@@ -303,8 +326,9 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   }
 
   private func applyDispatchGate() async {
+    let herdrReady = await herdrReadiness.preflight().state == .ready
     let allowed =
-      desiredDispatchAllowed && !paused
+      desiredDispatchAllowed && herdrReady && !paused
       && exclusiveOperations == 0 && !checkpointing
     if allowed {
       await ownershipRuntime?.setLaunchAllowed(true)

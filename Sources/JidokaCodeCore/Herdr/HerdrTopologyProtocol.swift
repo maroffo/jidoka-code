@@ -141,6 +141,37 @@ struct HerdrWorkspaceCreatedResult: Codable, Equatable, Sendable {
   }
 }
 
+struct HerdrWorkspaceTargetParameters: Codable, Equatable, Sendable {
+  let workspaceID: String
+
+  private enum CodingKeys: String, CodingKey {
+    case workspaceID = "workspace_id"
+  }
+}
+
+struct HerdrWorkspaceInfoResult: Codable, Equatable, Sendable {
+  let type: String
+  let workspace: HerdrWorkspaceSnapshot
+}
+
+struct HerdrTabTargetParameters: Codable, Equatable, Sendable {
+  let tabID: String
+
+  private enum CodingKeys: String, CodingKey {
+    case tabID = "tab_id"
+  }
+}
+
+struct HerdrTabInfoResult: Codable, Equatable, Sendable {
+  let type: String
+  let tab: HerdrTabSnapshot
+}
+
+struct HerdrPaneInfoResult: Codable, Equatable, Sendable {
+  let type: String
+  let pane: HerdrPaneSnapshot
+}
+
 struct HerdrLayoutApplyParameters: Codable, Equatable, Sendable {
   let workspaceID: String
   let tabLabel: String

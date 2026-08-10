@@ -124,6 +124,7 @@ private actor UIFixtureEngine: EngineClient {
     recovery: "Install an attested Pi and run preflight again."
   )
   private var credential = EngineCredentialStatus.missing
+  private var herdr = EngineHerdrStatus.unchecked
   private var repositories: [RepositoryConfiguration] = []
   private var profiles = ModelProfileRole.allCases.map {
     ModelProfileConfiguration(
@@ -162,6 +163,17 @@ private actor UIFixtureEngine: EngineClient {
         version: "0.84.1",
         policySHA256: String(repeating: "f", count: 64)
       )
+    case .runHerdrPreflight:
+      herdr = EngineHerdrStatus(
+        state: .ready,
+        version: "0.8.0",
+        protocolVersion: 19,
+        executableSHA256: String(repeating: "e", count: 64),
+        schemaSHA256: String(repeating: "d", count: 64),
+        policySHA256: String(repeating: "c", count: 64)
+      )
+    case .focusInHerdr:
+      guard herdr.state == .ready else { throw EngineClientError(.herdrBlocked) }
     case .replaceCredential(let token):
       guard !rejectCredentialOnce else {
         rejectCredentialOnce = false
@@ -222,7 +234,7 @@ private actor UIFixtureEngine: EngineClient {
       loginStatus = status
     case .completeOnboarding:
       guard externalAcknowledged, providerAcknowledged, pi.state == .ready,
-        credential.state == .valid, !repositories.isEmpty, loginSelected,
+        herdr.state == .ready, credential.state == .valid, !repositories.isEmpty, loginSelected,
         loginStatus == .enabled
       else {
         throw EngineClientError(.onboardingIncomplete)
@@ -274,6 +286,7 @@ private actor UIFixtureEngine: EngineClient {
       externalAutomationAcknowledged: externalAcknowledged,
       providerDisclosureAcknowledged: providerAcknowledged,
       pi: pi,
+      herdr: herdr,
       credential: credential,
       repositoryCount: repositories.count,
       configuredProfileRoles: profiles.map(\.role),
@@ -305,14 +318,16 @@ private actor UIFixtureEngine: EngineClient {
         maxConcurrency: maxConcurrency,
         loginItemSelected: loginSelected,
         loginItemStatus: loginStatus,
-        credential: credential
+        credential: credential,
+        herdr: herdr
       ),
       diagnostics: EngineDiagnostics(
         schemaVersion: 2,
         nonterminalJobCount: ambiguous.count,
         ambiguousMutationCount: ambiguous.count,
         coordinatorFailureCodes: [],
-        piIssueCode: pi.issueCode
+        piIssueCode: pi.issueCode,
+        herdrIssueCode: herdr.issueCode
       )
     )
   }
@@ -354,6 +369,7 @@ private enum UIFixtureRunner {
     await onboarding.refresh()
     await onboarding.acknowledgeExternalAutomation(true)
     await onboarding.runPiPreflight()
+    await onboarding.runHerdrPreflight()
     let sentinel = ["github", "pat", "ui", "fixture", "secret", UUID().uuidString]
       .joined(separator: "_")
     onboarding.token = sentinel

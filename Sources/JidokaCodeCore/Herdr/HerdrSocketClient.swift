@@ -528,6 +528,69 @@ public actor HerdrSocketClient {
     return response.result.snapshot
   }
 
+  func focusWorkspace(
+    workspaceID: String,
+    attestedBy handshake: HerdrHandshake
+  ) async throws {
+    guard handshake.snapshot.workspaces.contains(where: { $0.workspaceID == workspaceID }) else {
+      throw HerdrTopologyError.bindingLost
+    }
+    let response: HerdrResponse<HerdrWorkspaceInfoResult> = try await request(
+      method: .workspaceFocus,
+      params: HerdrWorkspaceTargetParameters(workspaceID: workspaceID),
+      expectedSocketIdentity: handshake.socketIdentity
+    )
+    try Self.validate(response: response, attestedBy: handshake)
+    guard response.result.type == "workspace_info",
+      response.result.workspace.workspaceID == workspaceID,
+      response.result.workspace.focused
+    else {
+      throw HerdrTopologyError.invalidResponse
+    }
+  }
+
+  func focusTab(
+    tabID: String,
+    attestedBy handshake: HerdrHandshake
+  ) async throws {
+    guard handshake.snapshot.tabs.contains(where: { $0.tabID == tabID }) else {
+      throw HerdrTopologyError.bindingLost
+    }
+    let response: HerdrResponse<HerdrTabInfoResult> = try await request(
+      method: .tabFocus,
+      params: HerdrTabTargetParameters(tabID: tabID),
+      expectedSocketIdentity: handshake.socketIdentity
+    )
+    try Self.validate(response: response, attestedBy: handshake)
+    guard response.result.type == "tab_info",
+      response.result.tab.tabID == tabID,
+      response.result.tab.focused
+    else {
+      throw HerdrTopologyError.invalidResponse
+    }
+  }
+
+  func focusPane(
+    paneID: String,
+    attestedBy handshake: HerdrHandshake
+  ) async throws {
+    guard handshake.snapshot.panes.contains(where: { $0.paneID == paneID }) else {
+      throw HerdrTopologyError.bindingLost
+    }
+    let response: HerdrResponse<HerdrPaneInfoResult> = try await request(
+      method: .paneFocus,
+      params: HerdrPaneTargetParameters(paneID: paneID),
+      expectedSocketIdentity: handshake.socketIdentity
+    )
+    try Self.validate(response: response, attestedBy: handshake)
+    guard response.result.type == "pane_info",
+      response.result.pane.paneID == paneID,
+      response.result.pane.focused
+    else {
+      throw HerdrTopologyError.invalidResponse
+    }
+  }
+
   func createWorkspace(
     _ parameters: HerdrWorkspaceCreateParameters,
     attestedBy handshake: HerdrHandshake
@@ -949,6 +1012,9 @@ private enum HerdrMethod: String, Sendable {
   case ping
   case sessionSnapshot = "session.snapshot"
   case workspaceCreate = "workspace.create"
+  case workspaceFocus = "workspace.focus"
+  case tabFocus = "tab.focus"
+  case paneFocus = "pane.focus"
   case layoutApply = "layout.apply"
   case layoutExport = "layout.export"
   case paneProcessInfo = "pane.process_info"

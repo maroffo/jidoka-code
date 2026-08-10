@@ -77,9 +77,9 @@ private struct XPCApplicationEngineClient: EngineClient {
 
   private func timeout(for command: EngineCommandKind) -> TimeInterval {
     switch command {
-    case .replaceCredential, .addRepository, .runPiPreflight:
+    case .replaceCredential, .addRepository, .runPiPreflight, .focusInHerdr:
       90
-    case .setProfile, .recheckAmbiguousMutation, .authorizeRetry,
+    case .setProfile, .recheckAmbiguousMutation, .authorizeRetry, .runHerdrPreflight,
       .prepareForHandoff, .prepareForQuit:
       700
     case .snapshot, .acknowledgeExternalAutomation, .acknowledgeProviderDisclosure,
@@ -228,6 +228,7 @@ actor ProductionEngineClient: EngineClient {
         readiness.externalAutomationAcknowledged,
         readiness.providerDisclosureAcknowledged,
         readiness.pi.state == .ready,
+        readiness.herdr.state == .ready,
         readiness.credential.state == .valid,
         readiness.repositoryCount > 0,
         Set(readiness.configuredProfileRoles) == Set(ModelProfileRole.allCases)
@@ -379,6 +380,10 @@ actor ProductionEngineClient: EngineClient {
       configuration: configuration,
       runtimeResolver: PiRuntimeResolver(
         configuration: .standard(resourceRoot: paths.piResources)
+      ),
+      herdrReadiness: try HerdrRuntimeReadinessChecker(
+        resourceRoot: paths.herdrResources,
+        socketURL: paths.herdrSocket
       )
     )
     let service = EngineService(
@@ -433,6 +438,8 @@ actor ProductionEngineClient: EngineClient {
   private struct Paths {
     let applicationSupport: URL
     let piResources: URL
+    let herdrResources: URL
+    let herdrSocket: URL
   }
 
   private static func paths() throws -> Paths {
@@ -446,10 +453,23 @@ actor ProductionEngineClient: EngineClient {
     guard FileManager.default.fileExists(atPath: piResources.path) else {
       throw EngineClientError(.piBlocked)
     }
+    let packagedHerdr = Bundle.main.resourceURL?.appendingPathComponent(
+      "Herdr", isDirectory: true
+    )
+    guard
+      let herdrResources = packagedHerdr.flatMap({
+        FileManager.default.fileExists(atPath: $0.path) ? $0 : nil
+      })
+    else {
+      throw EngineClientError(.herdrBlocked)
+    }
     return Paths(
       applicationSupport: FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/JidokaCode", isDirectory: true),
-      piResources: piResources
+      piResources: piResources,
+      herdrResources: herdrResources,
+      herdrSocket: FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/herdr/herdr.sock", isDirectory: false)
     )
   }
 }

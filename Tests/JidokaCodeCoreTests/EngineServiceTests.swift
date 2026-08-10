@@ -13,6 +13,7 @@ struct EngineServiceTests {
     #expect(initial.lifecycle == .onboarding)
     #expect(Set(initial.settings.profiles.map(\.role)) == Set(ModelProfileRole.allCases))
     #expect(initial.settings.maxConcurrency == 2)
+    #expect(initial.onboarding.herdr.state == .ready)
 
     _ = try await fixture.service.send(.acknowledgeExternalAutomation(true))
     _ = try await fixture.service.send(.acknowledgeProviderDisclosure(true))
@@ -89,6 +90,35 @@ struct EngineServiceTests {
     #expect(await fixture.runtime.dispatchValues.last == false)
   }
 
+  @Test("Herdr readiness closes dispatch and focus remains an explicit command")
+  func herdrReadinessAndFocus() async throws {
+    let fixture = try await EngineServiceFixture()
+    defer { fixture.remove() }
+    try await fixture.completeOnboarding()
+
+    await fixture.external.setHerdr(
+      EngineHerdrStatus(
+        state: .blocked,
+        issueCode: .versionMismatch,
+        summary: "Incompatible Herdr.",
+        recovery: "Restore Herdr 0.8.0."
+      )
+    )
+    let blocked = try await fixture.service.send(.runHerdrPreflight)
+    #expect(blocked.state.settings.herdr.state == .blocked)
+    #expect(blocked.state.operationalStatus == .warning)
+    #expect(await fixture.runtime.dispatchValues.last == false)
+    await #expect(throws: EngineClientError(.herdrBlocked)) {
+      _ = try await fixture.service.send(.focusInHerdr)
+    }
+    #expect(await fixture.runtime.focusCount == 0)
+
+    await fixture.external.setHerdr(EngineServiceExternalFake.readyHerdr())
+    _ = try await fixture.service.send(.runHerdrPreflight)
+    _ = try await fixture.service.send(.focusInHerdr)
+    #expect(await fixture.runtime.focusCount == 1)
+  }
+
   @Test("wake and network regain forward only lifecycle scheduler reasons")
   func lifecycleTriggers() async throws {
     let fixture = try await EngineServiceFixture()
@@ -97,6 +127,29 @@ struct EngineServiceTests {
     await fixture.service.notifyLifecycleEvent(.networkRegained)
     await fixture.service.notifyLifecycleEvent(.manual)
     #expect(await fixture.runtime.lifecycleReasons == [.wake, .networkRegained])
+  }
+
+  @Test("readiness regained on wake rebuilds runtime before requesting a pass")
+  func readinessRegainReloadsRuntime() async throws {
+    let fixture = try await EngineServiceFixture()
+    defer { fixture.remove() }
+    try await fixture.completeOnboarding()
+    await fixture.external.setHerdr(
+      EngineHerdrStatus(
+        state: .blocked,
+        issueCode: .socketUnavailable,
+        summary: "Herdr is unavailable.",
+        recovery: "Start Herdr."
+      )
+    )
+    _ = try await fixture.service.send(.runHerdrPreflight)
+    let reloadsBeforeRegain = await fixture.runtime.reloadValues.count
+
+    await fixture.external.setHerdr(EngineServiceExternalFake.readyHerdr())
+    await fixture.service.notifyLifecycleEvent(.wake)
+    #expect(await fixture.runtime.reloadValues.count == reloadsBeforeRegain + 1)
+    #expect(await fixture.runtime.reloadValues.last == true)
+    #expect(await fixture.runtime.lifecycleReasons.last == .wake)
   }
 
   @Test("pause persists first and leaves an in-flight pass running")
@@ -187,6 +240,7 @@ struct EngineServiceTests {
 private actor EngineServiceExternalFake: EngineExternalServicing {
   private(set) var sawCredential = false
   private var status = EngineCredentialStatus.missing
+  private var herdr = readyHerdr()
 
   func credentialStatus() -> EngineCredentialStatus {
     status
@@ -222,6 +276,25 @@ private actor EngineServiceExternalFake: EngineExternalServicing {
     )
   }
 
+  func preflightHerdr() -> EngineHerdrStatus {
+    herdr
+  }
+
+  func setHerdr(_ status: EngineHerdrStatus) {
+    herdr = status
+  }
+
+  static func readyHerdr() -> EngineHerdrStatus {
+    EngineHerdrStatus(
+      state: .ready,
+      version: "0.8.0",
+      protocolVersion: 19,
+      executableSHA256: String(repeating: "e", count: 64),
+      schemaSHA256: String(repeating: "d", count: 64),
+      policySHA256: String(repeating: "c", count: 64)
+    )
+  }
+
   func preflightPi() -> EnginePiStatus {
     EnginePiStatus(
       state: .ready,
@@ -234,6 +307,7 @@ private actor EngineServiceExternalFake: EngineExternalServicing {
 
 private actor EngineServiceRuntimeFake: EngineJobRuntime {
   private(set) var dispatchValues: [Bool] = []
+  private(set) var reloadValues: [Bool] = []
   private(set) var pauseValues: [Bool] = []
   private(set) var prePauseObservedPersistedValues: [Bool] = []
   private(set) var pauseDrainObservedPersistedValues: [Bool] = []
@@ -244,10 +318,12 @@ private actor EngineServiceRuntimeFake: EngineJobRuntime {
   private(set) var exclusiveBeginCount = 0
   private(set) var exclusiveEndCount = 0
   private(set) var prepareCount = 0
+  private(set) var focusCount = 0
   private var passRunning = false
   private var pauseObserver: ConfigurationStore?
 
   func reload(dispatchAllowed: Bool) {
+    reloadValues.append(dispatchAllowed)
     dispatchValues.append(dispatchAllowed)
   }
 
@@ -319,6 +395,10 @@ private actor EngineServiceRuntimeFake: EngineJobRuntime {
   func prepareForCheckpoint() {
     prepareCount += 1
     passRunning = false
+  }
+
+  func focusInHerdr() {
+    focusCount += 1
   }
 
   func setPassRunning(_ value: Bool) {

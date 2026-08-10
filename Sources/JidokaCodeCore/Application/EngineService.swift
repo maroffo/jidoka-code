@@ -12,6 +12,7 @@ public protocol EngineExternalServicing: Sendable {
     existingID: UUID?
   ) async throws -> RepositoryConfiguration
   func preflightPi() async -> EnginePiStatus
+  func preflightHerdr() async -> EngineHerdrStatus
 }
 
 public protocol EngineJobRuntime: Sendable {
@@ -29,6 +30,7 @@ public protocol EngineJobRuntime: Sendable {
   func timingSnapshot() async -> SchedulerTimingSnapshot?
   func coordinatorSnapshot() async -> JobCoordinatorSnapshot?
   func prepareForCheckpoint() async throws
+  func focusInHerdr() async throws
 }
 
 extension EngineJobRuntime {
@@ -51,6 +53,7 @@ public actor InactiveEngineJobRuntime: EngineJobRuntime {
   public func timingSnapshot() -> SchedulerTimingSnapshot? { nil }
   public func coordinatorSnapshot() -> JobCoordinatorSnapshot? { nil }
   public func prepareForCheckpoint() {}
+  public func focusInHerdr() throws { throw EngineClientError(.herdrBlocked) }
 }
 
 public actor EngineService: EngineClient {
@@ -66,6 +69,7 @@ public actor EngineService: EngineClient {
 
   private var credentialStatus = EngineCredentialStatus.missing
   private var piStatus = EnginePiStatus.unchecked
+  private var herdrStatus = EngineHerdrStatus.unchecked
   private var initialized = false
   private var quitting = false
   private var commandInProgress = false
@@ -97,6 +101,7 @@ public actor EngineService: EngineClient {
     guard !initialized else { return }
     credentialStatus = await external.credentialStatus()
     piStatus = await external.preflightPi()
+    herdrStatus = await external.preflightHerdr()
     let dispatchAllowed = try await dispatchAllowed()
     try await runtime.reload(dispatchAllowed: dispatchAllowed)
     let app = try await configuration.appConfiguration()
@@ -114,6 +119,20 @@ public actor EngineService: EngineClient {
 
   public func notifyLifecycleEvent(_ reason: SchedulerTriggerReason) async {
     guard initialized, !quitting, reason == .wake || reason == .networkRegained else { return }
+    let wasReady = herdrStatus.state == .ready
+    herdrStatus = await external.preflightHerdr()
+    let allowed = (try? await dispatchAllowed()) == true
+    if !wasReady, herdrStatus.state == .ready {
+      do {
+        try await runtime.reload(dispatchAllowed: allowed)
+      } catch {
+        await runtime.setDispatchAllowed(false)
+        return
+      }
+    } else {
+      await runtime.setDispatchAllowed(allowed)
+    }
+    guard herdrStatus.state == .ready else { return }
     await runtime.requestLifecyclePass(reason)
   }
 
@@ -183,6 +202,18 @@ public actor EngineService: EngineClient {
     case .runPiPreflight:
       piStatus = await external.preflightPi()
       await runtime.setDispatchAllowed(try await dispatchAllowed())
+      checkpoint = nil
+      didMutate()
+    case .runHerdrPreflight:
+      herdrStatus = await external.preflightHerdr()
+      try await runtime.reload(dispatchAllowed: try await dispatchAllowed())
+      checkpoint = nil
+      didMutate()
+    case .focusInHerdr:
+      guard herdrStatus.state == .ready else {
+        throw EngineClientError(.herdrBlocked)
+      }
+      try await runtime.focusInHerdr()
       checkpoint = nil
       didMutate()
     case .replaceCredential(let token):
@@ -397,6 +428,7 @@ public actor EngineService: EngineClient {
       && !snapshot.app.paused
       && credentialStatus.state == .valid
       && piStatus.state == .ready
+      && herdrStatus.state == .ready
       && !snapshot.repositories.isEmpty
       && Set(snapshot.profiles.map(\.role)) == Set(ModelProfileRole.allCases)
   }
@@ -420,6 +452,7 @@ public actor EngineService: EngineClient {
     let operationalStatus: EngineOperationalStatus
     if !ambiguous.isEmpty || !coordinatorFailures.isEmpty
       || (configuration.app.onboardingComplete && piStatus.state == .blocked)
+      || (configuration.app.onboardingComplete && herdrStatus.state == .blocked)
       || (configuration.app.onboardingComplete && credentialStatus.state != .valid)
       || (configuration.app.onboardingComplete
         && (!configuration.app.loginItemSelected
@@ -439,6 +472,7 @@ public actor EngineService: EngineClient {
       externalAutomationAcknowledged: configuration.app.externalAutomationAcknowledged,
       providerDisclosureAcknowledged: configuration.app.providerDisclosureAcknowledged,
       pi: piStatus,
+      herdr: herdrStatus,
       credential: credentialStatus,
       repositoryCount: configuration.repositories.count,
       configuredProfileRoles: roles,
@@ -461,14 +495,16 @@ public actor EngineService: EngineClient {
         maxConcurrency: configuration.app.maxConcurrency,
         loginItemSelected: configuration.app.loginItemSelected,
         loginItemStatus: configuration.app.loginItemStatus,
-        credential: credentialStatus
+        credential: credentialStatus,
+        herdr: herdrStatus
       ),
       diagnostics: EngineDiagnostics(
         schemaVersion: try await database.schemaVersion(),
         nonterminalJobCount: currentJobs.count,
         ambiguousMutationCount: ambiguous.count,
         coordinatorFailureCodes: coordinatorFailures,
-        piIssueCode: piStatus.issueCode
+        piIssueCode: piStatus.issueCode,
+        herdrIssueCode: herdrStatus.issueCode
       )
     )
   }
@@ -563,6 +599,7 @@ public actor EngineService: EngineClient {
       && snapshot.externalAutomationAcknowledged
       && snapshot.providerDisclosureAcknowledged
       && snapshot.pi.state == .ready
+      && snapshot.herdr.state == .ready
       && snapshot.credential.state == .valid
       && snapshot.repositoryCount > 0
       && Set(snapshot.configuredProfileRoles) == Set(ModelProfileRole.allCases)
@@ -625,6 +662,7 @@ public actor EngineService: EngineClient {
     case .replaceCredential, .deleteCredential: .credentialRejected
     case .addRepository, .updateRepository, .removeRepository: .repositoryRejected
     case .runPiPreflight: .piBlocked
+    case .runHerdrPreflight, .focusInHerdr: .herdrBlocked
     case .setLoginEnabled, .synchronizeLoginStatus: .loginItemFailed
     case .authorizeRetry, .recheckAmbiguousMutation: .staleEvidence
     case .completeOnboarding: .onboardingIncomplete

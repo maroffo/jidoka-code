@@ -56,6 +56,10 @@ public final class SettingsViewModel {
     state?.settings.credential ?? .missing
   }
 
+  public var herdrStatus: EngineHerdrStatus {
+    state?.settings.herdr ?? .unchecked
+  }
+
   public var diagnostics: [String] {
     guard let diagnostics = state?.diagnostics else {
       return ["Engine diagnostics unavailable"]
@@ -67,6 +71,9 @@ public final class SettingsViewModel {
     ]
     if let code = diagnostics.piIssueCode {
       values.append("Pi status code: \(code.rawValue)")
+    }
+    if let code = diagnostics.herdrIssueCode {
+      values.append("Herdr status code: \(code.rawValue)")
     }
     values += diagnostics.coordinatorFailureCodes.map { "Engine code: \($0)" }
     return values
@@ -220,6 +227,15 @@ public final class SettingsViewModel {
 
   public func saveMaxConcurrency() async {
     _ = await execute(.setMaxConcurrency(maxConcurrency))
+  }
+
+  public func runHerdrPreflight() async {
+    _ = await execute(.runHerdrPreflight)
+  }
+
+  public func focusInHerdr() async {
+    guard herdrStatus.state == .ready else { return }
+    _ = await execute(.focusInHerdr)
   }
 
   public func setLoginItemEnabled(_ enabled: Bool) async {

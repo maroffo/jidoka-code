@@ -67,6 +67,11 @@ public enum PresentationCopy {
         title: "Pi preflight blocked",
         detail: "Install an attested Pi and Node build, then run preflight again."
       )
+    case .herdrBlocked:
+      PresentationMessage(
+        title: "Herdr runtime blocked",
+        detail: "Restore the approved global Herdr runtime, then run its preflight again."
+      )
     case .loginItemFailed:
       PresentationMessage(
         title: "Login item needs attention",
@@ -90,6 +95,7 @@ public enum JidokaAccessibilityID {
   public static let menuStatus = "jidoka.menu.status"
   public static let pollNow = "jidoka.menu.poll-now"
   public static let pauseResume = "jidoka.menu.pause-resume"
+  public static let focusInHerdr = "jidoka.menu.focus-in-herdr"
   public static let settings = "jidoka.menu.settings"
   public static let openLogs = "jidoka.menu.open-logs"
   public static let quit = "jidoka.menu.quit"
@@ -97,6 +103,7 @@ public enum JidokaAccessibilityID {
   public static let externalAutomationDisclosure =
     "jidoka.onboarding.external-automation-disclosure"
   public static let piPreflight = "jidoka.onboarding.pi-preflight"
+  public static let herdrPreflight = "jidoka.onboarding.herdr-preflight"
   public static let tokenField = "jidoka.onboarding.token"
   public static let tokenImport = "jidoka.onboarding.token-import"
   public static let providerDisclosure = "jidoka.onboarding.provider-disclosure"
@@ -106,6 +113,8 @@ public enum JidokaAccessibilityID {
   public static let loginItem = "jidoka.onboarding.login-item"
   public static let onboardingComplete = "jidoka.onboarding.complete"
   public static let settingsWindow = "jidoka.settings.window"
+  public static let settingsHerdrPreflight = "jidoka.settings.herdr-preflight"
+  public static let settingsFocusInHerdr = "jidoka.settings.focus-in-herdr"
   public static let credentialReplacement = "jidoka.settings.credential-replacement"
   public static let credentialDeletion = "jidoka.settings.credential-deletion"
   public static let ambiguousRecheck = "jidoka.ambiguous.recheck"

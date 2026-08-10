@@ -169,6 +169,8 @@ private final class EngineProbeService: NSObject, EngineProbeXPCProtocol, @unche
         .acknowledgeExternalAutomation,
         .acknowledgeProviderDisclosure,
         .runPiPreflight,
+        .runHerdrPreflight,
+        .focusInHerdr,
         .replaceCredential,
         .deleteCredential,
         .addRepository,
@@ -344,9 +346,14 @@ private enum EngineServiceFactory {
     let resolver = PiRuntimeResolver(
       configuration: .standard(resourceRoot: paths.piResources)
     )
+    let herdrReadiness = try HerdrRuntimeReadinessChecker(
+      resourceRoot: paths.herdrResources,
+      socketURL: paths.herdrSocket
+    )
     let external = ProductionEngineExternalServices(
       configuration: configuration,
-      runtimeResolver: resolver
+      runtimeResolver: resolver,
+      herdrReadiness: herdrReadiness
     )
     let runtimeConfiguration = try ProductionEngineRuntimeConfiguration(
       applicationSupportRoot: paths.applicationSupport,
@@ -362,7 +369,8 @@ private enum EngineServiceFactory {
       database: database,
       configuration: configuration,
       jobs: jobs,
-      intents: intents
+      intents: intents,
+      herdrReadiness: herdrReadiness
     )
     let service = EngineService(
       configuration: configuration,
@@ -384,6 +392,7 @@ private enum EngineServiceFactory {
   private struct Paths {
     let applicationSupport: URL
     let piResources: URL
+    let herdrResources: URL
     let askPass: URL
     let pushGuard: URL
     let herdrHost: URL
@@ -403,6 +412,13 @@ private enum EngineServiceFactory {
     guard FileManager.default.fileExists(atPath: piResources.path) else {
       throw EngineClientError(.piBlocked)
     }
+    let packagedHerdrResources = contents.appendingPathComponent(
+      "Resources/Herdr", isDirectory: true
+    )
+    let herdrResources = packagedHerdrResources
+    guard FileManager.default.fileExists(atPath: herdrResources.path) else {
+      throw EngineClientError(.herdrBlocked)
+    }
     let packagedPushGuard = helperDirectory.appendingPathComponent(
       "GitHooks/pre-push", isDirectory: false)
     let developmentPushGuard = helperDirectory.appendingPathComponent(
@@ -411,6 +427,7 @@ private enum EngineServiceFactory {
       applicationSupport: FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/JidokaCode", isDirectory: true),
       piResources: piResources,
+      herdrResources: herdrResources,
       askPass: helperDirectory.appendingPathComponent("JidokaCodeAskPass", isDirectory: false),
       pushGuard: FileManager.default.fileExists(atPath: packagedPushGuard.path)
         ? packagedPushGuard : developmentPushGuard,
