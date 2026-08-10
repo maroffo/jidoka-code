@@ -17,6 +17,8 @@ public protocol EngineExternalServicing: Sendable {
 public protocol EngineJobRuntime: Sendable {
   func reload(dispatchAllowed: Bool) async throws
   func setDispatchAllowed(_ allowed: Bool) async
+  func prepareForPause() async
+  func waitForPauseDrain() async
   func setPaused(_ paused: Bool) async
   func pollNow() async
   func requestLifecyclePass(_ reason: SchedulerTriggerReason) async
@@ -27,6 +29,11 @@ public protocol EngineJobRuntime: Sendable {
   func timingSnapshot() async -> SchedulerTimingSnapshot?
   func coordinatorSnapshot() async -> JobCoordinatorSnapshot?
   func prepareForCheckpoint() async throws
+}
+
+extension EngineJobRuntime {
+  public func prepareForPause() async {}
+  public func waitForPauseDrain() async {}
 }
 
 public actor InactiveEngineJobRuntime: EngineJobRuntime {
@@ -266,8 +273,15 @@ public actor EngineService: EngineClient {
       checkpoint = nil
       didMutate()
     case .setPaused(let paused):
-      try await configuration.setPaused(paused, now: now())
+      if paused { await runtime.prepareForPause() }
+      do {
+        try await configuration.setPaused(paused, now: now())
+      } catch {
+        if paused { await runtime.setDispatchAllowed(try await dispatchAllowed()) }
+        throw error
+      }
       if paused {
+        await runtime.waitForPauseDrain()
         await runtime.setDispatchAllowed(false)
         await runtime.setPaused(true)
       } else {
@@ -351,13 +365,17 @@ public actor EngineService: EngineClient {
     case .prepareForQuit:
       quitting = true
       do {
+        await runtime.prepareForPause()
         try await configuration.setPaused(true, now: now())
+        await runtime.waitForPauseDrain()
         await runtime.setPaused(true)
         try await runtime.prepareForCheckpoint()
         _ = try await database.checkpoint()
         checkpoint = try await checkpointReceipt()
         didMutate()
       } catch {
+        _ = try? await database.checkpoint()
+        checkpoint = try? await checkpointReceipt()
         quitting = false
         throw error
       }

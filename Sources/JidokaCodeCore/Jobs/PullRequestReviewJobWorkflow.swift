@@ -217,28 +217,22 @@ public protocol PullRequestReviewExecuting: Sendable {
 }
 
 public struct PiPullRequestReviewJobExecutor: PullRequestReviewExecuting, Sendable {
-  private let runtimeResolver: any PiRuntimeResolving
-  private let resourceRoot: URL
+  private let executorFactory: any PiWorkflowExecutorBuilding
   private let sessionRoot: URL
   private let profiles: [ModelProfileConfiguration]
-  private let runner: any PiRPCProcessRunning
   private let offline: Bool
   private let timeoutSeconds: TimeInterval
 
   public init(
-    runtimeResolver: any PiRuntimeResolving,
-    resourceRoot: URL,
+    executorFactory: any PiWorkflowExecutorBuilding,
     sessionRoot: URL,
     profiles: [ModelProfileConfiguration],
-    runner: any PiRPCProcessRunning = PiRPCProcessRunner(),
     offline: Bool = false,
     timeoutSeconds: TimeInterval = 600
   ) {
-    self.runtimeResolver = runtimeResolver
-    self.resourceRoot = resourceRoot
+    self.executorFactory = executorFactory
     self.sessionRoot = sessionRoot
     self.profiles = profiles
-    self.runner = runner
     self.offline = offline
     self.timeoutSeconds = timeoutSeconds
   }
@@ -257,11 +251,8 @@ public struct PiPullRequestReviewJobExecutor: PullRequestReviewExecuting, Sendab
       offline: offline,
       timeoutSeconds: timeoutSeconds
     )
-    let executor = PiRPCWorkflowExecutor(
-      preparer: PiJobWorkflowPreparer(context: context),
-      runtimeResolver: runtimeResolver,
-      resourceRoot: resourceRoot,
-      runner: runner
+    let executor = executorFactory.makeExecutor(
+      preparer: PiJobWorkflowPreparer(context: context)
     )
     return try await PiPullRequestReviewRouter(executor: executor).run(
       PiPullRequestReviewInput(

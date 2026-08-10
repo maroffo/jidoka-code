@@ -620,6 +620,29 @@ struct PiWorkflowRouterTests {
     #expect(await commandExecutor.recordedCommandIDs().isEmpty)
   }
 
+  @Test("an unknown command outcome stops every later role and round")
+  func orchestrationPropagatesUnknownCommand() async throws {
+    let plan = try makeFrozenPlan(
+      ApprovedCommandCanonicalizer.canonicalize([validCommandProposal()])
+    )
+    let executor = orchestrationExecutor(
+      synthesisVerdict: { _ in "pass" },
+      findingSeverity: { _ in .none }
+    )
+    let commandExecutor = ScriptedCommandExecutor { _, _, _ in
+      throw ApprovedCommandRunStoreError.outcomeUnknown("command-fixture")
+    }
+
+    await #expect(throws: ApprovedCommandRunStoreError.outcomeUnknown("command-fixture")) {
+      _ = try await PiOrchestrationRouter(
+        executor: executor,
+        commandExecutor: commandExecutor
+      ).run(jobID: "orchestration-unknown", artifactSHA256: artifact, plan: plan)
+    }
+    #expect(await commandExecutor.recordedCommandIDs() == ["check"])
+    #expect(await executor.recordedRequests().map(\.role) == [.writer])
+  }
+
   @Test("a failed command prevents every later command in the frozen plan")
   func orchestrationStopsAfterFailure() async throws {
     let plan = try makeFrozenPlan(
@@ -986,8 +1009,12 @@ private actor ScriptedCommandExecutor: PiApprovedCommandExecuting {
   func execute(
     commandID: String,
     expectedPlanDigest: String,
-    plan: FrozenCommandPlan
+    plan: FrozenCommandPlan,
+    round: Int
   ) async throws -> VerificationCommandEvidence {
+    guard (1...PiOrchestrationRouter.maximumRounds).contains(round) else {
+      throw PiWorkflowRouterError.invalidInput
+    }
     commandIDs.append(commandID)
     return try handler(commandID, expectedPlanDigest, plan)
   }

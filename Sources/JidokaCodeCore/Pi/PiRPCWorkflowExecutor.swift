@@ -44,14 +44,14 @@ public enum PiRPCWorkflowExecutorError: Error, Equatable, Sendable {
   case resultIdentityMismatch
 }
 
-public struct PiRPCWorkflowExecutor: PiWorkflowExecuting, Sendable {
+struct PiRPCWorkflowExecutor: PiWorkflowExecuting, Sendable {
   private let preparer: any PiRPCWorkflowPreparing
   private let runtimeResolver: any PiRuntimeResolving
   private let resourceRoot: URL
   private let runner: any PiRPCProcessRunning
   private let nonce: @Sendable () -> String
 
-  public init(
+  init(
     preparer: any PiRPCWorkflowPreparing,
     runtimeResolver: any PiRuntimeResolving,
     resourceRoot: URL,
@@ -80,7 +80,7 @@ public struct PiRPCWorkflowExecutor: PiWorkflowExecuting, Sendable {
     self.nonce = nonce
   }
 
-  public func execute(_ request: PiWorkflowExecutionRequest) async throws -> PiWorkflowExecution {
+  func execute(_ request: PiWorkflowExecutionRequest) async throws -> PiWorkflowExecution {
     let preparation = try await preparer.prepare(request)
     let runtime = try runtimeResolver.resolve()
     let resources = try PiWorkflowResourceCatalog.inspect(resourceRoot: resourceRoot)
@@ -188,7 +188,7 @@ public struct PiRPCWorkflowExecutor: PiWorkflowExecuting, Sendable {
     switch request.sessionDirective {
     case .fresh:
       launch = .fresh
-    case .resume(let sessionID):
+    case .resume(let sessionID), .resumeBounded(let sessionID, _):
       launch = .resume(sessionID)
     }
     let tools = try PiWorkflowResourceCatalog.activeToolNames(

@@ -729,7 +729,13 @@ public actor RepositoryStore {
   }
 
   public func workspaceIsCleanAtRecordedHead(jobID: UUID) async throws -> Bool {
-    guard let record = try await workspaceStates.record(jobID: jobID),
+    guard let record = try await workspaceStates.record(jobID: jobID) else { return false }
+    return try await workspaceIsClean(jobID: jobID, exactHeadSHA: record.localHeadSHA)
+  }
+
+  public func workspaceIsClean(jobID: UUID, exactHeadSHA: String) async throws -> Bool {
+    guard GitHubInputValidation.validGitSHA(exactHeadSHA),
+      let record = try await workspaceStates.record(jobID: jobID),
       record.cleanupState == .retained
     else { return false }
     let workspace = try workspaceURL(record: record)
@@ -741,7 +747,7 @@ public actor RepositoryStore {
       ],
       workingDirectory: workspace
     )
-    guard head == record.localHeadSHA else { return false }
+    guard head == exactHeadSHA else { return false }
     let status = try await transport.runLocalGit(
       arguments: [
         "--no-pager", "--no-optional-locks", "--no-replace-objects",

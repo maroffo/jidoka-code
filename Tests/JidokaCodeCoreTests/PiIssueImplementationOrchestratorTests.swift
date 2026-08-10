@@ -33,6 +33,14 @@ struct PiIssueImplementationOrchestratorTests {
     #expect(commits.allSatisfy { $0.succeeded && $0.approvedHookPath == ".githooks" })
     #expect(await fixture.runner.callCount == 5)
     #expect(try await fixture.commitCount() == 2)
+    let commandRuns = try await fixture.commandRuns.runs(jobID: fixture.job.id)
+    #expect(commandRuns.count == fixture.envelope.plan.commandOrder.count)
+    #expect(commandRuns.allSatisfy { $0.state == .resultAccepted })
+    #expect(
+      commandRuns.filter { $0.phase == .bootstrap }.map(\.commandID) == [
+        "stage-plan", "setup-hooks-plan", "commit-plan",
+      ])
+    #expect(commandRuns.filter { $0.phase == .orchestration }.allSatisfy { $0.round == 1 })
     #expect(try await fixture.planCommitPaths() == [fixture.prepared.planPath])
     #expect(try await fixture.implementationCommitPaths() == ["Feature.txt"])
   }
@@ -42,6 +50,8 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
   let gitFixture: GitTestRoot
   let database: SQLiteStore
   let jobs: DurableJobStore
+  let commandRuns: ApprovedCommandRunStore
+  let commandGate: ApprovedCommandExecutionGate
   let repositories: RepositoryStore
   let job: JobRecord
   let workspaceURL: URL
@@ -108,6 +118,9 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
       now: Date(timeIntervalSince1970: 130_000)
     )
     jobs = DurableJobStore(database: database)
+    commandRuns = ApprovedCommandRunStore(database: database)
+    commandGate = ApprovedCommandExecutionGate()
+    await commandGate.open()
     let issueRevision = try IssueRevisionBuilder.make(
       input: IssueRevisionInput(
         issueNodeID: "issue-node-21",
@@ -136,7 +149,30 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
     guard case .created(let value) = creation else {
       throw ProductionOrchestratorFixtureError.suppressed
     }
-    job = value
+    let leased = productionOrchestratorJob(
+      try await jobs.transition(
+        jobID: value.id,
+        eventKey: "production-orchestrator:lease",
+        event: .acquireLease,
+        context: JobTransitionContext(now: value.createdAt, reason: "fixture lease")
+      )
+    )
+    let preparing = productionOrchestratorJob(
+      try await jobs.transition(
+        jobID: leased.id,
+        eventKey: "production-orchestrator:inputs",
+        event: .inputsValidated,
+        context: JobTransitionContext(now: value.createdAt, reason: "fixture inputs")
+      )
+    )
+    job = productionOrchestratorJob(
+      try await jobs.transition(
+        jobID: preparing.id,
+        eventKey: "production-orchestrator:pi",
+        event: .selectPiStep,
+        context: JobTransitionContext(now: value.createdAt, reason: "fixture Pi step")
+      )
+    )
     repositories = try RepositoryStore(
       rootURL: gitFixture.root.appendingPathComponent("ApplicationSupport", isDirectory: true),
       database: database,
@@ -280,16 +316,20 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
       commandOrder: plan.commandOrder
     )
     orchestrator = PiIssueImplementationOrchestrator(
-      runtimeResolver: ProductionFixtureRuntimeResolver(),
-      resourceRoot: Self.resourceRoot,
+      executorFactory: PiRPCWorkflowExecutorFactory(
+        runtimeResolver: ProductionFixtureRuntimeResolver(),
+        resourceRoot: Self.resourceRoot,
+        runner: runner
+      ),
       sessionRoot: sessionRoot,
       profiles: [
         Self.profile(.review), Self.profile(.planning), Self.profile(.orchestration),
       ],
       verificationRunner: VerificationCommandRunner(),
+      commandRuns: commandRuns,
+      commandGate: commandGate,
       importer: WorkspaceImporter(git: gitFixture.git),
       git: gitFixture.git,
-      runner: runner,
       offline: true,
       timeoutSeconds: 30
     )
@@ -414,6 +454,12 @@ private actor OrchestrationRPCRunner: PiRPCProcessRunning {
       abortAcknowledged: false,
       cleanupVerified: true
     )
+  }
+}
+
+private func productionOrchestratorJob(_ result: JobTransitionResult) -> JobRecord {
+  switch result {
+  case .applied(let job), .duplicate(let job): job
   }
 }
 

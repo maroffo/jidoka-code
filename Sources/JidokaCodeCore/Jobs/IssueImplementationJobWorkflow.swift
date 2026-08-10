@@ -37,6 +37,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
   private let contractVersion: String
   private let now: @Sendable () -> Date
   private let afterStepPersisted: @Sendable (JobStepKind) async throws -> Void
+  private let afterOrchestrationEvidencePersisted: @Sendable () async throws -> Void
 
   public init(
     jobs: DurableJobStore,
@@ -55,7 +56,8 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     authorID: Int64,
     contractVersion: String,
     now: @escaping @Sendable () -> Date = Date.init,
-    afterStepPersisted: @escaping @Sendable (JobStepKind) async throws -> Void = { _ in }
+    afterStepPersisted: @escaping @Sendable (JobStepKind) async throws -> Void = { _ in },
+    afterOrchestrationEvidencePersisted: @escaping @Sendable () async throws -> Void = {}
   ) {
     self.jobs = jobs
     self.configuration = configuration
@@ -74,6 +76,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     self.contractVersion = contractVersion
     self.now = now
     self.afterStepPersisted = afterStepPersisted
+    self.afterOrchestrationEvidencePersisted = afterOrchestrationEvidencePersisted
   }
 
   public func run(jobID: UUID) async throws {
@@ -164,6 +167,11 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       let step = try await jobs.completedStep(jobID: job.id, ordinal: job.currentStep),
       step.kind == kind
     else {
+      if job.currentStepKind == .orchestrate,
+        try await recoverInterruptedOrchestration(job)
+      {
+        return
+      }
       if let kind = job.currentStepKind,
         [.plan, .replan, .orchestrate].contains(kind)
       {
@@ -210,6 +218,9 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       let next: JobStepKind =
         evidence.disposition == PiOrchestrationDisposition.succeeded.rawValue
         ? .push : .publish
+      if next == .push {
+        _ = try await repositories.refreshWorkspaceHead(jobID: job.id, now: now())
+      }
       _ = try await advanceRecovered(
         job,
         nextStep: next,
@@ -265,6 +276,35 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     default:
       return
     }
+  }
+
+  private func recoverInterruptedOrchestration(_ job: JobRecord) async throws -> Bool {
+    let prepared = try await exactPrepared(job, expectedLabels: ["agent:wip"])
+    let envelope = try await planEnvelope(jobID: job.id)
+    guard envelope.issueRevisionSHA256 == prepared.issueRevision.sha256,
+      envelope.baseRevision == prepared.baseRevision,
+      let recovered = try await recoverableOrchestrationEvidence(
+        job: job,
+        envelope: envelope,
+        artifactSHA256: GitHubMarkerCodec.sha256(prepared.artifact)
+      )
+    else { return false }
+    try await appendStep(
+      job: job,
+      kind: .orchestrate,
+      inputDigest: envelope.plan.digest,
+      outputDigest: recovered.record.sha256,
+      mutationID: nil,
+      evidence: recovered.evidence.importEvidenceDigest
+    )
+    _ = try await repositories.refreshWorkspaceHead(jobID: job.id, now: now())
+    let pushing = try await advanceRecovered(
+      job,
+      nextStep: .push,
+      reason: "durable orchestration evidence completed before interruption"
+    )
+    try await run(jobID: pushing.id)
+    return true
   }
 
   private func blockInterruptedPiIfWorkspaceChanged(_ job: JobRecord) async throws {
@@ -1048,6 +1088,45 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     guard envelope.baseRevision == prepared.baseRevision else {
       throw IssueImplementationJobError.staleBaseRevision
     }
+    let artifactSHA256 = GitHubMarkerCodec.sha256(prepared.artifact)
+    if let recovered = try await recoverableOrchestrationEvidence(
+      job: job,
+      envelope: envelope,
+      artifactSHA256: artifactSHA256
+    ) {
+      let running = Self.job(
+        try await jobs.transition(
+          jobID: job.id,
+          eventKey: eventKey(job, "select-recovered-orchestration"),
+          event: .selectPiStep,
+          context: JobTransitionContext(
+            now: now(), reason: "durable orchestration evidence selected")
+        )
+      )
+      try await appendStep(
+        job: running,
+        kind: .orchestrate,
+        inputDigest: envelope.plan.digest,
+        outputDigest: recovered.record.sha256,
+        mutationID: nil,
+        evidence: recovered.evidence.importEvidenceDigest
+      )
+      _ = try await repositories.refreshWorkspaceHead(jobID: job.id, now: now())
+      let pushing = Self.job(
+        try await jobs.transition(
+          jobID: job.id,
+          eventKey: eventKey(running, "recovered-orchestration-completed"),
+          event: .piCompleted,
+          context: JobTransitionContext(
+            now: now(),
+            reason: "durable implementation, verification and import evidence recovered",
+            nextStep: .push
+          )
+        )
+      )
+      try await publishBranch(pushing)
+      return
+    }
     let materialization = try await repositories.materializeWorkspace(
       jobID: job.id,
       remote: prepared.remote,
@@ -1072,7 +1151,12 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       envelope: envelope,
       artifactSHA256: input.sha256
     )
-    let evidence = try ImplementationPublicationEvidence(execution: execution)
+    let evidence = try ImplementationPublicationEvidence(
+      execution: execution,
+      planSHA256: envelope.plan.digest,
+      artifactSHA256: input.sha256,
+      jobStep: running.currentStep
+    )
     let encoded = try JSONEncoder.sorted.encode(evidence)
     let record = try await artifacts.write(
       jobID: job.id,
@@ -1082,6 +1166,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       producerRunID: nil,
       now: now()
     )
+    try await afterOrchestrationEvidencePersisted()
     guard execution.orchestration.disposition == .succeeded,
       evidence.headSHA != nil,
       evidence.importEvidenceDigest != nil
@@ -1117,7 +1202,6 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       try await publishBlocked(publishing, diagnostic: diagnostic, label: "agent:blocked")
       return
     }
-    _ = try await repositories.refreshWorkspaceHead(jobID: job.id, now: now())
     try await appendStep(
       job: running,
       kind: .orchestrate,
@@ -1126,6 +1210,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       mutationID: nil,
       evidence: evidence.importEvidenceDigest
     )
+    _ = try await repositories.refreshWorkspaceHead(jobID: job.id, now: now())
     let pushing = Self.job(
       try await jobs.transition(
         jobID: job.id,
@@ -1761,6 +1846,35 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     throw IssueImplementationJobError.planMissing
   }
 
+  private func recoverableOrchestrationEvidence(
+    job: JobRecord,
+    envelope: IssueImplementationPlanEnvelope,
+    artifactSHA256: String
+  ) async throws -> RecoveredOrchestrationEvidence? {
+    let records = try await artifacts.records(jobID: job.id).filter { $0.kind == .verification }
+    for record in records.reversed() {
+      let data = try await artifacts.read(id: record.id)
+      guard
+        let evidence = try? JSONDecoder().decode(
+          ImplementationPublicationEvidence.self,
+          from: data
+        ),
+        evidence.schemaVersion == 2,
+        evidence.disposition == PiOrchestrationDisposition.succeeded.rawValue,
+        evidence.planSHA256 == envelope.plan.digest,
+        evidence.artifactSHA256 == artifactSHA256,
+        evidence.jobStep == job.currentStep,
+        let headSHA = evidence.headSHA,
+        GitHubInputValidation.validGitSHA(headSHA),
+        evidence.treeSHA.map(GitHubInputValidation.validGitSHA) == true,
+        evidence.importEvidenceDigest.map(GitHubInputValidation.validSHA256) == true,
+        try await repositories.workspaceIsClean(jobID: job.id, exactHeadSHA: headSHA)
+      else { continue }
+      return RecoveredOrchestrationEvidence(record: record, evidence: evidence)
+    }
+    return nil
+  }
+
   private func publicationEvidence(jobID: UUID) async throws -> ImplementationPublicationEvidence {
     let records = try await artifacts.records(jobID: jobID).filter { $0.kind == .verification }
     for record in records.reversed() {
@@ -1988,6 +2102,11 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
   }
 }
 
+private struct RecoveredOrchestrationEvidence: Sendable {
+  let record: ArtifactRecord
+  let evidence: ImplementationPublicationEvidence
+}
+
 private struct ImplementationPublicationEvidence: Codable, Sendable {
   let schemaVersion: Int
   let disposition: String
@@ -1996,15 +2115,31 @@ private struct ImplementationPublicationEvidence: Codable, Sendable {
   let importEvidenceDigest: String?
   let changedFiles: [String]
   let rounds: Int
+  let planSHA256: String?
+  let artifactSHA256: String?
+  let jobStep: Int?
 
-  init(execution: IssueImplementationExecutionResult) throws {
-    schemaVersion = 1
+  init(
+    execution: IssueImplementationExecutionResult,
+    planSHA256: String,
+    artifactSHA256: String,
+    jobStep: Int
+  ) throws {
+    schemaVersion = 2
     disposition = execution.orchestration.disposition.rawValue
     headSHA = execution.headSHA
     treeSHA = execution.treeSHA
     importEvidenceDigest = execution.importEvidence?.evidenceDigest
     changedFiles = execution.importEvidence?.changedFiles ?? []
     rounds = execution.orchestration.rounds
+    self.planSHA256 = planSHA256
+    self.artifactSHA256 = artifactSHA256
+    self.jobStep = jobStep
+    guard GitHubInputValidation.validSHA256(planSHA256),
+      GitHubInputValidation.validSHA256(artifactSHA256), jobStep >= 0
+    else {
+      throw IssueImplementationJobError.publicationEvidenceMissing
+    }
     if execution.orchestration.disposition == .succeeded {
       guard let headSHA, let treeSHA, let importEvidenceDigest,
         GitHubInputValidation.validGitSHA(headSHA),

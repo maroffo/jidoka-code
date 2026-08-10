@@ -334,20 +334,24 @@ private enum UIFixtureRunner {
     try prepareOutputDirectory(outputDirectory)
     let engine = UIFixtureEngine()
     let app = AppViewModel(client: engine)
-    let onboarding = OnboardingViewModel(client: engine) { state in app.apply(state) }
     let settings = SettingsViewModel(client: engine) { state in app.apply(state) }
-    await onboarding.refresh()
+    let onboardingSnapshot = OnboardingViewModel(client: engine) { state in app.apply(state) }
+    await onboardingSnapshot.refresh()
 
     var screenshots: [UIFixtureScreenshot] = []
     screenshots.append(
       try render(
-        AnyView(OnboardingView(model: onboarding, completed: {})),
+        AnyView(OnboardingView(model: onboardingSnapshot, completed: {})),
         size: NSSize(width: 720, height: 1_300),
         filename: "onboarding-first-run.png",
         outputDirectory: outputDirectory
       )
     )
 
+    // Keep screenshot-hosted models immutable after their windows are hidden. A live
+    // alert transition on a hidden NSHostingView can race AppKit sheet teardown.
+    let onboarding = OnboardingViewModel(client: engine) { state in app.apply(state) }
+    await onboarding.refresh()
     await onboarding.acknowledgeExternalAutomation(true)
     await onboarding.runPiPreflight()
     let sentinel = ["github", "pat", "ui", "fixture", "secret", UUID().uuidString]
@@ -392,6 +396,8 @@ private enum UIFixtureRunner {
     await app.togglePaused()
     await engine.injectAmbiguousMutation()
     await app.refresh()
+    let menuSnapshot = AppViewModel(client: engine)
+    await menuSnapshot.refresh()
     screenshots.append(
       try render(
         AnyView(
@@ -399,7 +405,7 @@ private enum UIFixtureRunner {
             Color(nsColor: .windowBackgroundColor)
             VStack(alignment: .leading, spacing: 8) {
               MenuBarContentView(
-                model: app,
+                model: menuSnapshot,
                 openOnboarding: {},
                 openSettings: {},
                 openLogs: {},

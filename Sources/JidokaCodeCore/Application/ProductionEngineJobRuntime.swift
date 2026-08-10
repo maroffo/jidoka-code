@@ -6,6 +6,8 @@ public struct ProductionEngineRuntimeConfiguration: Sendable {
   public let piResourceRoot: URL
   public let askPassExecutable: URL
   public let pushGuardExecutable: URL
+  public let herdrHostExecutable: URL
+  public let herdrSocketURL: URL
   public let contractVersion: String
 
   public init(
@@ -13,6 +15,8 @@ public struct ProductionEngineRuntimeConfiguration: Sendable {
     piResourceRoot: URL,
     askPassExecutable: URL,
     pushGuardExecutable: URL,
+    herdrHostExecutable: URL,
+    herdrSocketURL: URL,
     contractVersion: String
   ) throws {
     guard applicationSupportRoot.isFileURL,
@@ -23,6 +27,10 @@ public struct ProductionEngineRuntimeConfiguration: Sendable {
       askPassExecutable.path.hasPrefix("/"),
       pushGuardExecutable.isFileURL,
       pushGuardExecutable.path.hasPrefix("/"),
+      herdrHostExecutable.isFileURL,
+      herdrHostExecutable.path.hasPrefix("/"),
+      herdrSocketURL.isFileURL,
+      herdrSocketURL.path.hasPrefix("/"),
       !contractVersion.isEmpty,
       contractVersion.utf8.count <= 128
     else {
@@ -32,6 +40,8 @@ public struct ProductionEngineRuntimeConfiguration: Sendable {
     self.piResourceRoot = piResourceRoot.standardizedFileURL
     self.askPassExecutable = askPassExecutable.standardizedFileURL
     self.pushGuardExecutable = pushGuardExecutable.standardizedFileURL
+    self.herdrHostExecutable = herdrHostExecutable.standardizedFileURL
+    self.herdrSocketURL = herdrSocketURL.standardizedFileURL
     self.contractVersion = contractVersion
   }
 }
@@ -52,6 +62,7 @@ private struct ProductionJobComponents: Sendable {
   let coordinator: JobCoordinator
   let scheduler: DurableScheduler
   let workflows: JobWorkflowRegistry
+  let herdrRuntime: HerdrPiWorkflowRuntime
 }
 
 public actor ProductionEngineJobRuntime: EngineJobRuntime {
@@ -63,10 +74,13 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   private let jobs: DurableJobStore
   private let intents: MutationIntentStore
   private let dispatchGate = EngineDispatchGate()
+  private let commandRuns: ApprovedCommandRunStore
+  private let commandGate = ApprovedCommandExecutionGate()
   private let clock: any SchedulerClock
   private let now: @Sendable () -> Date
 
   private var components: ProductionJobComponents?
+  private var ownershipRuntime: HerdrPiWorkflowRuntime?
   private var schedulerTask: Task<Void, Never>?
   private var desiredDispatchAllowed = false
   private var paused = false
@@ -87,6 +101,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     self.configuration = configuration
     self.jobs = jobs
     self.intents = intents
+    commandRuns = ApprovedCommandRunStore(database: database, now: now)
     self.clock = clock
     self.now = now
   }
@@ -95,14 +110,45 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     desiredDispatchAllowed = dispatchAllowed
     checkpointing = false
     await dispatchGate.set(false)
+    await ownershipRuntime?.setLaunchAllowed(false)
+    await commandGate.closeAndWait()
     try await waitUntilSchedulerIdle()
     await stopScheduler()
     let snapshot = try await configuration.snapshot()
     paused = snapshot.app.paused
-    guard let account = snapshot.app.githubAccount,
-      let authorID = snapshot.app.githubAuthorID,
-      authorID > 0
+    let account = snapshot.app.githubAccount
+    let authorID = snapshot.app.githubAuthorID
+    let durableOwnershipCount =
+      try await database.scalarInt(
+        """
+        SELECT COUNT(*) FROM herdr_role_hosts
+        WHERE state IN ('prepared', 'waiting', 'running', 'stopping')
+        """
+      ) ?? 0
+    guard
+      ownershipRuntime != nil || durableOwnershipCount > 0
+        || (account != nil && authorID.map({ $0 > 0 }) == true)
     else {
+      _ = try await commandRuns.recoverAtStartup()
+      components = nil
+      return
+    }
+    let herdrRuntime: HerdrPiWorkflowRuntime
+    if let ownershipRuntime {
+      herdrRuntime = ownershipRuntime
+    } else {
+      herdrRuntime = try Self.makeHerdrRuntime(
+        runtimeConfiguration: runtimeConfiguration,
+        database: database,
+        configuration: configuration,
+        jobs: jobs,
+        now: now
+      )
+      ownershipRuntime = herdrRuntime
+    }
+    try await herdrRuntime.recoverDurableState()
+    _ = try await commandRuns.recoverAtStartup()
+    guard let account, let authorID, authorID > 0 else {
       components = nil
       return
     }
@@ -115,12 +161,20 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       account: account,
       authorID: authorID,
       profiles: snapshot.profiles,
+      herdrRuntime: herdrRuntime,
+      commandRuns: commandRuns,
+      commandGate: commandGate,
       dispatchGate: dispatchGate,
       clock: clock,
       now: now
     )
     components = built
     await built.scheduler.setPaused(paused)
+    try await built.coordinator.recoverAtStartup()
+    let startupExecutionAllowed =
+      desiredDispatchAllowed && !paused && exclusiveOperations == 0
+    await built.herdrRuntime.setLaunchAllowed(startupExecutionAllowed)
+    if startupExecutionAllowed { await commandGate.open() }
     await built.coordinator.run(
       pass: SchedulerPass(reasons: [.startup], startedAt: now())
     )
@@ -136,6 +190,17 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   public func setDispatchAllowed(_ allowed: Bool) async {
     desiredDispatchAllowed = allowed
     await applyDispatchGate()
+  }
+
+  public func prepareForPause() async {
+    await dispatchGate.set(false)
+    await ownershipRuntime?.closeLaunchAdmission()
+    await commandGate.close()
+  }
+
+  public func waitForPauseDrain() async {
+    await ownershipRuntime?.waitForLaunchAdmissionDrain()
+    await commandGate.waitUntilIdle()
   }
 
   public func setPaused(_ paused: Bool) async {
@@ -159,6 +224,8 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     }
     exclusiveOperations = 1
     await dispatchGate.set(false)
+    await ownershipRuntime?.setLaunchAllowed(false)
+    await commandGate.closeAndWait()
     await stopScheduler()
   }
 
@@ -183,9 +250,11 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
 
   public func waitUntilIdle() async throws {
     let deadline = ProcessInfo.processInfo.systemUptime + Self.idleWaitLimitSeconds
-    while await components?.scheduler.snapshot().passRunning == true
-      || exclusiveOperations > 0
-    {
+    while true {
+      let schedulerBusy = await components?.scheduler.snapshot().passRunning == true
+      let herdrBusy = await ownershipRuntime?.isBusy() == true
+      let commandBusy = await commandGate.isBusy()
+      guard schedulerBusy || herdrBusy || commandBusy || exclusiveOperations > 0 else { return }
       guard ProcessInfo.processInfo.systemUptime < deadline else {
         throw EngineClientError(.timedOut)
       }
@@ -204,14 +273,18 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   public func prepareForCheckpoint() async throws {
     checkpointing = true
     await dispatchGate.set(false)
+    await ownershipRuntime?.setLaunchAllowed(false)
+    await commandGate.closeAndWait()
     do {
       try await waitUntilIdle()
       await stopScheduler()
-      if let coordinator = components?.coordinator {
-        await coordinator.run(
+      if let components {
+        await components.coordinator.run(
           pass: SchedulerPass(reasons: [.manual], startedAt: now())
         )
+        try await components.herdrRuntime.waitUntilIdle()
       }
+      try await ownershipRuntime?.shutdownOwnedRoleHosts()
     } catch {
       checkpointing = false
       await applyDispatchGate()
@@ -230,9 +303,18 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   }
 
   private func applyDispatchGate() async {
-    await dispatchGate.set(
-      desiredDispatchAllowed && !paused && exclusiveOperations == 0 && !checkpointing
-    )
+    let allowed =
+      desiredDispatchAllowed && !paused
+      && exclusiveOperations == 0 && !checkpointing
+    if allowed {
+      await ownershipRuntime?.setLaunchAllowed(true)
+      await commandGate.open()
+      await dispatchGate.set(true)
+    } else {
+      await dispatchGate.set(false)
+      await ownershipRuntime?.setLaunchAllowed(false)
+      await commandGate.closeAndWait()
+    }
   }
 
   private func startScheduler() {
@@ -253,6 +335,28 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     await task?.value
   }
 
+  private static func makeHerdrRuntime(
+    runtimeConfiguration: ProductionEngineRuntimeConfiguration,
+    database: SQLiteStore,
+    configuration: ConfigurationStore,
+    jobs: DurableJobStore,
+    now: @escaping @Sendable () -> Date
+  ) throws -> HerdrPiWorkflowRuntime {
+    try HerdrPiWorkflowRuntime(
+      applicationSupportRoot: runtimeConfiguration.applicationSupportRoot,
+      resourceRoot: runtimeConfiguration.piResourceRoot,
+      hostExecutable: runtimeConfiguration.herdrHostExecutable,
+      socketURL: runtimeConfiguration.herdrSocketURL,
+      runtimeResolver: PiRuntimeResolver(
+        configuration: .standard(resourceRoot: runtimeConfiguration.piResourceRoot)
+      ),
+      database: database,
+      jobs: jobs,
+      configuration: configuration,
+      now: now
+    )
+  }
+
   private static func build(
     runtimeConfiguration: ProductionEngineRuntimeConfiguration,
     database: SQLiteStore,
@@ -262,6 +366,9 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     account: String,
     authorID: Int64,
     profiles: [ModelProfileConfiguration],
+    herdrRuntime: HerdrPiWorkflowRuntime,
+    commandRuns: ApprovedCommandRunStore,
+    commandGate: ApprovedCommandExecutionGate,
     dispatchGate: EngineDispatchGate,
     clock: any SchedulerClock,
     now: @escaping @Sendable () -> Date
@@ -323,10 +430,6 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       reads: broker,
       now: now
     )
-    let runtimeResolver = PiRuntimeResolver(
-      configuration: .standard(resourceRoot: runtimeConfiguration.piResourceRoot)
-    )
-
     let pullRequestReview = PullRequestReviewJobWorkflow(
       jobs: jobs,
       configuration: configuration,
@@ -340,8 +443,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
         credentials: credentials
       ),
       reviewer: PiPullRequestReviewJobExecutor(
-        runtimeResolver: runtimeResolver,
-        resourceRoot: runtimeConfiguration.piResourceRoot,
+        executorFactory: herdrRuntime,
         sessionRoot: sessions,
         profiles: profiles
       ),
@@ -365,8 +467,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
         credentials: credentials
       ),
       triage: PiIssueTriageJobExecutor(
-        runtimeResolver: runtimeResolver,
-        resourceRoot: runtimeConfiguration.piResourceRoot,
+        executorFactory: herdrRuntime,
         sessionRoot: sessions,
         profiles: profiles
       ),
@@ -392,19 +493,19 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
         credentials: credentials
       ),
       planner: PiIssueImplementationPlanner(
-        runtimeResolver: runtimeResolver,
-        resourceRoot: runtimeConfiguration.piResourceRoot,
+        executorFactory: herdrRuntime,
         sessionRoot: sessions,
         profiles: profiles
       ),
       orchestrator: PiIssueImplementationOrchestrator(
-        runtimeResolver: runtimeResolver,
-        resourceRoot: runtimeConfiguration.piResourceRoot,
+        executorFactory: herdrRuntime,
         sessionRoot: sessions,
         profiles: profiles,
         verificationRunner: VerificationCommandRunner(
           temporaryDirectory: temporary.path
         ),
+        commandRuns: commandRuns,
+        commandGate: commandGate,
         importer: WorkspaceImporter(git: git),
         git: git
       ),
@@ -448,7 +549,8 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     return ProductionJobComponents(
       coordinator: coordinator,
       scheduler: scheduler,
-      workflows: workflows
+      workflows: workflows,
+      herdrRuntime: herdrRuntime
     )
   }
 

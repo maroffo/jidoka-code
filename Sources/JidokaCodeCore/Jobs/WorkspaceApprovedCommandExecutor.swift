@@ -15,9 +15,13 @@ public struct WorkspaceApprovedCommandExecutor: PiApprovedCommandExecuting, Send
   public func execute(
     commandID: String,
     expectedPlanDigest: String,
-    plan: FrozenCommandPlan
+    plan: FrozenCommandPlan,
+    round: Int
   ) async throws -> VerificationCommandEvidence {
-    try await runner.execute(
+    guard (1...PiOrchestrationRouter.maximumRounds).contains(round) else {
+      throw PiWorkflowRouterError.invalidInput
+    }
+    return try await runner.execute(
       commandID: commandID,
       expectedPlanDigest: expectedPlanDigest,
       plan: plan,

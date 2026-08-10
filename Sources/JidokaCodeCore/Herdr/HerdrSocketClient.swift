@@ -578,6 +578,54 @@ public actor HerdrSocketClient {
     return response.result.layout
   }
 
+  func processInfo(
+    paneID: String,
+    attestedBy handshake: HerdrHandshake
+  ) async throws -> HerdrPaneProcessInfo {
+    let response: HerdrResponse<HerdrPaneProcessInfoResult> = try await request(
+      method: .paneProcessInfo,
+      params: HerdrPaneProcessInfoParameters(paneID: paneID),
+      expectedSocketIdentity: handshake.socketIdentity
+    )
+    try Self.validate(response: response, attestedBy: handshake)
+    guard response.result.type == "pane_process_info",
+      response.result.processInfo.paneID == paneID,
+      response.result.processInfo.foregroundProcesses.count <= 256
+    else {
+      throw HerdrTopologyError.invalidResponse
+    }
+    return response.result.processInfo
+  }
+
+  func closePane(
+    paneID: String,
+    terminalID: String,
+    attestedBy handshake: HerdrHandshake
+  ) async throws {
+    guard
+      handshake.snapshot.panes.contains(where: {
+        $0.paneID == paneID && $0.terminalID == terminalID && $0.agentSession == nil
+      })
+    else {
+      throw HerdrHostError.incompatiblePane
+    }
+    let response: HerdrResponse<HerdrOKResult> = try await request(
+      method: .paneClose,
+      params: HerdrPaneTargetParameters(paneID: paneID),
+      expectedSocketIdentity: handshake.socketIdentity
+    )
+    try Self.validate(response: response, attestedBy: handshake)
+    guard response.result.type == "ok" else {
+      throw HerdrTopologyError.invalidResponse
+    }
+    let post = try await self.handshake()
+    guard post.socketIdentity == handshake.socketIdentity,
+      !post.snapshot.panes.contains(where: { $0.terminalID == terminalID })
+    else {
+      throw HerdrTopologyError.invalidResponse
+    }
+  }
+
   func reportAgent(
     _ parameters: HerdrPaneReportAgentParameters,
     attestedBy handshake: HerdrHandshake
@@ -627,6 +675,7 @@ public actor HerdrSocketClient {
     paneID: String,
     workspaceID: String,
     tabID: String,
+    expectedTerminalID: String?,
     agent: HerdrPaneReportAgentParameters,
     metadata: HerdrPaneReportMetadataParameters,
     alias: String
@@ -663,6 +712,7 @@ public actor HerdrSocketClient {
             $0.paneID == paneID
               && $0.workspaceID == workspaceID
               && $0.tabID == tabID
+              && (expectedTerminalID == nil || $0.terminalID == expectedTerminalID)
               && $0.agentSession == nil
           })
         else {
@@ -713,6 +763,7 @@ public actor HerdrSocketClient {
     guard
       let pane = snapshotResponse.result.snapshot.panes.first(where: {
         $0.paneID == paneID && $0.workspaceID == workspaceID && $0.tabID == tabID
+          && (expectedTerminalID == nil || $0.terminalID == expectedTerminalID)
       })
     else {
       throw HerdrHostError.incompatiblePane
@@ -900,6 +951,8 @@ private enum HerdrMethod: String, Sendable {
   case workspaceCreate = "workspace.create"
   case layoutApply = "layout.apply"
   case layoutExport = "layout.export"
+  case paneProcessInfo = "pane.process_info"
+  case paneClose = "pane.close"
   case paneReportAgent = "pane.report_agent"
   case paneReportMetadata = "pane.report_metadata"
   case agentRename = "agent.rename"

@@ -96,7 +96,8 @@ struct HerdrHostRuntimeTests {
         HerdrFakeReply(dynamicResponse: { responder.response(to: $0) })
       }
     )
-    let environment = fixture.hostEnvironment(socketURL: server.socketURL)
+    var environment = fixture.hostEnvironment(socketURL: server.socketURL)
+    environment["JIDOKA_CODE_HERDR_SEQUENCE_BASE"] = "3"
 
     let status = try await HerdrHostRuntime.run(
       arguments: ["--launch-attempt-id", descriptor.launchAttemptID],
@@ -134,8 +135,20 @@ struct HerdrHostRuntimeTests {
       reports.compactMap { ($0["params"] as? [String: Any])?["state"] as? String }
         == ["working", "idle"]
     )
+    #expect(
+      reports.compactMap {
+        (($0["params"] as? [String: Any])?["seq"] as? NSNumber)?.intValue
+      }
+        == [3, 4]
+    )
     let metadata = objects.filter { $0["method"] as? String == "pane.report_metadata" }
     #expect(metadata.count == 2)
+    #expect(
+      metadata.compactMap {
+        (($0["params"] as? [String: Any])?["seq"] as? NSNumber)?.intValue
+      }
+        == [3, 4]
+    )
     #expect(
       metadata.allSatisfy {
         let tokens = ($0["params"] as? [String: Any])?["tokens"] as? [String: String]

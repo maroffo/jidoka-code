@@ -188,8 +188,14 @@ struct HerdrProtocolTests {
     }
     let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
     #expect(elapsed >= 0.04)
-    // Wall-clock scheduling can lag under the fully parallel package suite.
-    #expect(elapsed < 5.0)
+    // Sanitizer instrumentation can delay the task's post-timeout resumption while
+    // the typed timeout still wins. Keep a finite hang detector without applying
+    // the instrumentation allowance to the normal production-shaped test.
+    let processSymbols = UnsafeMutableRawPointer(bitPattern: -2)  // Darwin RTLD_DEFAULT.
+    let sanitizerActive =
+      dlsym(processSymbols, "__asan_init") != nil
+      || dlsym(processSymbols, "__tsan_init") != nil
+    #expect(elapsed < (sanitizerActive ? 15.0 : 5.0))
     await server.finish()
   }
 
@@ -416,6 +422,7 @@ struct HerdrProtocolTests {
         paneID: "w1:p1",
         workspaceID: "w1",
         tabID: "w1:t1",
+        expectedTerminalID: "term-1",
         agent: HerdrPaneReportAgentParameters(
           paneID: "w1:p1",
           source: "jidoka:run:run-0001",

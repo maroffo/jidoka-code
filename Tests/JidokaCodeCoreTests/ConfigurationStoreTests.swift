@@ -140,14 +140,39 @@ struct ConfigurationStoreTests {
     await legacy.close()
 
     let upgraded = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let backupURL = try #require(upgraded.migrationBackups.first)
-    #expect(upgraded.migrationBackups.count == 1)
-    let backup = try SQLiteStore(databaseURL: backupURL, migrations: [firstMigration])
-    #expect(try await backup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
-    #expect(try await backup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
-    #expect(try await backup.scalarInt("SELECT max_concurrency FROM app_settings") == 4)
-    #expect(try await backup.scalarInt("SELECT paused FROM app_settings") == 1)
-    await backup.close()
+    #expect(upgraded.migrationBackups.count == 3)
+    let settingsBackupURL = try #require(upgraded.migrationBackups.first)
+    let herdrBackupURL = try #require(upgraded.migrationBackups.dropFirst().first)
+    let commandBackupURL = try #require(upgraded.migrationBackups.last)
+    let settingsBackup = try SQLiteStore(
+      databaseURL: settingsBackupURL,
+      migrations: [firstMigration]
+    )
+    #expect(try await settingsBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
+    #expect(try await settingsBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    #expect(try await settingsBackup.scalarInt("SELECT max_concurrency FROM app_settings") == 4)
+    #expect(try await settingsBackup.scalarInt("SELECT paused FROM app_settings") == 1)
+    await settingsBackup.close()
+    let herdrBackup = try SQLiteStore(
+      databaseURL: herdrBackupURL,
+      migrations: Array(DatabaseSchema.migrations.prefix(2))
+    )
+    #expect(try await herdrBackup.schemaVersion() == 2)
+    #expect(try await herdrBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
+    #expect(try await herdrBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    await herdrBackup.close()
+    let commandBackup = try SQLiteStore(
+      databaseURL: commandBackupURL,
+      migrations: Array(DatabaseSchema.migrations.prefix(3))
+    )
+    #expect(try await commandBackup.schemaVersion() == 3)
+    #expect(try await commandBackup.scalarInt("SELECT COUNT(*) FROM pi_runs") == 0)
+    #expect(
+      try await commandBackup.scalarInt(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'approved_command_runs'"
+      ) == 0
+    )
+    await commandBackup.close()
 
     let store = ConfigurationStore(database: upgraded)
     var snapshot = try await store.snapshot()

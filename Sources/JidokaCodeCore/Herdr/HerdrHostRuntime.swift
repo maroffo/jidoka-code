@@ -22,6 +22,9 @@ public enum HerdrHostError: Error, Equatable, Sendable {
   case terminalControlFailed
   case tuiRuntimeFailed(String)
   case settlementMissing
+  case roleHostRestartNotAuthorized
+  case queueSequenceGap
+  case queueCommandMismatch
 
   public var code: String {
     switch self {
@@ -44,6 +47,9 @@ public enum HerdrHostError: Error, Equatable, Sendable {
     case .terminalControlFailed: "TERMINAL_CONTROL_FAILED"
     case .tuiRuntimeFailed: "TUI_RUNTIME_FAILED"
     case .settlementMissing: "SETTLEMENT_MISSING"
+    case .roleHostRestartNotAuthorized: "ROLE_HOST_RESTART_NOT_AUTHORIZED"
+    case .queueSequenceGap: "QUEUE_SEQUENCE_GAP"
+    case .queueCommandMismatch: "QUEUE_COMMAND_MISMATCH"
     }
   }
 }
@@ -441,6 +447,38 @@ public struct HerdrHostFailureRecord: Codable, Equatable, Sendable {
   }
 }
 
+public struct HerdrChildProcessRecord: Codable, Equatable, Sendable {
+  public let schemaVersion: Int
+  public let launchAttemptID: String
+  public let processID: Int32
+  public let processGroupID: Int32
+  public let startSeconds: UInt64
+  public let startMicroseconds: UInt64
+
+  init(
+    launchAttemptID: String,
+    processID: Int32,
+    processGroupID: Int32,
+    startSeconds: UInt64,
+    startMicroseconds: UInt64
+  ) {
+    schemaVersion = 1
+    self.launchAttemptID = launchAttemptID
+    self.processID = processID
+    self.processGroupID = processGroupID
+    self.startSeconds = startSeconds
+    self.startMicroseconds = startMicroseconds
+  }
+
+  public var processIdentity: HerdrHostProcessIdentity? {
+    try? HerdrHostProcessIdentity(
+      processID: processID,
+      startSeconds: startSeconds,
+      startMicroseconds: startMicroseconds
+    )
+  }
+}
+
 enum HerdrHostDescriptorPreparationPoint: CaseIterable, Sendable {
   case runDirectoryCreated
   case descriptorWritten
@@ -821,10 +859,69 @@ public enum HerdrHostDescriptorStore {
 }
 
 public enum HerdrHostRuntime {
+  static func childProcessRecord(
+    launchAttemptID: String,
+    channelDirectory: URL
+  ) throws -> HerdrChildProcessRecord? {
+    guard launchAttemptID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil else {
+      throw HerdrHostError.invalidDescriptor
+    }
+    let url = childProcessRecordURL(
+      launchAttemptID: launchAttemptID,
+      channelDirectory: channelDirectory
+    )
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    let data = try PiTUIFileProtocol.readPrivateFile(url, maximumBytes: 4_096)
+    let decoder = JSONDecoder()
+    guard let record = try? decoder.decode(HerdrChildProcessRecord.self, from: data),
+      record.schemaVersion == 1,
+      record.launchAttemptID == launchAttemptID,
+      record.processID > 0,
+      record.processGroupID == record.processID,
+      record.startMicroseconds < 1_000_000,
+      try encodedChildProcessRecord(record) == data
+    else {
+      throw HerdrHostError.invalidDescriptor
+    }
+    return record
+  }
+
+  static func childProcessIsAbsent(_ record: HerdrChildProcessRecord) -> Bool {
+    guard record.processIdentity != nil else { return false }
+    return !processGroupExists(record.processGroupID)
+  }
+
+  static func terminateChildProcess(
+    _ record: HerdrChildProcessRecord,
+    graceMilliseconds: Int = 1_000
+  ) async throws {
+    guard graceMilliseconds > 0, let identity = record.processIdentity,
+      record.processGroupID == record.processID
+    else {
+      throw HerdrHostError.invalidDescriptor
+    }
+    guard processGroupExists(record.processGroupID) else { return }
+    if let current = try? HerdrRoleHostRuntime.processIdentity(identity.processID) {
+      guard current == identity, getpgid(record.processID) == record.processGroupID else {
+        throw HerdrHostError.processGroupCleanupFailed
+      }
+    }
+    try await terminateProcessGroup(
+      record.processGroupID,
+      graceMilliseconds: graceMilliseconds
+    )
+  }
+
   public static func run(
     arguments: [String],
     environment: [String: String]
   ) async throws -> Int32 {
+    if arguments.first == "--role-host-id" {
+      return try await HerdrRoleHostRuntime.run(
+        arguments: arguments,
+        environment: environment
+      )
+    }
     do {
       return try await run(
         arguments: arguments,
@@ -868,6 +965,22 @@ public enum HerdrHostRuntime {
       throw HerdrHostError.invalidArguments
     }
     let launchAttemptID = arguments[1]
+    let sequenceBase: UInt64
+    if let value = environment["JIDOKA_CODE_HERDR_SEQUENCE_BASE"] {
+      guard let parsed = UInt64(value), parsed > 0, parsed.isMultiple(of: 2) == false,
+        parsed < UInt64.max
+      else {
+        throw HerdrHostError.invalidEnvironment
+      }
+      sequenceBase = parsed
+    } else {
+      sequenceBase = 1
+    }
+    let expectedTerminalID = environment["JIDOKA_CODE_HERDR_EXPECTED_TERMINAL_ID"]
+    guard expectedTerminalID == nil || expectedTerminalID.map(Self.validHerdrEnvironmentID) == true
+    else {
+      throw HerdrHostError.invalidEnvironment
+    }
     let root = URL(fileURLWithPath: rootValue, isDirectory: true)
     let descriptor = try descriptorLoader(launchAttemptID, root)
     let herdrCapabilities = [socketValue, paneID, workspaceID, tabID]
@@ -885,7 +998,9 @@ public enum HerdrHostRuntime {
         paneID: paneID,
         workspaceID: workspaceID,
         tabID: tabID,
-        responseTimeoutSeconds: responseTimeoutSeconds
+        expectedTerminalID: expectedTerminalID,
+        responseTimeoutSeconds: responseTimeoutSeconds,
+        sequenceBase: sequenceBase
       )
     } catch {
       throw HerdrHostError.invalidEnvironment
@@ -981,6 +1096,15 @@ public enum HerdrHostRuntime {
     let timeout = descriptor.executionTimeoutMilliseconds
     let grace = descriptor.abortGraceMilliseconds
     let pid = try spawn(descriptor)
+    if descriptor.settlement != nil {
+      do {
+        try recordChildProcess(pid, descriptor: descriptor)
+      } catch {
+        _ = Darwin.kill(-pid, SIGKILL)
+        _ = waitForChild(pid)
+        throw error
+      }
+    }
     let transfersTerminal = descriptor.settlement != nil && isatty(STDIN_FILENO) == 1
     let originalForegroundGroup = transfersTerminal ? tcgetpgrp(STDIN_FILENO) : -1
     if transfersTerminal {
@@ -991,7 +1115,11 @@ public enum HerdrHostRuntime {
         _ = waitForChild(pid)
         throw HerdrHostError.terminalControlFailed
       }
-      _ = Darwin.kill(-pid, SIGCONT)
+    }
+    guard Darwin.kill(-pid, SIGCONT) == 0 else {
+      _ = Darwin.kill(-pid, SIGKILL)
+      _ = waitForChild(pid)
+      throw HerdrHostError.launchFailed
     }
 
     do {
@@ -1010,6 +1138,50 @@ public enum HerdrHostRuntime {
       }
       throw error
     }
+  }
+
+  private static func recordChildProcess(
+    _ processID: pid_t,
+    descriptor: HerdrHostDescriptor
+  ) throws {
+    guard let settlement = descriptor.settlement,
+      getpgid(processID) == processID
+    else {
+      throw HerdrHostError.invalidDescriptor
+    }
+    let identity = try HerdrRoleHostRuntime.processIdentity(processID)
+    let record = HerdrChildProcessRecord(
+      launchAttemptID: descriptor.launchAttemptID,
+      processID: processID,
+      processGroupID: processID,
+      startSeconds: identity.startSeconds,
+      startMicroseconds: identity.startMicroseconds
+    )
+    try PiTUIFileProtocol.createPrivateFile(
+      data: try encodedChildProcessRecord(record),
+      at: childProcessRecordURL(
+        launchAttemptID: descriptor.launchAttemptID,
+        channelDirectory: URL(fileURLWithPath: settlement.channelDirectory, isDirectory: true)
+      ),
+      idempotent: true
+    )
+  }
+
+  private static func encodedChildProcessRecord(
+    _ record: HerdrChildProcessRecord
+  ) throws -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    var data = try encoder.encode(record)
+    data.append(0x0A)
+    return data
+  }
+
+  private static func childProcessRecordURL(
+    launchAttemptID: String,
+    channelDirectory: URL
+  ) -> URL {
+    channelDirectory.appendingPathComponent("child-process-\(launchAttemptID).json")
   }
 
   private enum ChildRace: Sendable {
@@ -1144,7 +1316,10 @@ public enum HerdrHostRuntime {
     for signal in [SIGINT, SIGTERM, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU] {
       sigaddset(&defaults, signal)
     }
-    let flags = Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF)
+    let flags = Int16(
+      POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF
+        | POSIX_SPAWN_START_SUSPENDED
+    )
     guard posix_spawnattr_setflags(&attributes, flags) == 0,
       posix_spawnattr_setpgroup(&attributes, 0) == 0,
       posix_spawnattr_setsigmask(&attributes, &mask) == 0,
@@ -1191,6 +1366,11 @@ public enum HerdrHostRuntime {
     return pointers.withUnsafeMutableBufferPointer { body($0.baseAddress!) }
   }
 
+  private static func validHerdrEnvironmentID(_ value: String) -> Bool {
+    !value.isEmpty && value.utf8.count <= 128
+      && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+  }
+
   private static func setForegroundProcessGroup(_ processGroup: pid_t) -> Int32 {
     var blocked = sigset_t()
     var previous = sigset_t()
@@ -1207,6 +1387,8 @@ private actor HerdrHostPaneReporter {
   private let paneID: String
   private let workspaceID: String
   private let tabID: String
+  private let expectedTerminalID: String?
+  private let sequenceBase: UInt64
   private var terminalID: String?
 
   init(
@@ -1214,7 +1396,9 @@ private actor HerdrHostPaneReporter {
     paneID: String,
     workspaceID: String,
     tabID: String,
-    responseTimeoutSeconds: TimeInterval
+    expectedTerminalID: String?,
+    responseTimeoutSeconds: TimeInterval,
+    sequenceBase: UInt64
   ) throws {
     guard Self.validID(paneID), Self.validID(workspaceID), Self.validID(tabID) else {
       throw HerdrHostError.invalidEnvironment
@@ -1228,6 +1412,8 @@ private actor HerdrHostPaneReporter {
     self.paneID = paneID
     self.workspaceID = workspaceID
     self.tabID = tabID
+    self.expectedTerminalID = expectedTerminalID
+    self.sequenceBase = sequenceBase
   }
 
   func start(descriptor: HerdrHostDescriptor) async throws {
@@ -1237,15 +1423,20 @@ private actor HerdrHostPaneReporter {
         paneID: paneID,
         workspaceID: workspaceID,
         tabID: tabID,
+        expectedTerminalID: expectedTerminalID,
         agent: HerdrPaneReportAgentParameters(
           paneID: paneID,
           source: "jidoka:host",
           agent: "pi",
           state: .working,
           message: "running",
-          sequence: 1
+          sequence: sequenceBase
         ),
-        metadata: metadata(descriptor: descriptor, summary: "running", sequence: 1),
+        metadata: metadata(
+          descriptor: descriptor,
+          summary: "running",
+          sequence: sequenceBase
+        ),
         alias: descriptor.agentAlias
       )
     } catch {
@@ -1269,12 +1460,12 @@ private actor HerdrHostPaneReporter {
           agent: "pi",
           state: success ? .idle : .blocked,
           message: success ? "settled" : "failed",
-          sequence: 2
+          sequence: sequenceBase + 1
         ),
         metadata: metadata(
           descriptor: descriptor,
           summary: success ? "settled" : "failed",
-          sequence: 2
+          sequence: sequenceBase + 1
         )
       )
     } catch {
