@@ -2,8 +2,8 @@
 
 **Status:** in-progress
 **Origin:** decisione in-session del 2026-08-09 dopo il merge della PR #9
-**Base:** `origin/main@282e849bdb4fdf573a1cf4f9bddb35c6fffebeed`
-**Branch:** `feat/jidoka-code-herdr-runtime`
+**Base:** `origin/main@ec2e17a8f6436dda6619a1165b359fd07fc6cb3e`
+**Branch:** `feat/jidoka-code-herdr-production-integration`
 **Goal:** eseguire ogni ruolo Pi production di Jidoka Code come agente top-level osservabile nella singola sessione Herdr globale dell'utente, preservando l'autorità durabile di Jidoka su dispatch, approval, mutation, completion, pause e recovery.
 
 ## Analysis, verificata il 2026-08-09
@@ -214,22 +214,22 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 
 - [x] Herdr `0.8.0` protocol `19` passa l'handshake fixed; mismatch produce zero mutation. Il digest schema osservato non viene dichiarato autenticato finché H5 non attesta il binary/CLI Herdr.
 - [x] Tutti i test automatici provano zero connessioni al socket default reale.
-- [ ] Ogni logical Pi role production è visibile come agente top-level in un pane Herdr; nessun child agent nascosto.
+- [x] Ogni logical Pi role production è visibile come agente top-level in un pane Herdr; nessun child agent nascosto.
 - [x] Una repository usa un solo workspace adottato o creato con identity exact; Jidoka non chiude mai il workspace condiviso.
 - [x] Ogni job generation ha un tab distinto e ogni role run un pane distinto.
 - [x] Creazione, metadata e agent launch non rubano il focus.
 - [x] Exact Node/Pi/resources/model/tools/environment coincidono con il launch descriptor durable.
-- [ ] `agent.start`, bare `pi`, native Herdr session restore e fallback RPC invisibile non compaiono nei path production.
+- [x] `agent.start`, bare `pi`, native Herdr session restore e fallback RPC invisibile non compaiono nei path production.
 - [x] Pi non riceve `HERDR_SOCKET_PATH` o altra capability globale Herdr.
 - [x] Observer Herdr mostra stato e transcript live del Pi TUI.
 - [x] Herdr `idle`, `done`, wait success, pane output ed exit code non possono completare un run.
 - [x] Un solo result envelope schema-valid e digest-bound più durable settlement completa il run.
 - [x] Response e ack persi non producono un secondo pane, prompt o Pi call.
-- [ ] Reconnect resnapshotta prima di mutation; duplicate, stale e reordered event non avanzano il job.
+- [x] Reconnect resnapshotta prima di mutation; duplicate, stale e reordered event non avanzano il job.
 - [x] Move e rename manuali sono seguiti senza ripristino forzato; close active produce interruption unknown.
-- [ ] Pause avvia zero nuovi host e lascia terminare i run in flight.
-- [ ] Quit lascia il server Herdr e tutti i terminali non Jidoka invariati.
-- [ ] Secret sentinel assente da argv, env, metadata, log, SQLite, artifact non autorizzati e history persisted da Jidoka.
+- [x] Pause avvia zero nuovi host e lascia terminare i run in flight.
+- [x] Quit lascia il server Herdr e tutti i terminali non Jidoka invariati.
+- [x] Secret sentinel assente da argv, env, metadata, log, SQLite, artifact non autorizzati e history persisted da Jidoka.
 - [ ] Package contiene e firma il host prima dell'app; Herdr non è incluso nel bundle.
 - [ ] Onboarding dichiara Herdr come runtime globale osservabile e fail-closed se assente/incompatibile.
 
@@ -274,11 +274,11 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 ### H4: Durable ownership e recovery-first integration
 
 - Scope: schema migration, PiRunStore, JobCoordinator e production composition.
-- [ ] Migration con backup aggiunge binding e append-only lifecycle/result records.
-- [ ] Rebind live run precede `recoverAtStartup`; stato non provabile resta reconciliation.
-- [ ] Iniettare un shared Herdr runner nei quattro workflow senza cambiare result schemas.
-- [ ] Pause, quit, helper crash, Herdr crash e event gap passano fault matrix.
-- [ ] Rimuovere ogni production direct-RPC fallback; conservare RPC soltanto per replay/probe offline.
+- [x] Migration con backup aggiunge binding e append-only lifecycle/result records.
+- [x] Rebind live run precede `recoverAtStartup`; stato non provabile resta reconciliation.
+- [x] Iniettare un shared Herdr runner nei quattro workflow senza cambiare result schemas.
+- [x] Pause, quit, helper crash, Herdr crash e event gap passano fault matrix.
+- [x] Rimuovere ogni production direct-RPC fallback; conservare RPC soltanto per replay/probe offline.
 
 ### H5: Readiness, package e operations
 
@@ -346,8 +346,8 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 ## External side effects
 
 - Autorizzati e già eseguiti: fetch/fast-forward locale `main`, branch/worktree dedicati, creazione nella sessione Herdr corrente del workspace `maroffo/jidoka-code`, tab `j/herdr-runtime/g1` e pane analisti visibili; tutti gli agenti analisti H0-H2 sono usciti e nessun lock Pi transitorio resta nel worktree. S11 ha usato soltanto sessioni nominate temporanee eliminate prima del PASS.
-- Autorizzati dall'invocazione corrente: plan/source edit e verifica locale necessari a H1-H4.
-- Non autorizzati: commit, push, PR, merge, install/update/config/stop Herdr, default-session production canary, provider live, GitHub mutation, Keychain reale, ServiceManagement, Apple Development installed test e package install.
+- Autorizzati dall'invocazione corrente: plan/source edit e verifica locale necessari a H1-H4; un commit H4, push del branch `feat/jidoka-code-herdr-production-integration` e creazione della relativa pull request.
+- Non autorizzati: amend, force-push, merge, deployment, install/update/config/stop Herdr, default-session production canary, provider live, mutazioni GitHub diverse dalla pull request autorizzata, Keychain reale, ServiceManagement, Apple Development installed test e package install.
 
 ## Progress
 
@@ -362,7 +362,7 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 - [x] 2026-08-09: due round H2 architecture/security/test visibili hanno chiuso tutti i finding Critical/Major; architecture e security finali non hanno finding aperti e test ha confermato `FIXES VERIFIED`.
 - [x] 2026-08-09: H3 Pi TUI parity, private runtime snapshot e structured result/ack/release completati con 396 test, S12 real TUI causal crash/resume, full E2E, 83 test ASAN, 83 test TSAN e manifest retained exact-run verificato. Evidence: [`docs/evidence/herdr-h3-pi-tui-settlement-report.md`](../../evidence/herdr-h3-pi-tui-settlement-report.md).
 - [x] 2026-08-09: review finali H3 architecture, security e test hanno riportato PASS senza finding aperti dopo la chiusura del replay downgrade e della lineage evidence S12.
-- [ ] H4 durability e production integration.
+- [x] 2026-08-10: H4 durable ownership e production integration completati con schema v4, shared visible Herdr runtime, exact 1/4/5-role topology, recovery-first startup, command authority, pause/quit barriers, moved-host rebind e nessun production RPC fallback. Full gate, E2E, 434-test ASan, 434-test TSan e quattro review closure sono verdi. Evidence: [`docs/evidence/herdr-h4-production-integration-report.md`](../../evidence/herdr-h4-production-integration-report.md).
 - [ ] H5 readiness, package e operations.
 - [ ] Final verification e review.
 
@@ -384,6 +384,7 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 - Attestare Homebrew non basta come execution authority: Node, Pi e l'intera closure dylib non-system devono essere copiati e riverificati in uno snapshot privato prima del launch.
 - Same-run crash recovery e reuse cross-run della sessione non possono condividere un resume nullable senza provenance: `session.json` conserva origin mode e boundary immutabili, mentre ogni round successivo presenta il digest del terminal result precedente.
 - Un `agent wait` avviato dopo l'ack può perdere una transizione già osservata; S12 arma il waiter prima dell'ack e usa result/ack/release, non il wait, come autorità.
+- Un offscreen `NSHostingView` usato da S10 può restare sottoscritto al view model dopo `orderOut`; mutare poi un `.alert` può far correre AppKit contro la sheet nascosta. Il fixture usa view model snapshot immutabili per il rendering e mantiene separati i modelli operativi.
 
 ## Execution decisions
 
@@ -401,6 +402,11 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 - 2026-08-09: un resume senza boundary è autorizzato soltanto da un'identità sessione schema 2 originata dal fresh launch dello stesso run; un round cross-run conserva e ripresenta sempre l'exact `sessionBoundarySHA256` precedente.
 - 2026-08-09: il result side channel canonicale resta completion authority; child exit, pane output, Herdr lifecycle e `agent wait` restano telemetry anche quando risultano `done`.
 - 2026-08-09: H3 espone il boundary validato a H4 ma non modifica ancora la production composition RPC; cutover, DB ownership, pause e quit restano gate H4.
+- 2026-08-10: H4 usa un solo `HerdrPiWorkflowRuntime` production per review, triage, planning e orchestration; le classi RPC restano soltanto nelle seam offline, probe e replay.
+- 2026-08-10: persistent role host e logical Pi run sono identità distinte; ogni process attempt ha un `launchAttemptID`, una queue sequence monotona e prove child PID/PGID/start prima di cleanup.
+- 2026-08-10: startup importa result, ricostruisce/rebind topology e recupera approved-command authority prima della generic job recovery; un binding non provabile blocca soltanto il relativo job.
+- 2026-08-10: pause chiude e drena topology, Pi e command admission; quit chiude un pane soltanto dopo una nuova prova completa di ownership corrente.
+- 2026-08-10: un approved command `started` senza exact accepted evidence diventa `unknown` e non viene mai rieseguito automaticamente; un result accepted può essere replayed soltanto sul repository state esatto.
 
 ## Outcomes and retrospective
 

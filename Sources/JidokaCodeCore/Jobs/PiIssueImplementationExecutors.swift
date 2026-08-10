@@ -10,28 +10,22 @@ public protocol IssueImplementationPlanning: Sendable {
 }
 
 public struct PiIssueImplementationPlanner: IssueImplementationPlanning, Sendable {
-  private let runtimeResolver: any PiRuntimeResolving
-  private let resourceRoot: URL
+  private let executorFactory: any PiWorkflowExecutorBuilding
   private let sessionRoot: URL
   private let profiles: [ModelProfileConfiguration]
-  private let runner: any PiRPCProcessRunning
   private let offline: Bool
   private let timeoutSeconds: TimeInterval
 
   public init(
-    runtimeResolver: any PiRuntimeResolving,
-    resourceRoot: URL,
+    executorFactory: any PiWorkflowExecutorBuilding,
     sessionRoot: URL,
     profiles: [ModelProfileConfiguration],
-    runner: any PiRPCProcessRunning = PiRPCProcessRunner(),
     offline: Bool = false,
     timeoutSeconds: TimeInterval = 600
   ) {
-    self.runtimeResolver = runtimeResolver
-    self.resourceRoot = resourceRoot
+    self.executorFactory = executorFactory
     self.sessionRoot = sessionRoot
     self.profiles = profiles
-    self.runner = runner
     self.offline = offline
     self.timeoutSeconds = timeoutSeconds
   }
@@ -42,7 +36,7 @@ public struct PiIssueImplementationPlanner: IssueImplementationPlanning, Sendabl
     workspaceURL: URL,
     artifactSHA256: String
   ) async throws -> PiPlanningOutput {
-    let executor = PiRPCWorkflowExecutor(
+    let executor = executorFactory.makeExecutor(
       preparer: PiJobWorkflowPreparer(
         context: PiJobWorkflowContext(
           artifact: prepared.artifact,
@@ -53,10 +47,7 @@ public struct PiIssueImplementationPlanner: IssueImplementationPlanning, Sendabl
           offline: offline,
           timeoutSeconds: timeoutSeconds
         )
-      ),
-      runtimeResolver: runtimeResolver,
-      resourceRoot: resourceRoot,
-      runner: runner
+      )
     )
     return try await PiPlanningRouter(executor: executor).run(
       jobID: "job-\(job.id.uuidString.lowercased())",
@@ -106,37 +97,37 @@ public enum PiIssueImplementationExecutorError: Error, Equatable, Sendable {
 }
 
 public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestrating, Sendable {
-  private let runtimeResolver: any PiRuntimeResolving
-  private let resourceRoot: URL
+  private let executorFactory: any PiWorkflowExecutorBuilding
   private let sessionRoot: URL
   private let profiles: [ModelProfileConfiguration]
   private let verificationRunner: VerificationCommandRunner
+  private let commandRuns: ApprovedCommandRunStore
+  private let commandGate: ApprovedCommandExecutionGate
   private let importer: WorkspaceImporter
   private let git: any GitLocalCommanding
-  private let runner: any PiRPCProcessRunning
   private let offline: Bool
   private let timeoutSeconds: TimeInterval
 
   public init(
-    runtimeResolver: any PiRuntimeResolving,
-    resourceRoot: URL,
+    executorFactory: any PiWorkflowExecutorBuilding,
     sessionRoot: URL,
     profiles: [ModelProfileConfiguration],
     verificationRunner: VerificationCommandRunner,
+    commandRuns: ApprovedCommandRunStore,
+    commandGate: ApprovedCommandExecutionGate,
     importer: WorkspaceImporter,
     git: any GitLocalCommanding,
-    runner: any PiRPCProcessRunning = PiRPCProcessRunner(),
     offline: Bool = false,
     timeoutSeconds: TimeInterval = 600
   ) {
-    self.runtimeResolver = runtimeResolver
-    self.resourceRoot = resourceRoot
+    self.executorFactory = executorFactory
     self.sessionRoot = sessionRoot
     self.profiles = profiles
     self.verificationRunner = verificationRunner
+    self.commandRuns = commandRuns
+    self.commandGate = commandGate
     self.importer = importer
     self.git = git
-    self.runner = runner
     self.offline = offline
     self.timeoutSeconds = timeoutSeconds
   }
@@ -162,13 +153,19 @@ public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestratin
       relativePath: envelope.planPath,
       workspace: workspaceURL
     )
+    let durableCommands = DurableApprovedCommandExecutor(
+      job: job,
+      store: commandRuns,
+      gate: commandGate,
+      runner: verificationRunner,
+      workspace: workspaceURL
+    )
     var bootstrapEvidence: [String: VerificationCommandEvidence] = [:]
     for commandID in layout.bootstrapCommandIDs {
-      let evidence = try await verificationRunner.execute(
+      let evidence = try await durableCommands.executeBootstrap(
         commandID: commandID,
         expectedPlanDigest: envelope.plan.digest,
-        plan: envelope.plan,
-        workspace: workspaceURL
+        plan: envelope.plan
       )
       guard evidence.succeeded else {
         throw PiIssueImplementationExecutorError.bootstrapCommandFailed(commandID)
@@ -190,11 +187,10 @@ public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestratin
       throw PiIssueImplementationExecutorError.planCommitViolation
     }
     let commands = BootstrapCachingApprovedCommandExecutor(
-      runner: verificationRunner,
-      workspace: workspaceURL,
+      executor: durableCommands,
       cached: bootstrapEvidence
     )
-    let executor = PiRPCWorkflowExecutor(
+    let executor = executorFactory.makeExecutor(
       preparer: PiJobWorkflowPreparer(
         context: PiJobWorkflowContext(
           artifact: prepared.artifact,
@@ -205,10 +201,7 @@ public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestratin
           offline: offline,
           timeoutSeconds: timeoutSeconds
         )
-      ),
-      runtimeResolver: runtimeResolver,
-      resourceRoot: resourceRoot,
-      runner: runner
+      )
     )
     let orchestration = try await PiOrchestrationRouter(
       executor: executor,
@@ -420,31 +413,29 @@ public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestratin
 }
 
 private actor BootstrapCachingApprovedCommandExecutor: PiApprovedCommandExecuting {
-  private let runner: VerificationCommandRunner
-  private let workspace: URL
+  private let executor: DurableApprovedCommandExecutor
   private let cached: [String: VerificationCommandEvidence]
 
   init(
-    runner: VerificationCommandRunner,
-    workspace: URL,
+    executor: DurableApprovedCommandExecutor,
     cached: [String: VerificationCommandEvidence]
   ) {
-    self.runner = runner
-    self.workspace = workspace
+    self.executor = executor
     self.cached = cached
   }
 
   func execute(
     commandID: String,
     expectedPlanDigest: String,
-    plan: FrozenCommandPlan
+    plan: FrozenCommandPlan,
+    round: Int
   ) async throws -> VerificationCommandEvidence {
     if let evidence = cached[commandID] { return evidence }
-    return try await runner.execute(
+    return try await executor.execute(
       commandID: commandID,
       expectedPlanDigest: expectedPlanDigest,
       plan: plan,
-      workspace: workspace
+      round: round
     )
   }
 }

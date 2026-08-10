@@ -226,28 +226,22 @@ public protocol IssueTriageExecuting: Sendable {
 }
 
 public struct PiIssueTriageJobExecutor: IssueTriageExecuting, Sendable {
-  private let runtimeResolver: any PiRuntimeResolving
-  private let resourceRoot: URL
+  private let executorFactory: any PiWorkflowExecutorBuilding
   private let sessionRoot: URL
   private let profiles: [ModelProfileConfiguration]
-  private let runner: any PiRPCProcessRunning
   private let offline: Bool
   private let timeoutSeconds: TimeInterval
 
   public init(
-    runtimeResolver: any PiRuntimeResolving,
-    resourceRoot: URL,
+    executorFactory: any PiWorkflowExecutorBuilding,
     sessionRoot: URL,
     profiles: [ModelProfileConfiguration],
-    runner: any PiRPCProcessRunning = PiRPCProcessRunner(),
     offline: Bool = false,
     timeoutSeconds: TimeInterval = 600
   ) {
-    self.runtimeResolver = runtimeResolver
-    self.resourceRoot = resourceRoot
+    self.executorFactory = executorFactory
     self.sessionRoot = sessionRoot
     self.profiles = profiles
-    self.runner = runner
     self.offline = offline
     self.timeoutSeconds = timeoutSeconds
   }
@@ -257,7 +251,7 @@ public struct PiIssueTriageJobExecutor: IssueTriageExecuting, Sendable {
     prepared: PreparedIssueTriageJob,
     artifactSHA256: String
   ) async throws -> PiIssueTriageOutput {
-    let executor = PiRPCWorkflowExecutor(
+    let executor = executorFactory.makeExecutor(
       preparer: PiJobWorkflowPreparer(
         context: PiJobWorkflowContext(
           artifact: prepared.artifact,
@@ -268,10 +262,7 @@ public struct PiIssueTriageJobExecutor: IssueTriageExecuting, Sendable {
           offline: offline,
           timeoutSeconds: timeoutSeconds
         )
-      ),
-      runtimeResolver: runtimeResolver,
-      resourceRoot: resourceRoot,
-      runner: runner
+      )
     )
     return try await PiIssueTriageRouter(executor: executor).run(
       PiIssueTriageInput(

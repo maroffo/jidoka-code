@@ -29,32 +29,107 @@ struct HerdrTopologyMutationLease: Equatable, Sendable {
   let token: UUID
 }
 
+enum HerdrTopologyMutationGateError: Error, Equatable, Sendable {
+  case closed
+}
+
 actor HerdrTopologyMutationGate {
   // The engine is single-instance, so a process-wide gate excludes competing coordinators.
   // The intent store remains the recovery authority across process restarts.
   static let shared = HerdrTopologyMutationGate()
 
+  private var allowed: Bool
+  private struct SerialWaiter {
+    let token: UUID
+    let continuation: CheckedContinuation<HerdrTopologyMutationLease, Error>
+  }
+
   private var active: [HerdrTopologyMutationKey: UUID] = [:]
+  private var serialWaiters: [HerdrTopologyMutationKey: [SerialWaiter]] = [:]
+  private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+
+  init(initiallyAllowed: Bool = true) {
+    allowed = initiallyAllowed
+  }
 
   func acquire(key: HerdrTopologyMutationKey) throws -> HerdrTopologyMutationLease {
+    guard allowed else { throw HerdrTopologyMutationGateError.closed }
     guard active[key] == nil else { throw HerdrTopologyError.concurrentMutation }
     let lease = HerdrTopologyMutationLease(key: key, token: UUID())
     active[key] = lease.token
     return lease
   }
 
+  func acquireSerially(
+    key: HerdrTopologyMutationKey
+  ) async throws -> HerdrTopologyMutationLease {
+    guard allowed else { throw HerdrTopologyMutationGateError.closed }
+    if active[key] == nil {
+      let lease = HerdrTopologyMutationLease(key: key, token: UUID())
+      active[key] = lease.token
+      return lease
+    }
+    let token = UUID()
+    return try await withCheckedThrowingContinuation { continuation in
+      serialWaiters[key, default: []].append(
+        SerialWaiter(token: token, continuation: continuation)
+      )
+    }
+  }
+
   func release(_ lease: HerdrTopologyMutationLease) {
     guard active[lease.key] == lease.token else { return }
+    if allowed, var waiters = serialWaiters[lease.key], !waiters.isEmpty {
+      let next = waiters.removeFirst()
+      if waiters.isEmpty {
+        serialWaiters.removeValue(forKey: lease.key)
+      } else {
+        serialWaiters[lease.key] = waiters
+      }
+      active[lease.key] = next.token
+      next.continuation.resume(
+        returning: HerdrTopologyMutationLease(key: lease.key, token: next.token)
+      )
+      return
+    }
     active.removeValue(forKey: lease.key)
+    resumeCloseWaitersIfIdle()
+  }
+
+  func close() {
+    allowed = false
+    let queued = serialWaiters.values.flatMap { $0 }
+    serialWaiters.removeAll()
+    for waiter in queued {
+      waiter.continuation.resume(throwing: HerdrTopologyMutationGateError.closed)
+    }
+  }
+
+  func waitUntilIdle() async {
+    guard !active.isEmpty else { return }
+    await withCheckedContinuation { continuation in
+      closeWaiters.append(continuation)
+    }
+  }
+
+  func closeAndWait() async {
+    close()
+    await waitUntilIdle()
+  }
+
+  func open() {
+    allowed = true
+  }
+
+  private func resumeCloseWaitersIfIdle() {
+    guard active.isEmpty else { return }
+    let waiters = closeWaiters
+    closeWaiters.removeAll()
+    for waiter in waiters { waiter.resume() }
   }
 }
 
 actor HerdrTopologyCoordinator {
-  private struct WorkspaceResolution: Sendable {
-    let workspaceID: String
-    let handshake: HerdrHandshake
-  }
-
   private let api: any HerdrTopologyAPI
   private let intents: any HerdrTopologyIntentStoring
   private let gate: HerdrTopologyMutationGate
@@ -74,9 +149,22 @@ actor HerdrTopologyCoordinator {
 
   func ensureTopology(for plan: HerdrTopologyPlan) async throws -> HerdrTopologyBinding {
     try Self.validateFilesystem(plan)
-    let lease = try await gate.acquire(key: Self.mutationKey(for: plan))
+    let lease = try await gate.acquire(key: Self.mutationKey(repositoryID: plan.repositoryID))
     do {
-      let result = try await ensureTopologyWhileHoldingLease(for: plan)
+      let initial = try await api.handshake()
+      let baselineFocus = HerdrTopologyFocus(snapshot: initial.snapshot)
+      let workspace = try await resolveWorkspace(
+        for: try Self.workspacePlan(plan),
+        jobID: plan.jobID,
+        generation: plan.generation,
+        handshake: initial,
+        baselineFocus: baselineFocus
+      )
+      let result = try await createJobTabIfAbsent(
+        for: plan,
+        workspace: workspace,
+        baselineFocus: baselineFocus
+      )
       await gate.release(lease)
       return result
     } catch {
@@ -85,34 +173,171 @@ actor HerdrTopologyCoordinator {
     }
   }
 
-  private func ensureTopologyWhileHoldingLease(
-    for plan: HerdrTopologyPlan
+  func ensureWorkspace(
+    for plan: HerdrWorkspacePlan,
+    jobID: String,
+    generation: Int
+  ) async throws -> HerdrWorkspaceBinding {
+    try Self.validateFilesystem(plan)
+    guard jobID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
+      (1...1_000_000).contains(generation)
+    else {
+      throw HerdrTopologyError.invalidPlan
+    }
+    let lease = try await gate.acquire(key: Self.mutationKey(repositoryID: plan.repositoryID))
+    do {
+      let initial = try await api.handshake()
+      let result = try await resolveWorkspace(
+        for: plan,
+        jobID: jobID,
+        generation: generation,
+        handshake: initial,
+        baselineFocus: HerdrTopologyFocus(snapshot: initial.snapshot)
+      )
+      await gate.release(lease)
+      return result
+    } catch {
+      await gate.release(lease)
+      throw error
+    }
+  }
+
+  func ensureJobTab(
+    for plan: HerdrTopologyPlan,
+    workspace priorWorkspace: HerdrWorkspaceBinding
   ) async throws -> HerdrTopologyBinding {
-    let initial = try await api.handshake()
-    let baselineFocus = HerdrTopologyFocus(snapshot: initial.snapshot)
-    let workspace = try await resolveWorkspace(
-      for: plan,
-      handshake: initial,
-      baselineFocus: baselineFocus
+    try Self.validateFilesystem(plan)
+    guard priorWorkspace.workspaceID == plan.boundWorkspaceID else {
+      throw HerdrTopologyError.workspaceIdentityMismatch
+    }
+    let lease = try await gate.acquire(key: Self.mutationKey(repositoryID: plan.repositoryID))
+    do {
+      let current = try await compatibleHandshake(after: priorWorkspace.handshake)
+      let baselineFocus = HerdrTopologyFocus(snapshot: current.snapshot)
+      guard
+        current.snapshot.workspaces.contains(where: {
+          $0.workspaceID == priorWorkspace.workspaceID
+            && Self.matchesRepository(
+              workspace: $0,
+              snapshot: current.snapshot,
+              repositoryRoot: plan.repositoryRoot
+            )
+        })
+      else {
+        throw HerdrTopologyError.workspaceIdentityMismatch
+      }
+      let result = try await createJobTabIfAbsent(
+        for: plan,
+        workspace: HerdrWorkspaceBinding(
+          workspaceID: priorWorkspace.workspaceID,
+          handshake: current
+        ),
+        baselineFocus: baselineFocus
+      )
+      await gate.release(lease)
+      return result
+    } catch {
+      await gate.release(lease)
+      throw error
+    }
+  }
+
+  func recoverJobTab(
+    for plan: HerdrTopologyPlan,
+    workspace: HerdrWorkspaceBinding
+  ) async throws -> HerdrTopologyBinding {
+    try Self.validateFilesystem(plan)
+    guard workspace.workspaceID == plan.boundWorkspaceID else {
+      throw HerdrTopologyError.bindingLost
+    }
+    let expectedRoot = Self.layout(for: plan.launches)
+    let parameters = HerdrLayoutApplyParameters(
+      workspaceID: workspace.workspaceID,
+      tabLabel: plan.tabLabel,
+      focus: false,
+      root: expectedRoot
     )
     guard
-      !workspace.handshake.snapshot.tabs.contains(where: {
-        $0.workspaceID == workspace.workspaceID && $0.label == plan.tabLabel
+      let stored = try await intents.storedIntent(
+        kind: .applyLayout,
+        repositoryID: plan.repositoryID,
+        jobID: plan.jobID,
+        generation: plan.generation,
+        payloadSHA256: try Self.digest(parameters),
+        socketIdentity: HerdrSocketIdentityRecord(workspace.handshake.socketIdentity)
+      )
+    else {
+      throw HerdrTopologyError.bindingLost
+    }
+    let layout: HerdrLayoutDescription
+    let attribution: HerdrTopologyMutationAttribution
+    switch stored.state {
+    case .attributed:
+      guard let storedAttribution = stored.attribution,
+        storedAttribution.workspaceID == workspace.workspaceID,
+        let tabID = storedAttribution.tabID
+      else {
+        throw HerdrTopologyError.mutationUnknown
+      }
+      layout = try await api.exportLayout(
+        tabID: tabID,
+        attestedBy: workspace.handshake
+      )
+      attribution = storedAttribution
+    case .sendStarted:
+      var candidates: [HerdrLayoutDescription] = []
+      for tab in workspace.handshake.snapshot.tabs {
+        guard
+          let candidate = try? await api.exportLayout(
+            tabID: tab.tabID,
+            attestedBy: workspace.handshake
+          ),
+          Self.matchesRecovered(actual: candidate.root, expected: expectedRoot)
+        else { continue }
+        candidates.append(candidate)
+      }
+      guard candidates.count == 1, let candidate = candidates.first else {
+        throw HerdrTopologyError.mutationUnknown
+      }
+      layout = candidate
+      attribution = HerdrTopologyMutationAttribution(
+        workspaceID: workspace.workspaceID,
+        tabID: candidate.tabID,
+        paneIDs: try Self.paneIDs(from: candidate.root)
+      )
+      try await intents.attribute(stored.receipt, as: attribution)
+    case .prepared:
+      throw HerdrTopologyError.bindingLost
+    case .unknown:
+      throw HerdrTopologyError.mutationUnknown
+    }
+    guard Self.matchesRecovered(actual: layout.root, expected: expectedRoot),
+      attribution.tabID == layout.tabID,
+      attribution.paneIDs == (try Self.paneIDs(from: layout.root)),
+      workspace.handshake.snapshot.tabs.contains(where: {
+        $0.tabID == layout.tabID && $0.workspaceID == layout.workspaceID
       })
     else {
-      throw HerdrTopologyError.tabAlreadyExists
+      throw HerdrTopologyError.mutationUnknown
     }
-    return try await createJobTab(
-      for: plan,
-      workspace: workspace,
-      baselineFocus: baselineFocus
+    return try Self.binding(
+      plan: plan,
+      workspaceID: layout.workspaceID,
+      layout: layout,
+      snapshot: workspace.handshake.snapshot
     )
   }
 
   nonisolated static func mutationKey(
     for plan: HerdrTopologyPlan
   ) -> HerdrTopologyMutationKey {
-    HerdrTopologyMutationKey(repositoryID: plan.repositoryID)
+    mutationKey(repositoryID: plan.repositoryID)
+  }
+
+  nonisolated static func mutationKey(
+    repositoryID: String
+  ) -> HerdrTopologyMutationKey {
+    HerdrTopologyMutationKey(repositoryID: repositoryID)
   }
 
   func reconcile(
@@ -149,10 +374,12 @@ actor HerdrTopologyCoordinator {
   }
 
   private func resolveWorkspace(
-    for plan: HerdrTopologyPlan,
+    for plan: HerdrWorkspacePlan,
+    jobID: String,
+    generation: Int,
     handshake: HerdrHandshake,
     baselineFocus: HerdrTopologyFocus
-  ) async throws -> WorkspaceResolution {
+  ) async throws -> HerdrWorkspaceBinding {
     if let boundWorkspaceID = plan.boundWorkspaceID {
       guard
         let workspace = handshake.snapshot.workspaces.first(where: {
@@ -166,7 +393,7 @@ actor HerdrTopologyCoordinator {
       else {
         throw HerdrTopologyError.workspaceIdentityMismatch
       }
-      return WorkspaceResolution(workspaceID: workspace.workspaceID, handshake: handshake)
+      return HerdrWorkspaceBinding(workspaceID: workspace.workspaceID, handshake: handshake)
     }
 
     let candidates = handshake.snapshot.workspaces.filter {
@@ -178,49 +405,99 @@ actor HerdrTopologyCoordinator {
         )
     }
     if candidates.count == 1, let workspace = candidates.first {
-      return WorkspaceResolution(workspaceID: workspace.workspaceID, handshake: handshake)
+      let parameters = HerdrWorkspaceCreateParameters(
+        label: plan.workspaceLabel,
+        cwd: plan.repositoryRoot.path,
+        env: [:],
+        focus: false
+      )
+      if let stored = try await intents.storedIntent(
+        kind: .createWorkspace,
+        repositoryID: plan.repositoryID,
+        jobID: jobID,
+        generation: generation,
+        payloadSHA256: try Self.digest(parameters),
+        socketIdentity: HerdrSocketIdentityRecord(handshake.socketIdentity)
+      ) {
+        let attribution = HerdrTopologyMutationAttribution(
+          workspaceID: workspace.workspaceID,
+          tabID: nil,
+          paneIDs: []
+        )
+        switch stored.state {
+        case .sendStarted:
+          try await intents.attribute(stored.receipt, as: attribution)
+        case .attributed:
+          guard stored.attribution?.workspaceID == workspace.workspaceID else {
+            throw HerdrTopologyError.mutationUnknown
+          }
+        case .prepared, .unknown:
+          throw HerdrTopologyError.mutationUnknown
+        }
+      }
+      return HerdrWorkspaceBinding(workspaceID: workspace.workspaceID, handshake: handshake)
     }
     guard candidates.isEmpty else { throw HerdrTopologyError.ambiguousWorkspace }
     return try await createWorkspace(
       for: plan,
+      jobID: jobID,
+      generation: generation,
       handshake: handshake,
       baselineFocus: baselineFocus
     )
   }
 
   private func createWorkspace(
-    for plan: HerdrTopologyPlan,
+    for plan: HerdrWorkspacePlan,
+    jobID: String,
+    generation: Int,
     handshake: HerdrHandshake,
     baselineFocus: HerdrTopologyFocus
-  ) async throws -> WorkspaceResolution {
+  ) async throws -> HerdrWorkspaceBinding {
     let parameters = HerdrWorkspaceCreateParameters(
       label: plan.workspaceLabel,
       cwd: plan.repositoryRoot.path,
       env: [:],
       focus: false
     )
-    let receipt = try await prepareIntent(
+    let stored = try await prepareIntent(
       kind: .createWorkspace,
       plan: plan,
+      jobID: jobID,
+      generation: generation,
       payload: parameters,
       handshake: handshake
     )
+    let receipt = stored.receipt
     let previousIDs = Set(handshake.snapshot.workspaces.map(\.workspaceID))
-    try await intents.markSendStarted(receipt)
+    let maySend: Bool
+    switch stored.state {
+    case .prepared:
+      try await intents.markSendStarted(receipt)
+      maySend = true
+    case .sendStarted:
+      maySend = false
+    case .attributed, .unknown:
+      throw HerdrTopologyError.mutationUnknown
+    }
 
     let directResult: HerdrWorkspaceCreatedResult?
-    do {
-      let result = try await api.createWorkspace(parameters, attestedBy: handshake)
-      guard result.workspace.label == plan.workspaceLabel,
-        result.tab.workspaceID == result.workspace.workspaceID,
-        result.rootPane.workspaceID == result.workspace.workspaceID,
-        result.rootPane.tabID == result.tab.tabID,
-        result.rootPane.cwd == plan.repositoryRoot.path
-      else {
-        throw HerdrTopologyError.invalidResponse
+    if maySend {
+      do {
+        let result = try await api.createWorkspace(parameters, attestedBy: handshake)
+        guard result.workspace.label == plan.workspaceLabel,
+          result.tab.workspaceID == result.workspace.workspaceID,
+          result.rootPane.workspaceID == result.workspace.workspaceID,
+          result.rootPane.tabID == result.tab.tabID,
+          result.rootPane.cwd == plan.repositoryRoot.path
+        else {
+          throw HerdrTopologyError.invalidResponse
+        }
+        directResult = result
+      } catch {
+        directResult = nil
       }
-      directResult = result
-    } catch {
+    } else {
       directResult = nil
     }
 
@@ -246,7 +523,7 @@ actor HerdrTopologyCoordinator {
       else {
         throw HerdrTopologyError.focusChanged
       }
-      return WorkspaceResolution(workspaceID: result.workspace.workspaceID, handshake: post)
+      return HerdrWorkspaceBinding(workspaceID: result.workspace.workspaceID, handshake: post)
     }
 
     if let recovered = try? await recoverWorkspace(
@@ -270,11 +547,11 @@ actor HerdrTopologyCoordinator {
   }
 
   private func recoverWorkspace(
-    for plan: HerdrTopologyPlan,
+    for plan: HerdrWorkspacePlan,
     previousIDs: Set<String>,
     handshake: HerdrHandshake,
     baselineFocus: HerdrTopologyFocus
-  ) async throws -> WorkspaceResolution {
+  ) async throws -> HerdrWorkspaceBinding {
     let post = try await compatibleHandshake(after: handshake)
     guard HerdrTopologyFocus(snapshot: post.snapshot) == baselineFocus else {
       throw HerdrTopologyError.focusChanged
@@ -291,12 +568,81 @@ actor HerdrTopologyCoordinator {
     guard candidates.count == 1, let workspace = candidates.first else {
       throw HerdrTopologyError.mutationUnknown
     }
-    return WorkspaceResolution(workspaceID: workspace.workspaceID, handshake: post)
+    return HerdrWorkspaceBinding(workspaceID: workspace.workspaceID, handshake: post)
+  }
+
+  private func createJobTabIfAbsent(
+    for plan: HerdrTopologyPlan,
+    workspace: HerdrWorkspaceBinding,
+    baselineFocus: HerdrTopologyFocus
+  ) async throws -> HerdrTopologyBinding {
+    let candidates = workspace.handshake.snapshot.tabs.filter {
+      $0.workspaceID == workspace.workspaceID && $0.label == plan.tabLabel
+    }
+    guard candidates.count <= 1 else { throw HerdrTopologyError.tabAlreadyExists }
+    guard let tab = candidates.first else {
+      return try await createJobTab(
+        for: plan,
+        workspace: workspace,
+        baselineFocus: baselineFocus
+      )
+    }
+    let expectedRoot = Self.layout(for: plan.launches)
+    let parameters = HerdrLayoutApplyParameters(
+      workspaceID: workspace.workspaceID,
+      tabLabel: plan.tabLabel,
+      focus: false,
+      root: expectedRoot
+    )
+    let payloadSHA256 = try Self.digest(parameters)
+    guard
+      let stored = try await intents.storedIntent(
+        kind: .applyLayout,
+        repositoryID: plan.repositoryID,
+        jobID: plan.jobID,
+        generation: plan.generation,
+        payloadSHA256: payloadSHA256,
+        socketIdentity: HerdrSocketIdentityRecord(workspace.handshake.socketIdentity)
+      )
+    else {
+      throw HerdrTopologyError.tabAlreadyExists
+    }
+    let layout = try await api.exportLayout(
+      tabID: tab.tabID,
+      attestedBy: workspace.handshake
+    )
+    guard layout.workspaceID == workspace.workspaceID,
+      Self.matches(actual: layout.root, expected: expectedRoot),
+      HerdrTopologyFocus(snapshot: workspace.handshake.snapshot) == baselineFocus
+    else {
+      throw HerdrTopologyError.mutationUnknown
+    }
+    let attribution = HerdrTopologyMutationAttribution(
+      workspaceID: workspace.workspaceID,
+      tabID: tab.tabID,
+      paneIDs: try Self.paneIDs(from: layout.root)
+    )
+    switch stored.state {
+    case .sendStarted:
+      try await intents.attribute(stored.receipt, as: attribution)
+    case .attributed:
+      guard stored.attribution == attribution else {
+        throw HerdrTopologyError.mutationUnknown
+      }
+    case .prepared, .unknown:
+      throw HerdrTopologyError.mutationUnknown
+    }
+    return try Self.binding(
+      plan: plan,
+      workspaceID: workspace.workspaceID,
+      layout: layout,
+      snapshot: workspace.handshake.snapshot
+    )
   }
 
   private func createJobTab(
     for plan: HerdrTopologyPlan,
-    workspace: WorkspaceResolution,
+    workspace: HerdrWorkspaceBinding,
     baselineFocus: HerdrTopologyFocus
   ) async throws -> HerdrTopologyBinding {
     let expectedRoot = Self.layout(for: plan.launches)
@@ -306,25 +652,39 @@ actor HerdrTopologyCoordinator {
       focus: false,
       root: expectedRoot
     )
-    let receipt = try await prepareIntent(
+    let stored = try await prepareIntent(
       kind: .applyLayout,
       plan: plan,
       payload: parameters,
       handshake: workspace.handshake
     )
+    let receipt = stored.receipt
     let previousTabIDs = Set(workspace.handshake.snapshot.tabs.map(\.tabID))
-    try await intents.markSendStarted(receipt)
+    let maySend: Bool
+    switch stored.state {
+    case .prepared:
+      try await intents.markSendStarted(receipt)
+      maySend = true
+    case .sendStarted:
+      maySend = false
+    case .attributed, .unknown:
+      throw HerdrTopologyError.mutationUnknown
+    }
 
     let directLayout: HerdrLayoutDescription?
-    do {
-      let result = try await api.applyLayout(parameters, attestedBy: workspace.handshake)
-      guard result.layout.workspaceID == workspace.workspaceID,
-        Self.matches(actual: result.layout.root, expected: expectedRoot)
-      else {
-        throw HerdrTopologyError.invalidResponse
+    if maySend {
+      do {
+        let result = try await api.applyLayout(parameters, attestedBy: workspace.handshake)
+        guard result.layout.workspaceID == workspace.workspaceID,
+          Self.matches(actual: result.layout.root, expected: expectedRoot)
+        else {
+          throw HerdrTopologyError.invalidResponse
+        }
+        directLayout = result.layout
+      } catch {
+        directLayout = nil
       }
-      directLayout = result.layout
-    } catch {
+    } else {
       directLayout = nil
     }
 
@@ -429,7 +789,54 @@ actor HerdrTopologyCoordinator {
     plan: HerdrTopologyPlan,
     payload: Payload,
     handshake: HerdrHandshake
-  ) async throws -> HerdrTopologyMutationReceipt {
+  ) async throws -> HerdrTopologyStoredIntent {
+    try await prepareIntent(
+      kind: kind,
+      repositoryID: plan.repositoryID,
+      jobID: plan.jobID,
+      generation: plan.generation,
+      payload: payload,
+      handshake: handshake
+    )
+  }
+
+  private func prepareIntent<Payload: Encodable & Sendable>(
+    kind: HerdrTopologyMutationIntent.Kind,
+    plan: HerdrWorkspacePlan,
+    jobID: String,
+    generation: Int,
+    payload: Payload,
+    handshake: HerdrHandshake
+  ) async throws -> HerdrTopologyStoredIntent {
+    try await prepareIntent(
+      kind: kind,
+      repositoryID: plan.repositoryID,
+      jobID: jobID,
+      generation: generation,
+      payload: payload,
+      handshake: handshake
+    )
+  }
+
+  private func prepareIntent<Payload: Encodable & Sendable>(
+    kind: HerdrTopologyMutationIntent.Kind,
+    repositoryID: String,
+    jobID: String,
+    generation: Int,
+    payload: Payload,
+    handshake: HerdrHandshake
+  ) async throws -> HerdrTopologyStoredIntent {
+    let payloadSHA256 = try Self.digest(payload)
+    if let existing = try await intents.storedIntent(
+      kind: kind,
+      repositoryID: repositoryID,
+      jobID: jobID,
+      generation: generation,
+      payloadSHA256: payloadSHA256,
+      socketIdentity: HerdrSocketIdentityRecord(handshake.socketIdentity)
+    ) {
+      return existing
+    }
     let id = mutationID()
     guard id.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil else {
       throw HerdrTopologyError.invalidPlan
@@ -437,13 +844,17 @@ actor HerdrTopologyCoordinator {
     let intent = HerdrTopologyMutationIntent(
       mutationID: id,
       kind: kind,
-      repositoryID: plan.repositoryID,
-      jobID: plan.jobID,
-      generation: plan.generation,
-      payloadSHA256: try Self.digest(payload),
+      repositoryID: repositoryID,
+      jobID: jobID,
+      generation: generation,
+      payloadSHA256: payloadSHA256,
       socketIdentity: HerdrSocketIdentityRecord(handshake.socketIdentity)
     )
-    return try await intents.prepare(intent)
+    return HerdrTopologyStoredIntent(
+      receipt: try await intents.prepare(intent),
+      state: .prepared,
+      attribution: nil
+    )
   }
 
   private static func digest<Value: Encodable>(_ value: Value) throws -> String {
@@ -514,6 +925,26 @@ actor HerdrTopologyCoordinator {
     }
   }
 
+  private static func matchesRecovered(
+    actual: HerdrLayoutNode,
+    expected: HerdrLayoutNode
+  ) -> Bool {
+    switch (actual, expected) {
+    case (.pane(let actualPane), .pane(let expectedPane)):
+      return actualPane.paneID != nil
+        && actualPane.workingDirectory == expectedPane.workingDirectory
+        && actualPane.command == expectedPane.command
+        && actualPane.environment == expectedPane.environment
+    case (.split(let actualSplit), .split(let expectedSplit)):
+      return actualSplit.direction == expectedSplit.direction
+        && abs(actualSplit.ratio - expectedSplit.ratio) < 0.000_001
+        && matchesRecovered(actual: actualSplit.first, expected: expectedSplit.first)
+        && matchesRecovered(actual: actualSplit.second, expected: expectedSplit.second)
+    default:
+      return false
+    }
+  }
+
   private static func paneIDs(from root: HerdrLayoutNode) throws -> [String] {
     switch root {
     case .pane(let pane):
@@ -566,23 +997,42 @@ actor HerdrTopologyCoordinator {
     )
   }
 
-  private static func validateFilesystem(_ plan: HerdrTopologyPlan) throws {
+  private static func workspacePlan(
+    _ plan: HerdrTopologyPlan
+  ) throws -> HerdrWorkspacePlan {
+    try HerdrWorkspacePlan(
+      repositoryID: plan.repositoryID,
+      repositoryRoot: plan.repositoryRoot,
+      workspaceLabel: plan.workspaceLabel,
+      boundWorkspaceID: plan.boundWorkspaceID
+    )
+  }
+
+  private static func validateFilesystem(_ plan: HerdrWorkspacePlan) throws {
     var repository = stat()
     guard lstat(plan.repositoryRoot.path, &repository) == 0,
       repository.st_mode & S_IFMT == S_IFDIR
     else {
       throw HerdrTopologyError.invalidPlan
     }
+  }
+
+  private static func validateFilesystem(_ plan: HerdrTopologyPlan) throws {
+    try validateFilesystem(workspacePlan(plan))
     for launch in plan.launches {
       var executable = stat()
       var descriptorRoot = stat()
+      var workingDirectory = stat()
       guard lstat(launch.hostExecutable.path, &executable) == 0,
         executable.st_mode & S_IFMT == S_IFREG,
         executable.st_mode & 0o111 != 0,
         lstat(launch.descriptorRoot.path, &descriptorRoot) == 0,
         descriptorRoot.st_mode & S_IFMT == S_IFDIR,
         descriptorRoot.st_uid == geteuid(),
-        descriptorRoot.st_mode & 0o077 == 0
+        descriptorRoot.st_mode & 0o077 == 0,
+        lstat(launch.workingDirectory.path, &workingDirectory) == 0,
+        workingDirectory.st_mode & S_IFMT == S_IFDIR,
+        workingDirectory.st_uid == geteuid()
       else {
         throw HerdrTopologyError.invalidPlan
       }

@@ -156,6 +156,38 @@ struct IssueImplementationJobWorkflowTests {
     await reopened.database.close()
   }
 
+  @Test("startup recovery imports durable orchestration evidence before workspace drift blocks")
+  func orchestrationEvidenceCrashBoundary() async throws {
+    let fixture = try await IssueImplementationJobFixture(crashAfterOrchestrationEvidence: true)
+    defer { fixture.remove() }
+    await #expect(throws: URLError.self) {
+      try await fixture.workflow.run(jobID: fixture.job.id)
+    }
+    #expect(
+      try await fixture.jobs.steps(jobID: fixture.job.id).allSatisfy { $0.kind != .orchestrate }
+    )
+
+    let reopened = try await fixture.reopenSimple()
+    _ = try await reopened.jobs.recoverAtStartup(now: fixture.now)
+    let queued = try #require(try await reopened.jobs.job(id: fixture.job.id))
+    #expect(queued.state == .reconciliationQueued)
+    _ = try await reopened.jobs.transition(
+      jobID: queued.id,
+      eventKey: "fixture:orchestration-evidence-recovery",
+      event: .acquireRecoveryLease,
+      context: JobTransitionContext(now: fixture.now, reason: "orchestration evidence recovery")
+    )
+
+    try await reopened.workflow.run(jobID: queued.id)
+
+    #expect(try await reopened.jobs.job(id: queued.id)?.state == .succeeded)
+    #expect(
+      try await reopened.jobs.steps(jobID: queued.id).map(\.kind).filter { $0 == .orchestrate }
+        == [.orchestrate]
+    )
+    await reopened.database.close()
+  }
+
   @Test(
     "startup recovery advances each durably completed implementation step exactly once",
     arguments: [
@@ -480,7 +512,8 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
     orchestrationBlocked: Bool = false,
     dropCommentCreateAttempt: Int? = nil,
     crashAfterStep: JobStepKind? = nil,
-    interruptPlanningAfterWrite: Bool = false
+    interruptPlanningAfterWrite: Bool = false,
+    crashAfterOrchestrationEvidence: Bool = false
   ) async throws {
     gitFixture = try GitTestRoot(prefix: "jidoka-implementation-job")
     sourceRepository = try await gitFixture.initializeRepository()
@@ -579,6 +612,9 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
     let sleeper = IssueImplementationImmediateSleeper()
     branchTransport = IssueImplementationBranchTransport()
     let crashGate = ImplementationStepCrashGate(kind: crashAfterStep)
+    let evidenceCrashGate = ImplementationEvidenceCrashGate(
+      enabled: crashAfterOrchestrationEvidence
+    )
     workflow = IssueImplementationJobWorkflow(
       jobs: jobs,
       configuration: configuration,
@@ -628,7 +664,10 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
       authorID: 7,
       contractVersion: "w6-test",
       now: { Date(timeIntervalSince1970: 120_001) },
-      afterStepPersisted: { kind in try await crashGate.afterPersisting(kind) }
+      afterStepPersisted: { kind in try await crashGate.afterPersisting(kind) },
+      afterOrchestrationEvidencePersisted: {
+        try await evidenceCrashGate.afterPersisting()
+      }
     )
     await api.setBranchTransport(branchTransport)
   }
@@ -759,6 +798,21 @@ private actor ImplementationStepCrashGate {
 
   func afterPersisting(_ persisted: JobStepKind) throws {
     guard !fired, persisted == kind else { return }
+    fired = true
+    throw URLError(.networkConnectionLost)
+  }
+}
+
+private actor ImplementationEvidenceCrashGate {
+  private let enabled: Bool
+  private var fired = false
+
+  init(enabled: Bool) {
+    self.enabled = enabled
+  }
+
+  func afterPersisting() throws {
+    guard enabled, !fired else { return }
     fired = true
     throw URLError(.networkConnectionLost)
   }

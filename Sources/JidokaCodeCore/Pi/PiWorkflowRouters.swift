@@ -4,6 +4,7 @@ import Foundation
 public enum PiWorkflowSessionDirective: Equatable, Sendable {
   case fresh
   case resume(String)
+  case resumeBounded(sessionID: String, boundarySHA256: String)
 }
 
 public struct PiNormalizedRoleResult: Equatable, Sendable {
@@ -142,17 +143,20 @@ public struct PiWorkflowExecutionRequest: Equatable, Sendable {
 
 public struct PiWorkflowExecution: Equatable, Sendable {
   public let sessionID: String
+  public let sessionBoundarySHA256: String?
   public let result: PiWorkflowRoleResult
   public let agentSettledCount: Int
   public let extensionErrorCount: Int
 
   public init(
     sessionID: String,
+    sessionBoundarySHA256: String? = nil,
     result: PiWorkflowRoleResult,
     agentSettledCount: Int = 1,
     extensionErrorCount: Int = 0
   ) {
     self.sessionID = sessionID
+    self.sessionBoundarySHA256 = sessionBoundarySHA256
     self.result = result
     self.agentSettledCount = agentSettledCount
     self.extensionErrorCount = extensionErrorCount
@@ -167,7 +171,8 @@ public protocol PiApprovedCommandExecuting: Sendable {
   func execute(
     commandID: String,
     expectedPlanDigest: String,
-    plan: FrozenCommandPlan
+    plan: FrozenCommandPlan,
+    round: Int
   ) async throws -> VerificationCommandEvidence
 }
 
@@ -583,6 +588,7 @@ public struct PiPlanningRouter: Sendable {
     try validateCommon(jobID: jobID, artifactSHA256: artifactSHA256)
     var sessions: Set<String> = []
     var writerSession: String?
+    var writerBoundarySHA256: String?
     var priorInputs: [PiNormalizedRoleResult] = []
     var engineFailures: [String] = []
     var lastResults: [PiWorkflowRoleResult] = []
@@ -591,9 +597,16 @@ public struct PiPlanningRouter: Sendable {
 
     for round in 1...Self.maximumRounds {
       let directive: PiWorkflowSessionDirective =
-        writerSession.map {
-          .resume($0)
-        } ?? .fresh
+        if let writerSession, let writerBoundarySHA256 {
+          .resumeBounded(
+            sessionID: writerSession,
+            boundarySHA256: writerBoundarySHA256
+          )
+        } else if let writerSession {
+          .resume(writerSession)
+        } else {
+          .fresh
+        }
       let writerExecution = try await executor.execute(
         PiWorkflowExecutionRequest(
           jobID: jobID,
@@ -615,6 +628,7 @@ public struct PiPlanningRouter: Sendable {
         sessions: &sessions
       )
       writerSession = writerExecution.sessionID
+      writerBoundarySHA256 = writerExecution.sessionBoundarySHA256
       guard case .planning(let writerPayload) = writer.payload,
         writerPayload.approvedPlanDigest == nil,
         writerPayload.approvedCommandDigests.isEmpty
@@ -910,6 +924,7 @@ public struct PiOrchestrationRouter: Sendable {
     }
     var sessions: Set<String> = []
     var writerSession: String?
+    var writerBoundarySHA256: String?
     var priorInputs: [PiNormalizedRoleResult] = []
     var engineFailures: [String] = []
     var lastResults: [PiWorkflowRoleResult] = []
@@ -917,9 +932,16 @@ public struct PiOrchestrationRouter: Sendable {
 
     for round in 1...Self.maximumRounds {
       let directive: PiWorkflowSessionDirective =
-        writerSession.map {
-          .resume($0)
-        } ?? .fresh
+        if let writerSession, let writerBoundarySHA256 {
+          .resumeBounded(
+            sessionID: writerSession,
+            boundarySHA256: writerBoundarySHA256
+          )
+        } else if let writerSession {
+          .resume(writerSession)
+        } else {
+          .fresh
+        }
       let writerExecution = try await executor.execute(
         PiWorkflowExecutionRequest(
           jobID: jobID,
@@ -944,6 +966,7 @@ public struct PiOrchestrationRouter: Sendable {
         sessions: &sessions
       )
       writerSession = writerExecution.sessionID
+      writerBoundarySHA256 = writerExecution.sessionBoundarySHA256
       guard case .orchestration(let writerPayload) = writer.payload,
         writerPayload.requestedCommandIDs == plan.commandOrder,
         writer.approvedCommandIDs == plan.commandOrder
@@ -962,25 +985,20 @@ public struct PiOrchestrationRouter: Sendable {
       engineFailures = writerBlocked ? ["writer-veto"] : []
       if !writerBlocked {
         for commandID in plan.commandOrder {
-          do {
-            let item = try await commandExecutor.execute(
-              commandID: commandID,
-              expectedPlanDigest: plan.digest,
-              plan: plan
-            )
-            guard item.commandID == commandID,
-              item.definitionDigest == plan.commands[commandID]?.definitionDigest
-            else {
-              throw PiWorkflowRouterError.commandEvidenceMismatch
-            }
-            evidence.append(item)
-            if !item.succeeded {
-              commandFailure = true
-              break
-            }
-          } catch {
+          let item = try await commandExecutor.execute(
+            commandID: commandID,
+            expectedPlanDigest: plan.digest,
+            plan: plan,
+            round: round
+          )
+          guard item.commandID == commandID,
+            item.definitionDigest == plan.commands[commandID]?.definitionDigest
+          else {
+            throw PiWorkflowRouterError.commandEvidenceMismatch
+          }
+          evidence.append(item)
+          if !item.succeeded {
             commandFailure = true
-            engineFailures = ["approved-command-execution-failed"]
             break
           }
         }
@@ -1127,6 +1145,13 @@ private func validateExecution(
     }
   case .resume(let expected):
     guard execution.sessionID == expected, sessions.contains(expected) else {
+      throw PiWorkflowRouterError.wrongWriterSession
+    }
+  case .resumeBounded(let expected, let priorBoundary):
+    guard execution.sessionID == expected, sessions.contains(expected),
+      GitHubInputValidation.validSHA256(priorBoundary),
+      execution.sessionBoundarySHA256.map(GitHubInputValidation.validSHA256) == true
+    else {
       throw PiWorkflowRouterError.wrongWriterSession
     }
   }

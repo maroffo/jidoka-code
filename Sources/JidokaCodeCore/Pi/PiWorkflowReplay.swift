@@ -18,6 +18,7 @@ public struct PiWorkflowReplayFixture: Sendable {
   public let transcript: Data
   public let terminalIdentity: PiRPCTerminalResultIdentity
   public let sessionDirective: PiWorkflowSessionDirective
+  public let sessionBoundarySHA256: String?
   public let promptRequestID: String
 
   public init(
@@ -26,6 +27,7 @@ public struct PiWorkflowReplayFixture: Sendable {
     transcript: Data,
     terminalIdentity: PiRPCTerminalResultIdentity,
     sessionDirective: PiWorkflowSessionDirective = .fresh,
+    sessionBoundarySHA256: String? = nil,
     promptRequestID: String = "prompt-1"
   ) {
     self.key = key
@@ -33,6 +35,7 @@ public struct PiWorkflowReplayFixture: Sendable {
     self.transcript = transcript
     self.terminalIdentity = terminalIdentity
     self.sessionDirective = sessionDirective
+    self.sessionBoundarySHA256 = sessionBoundarySHA256
     self.promptRequestID = promptRequestID
   }
 }
@@ -70,14 +73,24 @@ public actor PiWorkflowReplayExecutor: PiWorkflowExecuting {
     guard request.sessionDirective == fixture.sessionDirective else {
       throw PiWorkflowReplayError.sessionMismatch
     }
-    if case .resume(let expectedSessionID) = fixture.sessionDirective,
-      expectedSessionID != fixture.sessionID
-    {
-      throw PiWorkflowReplayError.sessionMismatch
+    switch fixture.sessionDirective {
+    case .fresh:
+      break
+    case .resume(let expectedSessionID):
+      guard expectedSessionID == fixture.sessionID else {
+        throw PiWorkflowReplayError.sessionMismatch
+      }
+    case .resumeBounded(let expectedSessionID, _):
+      guard expectedSessionID == fixture.sessionID,
+        fixture.sessionBoundarySHA256.map(GitHubInputValidation.validSHA256) == true
+      else {
+        throw PiWorkflowReplayError.sessionMismatch
+      }
     }
     let result = try Self.replay(fixture)
     return PiWorkflowExecution(
       sessionID: fixture.sessionID,
+      sessionBoundarySHA256: fixture.sessionBoundarySHA256,
       result: result,
       agentSettledCount: 1,
       extensionErrorCount: 0

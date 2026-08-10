@@ -222,6 +222,66 @@ struct HerdrPaneReportMetadataParameters: Codable, Equatable, Sendable {
   }
 }
 
+struct HerdrPaneProcessInfoParameters: Codable, Equatable, Sendable {
+  let paneID: String
+
+  private enum CodingKeys: String, CodingKey {
+    case paneID = "pane_id"
+  }
+}
+
+struct HerdrPaneProcessSnapshot: Codable, Equatable, Sendable {
+  let processID: UInt32
+  let name: String
+  let arguments: [String]?
+  let argumentZero: String?
+  let commandLine: String?
+  let workingDirectory: String?
+
+  private enum CodingKeys: String, CodingKey {
+    case processID = "pid"
+    case name
+    case arguments = "argv"
+    case argumentZero = "argv0"
+    case commandLine = "cmdline"
+    case workingDirectory = "cwd"
+  }
+}
+
+struct HerdrPaneProcessInfo: Codable, Equatable, Sendable {
+  let paneID: String
+  let shellProcessID: UInt32?
+  let foregroundProcessGroupID: UInt32?
+  let foregroundProcesses: [HerdrPaneProcessSnapshot]
+  let tty: String?
+
+  private enum CodingKeys: String, CodingKey {
+    case paneID = "pane_id"
+    case shellProcessID = "shell_pid"
+    case foregroundProcessGroupID = "foreground_process_group_id"
+    case foregroundProcesses = "foreground_processes"
+    case tty
+  }
+}
+
+struct HerdrPaneProcessInfoResult: Codable, Equatable, Sendable {
+  let type: String
+  let processInfo: HerdrPaneProcessInfo
+
+  private enum CodingKeys: String, CodingKey {
+    case type
+    case processInfo = "process_info"
+  }
+}
+
+struct HerdrPaneTargetParameters: Codable, Equatable, Sendable {
+  let paneID: String
+
+  private enum CodingKeys: String, CodingKey {
+    case paneID = "pane_id"
+  }
+}
+
 struct HerdrAgentRenameParameters: Codable, Equatable, Sendable {
   let target: String
   let name: String
@@ -248,7 +308,13 @@ struct HerdrTopologyFocus: Equatable, Sendable {
   }
 }
 
+enum HerdrHostLaunchKind: Equatable, Sendable {
+  case oneShot
+  case roleHost
+}
+
 struct HerdrHostLaunchPlan: Equatable, Sendable {
+  private(set) var kind: HerdrHostLaunchKind
   let role: String
   let paneLabel: String
   let runID: String
@@ -288,6 +354,7 @@ struct HerdrHostLaunchPlan: Equatable, Sendable {
     else {
       throw HerdrTopologyError.invalidPlan
     }
+    self.kind = .oneShot
     self.role = role
     self.paneLabel = paneLabel
     self.runID = runID
@@ -298,13 +365,80 @@ struct HerdrHostLaunchPlan: Equatable, Sendable {
     self.workingDirectory = workingDirectory
   }
 
+  init(
+    roleHostID: String,
+    role: PiWorkflowRole,
+    paneLabel: String,
+    agentAlias: String,
+    hostExecutable: URL,
+    descriptorRoot: URL,
+    workingDirectory: URL
+  ) throws {
+    try self.init(
+      role: role.rawValue,
+      paneLabel: paneLabel,
+      runID: roleHostID,
+      launchAttemptID: roleHostID,
+      agentAlias: agentAlias,
+      hostExecutable: hostExecutable,
+      descriptorRoot: descriptorRoot,
+      workingDirectory: workingDirectory
+    )
+    self.kind = .roleHost
+  }
+
   var command: [String] {
-    [hostExecutable.path, "--launch-attempt-id", launchAttemptID]
+    switch kind {
+    case .oneShot:
+      [hostExecutable.path, "--launch-attempt-id", launchAttemptID]
+    case .roleHost:
+      [hostExecutable.path, "--role-host-id", launchAttemptID]
+    }
   }
 
   var environment: [String: String] {
     ["JIDOKA_CODE_HERDR_RUN_ROOT": descriptorRoot.path]
   }
+}
+
+struct HerdrWorkspacePlan: Equatable, Sendable {
+  let repositoryID: String
+  let repositoryRoot: URL
+  let workspaceLabel: String
+  let boundWorkspaceID: String?
+
+  init(
+    repositoryID: String,
+    repositoryRoot: URL,
+    workspaceLabel: String,
+    boundWorkspaceID: String?
+  ) throws {
+    guard repositoryID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
+      (1...96).contains(workspaceLabel.utf8.count),
+      !workspaceLabel.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+      boundWorkspaceID.map(Self.validHerdrID) ?? true,
+      repositoryRoot.isFileURL,
+      repositoryRoot.path.hasPrefix("/"),
+      repositoryRoot.standardizedFileURL.path == repositoryRoot.path,
+      repositoryRoot.resolvingSymlinksInPath().path == repositoryRoot.path
+    else {
+      throw HerdrTopologyError.invalidPlan
+    }
+    self.repositoryID = repositoryID
+    self.repositoryRoot = repositoryRoot
+    self.workspaceLabel = workspaceLabel
+    self.boundWorkspaceID = boundWorkspaceID
+  }
+
+  private static func validHerdrID(_ value: String) -> Bool {
+    (1...128).contains(value.utf8.count)
+      && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+  }
+}
+
+struct HerdrWorkspaceBinding: Sendable {
+  let workspaceID: String
+  let handshake: HerdrHandshake
 }
 
 struct HerdrTopologyPlan: Equatable, Sendable {
@@ -344,8 +478,7 @@ struct HerdrTopologyPlan: Equatable, Sendable {
       Set(launches.map(\.paneLabel)).count == launches.count,
       Set(launches.map(\.runID)).count == launches.count,
       Set(launches.map(\.launchAttemptID)).count == launches.count,
-      Set(launches.map(\.agentAlias)).count == launches.count,
-      launches.allSatisfy({ $0.workingDirectory == repositoryRoot })
+      Set(launches.map(\.agentAlias)).count == launches.count
     else {
       throw HerdrTopologyError.invalidPlan
     }
@@ -423,6 +556,19 @@ struct HerdrTopologyMutationAttribution: Codable, Equatable, Sendable {
   let paneIDs: [String]
 }
 
+enum HerdrTopologyStoredIntentState: String, Equatable, Sendable {
+  case prepared
+  case sendStarted
+  case attributed
+  case unknown
+}
+
+struct HerdrTopologyStoredIntent: Equatable, Sendable {
+  let receipt: HerdrTopologyMutationReceipt
+  let state: HerdrTopologyStoredIntentState
+  let attribution: HerdrTopologyMutationAttribution?
+}
+
 protocol HerdrTopologyIntentStoring: Sendable {
   func prepare(_ intent: HerdrTopologyMutationIntent) async throws
     -> HerdrTopologyMutationReceipt
@@ -432,6 +578,27 @@ protocol HerdrTopologyIntentStoring: Sendable {
     as attribution: HerdrTopologyMutationAttribution
   ) async throws
   func markUnknown(_ receipt: HerdrTopologyMutationReceipt) async throws
+  func storedIntent(
+    kind: HerdrTopologyMutationIntent.Kind,
+    repositoryID: String,
+    jobID: String,
+    generation: Int,
+    payloadSHA256: String,
+    socketIdentity: HerdrSocketIdentityRecord
+  ) async throws -> HerdrTopologyStoredIntent?
+}
+
+extension HerdrTopologyIntentStoring {
+  func storedIntent(
+    kind: HerdrTopologyMutationIntent.Kind,
+    repositoryID: String,
+    jobID: String,
+    generation: Int,
+    payloadSHA256: String,
+    socketIdentity: HerdrSocketIdentityRecord
+  ) async throws -> HerdrTopologyStoredIntent? {
+    nil
+  }
 }
 
 public enum HerdrTopologyError: Error, Equatable, Sendable {

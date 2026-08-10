@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 public enum ApprovedCommandRegistryKind: String, CaseIterable, Codable, Sendable {
@@ -388,7 +389,7 @@ public struct FrozenCommandPlan: Equatable, Sendable {
   }
 }
 
-public struct VerificationCommandEvidence: Equatable, Sendable {
+public struct VerificationCommandEvidence: Codable, Equatable, Sendable {
   public let commandID: String
   public let registryKind: ApprovedCommandRegistryKind
   public let definitionDigest: String
@@ -404,10 +405,57 @@ public struct VerificationCommandEvidence: Equatable, Sendable {
   public let repositoryHeadSHA: String?
   public let approvedHookPath: String?
   public let gitConfigurationDigest: String?
+  public let repositoryStateSHA256: String?
+
+  public init(
+    commandID: String,
+    registryKind: ApprovedCommandRegistryKind,
+    definitionDigest: String,
+    exitCode: Int32?,
+    terminationSignal: Int32?,
+    timedOut: Bool,
+    outputLimitExceeded: Bool,
+    durationMilliseconds: Int64,
+    stdoutSHA256: String,
+    stderrSHA256: String,
+    stdoutExcerpt: String,
+    stderrExcerpt: String,
+    repositoryHeadSHA: String?,
+    approvedHookPath: String?,
+    gitConfigurationDigest: String?,
+    repositoryStateSHA256: String? = nil
+  ) {
+    self.commandID = commandID
+    self.registryKind = registryKind
+    self.definitionDigest = definitionDigest
+    self.exitCode = exitCode
+    self.terminationSignal = terminationSignal
+    self.timedOut = timedOut
+    self.outputLimitExceeded = outputLimitExceeded
+    self.durationMilliseconds = durationMilliseconds
+    self.stdoutSHA256 = stdoutSHA256
+    self.stderrSHA256 = stderrSHA256
+    self.stdoutExcerpt = stdoutExcerpt
+    self.stderrExcerpt = stderrExcerpt
+    self.repositoryHeadSHA = repositoryHeadSHA
+    self.approvedHookPath = approvedHookPath
+    self.gitConfigurationDigest = gitConfigurationDigest
+    self.repositoryStateSHA256 = repositoryStateSHA256
+  }
 
   public var succeeded: Bool {
     exitCode == 0 && terminationSignal == nil && !timedOut && !outputLimitExceeded
   }
+}
+
+struct PreparedVerificationCommandExecution: Sendable {
+  let command: ApprovedCommand
+  let workspace: URL
+  let workingDirectory: URL
+  let executable: URL
+  let arguments: [String]
+  let environment: [String: String]
+  let approvedHookPaths: Set<String>
 }
 
 public enum VerificationCommandError: Error, Equatable, Sendable {
@@ -426,6 +474,7 @@ public enum VerificationCommandError: Error, Equatable, Sendable {
   case unsafeGitConfiguration
   case unsafeGitRepository
   case commitHeadUnavailable
+  case repositoryStateUnavailable
 }
 
 public actor VerificationCommandRunner {
@@ -452,6 +501,22 @@ public actor VerificationCommandRunner {
     plan: FrozenCommandPlan,
     workspace: URL
   ) async throws -> VerificationCommandEvidence {
+    try await executePrepared(
+      try await prepare(
+        commandID: commandID,
+        expectedPlanDigest: expectedPlanDigest,
+        plan: plan,
+        workspace: workspace
+      )
+    )
+  }
+
+  func prepare(
+    commandID: String,
+    expectedPlanDigest: String,
+    plan: FrozenCommandPlan,
+    workspace: URL
+  ) async throws -> PreparedVerificationCommandExecution {
     try plan.validateFinalPlanningDecision()
     guard expectedPlanDigest == plan.digest else {
       throw VerificationCommandError.planDigestMismatch
@@ -495,12 +560,27 @@ public actor VerificationCommandRunner {
       }
       environment[key] = value
     }
+    return PreparedVerificationCommandExecution(
+      command: command,
+      workspace: workspace,
+      workingDirectory: workingDirectory,
+      executable: invocation.executable,
+      arguments: invocation.arguments,
+      environment: environment,
+      approvedHookPaths: Set(plan.commands.values.compactMap(\.approvedHookPath))
+    )
+  }
+
+  func executePrepared(
+    _ prepared: PreparedVerificationCommandExecution
+  ) async throws -> VerificationCommandEvidence {
+    let command = prepared.command
     let result = try await process.run(
       GitProcessRequest(
-        executable: invocation.executable,
-        arguments: invocation.arguments,
-        workingDirectory: workingDirectory,
-        environment: environment,
+        executable: prepared.executable,
+        arguments: prepared.arguments,
+        workingDirectory: prepared.workingDirectory,
+        environment: prepared.environment,
         timeoutSeconds: TimeInterval(command.timeoutSeconds),
         maximumOutputBytes: 4 * 1_024 * 1_024
       ))
@@ -508,17 +588,22 @@ public actor VerificationCommandRunner {
     let gitConfigurationDigest: String?
     if command.registryKind == .gitCommit, result.succeeded {
       repositoryHeadSHA = try await committedHead(
-        repository: workingDirectory,
-        environment: environment
+        repository: prepared.workspace,
+        environment: prepared.environment
       )
       gitConfigurationDigest = try await validateGitConfiguration(
-        repository: workingDirectory,
+        repository: prepared.workspace,
         approvedHookPath: command.approvedHookPath
       )
     } else {
       repositoryHeadSHA = nil
       gitConfigurationDigest = nil
     }
+    let repositoryStateSHA256 = try await repositoryStateSHA256(
+      workspace: prepared.workspace,
+      environment: prepared.environment,
+      approvedHookPaths: prepared.approvedHookPaths
+    )
     return VerificationCommandEvidence(
       commandID: command.id,
       registryKind: command.registryKind,
@@ -534,7 +619,24 @@ public actor VerificationCommandRunner {
       stderrExcerpt: Self.redactedExcerpt(result.stderr),
       repositoryHeadSHA: repositoryHeadSHA,
       approvedHookPath: command.approvedHookPath,
-      gitConfigurationDigest: gitConfigurationDigest
+      gitConfigurationDigest: gitConfigurationDigest,
+      repositoryStateSHA256: repositoryStateSHA256
+    )
+  }
+
+  func repositoryStateSHA256(
+    workspace: URL,
+    plan: FrozenCommandPlan
+  ) async throws -> String {
+    let environment = try CredentiallessEnvironment.make(
+      developerDirectory: developerDirectory,
+      homeDirectory: homeDirectory,
+      temporaryDirectory: temporaryDirectory
+    )
+    return try await repositoryStateSHA256(
+      workspace: workspace,
+      environment: environment,
+      approvedHookPaths: Set(plan.commands.values.compactMap(\.approvedHookPath))
     )
   }
 
@@ -560,6 +662,182 @@ public actor VerificationCommandRunner {
       throw VerificationCommandError.commitHeadUnavailable
     }
     return value
+  }
+
+  private func repositoryStateSHA256(
+    workspace: URL,
+    environment: [String: String],
+    approvedHookPaths: Set<String>
+  ) async throws -> String {
+    _ = try await validateGitConfigurationForState(
+      repository: workspace,
+      approvedHookPaths: approvedHookPaths
+    )
+    let head = try await repositoryHeadState(
+      workspace: workspace,
+      environment: environment
+    )
+    let status = try await gitStateData(
+      ["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+      workspace: workspace,
+      environment: environment
+    )
+    let staged = try await gitStateData(
+      ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--"],
+      workspace: workspace,
+      environment: environment
+    )
+    let unstaged = try await gitStateData(
+      ["diff", "--binary", "--no-ext-diff", "--no-textconv", "--"],
+      workspace: workspace,
+      environment: environment
+    )
+    let localConfiguration = try await gitStateData(
+      ["config", "--local", "--null", "--list"],
+      workspace: workspace,
+      environment: environment,
+      maximumOutputBytes: 1_048_576
+    )
+    let untrackedOutput = try await gitStateData(
+      ["ls-files", "--others", "--exclude-standard", "-z"],
+      workspace: workspace,
+      environment: environment,
+      maximumOutputBytes: 1_048_576
+    )
+    let untracked = try Self.untrackedFileDigests(
+      output: untrackedOutput,
+      workspace: workspace
+    )
+    var canonical = Data()
+    for (name, value) in [
+      ("head", head),
+      ("status", status),
+      ("staged", staged),
+      ("unstaged", unstaged),
+      ("localConfiguration", localConfiguration),
+    ] {
+      Self.appendFrame(Data(name.utf8), to: &canonical)
+      Self.appendFrame(value, to: &canonical)
+    }
+    for (path, digest) in untracked {
+      Self.appendFrame(Data("untrackedPath".utf8), to: &canonical)
+      Self.appendFrame(Data(path.utf8), to: &canonical)
+      Self.appendFrame(Data(digest.utf8), to: &canonical)
+    }
+    return Self.sha256(canonical)
+  }
+
+  private func repositoryHeadState(
+    workspace: URL,
+    environment: [String: String]
+  ) async throws -> Data {
+    let head = try await process.run(
+      GitProcessRequest(
+        executable: URL(fileURLWithPath: "/usr/bin/git"),
+        arguments: try Self.gitInvocationPrefix(repository: workspace)
+          + ["--no-optional-locks", "rev-parse", "--verify", "HEAD"],
+        workingDirectory: workspace,
+        environment: environment,
+        timeoutSeconds: 30,
+        maximumOutputBytes: 1_024
+      ))
+    if head.succeeded,
+      let value = String(data: head.stdout, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      GitHubInputValidation.validGitSHA(value)
+    {
+      return Data("commit:\(value)".utf8)
+    }
+    guard !head.timedOut, !head.outputLimitExceeded else {
+      throw VerificationCommandError.repositoryStateUnavailable
+    }
+    let symbolic = try await process.run(
+      GitProcessRequest(
+        executable: URL(fileURLWithPath: "/usr/bin/git"),
+        arguments: try Self.gitInvocationPrefix(repository: workspace)
+          + ["--no-optional-locks", "symbolic-ref", "--quiet", "HEAD"],
+        workingDirectory: workspace,
+        environment: environment,
+        timeoutSeconds: 30,
+        maximumOutputBytes: 1_024
+      ))
+    guard symbolic.succeeded, !symbolic.outputLimitExceeded,
+      let reference = String(data: symbolic.stdout, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      reference.hasPrefix("refs/heads/"),
+      GitHubInputValidation.validBranch(String(reference.dropFirst("refs/heads/".count)))
+    else {
+      throw VerificationCommandError.repositoryStateUnavailable
+    }
+    return Data("unborn:\(reference)".utf8)
+  }
+
+  private func gitStateData(
+    _ arguments: [String],
+    workspace: URL,
+    environment: [String: String],
+    maximumOutputBytes: Int = 4 * 1_024 * 1_024
+  ) async throws -> Data {
+    let result = try await process.run(
+      GitProcessRequest(
+        executable: URL(fileURLWithPath: "/usr/bin/git"),
+        arguments: try Self.gitInvocationPrefix(repository: workspace)
+          + ["--no-optional-locks"] + arguments,
+        workingDirectory: workspace,
+        environment: environment,
+        timeoutSeconds: 30,
+        maximumOutputBytes: maximumOutputBytes
+      ))
+    guard result.succeeded, !result.outputLimitExceeded else {
+      throw VerificationCommandError.repositoryStateUnavailable
+    }
+    return result.stdout
+  }
+
+  private static func untrackedFileDigests(
+    output: Data,
+    workspace: URL
+  ) throws -> [(String, String)] {
+    var paths: [String] = []
+    var start = output.startIndex
+    while start < output.endIndex {
+      guard let end = output[start...].firstIndex(of: 0), end > start,
+        let path = String(data: output[start..<end], encoding: .utf8),
+        validRelativePath(path)
+      else {
+        throw VerificationCommandError.repositoryStateUnavailable
+      }
+      paths.append(path)
+      start = output.index(after: end)
+    }
+    guard paths.count <= 10_000 else {
+      throw VerificationCommandError.repositoryStateUnavailable
+    }
+    var totalBytes = 0
+    return try paths.sorted().map { path in
+      let file = workspace.appendingPathComponent(path)
+      try validateContained(file, root: workspace)
+      var metadata = stat()
+      guard lstat(file.path, &metadata) == 0,
+        (metadata.st_mode & S_IFMT) == S_IFREG,
+        metadata.st_nlink == 1,
+        metadata.st_size >= 0,
+        metadata.st_size <= 16 * 1_024 * 1_024
+      else {
+        throw VerificationCommandError.repositoryStateUnavailable
+      }
+      totalBytes += Int(metadata.st_size)
+      guard totalBytes <= 32 * 1_024 * 1_024 else {
+        throw VerificationCommandError.repositoryStateUnavailable
+      }
+      return (path, sha256(try Data(contentsOf: file, options: [.mappedIfSafe])))
+    }
+  }
+
+  private static func appendFrame(_ value: Data, to target: inout Data) {
+    target.append(Data(String(value.count).utf8))
+    target.append(0x3a)
+    target.append(value)
   }
 
   private func resolve(
@@ -782,6 +1060,41 @@ public actor VerificationCommandRunner {
     )
   }
 
+  private func validateGitConfigurationForState(
+    repository: URL,
+    approvedHookPaths: Set<String>
+  ) async throws -> String {
+    let gitDirectory = try Self.validateGitRepositoryMetadata(repository: repository)
+    guard approvedHookPaths.allSatisfy(Self.validRelativePath) else {
+      throw VerificationCommandError.unsafeGitConfiguration
+    }
+    let environment = try CredentiallessEnvironment.make(
+      developerDirectory: developerDirectory,
+      homeDirectory: homeDirectory,
+      temporaryDirectory: temporaryDirectory
+    )
+    let result = try await process.run(
+      GitProcessRequest(
+        executable: URL(fileURLWithPath: "/usr/bin/git"),
+        arguments: [
+          "config", "--file", gitDirectory.appendingPathComponent("config").path,
+          "--no-includes", "--null", "--list",
+        ],
+        workingDirectory: repository,
+        environment: environment,
+        timeoutSeconds: 30,
+        maximumOutputBytes: 1_048_576
+      ))
+    guard result.succeeded, !result.outputLimitExceeded else {
+      throw VerificationCommandError.unsafeGitConfiguration
+    }
+    return try Self.validateGitConfigurationStateData(
+      result.stdout,
+      repository: repository,
+      approvedHookPaths: approvedHookPaths
+    )
+  }
+
   static func validateGitConfigurationData(
     _ data: Data,
     repository: URL,
@@ -824,6 +1137,43 @@ public actor VerificationCommandRunner {
       throw VerificationCommandError.unsafeGitConfiguration
     }
     return Self.sha256(data)
+  }
+
+  private static func validateGitConfigurationStateData(
+    _ data: Data,
+    repository: URL,
+    approvedHookPaths: Set<String>
+  ) throws -> String {
+    guard let output = String(data: data, encoding: .utf8) else {
+      throw VerificationCommandError.unsafeGitConfiguration
+    }
+    let records = output.split(separator: "\u{0}", omittingEmptySubsequences: true)
+    for record in records {
+      let value = String(record)
+      guard let separator = value.firstIndex(of: "\n") else {
+        throw VerificationCommandError.unsafeGitConfiguration
+      }
+      let key = String(value[..<separator]).lowercased()
+      let setting = String(value[value.index(after: separator)...])
+      if key == "core.hookspath" {
+        guard approvedHookPaths.contains(setting), validRelativePath(setting) else {
+          throw VerificationCommandError.unsafeGitConfiguration
+        }
+        let hookDirectory = repository.appendingPathComponent(setting, isDirectory: true)
+        try validateContained(hookDirectory, root: repository)
+        let values = try hookDirectory.resourceValues(forKeys: [
+          .isDirectoryKey, .isSymbolicLinkKey,
+        ])
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
+          throw VerificationCommandError.unsafeGitConfiguration
+        }
+        continue
+      }
+      guard safeGitSetting(key: key, value: setting, repository: repository) else {
+        throw VerificationCommandError.unsafeGitConfiguration
+      }
+    }
+    return sha256(data)
   }
 
   private static func safeGitSetting(

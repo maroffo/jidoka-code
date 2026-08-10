@@ -353,6 +353,8 @@ private enum EngineServiceFactory {
       piResourceRoot: paths.piResources,
       askPassExecutable: paths.askPass,
       pushGuardExecutable: paths.pushGuard,
+      herdrHostExecutable: paths.herdrHost,
+      herdrSocketURL: paths.herdrSocket,
       contractVersion: "jidoka-code-v1"
     )
     let runtime = ProductionEngineJobRuntime(
@@ -384,6 +386,8 @@ private enum EngineServiceFactory {
     let piResources: URL
     let askPass: URL
     let pushGuard: URL
+    let herdrHost: URL
+    let herdrSocket: URL
   }
 
   private static func enginePaths() throws -> Paths {
@@ -409,7 +413,12 @@ private enum EngineServiceFactory {
       piResources: piResources,
       askPass: helperDirectory.appendingPathComponent("JidokaCodeAskPass", isDirectory: false),
       pushGuard: FileManager.default.fileExists(atPath: packagedPushGuard.path)
-        ? packagedPushGuard : developmentPushGuard
+        ? packagedPushGuard : developmentPushGuard,
+      herdrHost: helperDirectory.appendingPathComponent(
+        "JidokaCodeHerdrHost", isDirectory: false
+      ),
+      herdrSocket: FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/herdr/herdr.sock", isDirectory: false)
     )
   }
 }

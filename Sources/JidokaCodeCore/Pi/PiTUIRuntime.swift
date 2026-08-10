@@ -321,6 +321,85 @@ public struct PiTUIResultExpectation: Equatable, Sendable {
   }
 }
 
+public struct PiTUISessionIdentity: Equatable, Sendable {
+  public let sessionID: String
+  public let sessionFile: URL
+  public let originLaunchMode: PiTUILaunchMode
+  public let originResumeBoundarySHA256: String?
+
+  public static func load(
+    from channelDirectory: URL,
+    configuration: PiTUIRunConfiguration
+  ) throws -> Self {
+    guard try PiTUIFileProtocol.safePrivateDirectory(channelDirectory),
+      try PiTUIFileProtocol.canonicalExistingURL(channelDirectory)
+        == configuration.channelDirectory
+    else {
+      throw PiTUIRuntimeError.identityMismatch
+    }
+    let data = try PiTUIFileProtocol.readPrivateFile(
+      channelDirectory.appendingPathComponent("session.json"),
+      maximumBytes: 64 * 1_024
+    )
+    guard data.last == 0x0A,
+      let object = try JSONSerialization.jsonObject(
+        with: Data(data.dropLast())
+      ) as? [String: Any],
+      Set(object.keys)
+        == Set([
+          "originLaunchMode", "originResumeBoundarySHA256", "runID", "runNonce",
+          "schemaVersion", "sessionFile", "sessionID",
+        ]),
+      object["schemaVersion"] as? Int == 2,
+      object["runID"] as? String == configuration.runID,
+      object["runNonce"] as? String == configuration.runNonce,
+      let sessionID = object["sessionID"] as? String,
+      sessionID.wholeMatch(
+        of: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+      ) != nil,
+      let sessionFile = object["sessionFile"] as? String,
+      let originValue = object["originLaunchMode"] as? String,
+      let origin = PiTUILaunchMode(rawValue: originValue)
+    else {
+      throw PiTUIRuntimeError.identityMismatch
+    }
+    let boundary: String?
+    if object["originResumeBoundarySHA256"] is NSNull {
+      boundary = nil
+    } else if let value = object["originResumeBoundarySHA256"] as? String,
+      value.wholeMatch(of: /^[0-9a-f]{64}$/) != nil
+    {
+      boundary = value
+    } else {
+      throw PiTUIRuntimeError.identityMismatch
+    }
+    let sessionURL = URL(fileURLWithPath: sessionFile)
+    guard PiTUIFileProtocol.isChild(sessionURL, of: configuration.sessionDirectory),
+      try PiTUIFileProtocol.safePrivateFile(sessionURL, maximumBytes: 64 * 1_024 * 1_024),
+      configuration.expectedSessionID.map({ $0 == sessionID }) ?? true,
+      (configuration.launchMode == .fresh && origin == .fresh && boundary == nil
+        && configuration.resumeBoundarySHA256 == nil)
+        || (configuration.launchMode == .resume
+          && ((configuration.resumeBoundarySHA256 == nil && origin == .fresh && boundary == nil)
+            || (configuration.resumeBoundarySHA256 != nil && origin == .resume
+              && boundary == configuration.resumeBoundarySHA256)))
+    else {
+      throw PiTUIRuntimeError.identityMismatch
+    }
+    return PiTUISessionIdentity(
+      sessionID: sessionID,
+      sessionFile: try PiTUIFileProtocol.canonicalExistingURL(sessionURL),
+      originLaunchMode: origin,
+      originResumeBoundarySHA256: boundary
+    )
+  }
+}
+
+public struct PiTUIPreparedResult: Equatable, Sendable {
+  public let terminalResult: PiRPCTerminalResult
+  public let envelope: Data
+}
+
 public struct PiTUIResultChannel: Sendable {
   public static let resultFileName = "result.json"
   public static let acknowledgementFileName = "acknowledgement.json"
@@ -339,10 +418,22 @@ public struct PiTUIResultChannel: Sendable {
   }
 
   public func preparedResult() throws -> PiRPCTerminalResult? {
+    try preparedResultRecord()?.terminalResult
+  }
+
+  public func preparedResultRecord() throws -> PiTUIPreparedResult? {
     let url = directory.appendingPathComponent(Self.resultFileName)
     guard FileManager.default.fileExists(atPath: url.path) else { return nil }
     let data = try PiTUIFileProtocol.readPrivateFile(url, maximumBytes: 4 * 1_024 * 1_024)
+    return try Self.decodePreparedResult(data, expectation: expectation)
+  }
+
+  public static func decodePreparedResult(
+    _ data: Data,
+    expectation: PiTUIResultExpectation
+  ) throws -> PiTUIPreparedResult {
     guard data.last == 0x0A,
+      data.count <= 4 * 1_024 * 1_024,
       let object = try JSONSerialization.jsonObject(with: Data(data.dropLast())) as? [String: Any],
       Set(object.keys)
         == Set([
@@ -396,7 +487,7 @@ public struct PiTUIResultChannel: Sendable {
     } catch {
       throw PiTUIRuntimeError.malformedFile
     }
-    return result
+    return PiTUIPreparedResult(terminalResult: result, envelope: data)
   }
 
   @discardableResult

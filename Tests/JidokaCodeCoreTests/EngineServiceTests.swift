@@ -110,6 +110,8 @@ struct EngineServiceTests {
     #expect(response.state.passRunning)
     #expect(try await fixture.configuration.appConfiguration().paused)
     #expect(await fixture.runtime.pauseValues.last == true)
+    #expect(await fixture.runtime.prePauseObservedPersistedValues.last == false)
+    #expect(await fixture.runtime.pauseDrainObservedPersistedValues.last == true)
     #expect(await fixture.runtime.pauseObservedPersistedValues.last == true)
     #expect(await fixture.runtime.prepareCount == 0)
 
@@ -233,6 +235,8 @@ private actor EngineServiceExternalFake: EngineExternalServicing {
 private actor EngineServiceRuntimeFake: EngineJobRuntime {
   private(set) var dispatchValues: [Bool] = []
   private(set) var pauseValues: [Bool] = []
+  private(set) var prePauseObservedPersistedValues: [Bool] = []
+  private(set) var pauseDrainObservedPersistedValues: [Bool] = []
   private(set) var pauseObservedPersistedValues: [Bool] = []
   private(set) var pollCount = 0
   private(set) var lifecycleReasons: [SchedulerTriggerReason] = []
@@ -249,6 +253,22 @@ private actor EngineServiceRuntimeFake: EngineJobRuntime {
 
   func setDispatchAllowed(_ allowed: Bool) {
     dispatchValues.append(allowed)
+  }
+
+  func prepareForPause() async {
+    if let pauseObserver,
+      let persisted = try? await pauseObserver.appConfiguration().paused
+    {
+      prePauseObservedPersistedValues.append(persisted)
+    }
+  }
+
+  func waitForPauseDrain() async {
+    if let pauseObserver,
+      let persisted = try? await pauseObserver.appConfiguration().paused
+    {
+      pauseDrainObservedPersistedValues.append(persisted)
+    }
   }
 
   func setPaused(_ paused: Bool) async {

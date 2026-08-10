@@ -46,6 +46,27 @@ public struct DefaultJobWorkflowFailureClassifier: JobWorkflowFailureClassifying
         return .permanent
       }
     }
+    if let herdr = error as? HerdrPiWorkflowError {
+      switch herdr {
+      case .launchSuppressed, .recoveryBoundaryReached:
+        return .transient(notBefore: now.addingTimeInterval(1))
+      case .topologyUnavailable, .roleHostUnavailable, .resultUnavailable,
+        .runtimeFailure, .timedOut:
+        return .piInterruptedUnknown
+      case .invalidRequest, .invalidPreparation, .jobNotFound, .repositoryNotFound,
+        .requestCollision, .resultDivergent:
+        return .permanent
+      }
+    }
+    if let command = error as? ApprovedCommandRunStoreError {
+      switch command {
+      case .launchSuppressed:
+        return .transient(notBefore: now.addingTimeInterval(1))
+      case .outcomeUnknown, .workspaceDiverged, .identityCollision, .divergentResult,
+        .invalidRecord, .jobNotFound, .runNotFound, .invalidTransition, .decode:
+        return .permanent
+      }
+    }
     if error as? GitPublicationError == .readBackUnavailable {
       return .transient(notBefore: now.addingTimeInterval(60))
     }
@@ -132,14 +153,17 @@ public actor JobCoordinator: SchedulerPassRunner {
     self.now = now
   }
 
+  public func recoverAtStartup() async throws {
+    guard !startupRecoveryCompleted else { return }
+    _ = try await jobs.recoverAtStartup(now: now())
+    startupRecoveryCompleted = true
+  }
+
   public func run(pass: SchedulerPass) async {
     lastPass = pass
     failures = []
     do {
-      if !startupRecoveryCompleted {
-        _ = try await jobs.recoverAtStartup(now: now())
-        startupRecoveryCompleted = true
-      }
+      try await recoverAtStartup()
       let snapshot = try await configuration.snapshot()
       try await dispatchCleanupRecovery()
       try await dispatchRecovery()

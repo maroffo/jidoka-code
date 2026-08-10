@@ -7,6 +7,53 @@ import Testing
 
 @Suite("Herdr prepared topology and exact recovery", .serialized)
 struct HerdrTopologyTests {
+  @Test("pause gate waits for admitted mutations and rejects every later send")
+  func pauseMutationBarrier() async throws {
+    let gate = HerdrTopologyMutationGate(initiallyAllowed: true)
+    let lease = try await gate.acquire(
+      key: HerdrTopologyMutationKey(repositoryID: "repository-pause")
+    )
+    let closed = AsyncFlag()
+    let closeTask = Task {
+      await gate.closeAndWait()
+      await closed.set()
+    }
+    await Task.yield()
+    #expect(!(await closed.value()))
+    await gate.release(lease)
+    await closeTask.value
+    #expect(await closed.value())
+    await #expect(throws: HerdrTopologyMutationGateError.closed) {
+      _ = try await gate.acquire(
+        key: HerdrTopologyMutationKey(repositoryID: "repository-late")
+      )
+    }
+    await gate.open()
+    let resumed = try await gate.acquire(
+      key: HerdrTopologyMutationKey(repositoryID: "repository-resumed")
+    )
+    await gate.release(resumed)
+  }
+
+  @Test("role-host publication leases serialize without bypassing pause closure")
+  func serializedPublicationLease() async throws {
+    let gate = HerdrTopologyMutationGate(initiallyAllowed: true)
+    let key = HerdrTopologyMutationKey(repositoryID: "queue:rolehost-00000001")
+    let first = try await gate.acquireSerially(key: key)
+    let secondAcquired = AsyncFlag()
+    let secondTask = Task {
+      let second = try await gate.acquireSerially(key: key)
+      await secondAcquired.set()
+      return second
+    }
+    await Task.yield()
+    #expect(!(await secondAcquired.value()))
+    await gate.release(first)
+    let second = try await secondTask.value
+    #expect(await secondAcquired.value())
+    await gate.release(second)
+  }
+
   @Test("one repository topology mutation is active across jobs and generations")
   func repositoryMutationSerialization() async throws {
     let fixture = try HerdrTopologyFixture()
@@ -106,6 +153,42 @@ struct HerdrTopologyTests {
         "handshake", "exportLayout", "attributed:applyLayout",
       ]
     )
+  }
+
+  @Test("a helper crash after layout send is attributed by a fresh coordinator without resend")
+  func helperCrashAfterLayoutSend() async throws {
+    let fixture = try HerdrTopologyFixture()
+    let plan = try fixture.plan()
+    let initial = fixture.handshake(snapshot: fixture.repositorySnapshot())
+    let applied = fixture.appliedLayout()
+    let post = fixture.handshake(snapshot: fixture.jobSnapshot(layout: applied))
+    let store = HerdrFakeTopologyIntentStore(failMarkUnknown: true)
+    let firstAPI = HerdrFakeTopologyAPI(
+      handshakes: [initial],
+      layoutError: HerdrSocketClientError.connectionClosed
+    )
+    let first = HerdrTopologyCoordinator(
+      api: firstAPI,
+      intents: store,
+      mutationID: { "mutation-layout-crash" }
+    )
+    await #expect(throws: HerdrTopologyError.invalidResponse) {
+      _ = try await first.ensureTopology(for: plan)
+    }
+    #expect(await firstAPI.applyCount() == 1)
+
+    let secondAPI = HerdrFakeTopologyAPI(
+      handshakes: [post],
+      exportedLayout: applied
+    )
+    let second = HerdrTopologyCoordinator(
+      api: secondAPI,
+      intents: store,
+      mutationID: { "must-not-create-another-intent" }
+    )
+    let recovered = try await second.ensureTopology(for: plan)
+    #expect(recovered.tabID == applied.tabID)
+    #expect(await secondAPI.applyCount() == 0)
   }
 
   @Test("an unprovable lost layout response becomes unknown and never retries")
@@ -701,10 +784,16 @@ private actor HerdrFakeTopologyIntentStore: HerdrTopologyIntentStoring {
   }
 
   private var intents: [String: (HerdrTopologyMutationIntent, Phase)] = [:]
+  private var attributions: [String: HerdrTopologyMutationAttribution] = [:]
   private let recorder: HerdrTopologyOperationRecorder?
+  private let failMarkUnknown: Bool
 
-  init(recorder: HerdrTopologyOperationRecorder? = nil) {
+  init(
+    recorder: HerdrTopologyOperationRecorder? = nil,
+    failMarkUnknown: Bool = false
+  ) {
     self.recorder = recorder
+    self.failMarkUnknown = failMarkUnknown
   }
 
   func prepare(_ intent: HerdrTopologyMutationIntent) throws -> HerdrTopologyMutationReceipt {
@@ -732,12 +821,52 @@ private actor HerdrFakeTopologyIntentStore: HerdrTopologyIntentStoring {
     as attribution: HerdrTopologyMutationAttribution
   ) throws {
     let intent = try transition(receipt, from: .sendStarted, to: .attributed)
+    attributions[receipt.mutationID] = attribution
     recorder?.append("attributed:\(intent.kind.rawValue)")
   }
 
   func markUnknown(_ receipt: HerdrTopologyMutationReceipt) throws {
+    if failMarkUnknown { throw HerdrTopologyError.invalidResponse }
     let intent = try transition(receipt, from: .sendStarted, to: .unknown)
     recorder?.append("unknown:\(intent.kind.rawValue)")
+  }
+
+  func storedIntent(
+    kind: HerdrTopologyMutationIntent.Kind,
+    repositoryID: String,
+    jobID: String,
+    generation: Int,
+    payloadSHA256: String,
+    socketIdentity: HerdrSocketIdentityRecord
+  ) throws -> HerdrTopologyStoredIntent? {
+    let matches = intents.filter { _, value in
+      let intent = value.0
+      return intent.kind == kind && intent.repositoryID == repositoryID
+        && intent.jobID == jobID && intent.generation == generation
+        && intent.payloadSHA256 == payloadSHA256
+        && intent.socketIdentity == socketIdentity
+    }
+    guard matches.count <= 1, let (id, value) = matches.first else {
+      if matches.isEmpty { return nil }
+      throw HerdrTopologyError.invalidResponse
+    }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let digest = SHA256.hash(data: try encoder.encode(value.0))
+      .map { String(format: "%02x", $0) }
+      .joined()
+    let state: HerdrTopologyStoredIntentState =
+      switch value.1 {
+      case .prepared: .prepared
+      case .sendStarted: .sendStarted
+      case .attributed: .attributed
+      case .unknown: .unknown
+      }
+    return HerdrTopologyStoredIntent(
+      receipt: HerdrTopologyMutationReceipt(mutationID: id, intentSHA256: digest),
+      state: state,
+      attribution: attributions[id]
+    )
   }
 
   private func transition(
@@ -768,6 +897,13 @@ private final class HerdrTopologyOperationRecorder: @unchecked Sendable {
     defer { lock.unlock() }
     return values
   }
+}
+
+private actor AsyncFlag {
+  private var flag = false
+
+  func set() { flag = true }
+  func value() -> Bool { flag }
 }
 
 private final class HerdrLockedSequence: @unchecked Sendable {

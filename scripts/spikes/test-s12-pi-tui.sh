@@ -478,6 +478,18 @@ if (agent.tokens?.managed_by !== "jidoka" || agent.tokens?.run_id !== runID
     || agent.tokens?.role !== "triage") process.exit(13);
 if (!settled.panes.some((pane) => pane.pane_id === paneID)) process.exit(14);
 NODE
+"$NODE" - \
+    "$CHANNEL_ROOT/child-process-$FRESH_LAUNCH_ATTEMPT_ID.json" \
+    "$CHANNEL_ROOT/child-process-$RESUME_LAUNCH_ATTEMPT_ID.json" <<'NODE'
+const fs = require("node:fs");
+for (const path of process.argv.slice(2)) {
+  const record = JSON.parse(fs.readFileSync(path, "utf8"));
+  if (record.schemaVersion !== 1 || !Number.isInteger(record.processID)
+      || record.processID <= 0 || record.processGroupID !== record.processID
+      || !Number.isInteger(record.startSeconds)
+      || !Number.isInteger(record.startMicroseconds)) process.exit(15);
+}
+NODE
 "$NODE" --input-type=module - \
     "$ROOT/Resources/Pi/runtime/jidoka-tui-contract.mjs" \
     "$CHANNEL_ROOT/session.json" "$CHANNEL_ROOT/result.json" \
@@ -652,4 +664,4 @@ fi
 printf 'S12 exact Pi TUI isolated E2E: PASS\n'
 printf 'session=%s workspace=%s panes=%s,%s,%s model=jidoka-fixture/fixture:off provider_calls=2\n' \
     "$HERDR_SESSION_NAME" "$workspace_id" "$pane_id" "$resume_pane_id" "$failure_pane_id"
-printf 'fresh_prompt=1 causal_tool_loop=1 recorded_before_crash=1 side_channel_before_crash=0 causal_resume=1 resume_prompt=0 cross_run_resume_boundary=1 cross_run_null_downgrade_blocked=1 result=1 acknowledgement=1 typed_runtime_failure=1 manual_input_context=0 pre_result_input_blocked=1 built_in_input_blocked=1 builder_parity=1 exact_process_group=1 old_pane_removed=1 pane_retained_until_release=1 focus_changes=0 provider_network_measured=1 provider_network=0\n'
+printf 'fresh_prompt=1 causal_tool_loop=1 recorded_before_crash=1 side_channel_before_crash=0 causal_resume=1 resume_prompt=0 cross_run_resume_boundary=1 cross_run_null_downgrade_blocked=1 result=1 acknowledgement=1 typed_runtime_failure=1 manual_input_context=0 pre_result_input_blocked=1 built_in_input_blocked=1 builder_parity=1 exact_process_group=1 child_process_identity=1 old_pane_removed=1 pane_retained_until_release=1 focus_changes=0 provider_network_measured=1 provider_network=0\n'

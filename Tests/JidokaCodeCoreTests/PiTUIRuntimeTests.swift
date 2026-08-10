@@ -37,6 +37,76 @@ struct PiTUIRuntimeTests {
     #expect(throws: PiTUIRuntimeError.self) { try fixture.configuration.write(to: destination) }
   }
 
+  @Test("session identity origin and boundary match the exact launch configuration")
+  func sessionIdentityMatchesLaunch() throws {
+    let fresh = try PiTUIFixture()
+    defer { fresh.remove() }
+    let sessionID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    let sessionFile = fresh.sessionDirectory.appendingPathComponent("session.jsonl")
+    try PiTUIFileProtocol.createPrivateFile(data: Data("{}\n".utf8), at: sessionFile)
+    let resumedOrigin: [String: Any] = [
+      "originLaunchMode": "resume",
+      "originResumeBoundarySHA256": String(repeating: "a", count: 64),
+      "runID": fresh.configuration.runID,
+      "runNonce": fresh.configuration.runNonce,
+      "schemaVersion": 2,
+      "sessionFile": sessionFile.path,
+      "sessionID": sessionID,
+    ]
+    try PiTUIFileProtocol.createPrivateFile(
+      data: try PiTUIFileProtocol.canonicalJSONData(resumedOrigin),
+      at: fresh.channel.appendingPathComponent("session.json")
+    )
+    #expect(throws: PiTUIRuntimeError.identityMismatch) {
+      _ = try PiTUISessionIdentity.load(
+        from: fresh.channel,
+        configuration: fresh.configuration
+      )
+    }
+
+    let resumed = try PiTUIFixture()
+    defer { resumed.remove() }
+    let resumedSessionFile = resumed.sessionDirectory.appendingPathComponent("session.jsonl")
+    try PiTUIFileProtocol.createPrivateFile(data: Data("{}\n".utf8), at: resumedSessionFile)
+    let expectedBoundary = String(repeating: "b", count: 64)
+    let resumeConfiguration = try PiTUIRunConfiguration(
+      runID: resumed.configuration.runID,
+      runNonce: resumed.configuration.runNonce,
+      workflow: resumed.configuration.workflow,
+      role: resumed.configuration.role,
+      promptURL: resumed.prompt,
+      promptSHA256: resumed.configuration.promptSHA256,
+      channelDirectory: resumed.channel,
+      workspaceRoot: resumed.workspace,
+      sessionDirectory: resumed.sessionDirectory,
+      sessionName: resumed.configuration.sessionName,
+      launchMode: .resume,
+      expectedSessionID: sessionID,
+      resumeBoundarySHA256: expectedBoundary,
+      model: resumed.configuration.model,
+      expectedCommands: resumed.configuration.expectedCommands
+    )
+    let wrongBoundaryOrigin: [String: Any] = [
+      "originLaunchMode": "resume",
+      "originResumeBoundarySHA256": String(repeating: "c", count: 64),
+      "runID": resumed.configuration.runID,
+      "runNonce": resumed.configuration.runNonce,
+      "schemaVersion": 2,
+      "sessionFile": resumedSessionFile.path,
+      "sessionID": sessionID,
+    ]
+    try PiTUIFileProtocol.createPrivateFile(
+      data: try PiTUIFileProtocol.canonicalJSONData(wrongBoundaryOrigin),
+      at: resumed.channel.appendingPathComponent("session.json")
+    )
+    #expect(throws: PiTUIRuntimeError.identityMismatch) {
+      _ = try PiTUISessionIdentity.load(
+        from: resumed.channel,
+        configuration: resumeConfiguration
+      )
+    }
+  }
+
   @Test("TUI argv omits RPC mode and prompt while preserving exact resource order")
   func tuiInvocation() throws {
     let fixture = try PiTUIFixture()

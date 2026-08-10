@@ -128,7 +128,8 @@ struct VerificationCommandRunnerTests {
   func repositoryScript() async throws {
     let fixture = try GitTestRoot(prefix: "jidoka-command-script")
     defer { fixture.remove() }
-    let script = fixture.root.appendingPathComponent("verify.sh")
+    let repository = try await fixture.initializeRepository()
+    let script = repository.appendingPathComponent("verify.sh")
     try writeExecutable(
       script,
       "#!/bin/sh\nprintf '<%s>\\n' \"$1\" \"$2\"\n"
@@ -151,9 +152,10 @@ struct VerificationCommandRunnerTests {
       commandID: command.id,
       expectedPlanDigest: plan.digest,
       plan: plan,
-      workspace: fixture.root
+      workspace: repository
     )
     #expect(evidence.succeeded)
+    #expect(evidence.repositoryStateSHA256?.count == 64)
     #expect(
       evidence.stdoutExcerpt
         == "<\(arguments[0])>\n<\(arguments[1])>\n"
@@ -166,7 +168,7 @@ struct VerificationCommandRunnerTests {
         commandID: command.id,
         expectedPlanDigest: plan.digest,
         plan: plan,
-        workspace: fixture.root
+        workspace: repository
       )
     }
   }
@@ -544,7 +546,8 @@ struct VerificationCommandRunnerTests {
   func resourceBounds() async throws {
     let fixture = try GitTestRoot(prefix: "jidoka-command-bounds")
     defer { fixture.remove() }
-    let timeoutScript = fixture.root.appendingPathComponent("timeout.sh")
+    let repository = try await fixture.initializeRepository()
+    let timeoutScript = repository.appendingPathComponent("timeout.sh")
     try writeExecutable(timeoutScript, "#!/bin/sh\nexec /bin/sleep 30\n")
     let timeout = makeApprovedCommand(
       id: "timeout",
@@ -563,9 +566,10 @@ struct VerificationCommandRunnerTests {
       commandID: timeout.id,
       expectedPlanDigest: plan.digest,
       plan: plan,
-      workspace: fixture.root
+      workspace: repository
     )
     #expect(evidence.timedOut)
     #expect(!evidence.succeeded)
+    #expect(evidence.repositoryStateSHA256?.count == 64)
   }
 }

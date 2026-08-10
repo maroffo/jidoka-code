@@ -34,7 +34,8 @@ struct WorkspaceApprovedCommandExecutorTests {
     let evidence = try await adapter.execute(
       commandID: command.id,
       expectedPlanDigest: plan.digest,
-      plan: plan
+      plan: plan,
+      round: 1
     )
 
     #expect(evidence.succeeded)
