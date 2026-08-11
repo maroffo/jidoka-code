@@ -185,17 +185,53 @@ assert_cleanup_guard() {
 
 assert_cleanup_guard
 if missing_identity_error="$(
-    /usr/bin/env -u SIGN_IDENTITY "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+    /usr/bin/env -u SIGN_IDENTITY -u INSTALLER_SIGN_IDENTITY \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
 )"; then
-    fail "installer package accepted a missing signing identity"
+    fail "installer package accepted a missing application signing identity"
 fi
 [[ "$missing_identity_error" == \
     *"SIGN_IDENTITY must name one explicit Apple code-signing identity"* ]] || \
-    fail "installer package did not fail closed on signing identity"
+    fail "installer package did not fail closed on application signing identity"
+if missing_installer_identity_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        /usr/bin/env -u INSTALLER_SIGN_IDENTITY \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package accepted a missing installer signing identity"
+fi
+[[ "$missing_installer_identity_error" == \
+    *"INSTALLER_SIGN_IDENTITY must name one explicit installer identity"* ]] || \
+    fail "installer package did not fail closed on installer signing identity"
+if invalid_notarize_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        INSTALLER_SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        NOTARIZE_PACKAGE=2 \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package accepted an invalid notarization mode"
+fi
+[[ "$invalid_notarize_error" == *"NOTARIZE_PACKAGE must be 0 or 1"* ]] || \
+    fail "installer package did not fail closed on notarization mode"
+if ignored_notary_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        INSTALLER_SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        NOTARY_KEY=/tmp/ignored-notary-key \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package silently ignored notary credentials"
+fi
+[[ "$ignored_notary_error" == *"notary credentials require NOTARIZE_PACKAGE=1"* ]] || \
+    fail "installer package did not reject inactive notary credentials"
 [[ "$(/usr/bin/grep -Fc '/usr/bin/pkgbuild' "$ROOT/scripts/package-installer.sh")" == "1" ]] || \
     fail "installer package must use one pkgbuild step"
 [[ "$(/usr/bin/grep -Fc '/usr/bin/productbuild' "$ROOT/scripts/package-installer.sh")" == "1" ]] || \
     fail "installer package must use one productbuild step"
+[[ "$(/usr/bin/grep -Fc '/usr/bin/xcrun notarytool submit' "$ROOT/scripts/package-installer.sh")" == "1" ]] || \
+    fail "installer package must use one explicit notary submission step"
+/usr/bin/grep -Fq -- "--sign \"\$INSTALLER_SIGN_IDENTITY\"" \
+    "$ROOT/scripts/package-installer.sh" || \
+    fail "product package must use the explicit installer identity"
 [[ "$(/usr/bin/grep -Ec '(^|/)installer([[:space:]]|$)' "$ROOT/scripts/package-installer.sh")" == "0" ]] || \
     fail "package builder must not install its output"
 TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-s1.XXXXXX")"
