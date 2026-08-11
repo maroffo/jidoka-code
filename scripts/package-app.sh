@@ -25,8 +25,6 @@ readonly HERDR_RESOURCES="$RESOURCES/Herdr"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 readonly SIGNING_KEYCHAIN="${SIGNING_KEYCHAIN:-}"
 readonly ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
-CODESIGN_KEYCHAIN_ARGUMENTS=()
-SECURITY_KEYCHAIN_ARGUMENTS=()
 
 fail() {
     printf 'packaging failed: %s\n' "$1" >&2
@@ -43,8 +41,6 @@ configure_signing_keychain() {
     canonical_parent="$(cd "$(/usr/bin/dirname "$SIGNING_KEYCHAIN")" && pwd -P)"
     [[ "$canonical_parent/$(/usr/bin/basename "$SIGNING_KEYCHAIN")" == "$SIGNING_KEYCHAIN" ]] || \
         fail "SIGNING_KEYCHAIN must be canonical"
-    CODESIGN_KEYCHAIN_ARGUMENTS=(--keychain "$SIGNING_KEYCHAIN")
-    SECURITY_KEYCHAIN_ARGUMENTS=("$SIGNING_KEYCHAIN")
 }
 
 list_rpaths() {
@@ -94,9 +90,12 @@ sign_path() {
     local identifier="$2"
     if [[ "$SIGN_IDENTITY" == "-" ]]; then
         /usr/bin/codesign --force --sign - --identifier "$identifier" "$path"
+    elif [[ -n "$SIGNING_KEYCHAIN" ]]; then
+        /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --timestamp --options runtime \
+            --keychain "$SIGNING_KEYCHAIN" --identifier "$identifier" "$path"
     else
         /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --timestamp --options runtime \
-            "${CODESIGN_KEYCHAIN_ARGUMENTS[@]}" --identifier "$identifier" "$path"
+            --identifier "$identifier" "$path"
     fi
 }
 
@@ -107,10 +106,13 @@ verify_signing_identity() {
     fi
     [[ "$SIGN_IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]] || \
         fail "SIGN_IDENTITY must be a 40-character SHA-1 identity"
-    identities="$(
-        /usr/bin/security find-identity -v -p codesigning \
-            "${SECURITY_KEYCHAIN_ARGUMENTS[@]}" 2>/dev/null
-    )"
+    if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+        identities="$(
+            /usr/bin/security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" 2>/dev/null
+        )"
+    else
+        identities="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null)"
+    fi
     printf '%s\n' "$identities" | /usr/bin/awk -v expected="$SIGN_IDENTITY" '
         toupper($2) == toupper(expected) { found = 1 }
         END { exit(found ? 0 : 1) }
@@ -143,14 +145,13 @@ if [[ "$SIGN_IDENTITY" == "-" && "$ALLOW_ADHOC_SIGNING" != "1" ]]; then
     fail "release packaging requires an explicit SIGN_IDENTITY"
 fi
 configure_signing_keychain
-readonly -a CODESIGN_KEYCHAIN_ARGUMENTS SECURITY_KEYCHAIN_ARGUMENTS
 verify_signing_identity
 "$ROOT/scripts/verify-toolchain.sh"
 
 for input in \
     "$ROOT/Packaging/Info.plist" \
     "$ROOT/Packaging/app-inventory.txt" \
-    "$ROOT/Packaging/com.maroffo.JidokaCode.EngineProbe.plist" \
+    "$ROOT/Packaging/com.maroffo.JidokaCode.Engine.plist" \
     "$ROOT/Resources/Herdr/api-schema-0.8.0.json" \
     "$ROOT/Resources/Herdr/runtime-builds.json" \
     "$ROOT/Resources/Pi/manifest.json" \
@@ -249,8 +250,8 @@ fi
 /usr/bin/install -m 0755 "$BIN_DIR/JidokaCodeHerdrHost" "$HERDR_HOST_EXECUTABLE"
 /usr/bin/install -m 0644 "$ROOT/Packaging/Info.plist" "$CONTENTS/Info.plist"
 /usr/bin/install -m 0644 \
-    "$ROOT/Packaging/com.maroffo.JidokaCode.EngineProbe.plist" \
-    "$LAUNCH_AGENTS/com.maroffo.JidokaCode.EngineProbe.plist"
+    "$ROOT/Packaging/com.maroffo.JidokaCode.Engine.plist" \
+    "$LAUNCH_AGENTS/com.maroffo.JidokaCode.Engine.plist"
 /usr/bin/install -m 0644 \
     "$ROOT/Resources/Herdr/api-schema-0.8.0.json" \
     "$HERDR_RESOURCES/api-schema-0.8.0.json"
@@ -347,12 +348,12 @@ assert_portable_macho "$HERDR_HOST_EXECUTABLE"
     fail "packaged Herdr runtime policy digest differs"
 /usr/bin/plutil -convert xml1 -o /dev/null "$HERDR_RESOURCES/runtime-builds.json"
 /usr/bin/plutil -lint "$CONTENTS/Info.plist"
-/usr/bin/plutil -lint "$LAUNCH_AGENTS/com.maroffo.JidokaCode.EngineProbe.plist"
-sign_path "$ENGINE_EXECUTABLE" com.maroffo.JidokaCode.EngineProbe
+/usr/bin/plutil -lint "$LAUNCH_AGENTS/com.maroffo.JidokaCode.Engine.plist"
+sign_path "$ENGINE_EXECUTABLE" com.maroffo.JidokaCode.Engine
 sign_path "$ASKPASS_EXECUTABLE" com.maroffo.JidokaCode.AskPass
 sign_path "$PUSH_GUARD_EXECUTABLE" com.maroffo.JidokaCode.PushGuard
 sign_path "$HERDR_HOST_EXECUTABLE" com.maroffo.JidokaCode.HerdrHost
-sign_path "$APP" com.maroffo.JidokaCode.Probe
+sign_path "$APP" com.maroffo.JidokaCode
 /usr/bin/codesign --verify --strict "$ENGINE_EXECUTABLE"
 /usr/bin/codesign --verify --strict "$ASKPASS_EXECUTABLE"
 /usr/bin/codesign --verify --strict "$PUSH_GUARD_EXECUTABLE"

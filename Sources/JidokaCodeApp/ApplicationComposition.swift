@@ -160,24 +160,47 @@ final class ApplicationWindowController {
 final class DurableTerminationGate {
   private var inProgress = false
   private var approved = false
+  private var pendingCompletions: [@MainActor (Bool) -> Void] = []
+
+  func prepare(
+    checkpoint: @escaping @MainActor () async -> Bool,
+    completion: @escaping @MainActor (Bool) -> Void
+  ) {
+    if approved {
+      completion(true)
+      return
+    }
+    pendingCompletions.append(completion)
+    guard !inProgress else { return }
+    inProgress = true
+    Task { @MainActor in
+      let checkpointed = await checkpoint()
+      inProgress = false
+      approved = checkpointed
+      let completions = pendingCompletions
+      pendingCompletions.removeAll(keepingCapacity: false)
+      for completion in completions {
+        completion(checkpointed)
+      }
+    }
+  }
+
+  func prepareAndRequestTermination(
+    checkpoint: @escaping @MainActor () async -> Bool,
+    requestTermination: @escaping @MainActor () -> Void
+  ) {
+    prepare(checkpoint: checkpoint) { checkpointed in
+      guard checkpointed else { return }
+      requestTermination()
+    }
+  }
 
   func request(
     checkpoint: @escaping @MainActor () async -> Bool,
     completion: @escaping @MainActor (Bool) -> Void
   ) -> NSApplication.TerminateReply {
     if approved { return .terminateNow }
-    if inProgress { return .terminateLater }
-    inProgress = true
-    Task { @MainActor [weak self] in
-      guard let self else {
-        completion(false)
-        return
-      }
-      let checkpointed = await checkpoint()
-      inProgress = false
-      approved = checkpointed
-      completion(checkpointed)
-    }
+    prepare(checkpoint: checkpoint, completion: completion)
     return .terminateLater
   }
 }
@@ -189,7 +212,9 @@ final class JidokaApplicationDelegate: NSObject, NSApplicationDelegate {
   private let terminationGate = DurableTerminationGate()
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    startMainQuitObserver()
+    startMainQuitObserver { [weak self] in
+      self?.prepareForRequestedTermination()
+    }
     activationObserver = DistributedNotificationCenter.default().addObserver(
       forName: Notification.Name(JidokaApplicationInstance.activationNotification),
       object: nil,
@@ -204,6 +229,14 @@ final class JidokaApplicationDelegate: NSObject, NSApplicationDelegate {
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     false
+  }
+
+  private func prepareForRequestedTermination() {
+    guard let composition else { return }
+    terminationGate.prepareAndRequestTermination(
+      checkpoint: { await composition.appViewModel.prepareForQuit() != nil },
+      requestTermination: { NSApplication.shared.terminate(nil) }
+    )
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -225,7 +258,7 @@ final class JidokaApplicationDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum JidokaApplicationInstance {
-  static let activationNotification = "com.maroffo.JidokaCode.Probe.ui.activate"
+  static let activationNotification = "com.maroffo.JidokaCode.ui.activate"
 
   @MainActor
   static func activateExisting() {

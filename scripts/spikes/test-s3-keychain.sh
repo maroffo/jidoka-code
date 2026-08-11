@@ -15,7 +15,7 @@ readonly TARGET_APP="$HOME/Applications/Jidoka Code Probe.app"
 readonly TARGET_BIN="$TARGET_APP/Contents/MacOS/Jidoka Code"
 readonly TARGET_HELPER="$TARGET_APP/Contents/Helpers/JidokaCodeEngineProbe"
 readonly TARGET_BASH_GATE="$TARGET_APP/Contents/Resources/Pi/extensions/jidoka-deny-user-bash.js"
-readonly SERVICE_LABEL="com.maroffo.JidokaCode.EngineProbe"
+readonly SERVICE_LABEL="com.maroffo.JidokaCode.Engine"
 readonly KEYCHAIN_SERVICE="com.maroffo.JidokaCode.test.github"
 readonly KEYCHAIN_ACCOUNT="eabf21b6-02df-4854-b9a8-c8a21eafdbca"
 readonly SPIKE_PARENT="$HOME/Library/Application Support/JidokaCode/Spike"
@@ -33,6 +33,7 @@ EVIDENCE_DIR=""
 OWN_TARGET=0
 OWN_EVENT_DIR=0
 OWN_LOCK=0
+OWN_SERVICE=0
 CLEANUP_DONE=0
 DIGEST_ONE=""
 DIGEST_TWO=""
@@ -121,10 +122,21 @@ keychain_status() {
     json_value "$output" exists
 }
 
-service_status() {
-    local output="$TEMP_ROOT/agent-status.json"
-    run_app_success "$output" --lifecycle agent status
+service_status_for() {
+    local executable="$1"
+    local output="$2"
+    local stderr="$output.stderr"
+    (
+        cd /
+        "$executable" --lifecycle agent status
+    ) >"$output" 2>"$stderr" || return $?
+    [[ ! -s "$stderr" ]] || return 1
+    /usr/bin/plutil -convert xml1 -o /dev/null "$output" || return 1
     json_value "$output" status
+}
+
+service_status() {
+    service_status_for "$TARGET_BIN" "$TEMP_ROOT/agent-status.json"
 }
 
 status_is_inert() {
@@ -327,15 +339,21 @@ cleanup_owned_state() {
             fi
             system_keychain_item_absent || failed=1
 
-            if status="$(service_status 2>/dev/null)"; then
-                if ! status_is_inert "$status"; then
-                    run_app "$TEMP_ROOT/cleanup-agent-unregister.json" --lifecycle agent unregister
+            if [[ "$OWN_SERVICE" == "1" ]]; then
+                if status="$(service_status 2>/dev/null)"; then
+                    if ! status_is_inert "$status"; then
+                        run_app "$TEMP_ROOT/cleanup-agent-unregister.json" \
+                            --lifecycle agent unregister
+                    fi
+                else
+                    failed=1
                 fi
-            else
+                wait_for_inert_status || failed=1
+                wait_for_agent_absence || failed=1
+                OWN_SERVICE=0
+            elif launchctl_job_exists || [[ -n "$(binary_pids "$TARGET_HELPER")" ]]; then
                 failed=1
             fi
-            wait_for_inert_status || failed=1
-            wait_for_agent_absence || failed=1
             [[ -z "$(binary_pids "$TARGET_BIN")" ]] || failed=1
         fi
     fi
@@ -391,7 +409,11 @@ EVIDENCE_DIR="$ROOT/build/evidence/$(/usr/bin/basename "$TEMP_ROOT")"
 readonly EVIDENCE_DIR
 trap cleanup_on_exit EXIT
 
-"$ROOT/scripts/package-app.sh"
+if [[ "$MODE" == "preflight" ]]; then
+    ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
+else
+    "$ROOT/scripts/package-app.sh"
+fi
 /usr/bin/codesign --verify --strict --deep "$SOURCE_APP"
 [[ -x "$NODE_BIN" && -f "$PI_CLI" && ! -L "$NODE_BIN" && ! -L "$PI_CLI" ]]
 [[ "$($NODE_BIN --version)" == "v26.6.0" ]]
@@ -427,6 +449,12 @@ fi
 
 [[ ! -e "$TARGET_APP" && ! -L "$TARGET_APP" ]] || fail "target already exists"
 [[ ! -e "$EVENT_DIR" && ! -L "$EVENT_DIR" ]] || fail "event directory already exists"
+initial_service_status="$(
+    service_status_for "$SOURCE_BIN" "$TEMP_ROOT/initial-agent-status.json"
+)" || fail "production helper status is unavailable"
+status_is_inert "$initial_service_status" || fail "production helper is already registered"
+! launchctl_job_exists || fail "production helper launchd job already exists"
+[[ -z "$(launchctl_pid)" ]] || fail "production helper launchd PID already exists"
 system_keychain_item_absent || fail "exact Keychain item is present or status is ambiguous"
 prepare_lock
 OWN_EVENT_DIR=1
@@ -445,6 +473,7 @@ run_app_success "$read_one" --keychain read
 [[ "$(json_value "$read_one" sentinelSHA256)" == "$DIGEST_ONE" ]]
 
 agent_register="$TEMP_ROOT/agent-register.json"
+OWN_SERVICE=1
 run_app_success "$agent_register" --lifecycle agent register
 [[ "$(json_value "$agent_register" status)" == "enabled" ]]
 helper_pid="$(wait_for_exact_helper)" || fail "helper did not become exact within 10 seconds"
@@ -501,6 +530,7 @@ system_keychain_item_absent || fail "system lookup still finds the exact item"
 run_app_success "$TEMP_ROOT/agent-unregister.json" --lifecycle agent unregister
 wait_for_inert_status || fail "agent unregister did not converge"
 wait_for_agent_absence || fail "agent job or process remains"
+OWN_SERVICE=0
 [[ -z "$(binary_pids "$TARGET_BIN")" ]]
 
 archive_evidence true false

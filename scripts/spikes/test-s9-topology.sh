@@ -17,6 +17,8 @@ MODE="live"
 TEMP_ROOT=""
 EVIDENCE_DIR=""
 APP_LAUNCH_PID=""
+APP_LAUNCH_START=""
+OWN_APP=0
 
 fail() {
     printf 'S9 topology failed: %s\n' "$1" >&2
@@ -42,29 +44,43 @@ exact_app_pids() {
     '
 }
 
-stop_exact_app_processes() {
-    local pid
-    local remaining
-    while IFS= read -r pid; do
-        [[ -z "$pid" ]] || /bin/kill -TERM "$pid" 2>/dev/null || true
-    done < <(exact_app_pids)
+process_start_identity() {
+    /bin/ps -p "$1" -o lstart= 2>/dev/null | /usr/bin/awk '{$1=$1; print}'
+}
+
+process_command() {
+    /bin/ps -p "$1" -o command= 2>/dev/null | /usr/bin/awk '{$1=$1; print}'
+}
+
+owned_app_is_exact() {
+    [[ "$OWN_APP" == "1" && "$APP_LAUNCH_PID" =~ ^[0-9]+$ && \
+        -n "$APP_LAUNCH_START" ]] || return 1
+    [[ "$(process_start_identity "$APP_LAUNCH_PID")" == "$APP_LAUNCH_START" && \
+        "$(process_command "$APP_LAUNCH_PID")" == "$APP_EXECUTABLE" ]]
+}
+
+stop_owned_app_process() {
+    [[ "$OWN_APP" == "1" ]] || return 0
+    if ! /bin/kill -0 "$APP_LAUNCH_PID" 2>/dev/null; then
+        return 0
+    fi
+    owned_app_is_exact || return 1
+    /bin/kill -TERM "$APP_LAUNCH_PID" 2>/dev/null || true
     for _ in {1..50}; do
-        remaining="$(exact_app_pids)"
-        [[ -z "$remaining" ]] && return 0
+        owned_app_is_exact || return 0
         /bin/sleep 0.1
     done
-    while IFS= read -r pid; do
-        [[ -z "$pid" ]] || /bin/kill -KILL "$pid" 2>/dev/null || true
-    done < <(exact_app_pids)
+    owned_app_is_exact || return 0
+    /bin/kill -KILL "$APP_LAUNCH_PID" 2>/dev/null || true
     /bin/sleep 0.2
-    [[ -z "$(exact_app_pids)" ]]
+    ! owned_app_is_exact
 }
 
 cleanup() {
     local status=$?
     trap - EXIT
-    stop_exact_app_processes || status=1
-    if [[ -n "$APP_LAUNCH_PID" ]]; then
+    stop_owned_app_process || status=1
+    if [[ "$OWN_APP" == "1" && -n "$APP_LAUNCH_PID" ]]; then
         wait "$APP_LAUNCH_PID" 2>/dev/null || true
     fi
     if [[ -n "$TEMP_ROOT" && -d "$TEMP_ROOT" && ! -L "$TEMP_ROOT" ]]; then
@@ -93,10 +109,14 @@ trap cleanup EXIT
 /bin/mkdir -p "$TEMP_ROOT/home" "$TEMP_ROOT/runtime" "$EVIDENCE_DIR"
 /bin/chmod 0700 "$TEMP_ROOT/home" "$TEMP_ROOT/runtime" "$EVIDENCE_DIR"
 
-"$ROOT/scripts/package-app.sh"
+if [[ "$MODE" == "preflight" ]]; then
+    ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
+else
+    "$ROOT/scripts/package-app.sh"
+fi
 /usr/bin/codesign --verify --strict --deep "$APP"
 [[ -x "$HELPER" && ! -L "$HELPER" ]] || fail "selected helper is absent"
-[[ -f "$APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist" ]] || \
+[[ -f "$APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist" ]] || \
     fail "selected helper service declaration is absent"
 if /usr/bin/strings -a "$APP_EXECUTABLE" | /usr/bin/grep -Eq \
     'MonolithLifecycleProbe|monolith-events|monolith lifecycle probe failed'; then
@@ -104,22 +124,38 @@ if /usr/bin/strings -a "$APP_EXECUTABLE" | /usr/bin/grep -Eq \
 fi
 
 [[ -z "$(exact_app_pids)" ]] || fail "an exact probe app process already exists"
+if [[ "$MODE" == "preflight" ]]; then
+    /usr/bin/install -m 0600 "$DECISION" "$EVIDENCE_DIR/topology-decision.json"
+    printf '{"normalAppLaunch":"not-run-preflight","selectedTopology":"launch-agent-helper","signed":false}\n' \
+        >"$EVIDENCE_DIR/summary.json"
+    /bin/chmod 0600 "$EVIDENCE_DIR/summary.json"
+    printf 'S9 topology preflight: PASS\n'
+    printf 'selected=launch-agent-helper normal_app_launch=not-run default_socket_contacts=0\n'
+    exit 0
+fi
 (
     cd /
-    /usr/bin/env -i \
+    exec /usr/bin/env -i \
         HOME="$TEMP_ROOT/home" \
         PATH="/usr/bin:/bin" \
         TMPDIR="$TEMP_ROOT/runtime" \
         "$APP_EXECUTABLE"
 ) >"$TEMP_ROOT/app.stdout" 2>"$TEMP_ROOT/app.stderr" &
 APP_LAUNCH_PID=$!
-launched_pid=""
+OWN_APP=1
 for _ in {1..50}; do
-    launched_pid="$(exact_app_pids)"
-    [[ -n "$launched_pid" ]] && break
+    APP_LAUNCH_START="$(process_start_identity "$APP_LAUNCH_PID")"
+    [[ -n "$APP_LAUNCH_START" ]] && break
     /bin/sleep 0.1
 done
-[[ "$launched_pid" =~ ^[0-9]+$ ]] || fail "selected-topology app did not become exactly one"
+[[ -n "$APP_LAUNCH_START" ]] || fail "selected-topology app start identity is unavailable"
+for _ in {1..50}; do
+    owned_app_is_exact && break
+    /bin/sleep 0.1
+done
+owned_app_is_exact || fail "selected-topology app did not become exact"
+[[ "$(exact_app_pids)" == "$APP_LAUNCH_PID" ]] || \
+    fail "selected-topology app process inventory is ambiguous"
 /bin/sleep 2
 [[ ! -e "$TEMP_ROOT/home/Library/Application Support/JidokaCode/Spike/S2" ]] || \
     fail "normal app launch executed the removed monolith probe"
@@ -139,12 +175,15 @@ fi
 [[ "$(/usr/bin/plutil -extract action raw "$TEMP_ROOT/graceful.json")" == \
     "main.graceful-quit" ]] || fail "graceful quit acknowledgement differs"
 for _ in {1..50}; do
-    [[ -z "$(exact_app_pids)" ]] && break
+    owned_app_is_exact || break
     /bin/sleep 0.1
 done
-[[ -z "$(exact_app_pids)" ]] || fail "exact probe app process survived graceful quit"
+owned_app_is_exact && fail "owned probe app process survived graceful quit"
 wait "$APP_LAUNCH_PID" 2>/dev/null || true
+OWN_APP=0
 APP_LAUNCH_PID=""
+APP_LAUNCH_START=""
+[[ -z "$(exact_app_pids)" ]] || fail "an unowned exact app process appeared during S9"
 
 if [[ "$MODE" == "live" ]]; then
     [[ "$SIGN_IDENTITY" != "-" ]] || fail "live S9 requires an explicit signing identity"

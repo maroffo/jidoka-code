@@ -9,7 +9,7 @@
 ./Contents/Info.plist
 ./Contents/Library
 ./Contents/Library/LaunchAgents
-./Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist
+./Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist
 ./Contents/MacOS
 ./Contents/MacOS/Jidoka Code
 ./Contents/Resources

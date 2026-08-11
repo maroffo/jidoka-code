@@ -22,7 +22,7 @@ public struct PackagedPreflightReport: Codable, Equatable, Sendable {
 }
 
 public enum PackagedPreflight {
-  public static let expectedBundleIdentifier = "com.maroffo.JidokaCode.Probe"
+  public static let expectedBundleIdentifier = "com.maroffo.JidokaCode"
   public static let expectedResourceName = "jidoka-code"
   public static let supportedSchemaVersion = 1
 

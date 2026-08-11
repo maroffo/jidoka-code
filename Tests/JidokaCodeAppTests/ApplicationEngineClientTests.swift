@@ -7,6 +7,12 @@ import Testing
 
 @Suite("Application helper handoff")
 struct ApplicationEngineClientTests {
+  @Test("production activation notification identity is exact")
+  func productionActivationNotification() {
+    #expect(
+      JidokaApplicationInstance.activationNotification == "com.maroffo.JidokaCode.ui.activate")
+  }
+
   @Test("first onboarding checkpoints bootstrap before registration and helper handoff")
   func enableAndComplete() async throws {
     let events = TopologyEventLog()
@@ -244,6 +250,7 @@ struct ApplicationEngineClientTests {
   func durableTerminationGate() async throws {
     let probe = TerminationCheckpointProbe()
     let gate = DurableTerminationGate()
+    var duplicateCompletions: [Bool] = []
     let first = gate.request(
       checkpoint: { await probe.checkpoint() },
       completion: { probe.complete($0) }
@@ -253,7 +260,7 @@ struct ApplicationEngineClientTests {
         Issue.record("a duplicate termination request started another checkpoint")
         return false
       },
-      completion: { _ in }
+      completion: { duplicateCompletions.append($0) }
     )
     #expect(first == .terminateLater)
     #expect(duplicate == .terminateLater)
@@ -261,11 +268,61 @@ struct ApplicationEngineClientTests {
     #expect(probe.callCount == 1)
     #expect(probe.continuation != nil)
     probe.resume(true)
-    for _ in 0..<100 where probe.completions.isEmpty { await Task.yield() }
+    for _ in 0..<100 where duplicateCompletions.isEmpty { await Task.yield() }
     #expect(probe.completions == [true])
+    #expect(duplicateCompletions == [true])
     #expect(
       gate.request(checkpoint: { false }, completion: { _ in }) == .terminateNow
     )
+  }
+
+  @Test("a notification checkpoint completes before synchronous termination")
+  @MainActor
+  func preparedTerminationGate() async {
+    let probe = TerminationCheckpointProbe()
+    let gate = DurableTerminationGate()
+    var events: [String] = []
+    gate.prepareAndRequestTermination(
+      checkpoint: {
+        events.append("checkpoint-start")
+        let result = await probe.checkpoint()
+        events.append("checkpoint-end")
+        return result
+      },
+      requestTermination: { events.append("terminate") }
+    )
+    for _ in 0..<100 where probe.continuation == nil { await Task.yield() }
+    #expect(events == ["checkpoint-start"])
+    probe.resume(true)
+    for _ in 0..<100 where events.count < 3 { await Task.yield() }
+    #expect(events == ["checkpoint-start", "checkpoint-end", "terminate"])
+    #expect(gate.request(checkpoint: { false }, completion: { _ in }) == .terminateNow)
+  }
+
+  @Test("a failed notification checkpoint resolves a concurrent AppKit quit")
+  @MainActor
+  func failedPreparedTerminationResolvesConcurrentRequest() async {
+    let probe = TerminationCheckpointProbe()
+    let gate = DurableTerminationGate()
+    var requestCompletions: [Bool] = []
+    var terminationRequests = 0
+    gate.prepareAndRequestTermination(
+      checkpoint: { await probe.checkpoint() },
+      requestTermination: { terminationRequests += 1 }
+    )
+    let reply = gate.request(
+      checkpoint: {
+        Issue.record("a concurrent AppKit quit started another checkpoint")
+        return true
+      },
+      completion: { requestCompletions.append($0) }
+    )
+    #expect(reply == .terminateLater)
+    for _ in 0..<100 where probe.continuation == nil { await Task.yield() }
+    probe.resume(false)
+    for _ in 0..<100 where requestCompletions.isEmpty { await Task.yield() }
+    #expect(requestCompletions == [false])
+    #expect(terminationRequests == 0)
   }
 
   @Test("incomplete bootstrap never attempts registration")
