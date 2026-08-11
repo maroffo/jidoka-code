@@ -10,7 +10,7 @@ Branch: `feat/jidoka-code-herdr-readiness-package-operations`
 
 H5 adds a fail-closed production readiness boundary for the external Herdr runtime, explicit user-only focus, packaged host inventory and nested signing, an audited local installer package, and operations guidance.
 
-It does not install the package, register ServiceManagement, access application GitHub or provider credentials, contact or focus the default Herdr session during automated verification, or run a live production canary. One H5 commit, a non-force push of this branch, and creation of its pull request were separately authorized on 2026-08-10; merge remains unauthorized.
+It does not install the package, register ServiceManagement, access application GitHub or provider credentials, contact or focus the default Herdr session during automated verification, or run a live production canary. The initial H5 commit, non-force push, and pull request were separately authorized on 2026-08-10. The project owner merged PR #12 as `47c6ffa3da948239891fffbcf09b2e716c0ce925` before the signing/notarization follow-up was pushed; that follow-up remains a separate publication and no merge was executed by the assistant.
 
 A follow-up authorization imported the existing matching Developer ID Application and Developer ID Installer private keys into the login Keychain, used a private App Store Connect key with mode `0600`, and submitted the signed package to Apple Notary Service. No certificate was created or revoked, no secret was written to the repository or build manifest, and no package was installed.
 

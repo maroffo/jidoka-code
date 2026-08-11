@@ -952,6 +952,7 @@ Append-only.
 - 2026-08-10: dopo la verifica H5, il project owner autorizza separatamente un commit con hook attivi, push non-force del branch dedicato e apertura della relativa pull request. Merge e side effect W8/W9 restano non autorizzati.
 - 2026-08-10: H5 chiude dispatch su attestation Herdr binary/full-schema/handshake, espone `Open in Herdr` soltanto su comando utente con ownership rivalidata, include e firma il role host, produce un `.pkg` locale senza script e documenta shared-session operations. Installazione e remainder W8/W9 restano separati.
 - 2026-08-11: il project owner autorizza il follow-up completo di signing/notarization. Le chiavi preesistenti Developer ID Application e Installer vengono importate localmente, la chiave App Store Connect viene stretta a mode `0600`, e il package è inviato a Apple senza credenziali o sorgenti separati.
+- 2026-08-11: il project owner ha mergiato PR #12 come `47c6ffa3da948239891fffbcf09b2e716c0ce925` prima che il follow-up signing/notarization venisse pushato; il follow-up resta quindi una publication separata e l'assistente non esegue merge.
 - 2026-08-11: Apple Notary Service restituisce `Accepted`; package e app passano trusted timestamp, stapling, `stapler validate` e Gatekeeper `Notarized Developer ID`. Nessuna installazione, receipt, ServiceManagement o canary default-session viene eseguita.
 
 ## Outcomes and retrospective

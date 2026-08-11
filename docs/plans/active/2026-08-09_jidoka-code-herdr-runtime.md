@@ -347,9 +347,9 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 
 - Autorizzati e già eseguiti in H0-H4: branch/worktree dedicati, analisi allora visibili nella sessione Herdr, sessioni nominate isolate S11/S12, commit e pubblicazione H1-H4. Gli agenti precedenti sono usciti e nessun lock Pi transitorio resta.
 - Autorizzati e già eseguiti in H5: branch/worktree `feat/jidoka-code-herdr-readiness-package-operations` dalla base merge exact, package verification locale e import delle preesistenti chiavi Developer ID Application/Installer corrispondenti ai certificati Hikma nel login Keychain. Il package non è stato installato.
-- Autorizzati il 2026-08-10 dopo la verifica H5: commit con hook attivi, push non-force del branch dedicato e creazione della relativa pull request.
-- Autorizzati successivamente: firma Developer ID Application/Installer, trusted timestamp, invio del package privo di segreti a Apple Notary Service, attesa `Accepted`, stapling e Gatekeeper assessment. La chiave App Store Connect resta locale con mode `0600`.
-- Non autorizzati in H5: amend, force-push, merge, deployment, package install, ServiceManagement, credential GitHub applicative, provider live, install/update/config/stop Herdr, default-session production canary o focus reale, e altre mutation GitHub.
+- Autorizzati il 2026-08-10 dopo la verifica H5: commit con hook attivi, push non-force del branch dedicato e creazione della relativa pull request. Il project owner ha poi mergiato PR #12 come `47c6ffa3da948239891fffbcf09b2e716c0ce925` prima del push del follow-up signing/notarization.
+- Autorizzati successivamente: firma Developer ID Application/Installer, trusted timestamp, invio del package privo di segreti a Apple Notary Service, attesa `Accepted`, stapling, Gatekeeper assessment, commit e pubblicazione separata del follow-up. La chiave App Store Connect resta locale con mode `0600`; l'assistente non ha eseguito merge.
+- Non autorizzati in H5: amend, force-push, merge del follow-up, deployment, package install, ServiceManagement, credential GitHub applicative, provider live, install/update/config/stop Herdr, default-session production canary o focus reale, e altre mutation GitHub.
 
 ## Progress
 
