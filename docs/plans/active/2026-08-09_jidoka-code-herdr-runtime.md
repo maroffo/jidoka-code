@@ -346,9 +346,10 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 ## External side effects
 
 - Autorizzati e già eseguiti in H0-H4: branch/worktree dedicati, analisi allora visibili nella sessione Herdr, sessioni nominate isolate S11/S12, commit e pubblicazione H1-H4. Gli agenti precedenti sono usciti e nessun lock Pi transitorio resta.
-- Autorizzati e già eseguiti in H5: branch/worktree `feat/jidoka-code-herdr-readiness-package-operations` dalla base merge exact e uso dell'identità Apple Development disponibile per app e package verification locali. Il package non è stato installato.
-- Autorizzati il 2026-08-10 dopo la verifica H5: un commit locale con hook attivi, push non-force del branch dedicato e creazione della relativa pull request.
-- Non autorizzati in H5: amend, force-push, merge, deployment, package install, ServiceManagement, Keychain reale, provider live, install/update/config/stop Herdr, default-session production canary o focus reale, e altre mutation GitHub.
+- Autorizzati e già eseguiti in H5: branch/worktree `feat/jidoka-code-herdr-readiness-package-operations` dalla base merge exact, package verification locale e import delle preesistenti chiavi Developer ID Application/Installer corrispondenti ai certificati Hikma nel login Keychain. Il package non è stato installato.
+- Autorizzati il 2026-08-10 dopo la verifica H5: commit con hook attivi, push non-force del branch dedicato e creazione della relativa pull request.
+- Autorizzati successivamente: firma Developer ID Application/Installer, trusted timestamp, invio del package privo di segreti a Apple Notary Service, attesa `Accepted`, stapling e Gatekeeper assessment. La chiave App Store Connect resta locale con mode `0600`.
+- Non autorizzati in H5: amend, force-push, merge, deployment, package install, ServiceManagement, credential GitHub applicative, provider live, install/update/config/stop Herdr, default-session production canary o focus reale, e altre mutation GitHub.
 
 ## Progress
 
@@ -411,10 +412,11 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 - 2026-08-10: H5 accetta una sola policy arm64 per Herdr `0.8.0`, executable digest e full `api schema --json` byte-identico; version, schema e CLI sono verificati con argv credentialless prima di qualsiasi handshake.
 - 2026-08-10: readiness è autorità di dispatch sia nell'engine sia nel runtime production. Un regain ricostruisce recovery prima del pass, mentre result import e command recovery locali non dipendono dalla disponibilità del socket.
 - 2026-08-10: `Open in Herdr` non accetta target UI. Rivalida binding, terminale, PID/start, executable e argv, poi concentra workspace, tab e pane soltanto per comando utente.
-- 2026-08-10: il package locale richiede identità esplicita, firma nested-before-outer, chiude payload e destinazione, resta unsigned/non-notarized e non esegue install o script.
+- 2026-08-11: il package richiede identità Application e Installer separate, firma nested-before-outer con trusted timestamp, chiude payload e destinazione, supporta notarization esplicita fail-closed e non esegue install o lifecycle script.
+- 2026-08-11: Apple Notary Service accetta il package, `stapler validate` passa e Gatekeeper riporta `Notarized Developer ID`; app installata e receipt restano assenti.
 
 ## Outcomes and retrospective
 
 H1-H5 sono completati sulla base merge H4. Il runtime production usa agenti Pi top-level visibili, mantiene result/ack/release e SQLite come sola autorità, recupera ownership e command evidence prima dei job generici, e ora chiude dispatch su ogni drift Herdr binary/schema/socket. Package e operations rendono verificabili host, provenance, shared-session disclosure e recovery senza installare o mutare la sessione globale.
 
-Restano W8/W9 separati: bundle identifier production senza suffisso `.Probe`, reproduction in disposable staging checkout, installer identity/notarization se richiesti, installazione, ServiceManagement, runtime accessibility, Keychain/provider e canary sulla sessione default. Ognuno richiede il checkpoint specifico già definito.
+Restano W8/W9 separati: bundle identifier production senza suffisso `.Probe`, reproduction in disposable staging checkout, installazione, ServiceManagement, runtime accessibility, credential GitHub/provider e canary sulla sessione default. Ognuno richiede il checkpoint specifico già definito.

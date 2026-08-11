@@ -665,11 +665,11 @@ Pass/falsifier/disposition normativi:
 ### W8: Packaging, installer, documentation and repository gates
 
 - Scope: `Packaging/`, `scripts/`, `docs/operations.md`, `Makefile`, `.gitignore` se necessario.
-- Excluded: updater, notarization automatica e migrazione automatica di tool esterni.
+- Excluded: updater e migrazione automatica di tool esterni. Notarization resta una modalità credentialed esplicita, mai il default silenzioso.
 - [x] Script deterministico costruisce release binaries, `.app` layout, resource copy, nested signing in ordine e `codesign` verify.
 - [x] `Info.plist` dichiara bundle id/version/LSUIElement/minimum OS; LaunchAgent plist bundle-relative soltanto se scelto.
 - [x] `pkgbuild`/`productbuild` produce installer locale. Nessun postinstall root tenta di registrare login item; il primo onboarding user-context lo registra per default.
-- [x] Supportare `SIGN_IDENTITY` esplicita; ad-hoc resta una fixture S1 soltanto con opt-in. Notarization è fuori scope e documentata come rischio distribuzione.
+- [x] Supportare identità Developer ID Application e Installer esplicite; ad-hoc resta una fixture S1 soltanto con opt-in. La modalità notarization richiede credenziali esplicite, risposta `Accepted`, stapling e Gatekeeper pass.
 - [x] Verificare bundle e pkg non contengano path checkout, token sentinel, sessioni o artifact test.
 - [ ] Ripetere package build in un disposable staging checkout creato per il test, registrare il target e rimuovere soltanto quel path dopo build. Il bundle deve poi avviarsi con cwd `/`; il normale implementation worktree non viene spostato o nascosto.
 - [ ] CHECKPOINT C prima di `installer`: presentare exact pkg path e SHA-256, package/receipt id, target `/Applications/Jidoka Code.app`, firma, eventuale app preesistente e rollback. Dopo autorizzazione, installare, provare risorse bundled e disinstall/restore soltanto se separatamente autorizzato.
@@ -802,7 +802,7 @@ Pass/falsifier/disposition normativi:
 - Provider model prompt dal processo app: CHECKPOINT A autorizza esclusivamente 19 call senza retry a `openai-codex/gpt-5.6-sol:max`, per i quattro profili e workflow S4/S8, con soli workflow pubblici e fixture sintetiche, envelope stimato 152k token input e 39,5k output, costo metadata massimo stimato 2,15 USD.
 - GitHub canary comments, labels, branch e PR, incluso l’head update del fixture actor: non autorizzati; richiedono repository, object e target esatti. Merge non autorizzabile da questa V1.
 - Herdr design tranche 2026-08-09: autorizzati branch/worktree locali, source edit e verifica fixture necessari; il workspace `maroffo/jidoka-code`, il tab `j/herdr-runtime/g1` e tre pane analyst sono stati creati nella sessione globale senza cambiare focus. Commit, push, PR e default-session canary restano non autorizzati.
-- Nessun deploy, publication, release o notarization autorizzato.
+- Fino a H4 nessun deploy, publication, release o notarization era autorizzato. Il follow-up H5 autorizza Developer ID signing e invio del solo package privo di segreti a Apple Notary Service; package install, merge e deployment restano non autorizzati.
 
 ## Progress
 
@@ -951,7 +951,9 @@ Append-only.
 - 2026-08-10: H4 è mergiato come `8cf8033e38e1710ecac23b1621051e9a73ed417f`; H5 parte da quella base in branch/worktree separati. Il project owner autorizza branch/worktree e uso dell'identità Apple Development disponibile per package verification locale, ma non commit, push, installazione, ServiceManagement, Keychain/provider, focus o canary default-session.
 - 2026-08-10: dopo la verifica H5, il project owner autorizza separatamente un commit con hook attivi, push non-force del branch dedicato e apertura della relativa pull request. Merge e side effect W8/W9 restano non autorizzati.
 - 2026-08-10: H5 chiude dispatch su attestation Herdr binary/full-schema/handshake, espone `Open in Herdr` soltanto su comando utente con ownership rivalidata, include e firma il role host, produce un `.pkg` locale senza script e documenta shared-session operations. Installazione e remainder W8/W9 restano separati.
+- 2026-08-11: il project owner autorizza il follow-up completo di signing/notarization. Le chiavi preesistenti Developer ID Application e Installer vengono importate localmente, la chiave App Store Connect viene stretta a mode `0600`, e il package è inviato a Apple senza credenziali o sorgenti separati.
+- 2026-08-11: Apple Notary Service restituisce `Accepted`; package e app passano trusted timestamp, stapling, `stapler validate` e Gatekeeper `Notarized Developer ID`. Nessuna installazione, receipt, ServiceManagement o canary default-session viene eseguita.
 
 ## Outcomes and retrospective
 
-W0, W1 S1-S9, W2-W7 e H1-H5 sono eseguiti. Ad-hoc è definitivamente scartato per lifecycle/install e resta soltanto fixture S1 esplicita; Apple Development soddisfa la verifica locale nested app/host. Il helper resta l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53. Checkpoint B è accettato e il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5, coordinator W6, UI/lifecycle W7 e runtime Herdr visibile H sono verificati localmente. Herdr `0.8.0` è prerequisito esterno attestato e dispatch fallisce chiuso su drift; il package locale chiude inventory e installer actions ma resta unsigned, unnotarized e non installato. W8-W9, disposable staging checkout, identifier production, CHECKPOINT C, installed lifecycle, runtime VoiceOver, credential/GitHub e default-session canary restano aperti e richiedono le autorizzazioni documentate.
+W0, W1 S1-S9, W2-W7 e H1-H5 sono eseguiti. Ad-hoc è definitivamente scartato per lifecycle/install e resta soltanto fixture S1 esplicita; Developer ID Application firma app e helper, Developer ID Installer firma il product archive, e Apple notarization/stapling passano con trusted timestamp e Team ID unico. Il helper resta l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53. Checkpoint B è accettato e il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5, coordinator W6, UI/lifecycle W7 e runtime Herdr visibile H sono verificati localmente. Herdr `0.8.0` è prerequisito esterno attestato e dispatch fallisce chiuso su drift; il package chiude inventory e installer actions ed è firmato/notarizzato, ma resta non installato. W8-W9, disposable staging checkout, identifier production, CHECKPOINT C, installed lifecycle, runtime VoiceOver, credential GitHub/provider e default-session canary restano aperti e richiedono le autorizzazioni documentate.

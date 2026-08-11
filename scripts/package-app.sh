@@ -23,11 +23,28 @@ readonly PUSH_GUARD_EXECUTABLE="$GIT_HOOKS/pre-push"
 readonly HERDR_HOST_EXECUTABLE="$HELPERS/JidokaCodeHerdrHost"
 readonly HERDR_RESOURCES="$RESOURCES/Herdr"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+readonly SIGNING_KEYCHAIN="${SIGNING_KEYCHAIN:-}"
 readonly ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
+CODESIGN_KEYCHAIN_ARGUMENTS=()
+SECURITY_KEYCHAIN_ARGUMENTS=()
 
 fail() {
     printf 'packaging failed: %s\n' "$1" >&2
     exit 1
+}
+
+configure_signing_keychain() {
+    local canonical_parent
+    if [[ -z "$SIGNING_KEYCHAIN" ]]; then
+        return
+    fi
+    [[ "$SIGNING_KEYCHAIN" == /* && -f "$SIGNING_KEYCHAIN" && ! -L "$SIGNING_KEYCHAIN" ]] || \
+        fail "SIGNING_KEYCHAIN must be an absolute regular keychain file"
+    canonical_parent="$(cd "$(/usr/bin/dirname "$SIGNING_KEYCHAIN")" && pwd -P)"
+    [[ "$canonical_parent/$(/usr/bin/basename "$SIGNING_KEYCHAIN")" == "$SIGNING_KEYCHAIN" ]] || \
+        fail "SIGNING_KEYCHAIN must be canonical"
+    CODESIGN_KEYCHAIN_ARGUMENTS=(--keychain "$SIGNING_KEYCHAIN")
+    SECURITY_KEYCHAIN_ARGUMENTS=("$SIGNING_KEYCHAIN")
 }
 
 list_rpaths() {
@@ -78,8 +95,8 @@ sign_path() {
     if [[ "$SIGN_IDENTITY" == "-" ]]; then
         /usr/bin/codesign --force --sign - --identifier "$identifier" "$path"
     else
-        /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --timestamp=none --options runtime \
-            --identifier "$identifier" "$path"
+        /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --timestamp --options runtime \
+            "${CODESIGN_KEYCHAIN_ARGUMENTS[@]}" --identifier "$identifier" "$path"
     fi
 }
 
@@ -90,7 +107,10 @@ verify_signing_identity() {
     fi
     [[ "$SIGN_IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]] || \
         fail "SIGN_IDENTITY must be a 40-character SHA-1 identity"
-    identities="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null)"
+    identities="$(
+        /usr/bin/security find-identity -v -p codesigning \
+            "${SECURITY_KEYCHAIN_ARGUMENTS[@]}" 2>/dev/null
+    )"
     printf '%s\n' "$identities" | /usr/bin/awk -v expected="$SIGN_IDENTITY" '
         toupper($2) == toupper(expected) { found = 1 }
         END { exit(found ? 0 : 1) }
@@ -122,6 +142,8 @@ verify_signed_team() {
 if [[ "$SIGN_IDENTITY" == "-" && "$ALLOW_ADHOC_SIGNING" != "1" ]]; then
     fail "release packaging requires an explicit SIGN_IDENTITY"
 fi
+configure_signing_keychain
+readonly -a CODESIGN_KEYCHAIN_ARGUMENTS SECURITY_KEYCHAIN_ARGUMENTS
 verify_signing_identity
 "$ROOT/scripts/verify-toolchain.sh"
 

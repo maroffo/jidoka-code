@@ -64,31 +64,52 @@ Jidoka Code does not merge pull requests, bypass Git hooks, force-push, or treat
 
 ## Build and package audit
 
-A local release package requires an explicit 40-character signing-identity SHA:
+A release package requires separate explicit 40-character SHA-1 identities for application code and the installer:
 
 ```sh
-SIGN_IDENTITY=<identity-sha> make jidoka-code-package
+SIGN_IDENTITY=<developer-id-application-sha1> \
+INSTALLER_SIGN_IDENTITY=<developer-id-installer-sha1> \
+make jidoka-code-package
+```
+
+`SIGNING_KEYCHAIN=<canonical-keychain-path>` may select a dedicated signing keychain. When supplied, that keychain must also be on the user's keychain search list while `codesign` runs.
+
+Notarization is an explicit network mode. The App Store Connect private key must be a canonical, single-link, current-user file with permissions `0400` or `0600`:
+
+```sh
+SIGN_IDENTITY=<developer-id-application-sha1> \
+INSTALLER_SIGN_IDENTITY=<developer-id-installer-sha1> \
+NOTARIZE_PACKAGE=1 \
+NOTARY_KEY=<canonical-p8-path> \
+NOTARY_KEY_ID=<app-store-connect-key-id> \
+NOTARY_ISSUER=<app-store-connect-issuer-uuid> \
+make jidoka-code-package
 ```
 
 The build produces:
 
 - `build/Jidoka Code.app`;
 - `build/Jidoka Code.pkg`;
-- `build/package-manifest.json`.
+- `build/package-manifest.json`;
+- `build/notarization-result.json` only after Apple returns `Accepted`.
 
-The script signs nested executables before the outer app, verifies one Team ID, enforces the closed `Packaging/app-inventory.txt`, rejects symlinks and a bundled Herdr executable, and compares the installer payload with the signed app inventory. The installer has identifier `com.maroffo.JidokaCode.pkg`, version `0.1.0`, and destination `/Applications/Jidoka Code.app`. It has no lifecycle scripts.
+The script signs nested executables before the outer app with Developer ID Application, verifies one Team ID and trusted timestamps, enforces the closed `Packaging/app-inventory.txt`, rejects symlinks and a bundled Herdr executable, and compares the installer payload with the signed app inventory. `productbuild` signs the product with Developer ID Installer and the selected certificate fingerprint. The installer has identifier `com.maroffo.JidokaCode.pkg`, version `0.1.0`, and destination `/Applications/Jidoka Code.app`. It has no lifecycle scripts.
 
-The local `.pkg` is intentionally unsigned because an Apple Development identity is not an Installer identity. Do not describe it as notarized or distribution-ready. Installation, ServiceManagement registration, Keychain/provider access, and a live default-session canary are separate approval checkpoints. The package script never performs them.
+With `NOTARIZE_PACKAGE=1`, the product is published only after Apple Notary Service returns `Accepted`, `stapler` succeeds, `stapler validate` passes, and Gatekeeper reports `Notarized Developer ID`. The manifest SHA-256 binds the post-staple package bytes and records the submission ID. Without that flag, the package remains Developer ID signed but unnotarized.
+
+Package construction and notarization never invoke `installer`, ServiceManagement, application credentials, providers, or the default Herdr session. Installation and the production canary remain separate approval checkpoints.
 
 After separate installation approval, validate the package before invoking `installer`:
 
 ```sh
 pkgutil --payload-files "build/Jidoka Code.pkg"
 pkgutil --check-signature "build/Jidoka Code.pkg"
+xcrun stapler validate "build/Jidoka Code.pkg"
+spctl -a -vv -t install "build/Jidoka Code.pkg"
 codesign --verify --strict --deep "build/Jidoka Code.app"
 ```
 
-Expected package signature status is `no signature`; nested app and helpers must verify with the approved team. Compare `shasum -a 256 "build/Jidoka Code.pkg"` with `package-manifest.json`.
+A notarized build must report an Apple Developer ID Installer signature, trusted timestamp, trusted Apple notarization, and `source=Notarized Developer ID`. Compare `shasum -a 256 "build/Jidoka Code.pkg"` with `package-manifest.json`.
 
 ## Uninstall boundary
 

@@ -10,7 +10,9 @@ Branch: `feat/jidoka-code-herdr-readiness-package-operations`
 
 H5 adds a fail-closed production readiness boundary for the external Herdr runtime, explicit user-only focus, packaged host inventory and nested signing, an audited local installer package, and operations guidance.
 
-It does not install the package, register ServiceManagement, access real Keychain or provider credentials, contact or focus the default Herdr session during automated verification, or run a live production canary. One H5 commit, a non-force push of this branch, and creation of its pull request were separately authorized on 2026-08-10; merge remains unauthorized.
+It does not install the package, register ServiceManagement, access application GitHub or provider credentials, contact or focus the default Herdr session during automated verification, or run a live production canary. One H5 commit, a non-force push of this branch, and creation of its pull request were separately authorized on 2026-08-10; merge remains unauthorized.
+
+A follow-up authorization imported the existing matching Developer ID Application and Developer ID Installer private keys into the login Keychain, used a private App Store Connect key with mode `0600`, and submitted the signed package to Apple Notary Service. No certificate was created or revoked, no secret was written to the repository or build manifest, and no package was installed.
 
 ## Runtime attestation
 
@@ -35,7 +37,7 @@ It focuses workspace, tab, then pane through typed methods. It proves the proces
 
 ## Package and installer audit
 
-`Packaging/app-inventory.txt` closes the application inventory. `scripts/package-app.sh` builds `JidokaCodeHerdrHost`, copies the two Herdr attestation resources, removes checkout rpaths, signs every nested executable before the outer app, verifies one concrete Team ID, rejects symlinks, and rejects a bundled external `herdr` executable. Ad-hoc signing is accepted only when S1 passes `ALLOW_ADHOC_SIGNING=1`; release packaging requires an explicit 40-character `SIGN_IDENTITY`.
+`Packaging/app-inventory.txt` closes the application inventory. `scripts/package-app.sh` builds `JidokaCodeHerdrHost`, copies the two Herdr attestation resources, removes checkout rpaths, signs every nested executable before the outer app, verifies one concrete Team ID, rejects symlinks, and rejects a bundled external `herdr` executable. Ad-hoc signing is accepted only when S1 passes `ALLOW_ADHOC_SIGNING=1`; release packaging requires explicit Developer ID Application and Developer ID Installer SHA-1 identities.
 
 `scripts/package-installer.sh` uses one `pkgbuild` and one `productbuild` step. It verifies:
 
@@ -43,19 +45,23 @@ It focuses workspace, tab, then pane through typed methods. It proves the proces
 - receipt identifier `com.maroffo.JidokaCode.pkg` and destination `/Applications/Jidoka Code.app`;
 - exact app and extended-attribute payload inventories;
 - non-relocatable payload, no lifecycle scripts, and no postinstall action;
-- nested app and host signatures with Team ID `X3Q42VNZDC`;
+- nested app and host Developer ID Application signatures with Team ID `X3Q42VNZDC` and trusted timestamps;
+- a Developer ID Installer product signature using certificate SHA-256 `F1A2E1056C5B3B4A994DA9D6F2427D782F643FBA2D048A26973E6A14FB938731`;
 - no checkout path, symlink, test artifact, or external Herdr executable in the app;
-- an intentionally unsigned local package and a digest-bound package manifest.
+- optional notarization that publishes output only after Apple returns `Accepted`, stapling succeeds, and Gatekeeper reports `Notarized Developer ID`.
 
 Final local package evidence, not installed:
 
-- `build/Jidoka Code.pkg` SHA-256: `c1d2cc9be8257d803a74f3926caeca2d6ca00866f0c88e93eeb82d233bc4979e`;
-- `build/package-manifest.json` SHA-256: `00b6836c3ea2a5928b1a1a3e85c350aa5c7cd252a34d34840b13513810301b82`;
+- `build/Jidoka Code.pkg` SHA-256: `4f215557d911412be45eca0fbfb290c1d03c203f0a566af8796e52d9c83cc78b`;
+- `build/package-manifest.json` SHA-256: `77b26df99256873bc13cb3471d7cd3cfe8d5ba658e33e8bd996c2e75c6c278de`;
+- `build/notarization-result.json` SHA-256: `fcd8c01800c58625c5fcc6e59b9ec6fdebfade9c6ee6efdd0253435fa0733122`;
+- Apple notarization submission: `97cbda8c-f124-4eff-bcf5-3dc96db83315`, status `Accepted`;
 - `Packaging/app-inventory.txt` SHA-256: `d3549c33827a038eea4ea36ac90c52c649c822cef7e55e2d6579cdd536b9ffaf`;
+- `pkgutil`: Apple Developer ID Installer signature, trusted timestamp, trusted Apple notarization;
+- `stapler validate`: pass;
+- `spctl -t install`: accepted as `Notarized Developer ID`;
 - package receipt present on host: no;
 - `/Applications/Jidoka Code.app` present on host: no.
-
-The `.pkg` is not signed or notarized because the authorized identity is Apple Development, not an Installer identity. No distribution-readiness claim is made.
 
 ## Verification after the final source edit
 
@@ -66,7 +72,7 @@ The `.pkg` is not signed or notarized because the authorized identity is Apple D
 - S12: `provider_network=0`, `focus_changes=0`;
 - AddressSanitizer: 445 tests in 71 suites passed with no sanitizer finding;
 - ThreadSanitizer: 445 tests in 71 suites passed with no data-race finding;
-- signed package construction and the independent package audit passed;
+- Developer ID Application and Installer construction, Apple notarization, stapling, Gatekeeper assessment, and the independent package audit passed;
 - strict Swift format, ShellCheck, and `git diff --check` passed before the post-document repository gate.
 
 Evidence log SHA-256:
@@ -76,7 +82,8 @@ Evidence log SHA-256:
 - `/tmp/jidoka-h5-asan-final-1.log`: `482dd64dd455458fca9ccc7c7fd09556c5a5ee15c31066c98c3078b9b1ce9200`;
 - `/tmp/jidoka-h5-tsan-final-1.log`: `4a1e499d25e8d03d253c1498a8125eda1eaa4ce9b96540ad2b3b43819b09e6e4`;
 - `/tmp/jidoka-h5-signed-package-final-1.log`: `c16277730fe1a33f37f04c1e9bf2c0e40396edeec284ebf22437c4d4599cd785`;
-- `/tmp/jidoka-h5-package-audit-final-1.log`: `61d7acf816c1e7836801c6fb13a37fa14a3f4b44e430c20cb7c17c50783f618e`.
+- `/tmp/jidoka-h5-package-audit-final-1.log`: `61d7acf816c1e7836801c6fb13a37fa14a3f4b44e430c20cb7c17c50783f618e`;
+- `/tmp/jidoka-h5-developer-id-notarized-package-final-2.log`: `e6cb8b7123a2d76d1b1c0e0566255ae0c72abaec98535c8b77295ece5eba0a29`.
 
 The final post-document `make check` is intentionally recorded in the session handoff rather than self-embedded here, so this report is not modified after that gate.
 
@@ -88,6 +95,7 @@ Residual boundaries:
 
 - the schema digest proves the approved CLI output, not cryptographic identity of the socket peer;
 - malicious same-UID process replacement remains outside the threat model;
-- the local package is unsigned, unnotarized, and not installed;
+- the Developer ID certificates expire on 2027-02-01 and require reviewed rotation before then;
+- the notarized package remains uninstalled;
 - the production bundle identifier still carries the historical `.Probe` suffix;
 - disposable staging-checkout reproduction, installed ServiceManagement lifecycle, real accessibility, Keychain/provider access, and the default-session canary remain W8/W9 checkpoints requiring separate authorization.
