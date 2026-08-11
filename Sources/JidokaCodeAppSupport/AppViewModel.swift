@@ -34,6 +34,11 @@ public final class AppViewModel {
     return !isWorking && state.lifecycle == .ready
   }
 
+  public var canFocusInHerdr: Bool {
+    guard let state else { return false }
+    return !isWorking && state.lifecycle == .ready && state.settings.herdr.state == .ready
+  }
+
   public func apply(_ state: EngineUIState) {
     self.state = state
   }
@@ -50,6 +55,11 @@ public final class AppViewModel {
   public func togglePaused() async {
     guard let state, canPauseOrResume else { return }
     _ = await execute(.setPaused(!state.paused))
+  }
+
+  public func focusInHerdr() async {
+    guard canFocusInHerdr else { return }
+    _ = await execute(.focusInHerdr)
   }
 
   public func recheck(_ mutation: EngineAmbiguousMutation) async {

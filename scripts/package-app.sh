@@ -20,7 +20,10 @@ readonly ENGINE_EXECUTABLE="$HELPERS/JidokaCodeEngineProbe"
 readonly ASKPASS_EXECUTABLE="$HELPERS/JidokaCodeAskPass"
 readonly GIT_HOOKS="$HELPERS/GitHooks"
 readonly PUSH_GUARD_EXECUTABLE="$GIT_HOOKS/pre-push"
+readonly HERDR_HOST_EXECUTABLE="$HELPERS/JidokaCodeHerdrHost"
+readonly HERDR_RESOURCES="$RESOURCES/Herdr"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+readonly ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
 
 fail() {
     printf 'packaging failed: %s\n' "$1" >&2
@@ -99,6 +102,7 @@ verify_signed_team() {
     local helper_team
     local askpass_team
     local push_guard_team
+    local herdr_host_team
     if [[ "$SIGN_IDENTITY" == "-" ]]; then
         return 0
     fi
@@ -106,18 +110,27 @@ verify_signed_team() {
     helper_team="$(/usr/bin/codesign -dvvv "$ENGINE_EXECUTABLE" 2>&1 | /usr/bin/awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
     askpass_team="$(/usr/bin/codesign -dvvv "$ASKPASS_EXECUTABLE" 2>&1 | /usr/bin/awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
     push_guard_team="$(/usr/bin/codesign -dvvv "$PUSH_GUARD_EXECUTABLE" 2>&1 | /usr/bin/awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
+    herdr_host_team="$(/usr/bin/codesign -dvvv "$HERDR_HOST_EXECUTABLE" 2>&1 | /usr/bin/awk -F= '$1 == "TeamIdentifier" {print $2; exit}')"
     [[ -n "$app_team" && "$app_team" != "not set" && \
         "$app_team" == "$helper_team" && "$app_team" == "$askpass_team" && \
-        "$app_team" == "$push_guard_team" ]] || \
+        "$app_team" == "$push_guard_team" && "$app_team" == "$herdr_host_team" ]] || \
         fail "signed app and helpers do not share a concrete TeamIdentifier"
 }
 
+[[ "$ALLOW_ADHOC_SIGNING" == "0" || "$ALLOW_ADHOC_SIGNING" == "1" ]] || \
+    fail "ALLOW_ADHOC_SIGNING must be 0 or 1"
+if [[ "$SIGN_IDENTITY" == "-" && "$ALLOW_ADHOC_SIGNING" != "1" ]]; then
+    fail "release packaging requires an explicit SIGN_IDENTITY"
+fi
 verify_signing_identity
 "$ROOT/scripts/verify-toolchain.sh"
 
 for input in \
     "$ROOT/Packaging/Info.plist" \
+    "$ROOT/Packaging/app-inventory.txt" \
     "$ROOT/Packaging/com.maroffo.JidokaCode.EngineProbe.plist" \
+    "$ROOT/Resources/Herdr/api-schema-0.8.0.json" \
+    "$ROOT/Resources/Herdr/runtime-builds.json" \
     "$ROOT/Resources/Pi/manifest.json" \
     "$ROOT/Resources/Pi/workflow-resources.json" \
     "$ROOT/Resources/Pi/tui-resources.json" \
@@ -161,6 +174,7 @@ cd "$ROOT"
 /usr/bin/xcrun swift build --configuration release --product JidokaCodeEngineProbe
 /usr/bin/xcrun swift build --configuration release --product JidokaCodeAskPass
 /usr/bin/xcrun swift build --configuration release --product JidokaCodePushGuard
+/usr/bin/xcrun swift build --configuration release --product JidokaCodeHerdrHost
 BIN_DIR="$(/usr/bin/xcrun swift build --configuration release --show-bin-path)"
 BIN_DIR="$(cd "$BIN_DIR" && pwd -P)"
 readonly BIN_DIR
@@ -173,7 +187,8 @@ for executable in \
     "$BIN_DIR/JidokaCodeApp" \
     "$BIN_DIR/JidokaCodeEngineProbe" \
     "$BIN_DIR/JidokaCodeAskPass" \
-    "$BIN_DIR/JidokaCodePushGuard"
+    "$BIN_DIR/JidokaCodePushGuard" \
+    "$BIN_DIR/JidokaCodeHerdrHost"
 do
     [[ -f "$executable" && -x "$executable" && ! -L "$executable" ]] || \
         fail "missing regular SwiftPM product: $executable"
@@ -188,6 +203,7 @@ fi
     "$HELPERS" \
     "$GIT_HOOKS" \
     "$LAUNCH_AGENTS" \
+    "$HERDR_RESOURCES" \
     "$RESOURCES/Spikes" \
     "$RESOURCES/Pi/extensions" \
     "$RESOURCES/Pi/runtime" \
@@ -208,10 +224,17 @@ fi
 /usr/bin/install -m 0755 "$BIN_DIR/JidokaCodeEngineProbe" "$ENGINE_EXECUTABLE"
 /usr/bin/install -m 0755 "$BIN_DIR/JidokaCodeAskPass" "$ASKPASS_EXECUTABLE"
 /usr/bin/install -m 0755 "$BIN_DIR/JidokaCodePushGuard" "$PUSH_GUARD_EXECUTABLE"
+/usr/bin/install -m 0755 "$BIN_DIR/JidokaCodeHerdrHost" "$HERDR_HOST_EXECUTABLE"
 /usr/bin/install -m 0644 "$ROOT/Packaging/Info.plist" "$CONTENTS/Info.plist"
 /usr/bin/install -m 0644 \
     "$ROOT/Packaging/com.maroffo.JidokaCode.EngineProbe.plist" \
     "$LAUNCH_AGENTS/com.maroffo.JidokaCode.EngineProbe.plist"
+/usr/bin/install -m 0644 \
+    "$ROOT/Resources/Herdr/api-schema-0.8.0.json" \
+    "$HERDR_RESOURCES/api-schema-0.8.0.json"
+/usr/bin/install -m 0644 \
+    "$ROOT/Resources/Herdr/runtime-builds.json" \
+    "$HERDR_RESOURCES/runtime-builds.json"
 /usr/bin/install -m 0644 "$ROOT/Resources/Pi/manifest.json" "$RESOURCES/Pi/manifest.json"
 /usr/bin/install -m 0644 \
     "$ROOT/Resources/Pi/workflow-resources.json" \
@@ -281,27 +304,46 @@ done
     "$RESOURCES/Spikes/jidoka-local-spikes.mjs"
 
 /usr/bin/strip -S \
-    "$APP_EXECUTABLE" "$ENGINE_EXECUTABLE" "$ASKPASS_EXECUTABLE" "$PUSH_GUARD_EXECUTABLE"
+    "$APP_EXECUTABLE" "$ENGINE_EXECUTABLE" "$ASKPASS_EXECUTABLE" \
+    "$PUSH_GUARD_EXECUTABLE" "$HERDR_HOST_EXECUTABLE"
 remove_developer_rpaths "$APP_EXECUTABLE"
 remove_developer_rpaths "$ENGINE_EXECUTABLE"
 remove_developer_rpaths "$ASKPASS_EXECUTABLE"
 remove_developer_rpaths "$PUSH_GUARD_EXECUTABLE"
+remove_developer_rpaths "$HERDR_HOST_EXECUTABLE"
 assert_portable_macho "$APP_EXECUTABLE"
 assert_portable_macho "$ENGINE_EXECUTABLE"
 assert_portable_macho "$ASKPASS_EXECUTABLE"
 assert_portable_macho "$PUSH_GUARD_EXECUTABLE"
+assert_portable_macho "$HERDR_HOST_EXECUTABLE"
 
+[[ "$(/usr/bin/shasum -a 256 "$HERDR_RESOURCES/api-schema-0.8.0.json" | /usr/bin/awk '{print $1}')" == \
+    "88ff414aa996e390c2db05a37b95d28dbe4e81b98329f6ed7f7a2cc5c6ebf51a" ]] || \
+    fail "packaged Herdr API schema digest differs"
+[[ "$(/usr/bin/shasum -a 256 "$HERDR_RESOURCES/runtime-builds.json" | /usr/bin/awk '{print $1}')" == \
+    "3fdd7b5d6f273ab264c6c2f502e8c8902819cc353052191769c4ec22213d4673" ]] || \
+    fail "packaged Herdr runtime policy digest differs"
+/usr/bin/plutil -convert xml1 -o /dev/null "$HERDR_RESOURCES/runtime-builds.json"
 /usr/bin/plutil -lint "$CONTENTS/Info.plist"
 /usr/bin/plutil -lint "$LAUNCH_AGENTS/com.maroffo.JidokaCode.EngineProbe.plist"
 sign_path "$ENGINE_EXECUTABLE" com.maroffo.JidokaCode.EngineProbe
 sign_path "$ASKPASS_EXECUTABLE" com.maroffo.JidokaCode.AskPass
 sign_path "$PUSH_GUARD_EXECUTABLE" com.maroffo.JidokaCode.PushGuard
+sign_path "$HERDR_HOST_EXECUTABLE" com.maroffo.JidokaCode.HerdrHost
 sign_path "$APP" com.maroffo.JidokaCode.Probe
 /usr/bin/codesign --verify --strict "$ENGINE_EXECUTABLE"
 /usr/bin/codesign --verify --strict "$ASKPASS_EXECUTABLE"
 /usr/bin/codesign --verify --strict "$PUSH_GUARD_EXECUTABLE"
+/usr/bin/codesign --verify --strict "$HERDR_HOST_EXECUTABLE"
 /usr/bin/codesign --verify --strict --deep "$APP"
 verify_signed_team
+
+actual_inventory="$(cd "$APP" && /usr/bin/find . -print | LC_ALL=C /usr/bin/sort)"
+expected_inventory="$(<"$ROOT/Packaging/app-inventory.txt")"
+[[ "$actual_inventory" == "$expected_inventory" ]] || fail "bundle inventory differs from allowlist"
+[[ -z "$(/usr/bin/find "$APP" -type l -print)" ]] || fail "bundle contains symbolic links"
+[[ -z "$(/usr/bin/find "$APP" -type f -name herdr -print)" ]] || \
+    fail "external Herdr runtime must not be bundled"
 
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
     printf 'signing=adhoc\n'

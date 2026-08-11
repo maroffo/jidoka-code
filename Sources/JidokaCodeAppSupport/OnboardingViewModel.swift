@@ -43,6 +43,7 @@ public final class OnboardingViewModel {
       && onboarding.externalAutomationAcknowledged
       && onboarding.providerDisclosureAcknowledged
       && onboarding.pi.state == .ready
+      && onboarding.herdr.state == .ready
       && onboarding.credential.state == .valid
       && onboarding.repositoryCount > 0
       && Set(onboarding.configuredProfileRoles) == Set(ModelProfileRole.allCases)
@@ -68,6 +69,10 @@ public final class OnboardingViewModel {
 
   public func runPiPreflight() async {
     _ = await execute(.runPiPreflight)
+  }
+
+  public func runHerdrPreflight() async {
+    _ = await execute(.runHerdrPreflight)
   }
 
   public func validateAndImportCredential() async {

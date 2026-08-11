@@ -13,6 +13,7 @@ readonly SOURCE_EXECUTABLE="$SOURCE_APP/Contents/MacOS/Jidoka Code"
 readonly SOURCE_ENGINE="$SOURCE_APP/Contents/Helpers/JidokaCodeEngineProbe"
 readonly SOURCE_ASKPASS="$SOURCE_APP/Contents/Helpers/JidokaCodeAskPass"
 readonly SOURCE_PUSH_GUARD="$SOURCE_APP/Contents/Helpers/GitHooks/pre-push"
+readonly SOURCE_HERDR_HOST="$SOURCE_APP/Contents/Helpers/JidokaCodeHerdrHost"
 TEMP_ROOT=""
 
 fail() {
@@ -183,6 +184,20 @@ assert_cleanup_guard() {
 }
 
 assert_cleanup_guard
+if missing_identity_error="$(
+    /usr/bin/env -u SIGN_IDENTITY "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package accepted a missing signing identity"
+fi
+[[ "$missing_identity_error" == \
+    *"SIGN_IDENTITY must name one explicit Apple code-signing identity"* ]] || \
+    fail "installer package did not fail closed on signing identity"
+[[ "$(/usr/bin/grep -Fc '/usr/bin/pkgbuild' "$ROOT/scripts/package-installer.sh")" == "1" ]] || \
+    fail "installer package must use one pkgbuild step"
+[[ "$(/usr/bin/grep -Fc '/usr/bin/productbuild' "$ROOT/scripts/package-installer.sh")" == "1" ]] || \
+    fail "installer package must use one productbuild step"
+[[ "$(/usr/bin/grep -Ec '(^|/)installer([[:space:]]|$)' "$ROOT/scripts/package-installer.sh")" == "0" ]] || \
+    fail "package builder must not install its output"
 TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-s1.XXXXXX")"
 readonly TEMP_ROOT
 trap cleanup EXIT
@@ -193,7 +208,7 @@ readonly MUTATED_ATTESTATION_APP="$TEMP_ROOT/Jidoka Code Attestation Mutated.app
 readonly MUTATED_POLICY_APP="$TEMP_ROOT/Jidoka Code Policy Mutated.app"
 readonly MUTATED_WORKFLOW_APP="$TEMP_ROOT/Jidoka Code Workflow Mutated.app"
 
-"$ROOT/scripts/package-app.sh"
+ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
 JIDOKA_PI_RESOURCE_ROOT="$SOURCE_APP/Contents/Resources/Pi" \
     /opt/homebrew/Cellar/node/26.6.0/bin/node \
     "$ROOT/scripts/tests/test-jidoka-extension-rpc.mjs"
@@ -203,70 +218,7 @@ JIDOKA_PI_RESOURCE_ROOT="$SOURCE_APP/Contents/Resources/Pi" \
     "com.maroffo.JidokaCode.Probe" ]]
 [[ "$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$SOURCE_APP/Contents/Info.plist")" == "14.0" ]]
 
-expected_inventory="$(cat <<'EOF'
-.
-./Contents
-./Contents/Helpers
-./Contents/Helpers/GitHooks
-./Contents/Helpers/GitHooks/pre-push
-./Contents/Helpers/JidokaCodeAskPass
-./Contents/Helpers/JidokaCodeEngineProbe
-./Contents/Info.plist
-./Contents/Library
-./Contents/Library/LaunchAgents
-./Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist
-./Contents/MacOS
-./Contents/MacOS/Jidoka Code
-./Contents/Resources
-./Contents/Resources/Pi
-./Contents/Resources/Pi/extensions
-./Contents/Resources/Pi/extensions/jidoka-code.ts
-./Contents/Resources/Pi/extensions/jidoka-deny-user-bash.js
-./Contents/Resources/Pi/extensions/jidoka-runtime.ts
-./Contents/Resources/Pi/extensions/jidoka-tui-runtime.ts
-./Contents/Resources/Pi/manifest.json
-./Contents/Resources/Pi/runtime
-./Contents/Resources/Pi/runtime/jidoka-extension-contract.mjs
-./Contents/Resources/Pi/runtime/jidoka-tui-contract.mjs
-./Contents/Resources/Pi/runtime/node-runtime-builds.json
-./Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs
-./Contents/Resources/Pi/runtime/pi-rpc-workflow-probe.mjs
-./Contents/Resources/Pi/runtime/pi-runtime-attestation.mjs
-./Contents/Resources/Pi/runtime/pi-runtime-builds.json
-./Contents/Resources/Pi/skills
-./Contents/Resources/Pi/skills/jidoka-code-issue-triage
-./Contents/Resources/Pi/skills/jidoka-code-issue-triage/SKILL.md
-./Contents/Resources/Pi/skills/jidoka-code-orchestrate
-./Contents/Resources/Pi/skills/jidoka-code-orchestrate/SKILL.md
-./Contents/Resources/Pi/skills/jidoka-code-plan
-./Contents/Resources/Pi/skills/jidoka-code-plan/SKILL.md
-./Contents/Resources/Pi/skills/jidoka-code-pr-review
-./Contents/Resources/Pi/skills/jidoka-code-pr-review/SKILL.md
-./Contents/Resources/Pi/skills/jidoka-code-review-architecture
-./Contents/Resources/Pi/skills/jidoka-code-review-architecture/SKILL.md
-./Contents/Resources/Pi/skills/jidoka-code-review-security
-./Contents/Resources/Pi/skills/jidoka-code-review-security/SKILL.md
-./Contents/Resources/Pi/skills/jidoka-code-review-test
-./Contents/Resources/Pi/skills/jidoka-code-review-test/SKILL.md
-./Contents/Resources/Pi/skills/jidoka-code-synthesize
-./Contents/Resources/Pi/skills/jidoka-code-synthesize/SKILL.md
-./Contents/Resources/Pi/tui-resources.json
-./Contents/Resources/Pi/workflow-resources.json
-./Contents/Resources/Pi/workflow-skills
-./Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity
-./Contents/Resources/Pi/workflow-skills/jidoka-code-orchestration-fidelity/SKILL.md
-./Contents/Resources/Pi/workflow-skills/jidoka-code-planning-fidelity
-./Contents/Resources/Pi/workflow-skills/jidoka-code-planning-fidelity/SKILL.md
-./Contents/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity
-./Contents/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity/SKILL.md
-./Contents/Resources/Pi/workflow-skills/jidoka-code-triage-fidelity
-./Contents/Resources/Pi/workflow-skills/jidoka-code-triage-fidelity/SKILL.md
-./Contents/Resources/Spikes
-./Contents/Resources/Spikes/jidoka-local-spikes.mjs
-./Contents/_CodeSignature
-./Contents/_CodeSignature/CodeResources
-EOF
-)"
+expected_inventory="$(<"$ROOT/Packaging/app-inventory.txt")"
 actual_inventory="$(cd "$SOURCE_APP" && /usr/bin/find . -print | LC_ALL=C /usr/bin/sort)"
 [[ "$actual_inventory" == "$expected_inventory" ]] || fail "bundle inventory differs from allowlist"
 [[ -z "$(/usr/bin/find "$SOURCE_APP" -type l -print)" ]] || fail "bundle contains symbolic links"
@@ -282,6 +234,21 @@ launch_agent_plist="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.Jidoka
 [[ "$(/usr/bin/plutil -extract KeepAlive.SuccessfulExit raw "$launch_agent_plist")" == "false" ]]
 [[ "$(/usr/bin/plutil -extract 'MachServices.com\.maroffo\.JidokaCode\.EngineProbe' raw "$launch_agent_plist")" == "true" ]] || \
     fail "launch agent Mach service differs from allowlist"
+
+herdr_schema="$SOURCE_APP/Contents/Resources/Herdr/api-schema-0.8.0.json"
+herdr_policy="$SOURCE_APP/Contents/Resources/Herdr/runtime-builds.json"
+[[ "$(/usr/bin/shasum -a 256 "$herdr_schema" | /usr/bin/awk '{print $1}')" == \
+    "88ff414aa996e390c2db05a37b95d28dbe4e81b98329f6ed7f7a2cc5c6ebf51a" ]] || \
+    fail "packaged Herdr schema differs from approved bytes"
+[[ "$(/usr/bin/shasum -a 256 "$herdr_policy" | /usr/bin/awk '{print $1}')" == \
+    "3fdd7b5d6f273ab264c6c2f502e8c8902819cc353052191769c4ec22213d4673" ]] || \
+    fail "packaged Herdr policy differs from approved bytes"
+[[ "$(/usr/bin/plutil -extract schemaVersion raw "$herdr_policy")" == "1" ]]
+[[ "$(/usr/bin/plutil -extract builds.0.version raw "$herdr_policy")" == "0.8.0" ]]
+[[ "$(/usr/bin/plutil -extract builds.0.protocolVersion raw "$herdr_policy")" == "19" ]]
+[[ "$(/usr/bin/plutil -extract builds.0.executableSHA256 raw "$herdr_policy")" == \
+    "97bdb194a731262d2b70062621a5673b1cd409b9e6870df361bd65799217eaf3" ]]
+[[ ! -e "$SOURCE_APP/Contents/Helpers/herdr" ]] || fail "external Herdr binary was bundled"
 
 assert_resource_digest() {
     local relative_path="$1"
@@ -374,6 +341,8 @@ assert_resource_digest \
 for path in \
     "$SOURCE_APP/Contents/Info.plist" \
     "$launch_agent_plist" \
+    "$SOURCE_APP/Contents/Resources/Herdr/api-schema-0.8.0.json" \
+    "$SOURCE_APP/Contents/Resources/Herdr/runtime-builds.json" \
     "$SOURCE_APP/Contents/Resources/Pi/manifest.json" \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-resources.json" \
     "$SOURCE_APP/Contents/Resources/Pi/tui-resources.json" \
@@ -406,7 +375,8 @@ do
     [[ -f "$path" && ! -L "$path" ]] || fail "expected regular bundle file: $path"
 done
 for path in \
-    "$SOURCE_EXECUTABLE" "$SOURCE_ENGINE" "$SOURCE_ASKPASS" "$SOURCE_PUSH_GUARD"
+    "$SOURCE_EXECUTABLE" "$SOURCE_ENGINE" "$SOURCE_ASKPASS" \
+    "$SOURCE_PUSH_GUARD" "$SOURCE_HERDR_HOST"
 do
     [[ -f "$path" && -x "$path" && ! -L "$path" ]] || fail "expected executable: $path"
     assert_portable_macho "$path"
@@ -415,14 +385,17 @@ done
 /usr/bin/codesign --verify --strict "$SOURCE_ENGINE"
 /usr/bin/codesign --verify --strict "$SOURCE_ASKPASS"
 /usr/bin/codesign --verify --strict "$SOURCE_PUSH_GUARD"
+/usr/bin/codesign --verify --strict "$SOURCE_HERDR_HOST"
 /usr/bin/codesign --verify --strict --deep "$SOURCE_APP"
 
 app_minos="$(/usr/bin/otool -l "$SOURCE_EXECUTABLE" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
 engine_minos="$(/usr/bin/otool -l "$SOURCE_ENGINE" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
 askpass_minos="$(/usr/bin/otool -l "$SOURCE_ASKPASS" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
 push_guard_minos="$(/usr/bin/otool -l "$SOURCE_PUSH_GUARD" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
+herdr_host_minos="$(/usr/bin/otool -l "$SOURCE_HERDR_HOST" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
 [[ "$app_minos" == "14.0" && "$engine_minos" == "14.0" && \
-    "$askpass_minos" == "14.0" && "$push_guard_minos" == "14.0" ]] || \
+    "$askpass_minos" == "14.0" && "$push_guard_minos" == "14.0" && \
+    "$herdr_host_minos" == "14.0" ]] || \
     fail "unexpected minimum OS"
 
 BIN_DIR="$(/usr/bin/xcrun swift build --configuration release --show-bin-path)"
@@ -443,6 +416,8 @@ normalize_unsigned_product "$BIN_DIR/JidokaCodeAskPass" "$TEMP_ROOT/expected-ask
 normalize_unsigned_product "$SOURCE_ASKPASS" "$TEMP_ROOT/actual-askpass"
 normalize_unsigned_product "$BIN_DIR/JidokaCodePushGuard" "$TEMP_ROOT/expected-push-guard"
 normalize_unsigned_product "$SOURCE_PUSH_GUARD" "$TEMP_ROOT/actual-push-guard"
+normalize_unsigned_product "$BIN_DIR/JidokaCodeHerdrHost" "$TEMP_ROOT/expected-herdr-host"
+normalize_unsigned_product "$SOURCE_HERDR_HOST" "$TEMP_ROOT/actual-herdr-host"
 /usr/bin/cmp -s "$TEMP_ROOT/expected-app" "$TEMP_ROOT/actual-app" || \
     fail "packaged app lacks build-product provenance"
 /usr/bin/cmp -s "$TEMP_ROOT/expected-engine" "$TEMP_ROOT/actual-engine" || \
@@ -451,6 +426,8 @@ normalize_unsigned_product "$SOURCE_PUSH_GUARD" "$TEMP_ROOT/actual-push-guard"
     fail "packaged askpass helper lacks build-product provenance"
 /usr/bin/cmp -s "$TEMP_ROOT/expected-push-guard" "$TEMP_ROOT/actual-push-guard" || \
     fail "packaged push guard lacks build-product provenance"
+/usr/bin/cmp -s "$TEMP_ROOT/expected-herdr-host" "$TEMP_ROOT/actual-herdr-host" || \
+    fail "packaged Herdr host lacks build-product provenance"
 
 /usr/bin/ditto "$SOURCE_APP" "$COPIED_APP"
 [[ "$COPIED_APP" != "$ROOT"/* ]]
@@ -563,8 +540,8 @@ then
 fi
 
 printf 'S1 package E2E: PASS\n'
-printf 'app_minos=%s engine_minos=%s askpass_minos=%s push_guard_minos=%s\n' \
-    "$app_minos" "$engine_minos" "$askpass_minos" "$push_guard_minos"
+printf 'app_minos=%s engine_minos=%s askpass_minos=%s push_guard_minos=%s herdr_host_minos=%s\n' \
+    "$app_minos" "$engine_minos" "$askpass_minos" "$push_guard_minos" "$herdr_host_minos"
 printf 'manifest_sha256=%s mutated_sha256=%s\n' "$manifest_digest" "$mutated_digest"
 printf 'preflight=%s\n' "$(<"$preflight_stdout")"
 printf 'engine=%s\n' "$(<"$engine_stdout")"

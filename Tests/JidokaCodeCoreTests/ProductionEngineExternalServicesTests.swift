@@ -35,6 +35,7 @@ struct ProductionEngineExternalServicesTests {
       transport: IdentityGitHubTransport(account: "hubot", authorID: 8),
       credentialVault: fixture.vault,
       runtimeResolver: UnusedPiRuntimeResolver(),
+      herdrReadiness: ReadyHerdrReadiness(),
       now: { Date(timeIntervalSince1970: 700_001) }
     )
     let recovered = await reopenedExternal.credentialStatus()
@@ -85,7 +86,8 @@ struct ProductionEngineExternalServicesTests {
       configuration: reopenedConfiguration,
       transport: IdentityGitHubTransport(account: "hubot", authorID: 8),
       credentialVault: fixture.vault,
-      runtimeResolver: UnusedPiRuntimeResolver()
+      runtimeResolver: UnusedPiRuntimeResolver(),
+      herdrReadiness: ReadyHerdrReadiness()
     )
     #expect(
       await reopenedExternal.credentialStatus()
@@ -121,7 +123,8 @@ struct ProductionEngineExternalServicesTests {
       configuration: reopenedConfiguration,
       transport: IdentityGitHubTransport(account: "octocat", authorID: 7),
       credentialVault: fixture.vault,
-      runtimeResolver: UnusedPiRuntimeResolver()
+      runtimeResolver: UnusedPiRuntimeResolver(),
+      herdrReadiness: ReadyHerdrReadiness()
     )
     #expect(await reopenedExternal.credentialStatus() == .missing)
     app = try await reopenedConfiguration.appConfiguration()
@@ -261,6 +264,7 @@ private struct ExternalServicesFixture {
       ),
       credentialVault: vault,
       runtimeResolver: UnusedPiRuntimeResolver(),
+      herdrReadiness: ReadyHerdrReadiness(),
       now: { Date(timeIntervalSince1970: 700_000) }
     )
   }
@@ -360,6 +364,19 @@ private struct IdentityGitHubTransport: GitHubHTTPTransport {
       ]
     )
     return GitHubHTTPResponse(statusCode: 200, url: url, headers: [:], body: body)
+  }
+}
+
+private struct ReadyHerdrReadiness: HerdrRuntimeReadinessChecking {
+  func preflight() -> EngineHerdrStatus {
+    EngineHerdrStatus(
+      state: .ready,
+      version: "0.8.0",
+      protocolVersion: 19,
+      executableSHA256: String(repeating: "e", count: 64),
+      schemaSHA256: String(repeating: "d", count: 64),
+      policySHA256: String(repeating: "c", count: 64)
+    )
   }
 }
 

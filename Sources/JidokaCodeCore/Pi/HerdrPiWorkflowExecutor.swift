@@ -24,6 +24,18 @@ protocol HerdrPiRuntimeAPI: Sendable {
     paneID: String,
     attestedBy handshake: HerdrHandshake
   ) async throws -> HerdrPaneProcessInfo
+  func focusWorkspace(
+    workspaceID: String,
+    attestedBy handshake: HerdrHandshake
+  ) async throws
+  func focusTab(
+    tabID: String,
+    attestedBy handshake: HerdrHandshake
+  ) async throws
+  func focusPane(
+    paneID: String,
+    attestedBy handshake: HerdrHandshake
+  ) async throws
   func closePane(
     paneID: String,
     terminalID: String,
@@ -216,9 +228,16 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     }
   }
 
-  public func recoverDurableState() async throws {
+  func recoverDurableResults() async throws {
     recoveryMode = true
     await setLaunchAllowed(false)
+    for run in try await runs.activeRuns() {
+      try await importDurableResultIfPresent(run)
+    }
+  }
+
+  public func recoverDurableState() async throws {
+    try await recoverDurableResults()
     let handshake = try await api.handshake()
     let repositoryBindings = try await runs.repositoryBindings()
     for binding in repositoryBindings where binding.state == .active {
@@ -246,9 +265,6 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     }
 
     recoveryBlockedJobIDs.removeAll()
-    for run in try await runs.activeRuns() {
-      try await importDurableResultIfPresent(run)
-    }
     let durableRuns = try await runs.activeRuns()
     var activeLaunchByHost: [String: PiRunLaunchRecord] = [:]
     for run in durableRuns {
@@ -728,6 +744,162 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
       generation: binding.generation,
       now: now()
     )
+  }
+
+  public func focusMostRecentOwnedPane() async throws {
+    let hosts = try await runs.roleHosts().filter {
+      [.waiting, .running].contains($0.state)
+        && $0.processIdentity != nil
+        && $0.tabID != nil
+        && $0.paneID != nil
+        && $0.terminalID != nil
+    }.sorted {
+      if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+      return $0.id < $1.id
+    }
+
+    for host in hosts {
+      guard let identity = host.processIdentity,
+        (try? HerdrRoleHostRuntime.processIdentity(identity.processID)) == identity,
+        let tabID = host.tabID,
+        let paneID = host.paneID,
+        let terminalID = host.terminalID,
+        let binding = try await runs.jobBinding(jobID: host.jobID),
+        binding.state == .active,
+        binding.generation == host.generation,
+        binding.workspaceID == host.workspaceID,
+        binding.tabID == tabID,
+        let repository = try await runs.repositoryBinding(repositoryID: binding.repositoryID),
+        repository.state == .active,
+        repository.workspaceID == host.workspaceID
+      else {
+        continue
+      }
+
+      let handshake = try await api.handshake()
+      guard repository.socketIdentity == handshake.socketIdentity,
+        repository.herdrVersion == handshake.pong.version,
+        repository.herdrProtocol == handshake.pong.protocolVersion
+      else {
+        throw HerdrPiWorkflowError.topologyUnavailable
+      }
+      let paneCandidates = handshake.snapshot.panes.filter { $0.terminalID == terminalID }
+      guard paneCandidates.count == 1,
+        let pane = paneCandidates.first,
+        pane.workspaceID == host.workspaceID,
+        pane.tabID == tabID,
+        pane.paneID == paneID,
+        let process = try? await api.processInfo(paneID: paneID, attestedBy: handshake),
+        matchesRoleHostProcess(
+          process,
+          processID: identity.processID,
+          roleHostID: host.id,
+          workingDirectory: nil
+        )
+      else {
+        continue
+      }
+
+      let workspaceHandshake: HerdrHandshake
+      do {
+        try await api.focusWorkspace(
+          workspaceID: host.workspaceID,
+          attestedBy: handshake
+        )
+        workspaceHandshake = try await api.handshake()
+      } catch {
+        let recovery = try await api.handshake()
+        guard recovery.socketIdentity == handshake.socketIdentity,
+          recovery.snapshot.focusedWorkspaceID == host.workspaceID
+        else {
+          throw HerdrPiWorkflowError.topologyUnavailable
+        }
+        workspaceHandshake = recovery
+      }
+      guard workspaceHandshake.socketIdentity == handshake.socketIdentity,
+        workspaceHandshake.snapshot.focusedWorkspaceID == host.workspaceID,
+        workspaceHandshake.snapshot.panes.contains(where: {
+          $0.paneID == paneID && $0.terminalID == terminalID
+            && $0.workspaceID == host.workspaceID && $0.tabID == tabID
+        })
+      else {
+        throw HerdrPiWorkflowError.topologyUnavailable
+      }
+
+      let tabHandshake: HerdrHandshake
+      do {
+        try await api.focusTab(tabID: tabID, attestedBy: workspaceHandshake)
+        tabHandshake = try await api.handshake()
+      } catch {
+        let recovery = try await api.handshake()
+        guard recovery.socketIdentity == handshake.socketIdentity,
+          recovery.snapshot.focusedWorkspaceID == host.workspaceID,
+          recovery.snapshot.focusedTabID == tabID
+        else {
+          throw HerdrPiWorkflowError.topologyUnavailable
+        }
+        tabHandshake = recovery
+      }
+      guard tabHandshake.socketIdentity == handshake.socketIdentity,
+        (try? HerdrRoleHostRuntime.processIdentity(identity.processID)) == identity,
+        tabHandshake.snapshot.focusedWorkspaceID == host.workspaceID,
+        tabHandshake.snapshot.focusedTabID == tabID,
+        tabHandshake.snapshot.panes.contains(where: {
+          $0.paneID == paneID && $0.terminalID == terminalID
+            && $0.workspaceID == host.workspaceID && $0.tabID == tabID
+        }),
+        let beforeFocus = try? await api.processInfo(
+          paneID: paneID,
+          attestedBy: tabHandshake
+        ),
+        matchesRoleHostProcess(
+          beforeFocus,
+          processID: identity.processID,
+          roleHostID: host.id,
+          workingDirectory: nil
+        )
+      else {
+        throw HerdrPiWorkflowError.topologyUnavailable
+      }
+
+      do {
+        try await api.focusPane(paneID: paneID, attestedBy: tabHandshake)
+      } catch {
+        let recovery = try await api.handshake()
+        guard recovery.socketIdentity == handshake.socketIdentity,
+          recovery.snapshot.focusedWorkspaceID == host.workspaceID,
+          recovery.snapshot.focusedTabID == tabID,
+          recovery.snapshot.focusedPaneID == paneID
+        else {
+          throw HerdrPiWorkflowError.topologyUnavailable
+        }
+      }
+      let proof = try await api.handshake()
+      guard proof.socketIdentity == handshake.socketIdentity,
+        (try? HerdrRoleHostRuntime.processIdentity(identity.processID)) == identity,
+        proof.snapshot.focusedWorkspaceID == host.workspaceID,
+        proof.snapshot.focusedTabID == tabID,
+        proof.snapshot.focusedPaneID == paneID,
+        proof.snapshot.panes.contains(where: {
+          $0.paneID == paneID && $0.terminalID == terminalID
+            && $0.workspaceID == host.workspaceID && $0.tabID == tabID
+        }),
+        let finalProcess = try? await api.processInfo(
+          paneID: paneID,
+          attestedBy: proof
+        ),
+        matchesRoleHostProcess(
+          finalProcess,
+          processID: identity.processID,
+          roleHostID: host.id,
+          workingDirectory: nil
+        )
+      else {
+        throw HerdrPiWorkflowError.topologyUnavailable
+      }
+      return
+    }
+    throw HerdrPiWorkflowError.roleHostUnavailable
   }
 
   public func shutdownOwnedRoleHosts(timeoutSeconds: TimeInterval = 15) async throws {

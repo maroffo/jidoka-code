@@ -40,11 +40,18 @@ struct ProductionHerdrCompositionTests {
     }
   }
 
-  @Test("production endpoint is fixed by the helper and cannot come from workflow input")
+  @Test("production endpoint and attestation resources cannot come from process input")
   func defaultSocketIsFixed() throws {
     let source = try String(contentsOf: engineMainSource(), encoding: .utf8)
+    let appClient = try String(contentsOf: appClientSource(), encoding: .utf8)
     #expect(source.contains(".appendingPathComponent(\".config/herdr/herdr.sock\""))
+    #expect(appClient.contains(".appendingPathComponent(\".config/herdr/herdr.sock\""))
     #expect(!source.contains("ProcessInfo.processInfo.environment[\"HERDR_SOCKET_PATH\"]"))
+    #expect(!appClient.contains("ProcessInfo.processInfo.environment[\"HERDR_SOCKET_PATH\"]"))
+    #expect(!source.contains("sourceHerdrResources"))
+    #expect(!appClient.contains("sourceHerdr"))
+    #expect(source.contains(".runHerdrPreflight"))
+    #expect(source.contains(".focusInHerdr"))
   }
 
   private func productionRuntimeSource() -> URL {
@@ -56,6 +63,12 @@ struct ProductionHerdrCompositionTests {
   private func engineMainSource() -> URL {
     projectRoot().appendingPathComponent(
       "Sources/JidokaCodeEngineProbe/JidokaCodeEngineMain.swift"
+    )
+  }
+
+  private func appClientSource() -> URL {
+    projectRoot().appendingPathComponent(
+      "Sources/JidokaCodeApp/ApplicationEngineClient.swift"
     )
   }
 

@@ -212,7 +212,7 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 
 ## Acceptance criteria
 
-- [x] Herdr `0.8.0` protocol `19` passa l'handshake fixed; mismatch produce zero mutation. Il digest schema osservato non viene dichiarato autenticato finché H5 non attesta il binary/CLI Herdr.
+- [x] Herdr `0.8.0` protocol `19` passa l'handshake fixed; mismatch produce zero mutation. H5 attesta executable e full schema CLI offline prima del socket; il digest schema non viene usato come identità crittografica del peer.
 - [x] Tutti i test automatici provano zero connessioni al socket default reale.
 - [x] Ogni logical Pi role production è visibile come agente top-level in un pane Herdr; nessun child agent nascosto.
 - [x] Una repository usa un solo workspace adottato o creato con identity exact; Jidoka non chiude mai il workspace condiviso.
@@ -230,8 +230,8 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 - [x] Pause avvia zero nuovi host e lascia terminare i run in flight.
 - [x] Quit lascia il server Herdr e tutti i terminali non Jidoka invariati.
 - [x] Secret sentinel assente da argv, env, metadata, log, SQLite, artifact non autorizzati e history persisted da Jidoka.
-- [ ] Package contiene e firma il host prima dell'app; Herdr non è incluso nel bundle.
-- [ ] Onboarding dichiara Herdr come runtime globale osservabile e fail-closed se assente/incompatibile.
+- [x] Package contiene e firma il host prima dell'app; Herdr non è incluso nel bundle.
+- [x] Onboarding dichiara Herdr come runtime globale osservabile e fail-closed se assente/incompatibile.
 
 ## Workstreams
 
@@ -283,10 +283,10 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 ### H5: Readiness, package e operations
 
 - Scope: EngineProtocol/UI, package, operations e W8 integration.
-- [ ] Herdr readiness compare in onboarding/settings e blocca dispatch se incompatibile.
-- [ ] `Open in Herdr` o focus esplicito solo su azione utente; observer resta read-only by default.
-- [ ] Package firma il host e verifica inventory/provenance; Herdr resta esterno.
-- [ ] Documentare shared-session disclosure, transcript visibility, manual close/takeover e recovery.
+- [x] Herdr readiness compare in onboarding/settings e blocca dispatch se incompatibile.
+- [x] `Open in Herdr` o focus esplicito solo su azione utente; observer resta read-only by default.
+- [x] Package firma il host e verifica inventory/provenance; Herdr resta esterno.
+- [x] Documentare shared-session disclosure, transcript visibility, manual close/takeover e recovery.
 - [x] S11 fake/isolated entra nei gate; default-session canary resta manuale e separato.
 
 ## Verification matrix
@@ -345,9 +345,10 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 
 ## External side effects
 
-- Autorizzati e già eseguiti: fetch/fast-forward locale `main`, branch/worktree dedicati, creazione nella sessione Herdr corrente del workspace `maroffo/jidoka-code`, tab `j/herdr-runtime/g1` e pane analisti visibili; tutti gli agenti analisti H0-H2 sono usciti e nessun lock Pi transitorio resta nel worktree. S11 ha usato soltanto sessioni nominate temporanee eliminate prima del PASS.
-- Autorizzati dall'invocazione corrente: plan/source edit e verifica locale necessari a H1-H4; un commit H4, push del branch `feat/jidoka-code-herdr-production-integration` e creazione della relativa pull request.
-- Non autorizzati: amend, force-push, merge, deployment, install/update/config/stop Herdr, default-session production canary, provider live, mutazioni GitHub diverse dalla pull request autorizzata, Keychain reale, ServiceManagement, Apple Development installed test e package install.
+- Autorizzati e già eseguiti in H0-H4: branch/worktree dedicati, analisi allora visibili nella sessione Herdr, sessioni nominate isolate S11/S12, commit e pubblicazione H1-H4. Gli agenti precedenti sono usciti e nessun lock Pi transitorio resta.
+- Autorizzati e già eseguiti in H5: branch/worktree `feat/jidoka-code-herdr-readiness-package-operations` dalla base merge exact e uso dell'identità Apple Development disponibile per app e package verification locali. Il package non è stato installato.
+- Autorizzati il 2026-08-10 dopo la verifica H5: un commit locale con hook attivi, push non-force del branch dedicato e creazione della relativa pull request.
+- Non autorizzati in H5: amend, force-push, merge, deployment, package install, ServiceManagement, Keychain reale, provider live, install/update/config/stop Herdr, default-session production canary o focus reale, e altre mutation GitHub.
 
 ## Progress
 
@@ -363,8 +364,8 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 - [x] 2026-08-09: H3 Pi TUI parity, private runtime snapshot e structured result/ack/release completati con 396 test, S12 real TUI causal crash/resume, full E2E, 83 test ASAN, 83 test TSAN e manifest retained exact-run verificato. Evidence: [`docs/evidence/herdr-h3-pi-tui-settlement-report.md`](../../evidence/herdr-h3-pi-tui-settlement-report.md).
 - [x] 2026-08-09: review finali H3 architecture, security e test hanno riportato PASS senza finding aperti dopo la chiusura del replay downgrade e della lineage evidence S12.
 - [x] 2026-08-10: H4 durable ownership e production integration completati con schema v4, shared visible Herdr runtime, exact 1/4/5-role topology, recovery-first startup, command authority, pause/quit barriers, moved-host rebind e nessun production RPC fallback. Full gate, E2E, 434-test ASan, 434-test TSan e quattro review closure sono verdi. Evidence: [`docs/evidence/herdr-h4-production-integration-report.md`](../../evidence/herdr-h4-production-integration-report.md).
-- [ ] H5 readiness, package e operations.
-- [ ] Final verification e review.
+- [x] 2026-08-10: H5 readiness, focus esplicito, package e operations completati da `origin/main@8cf8033e38e1710ecac23b1621051e9a73ed417f`. Binary/schema drift, dispatch regain, pane takeover, XPC status, nested signing e payload installer hanno falsificatori permanenti. Evidence: [`docs/evidence/herdr-h5-readiness-package-operations-report.md`](../../evidence/herdr-h5-readiness-package-operations-report.md).
+- [x] 2026-08-10: focused closure, S1/S10/S11/S12, 445-test ASan, 445-test TSan e package audit firmato sono verdi. Review H5 parent completata; review agent indipendenti non avviati per il boundary no-hidden/no-default-session.
 
 ## Surprises and discoveries
 
@@ -375,7 +376,7 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 - Una sessione globale massimizza visibilità e insieme amplia il blast radius del client Jidoka a terminali estranei; il metodo allowlist è quindi un security boundary applicativo.
 - Il config root Herdr reale è `0755`: il client deve validare la directory parent immediata del socket come canonicale, current-user e non scrivibile da group/other, non imporre mode `0700`.
 - Un timeout Swift cancellation-only non interrompe una syscall bloccante; H1 usa deadline monotonic native su connect/read/write e chiude il descriptor su ogni uscita.
-- Il digest dello schema CLI Herdr non autentica il peer socket: H1 lo conserva soltanto come provenance offline, mentre l'attestation binary/schema resta H5.
+- Il digest dello schema CLI Herdr non autentica il peer socket: H5 lega il full schema all'executable approvato e poi richiede l'handshake fixed, ma same-UID peer substitution resta fuori threat model.
 - Un server Herdr nominato headless espone `detached_server_daemon=false`; S11 usa quindi una TUI nominata attached con PTY dimensionato e non contatta il socket default.
 - `pane.report_agent` non accetta `done`: il host riferisce `idle` o `blocked`, mentre `done` resta uno stato osservato derivato e non può completare il job.
 - Gli observer emettono frame terminali strutturati, ma lo screen corrente autorevole per S11 è `pane read --source visible`; concatenare history ANSI produce falsi positivi.
@@ -407,7 +408,13 @@ Move aggiorna il pane ID solo se terminal e run identity restano uguali. Rename 
 - 2026-08-10: startup importa result, ricostruisce/rebind topology e recupera approved-command authority prima della generic job recovery; un binding non provabile blocca soltanto il relativo job.
 - 2026-08-10: pause chiude e drena topology, Pi e command admission; quit chiude un pane soltanto dopo una nuova prova completa di ownership corrente.
 - 2026-08-10: un approved command `started` senza exact accepted evidence diventa `unknown` e non viene mai rieseguito automaticamente; un result accepted può essere replayed soltanto sul repository state esatto.
+- 2026-08-10: H5 accetta una sola policy arm64 per Herdr `0.8.0`, executable digest e full `api schema --json` byte-identico; version, schema e CLI sono verificati con argv credentialless prima di qualsiasi handshake.
+- 2026-08-10: readiness è autorità di dispatch sia nell'engine sia nel runtime production. Un regain ricostruisce recovery prima del pass, mentre result import e command recovery locali non dipendono dalla disponibilità del socket.
+- 2026-08-10: `Open in Herdr` non accetta target UI. Rivalida binding, terminale, PID/start, executable e argv, poi concentra workspace, tab e pane soltanto per comando utente.
+- 2026-08-10: il package locale richiede identità esplicita, firma nested-before-outer, chiude payload e destinazione, resta unsigned/non-notarized e non esegue install o script.
 
 ## Outcomes and retrospective
 
-Da compilare dopo H5 o in caso di stop. Il primo gate decisionale è H3: se il Pi TUI non preserva exact tool/result/settlement e crash semantics senza parsing del terminale, il cutover production resta bloccato e W8 non può dichiarare la visibilità Herdr completata.
+H1-H5 sono completati sulla base merge H4. Il runtime production usa agenti Pi top-level visibili, mantiene result/ack/release e SQLite come sola autorità, recupera ownership e command evidence prima dei job generici, e ora chiude dispatch su ogni drift Herdr binary/schema/socket. Package e operations rendono verificabili host, provenance, shared-session disclosure e recovery senza installare o mutare la sessione globale.
+
+Restano W8/W9 separati: bundle identifier production senza suffisso `.Probe`, reproduction in disposable staging checkout, installer identity/notarization se richiesti, installazione, ServiceManagement, runtime accessibility, Keychain/provider e canary sulla sessione default. Ognuno richiede il checkpoint specifico già definito.

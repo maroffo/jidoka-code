@@ -1,7 +1,7 @@
 import Foundation
 
 public enum EngineProtocolVersion {
-  public static let current = 1
+  public static let current = 2
 }
 
 public enum EngineLifecycleState: String, Codable, Sendable {
@@ -70,6 +70,61 @@ public struct EnginePiStatus: Codable, Equatable, Sendable {
   }
 
   public static let unchecked = EnginePiStatus(state: .unchecked)
+}
+
+public enum EngineHerdrState: String, Codable, Sendable {
+  case unchecked
+  case ready
+  case blocked
+}
+
+public enum EngineHerdrIssueCode: String, CaseIterable, Codable, Sendable {
+  case executableUnavailable
+  case executableMismatch
+  case policyInvalid
+  case schemaMismatch
+  case socketUnavailable
+  case unsafeSocket
+  case versionMismatch
+  case protocolMismatch
+  case capabilityMismatch
+  case runtimeUnavailable
+}
+
+public struct EngineHerdrStatus: Codable, Equatable, Sendable {
+  public let state: EngineHerdrState
+  public let version: String?
+  public let protocolVersion: Int?
+  public let executableSHA256: String?
+  public let schemaSHA256: String?
+  public let policySHA256: String?
+  public let issueCode: EngineHerdrIssueCode?
+  public let summary: String?
+  public let recovery: String?
+
+  public init(
+    state: EngineHerdrState,
+    version: String? = nil,
+    protocolVersion: Int? = nil,
+    executableSHA256: String? = nil,
+    schemaSHA256: String? = nil,
+    policySHA256: String? = nil,
+    issueCode: EngineHerdrIssueCode? = nil,
+    summary: String? = nil,
+    recovery: String? = nil
+  ) {
+    self.state = state
+    self.version = version
+    self.protocolVersion = protocolVersion
+    self.executableSHA256 = executableSHA256
+    self.schemaSHA256 = schemaSHA256
+    self.policySHA256 = policySHA256
+    self.issueCode = issueCode
+    self.summary = summary
+    self.recovery = recovery
+  }
+
+  public static let unchecked = EngineHerdrStatus(state: .unchecked)
 }
 
 public struct EngineRepositoryDraft: Codable, Equatable, Sendable {
@@ -154,19 +209,22 @@ public struct EngineDiagnostics: Codable, Equatable, Sendable {
   public let ambiguousMutationCount: Int
   public let coordinatorFailureCodes: [String]
   public let piIssueCode: PiRuntimeIssueCode?
+  public let herdrIssueCode: EngineHerdrIssueCode?
 
   public init(
     schemaVersion: Int,
     nonterminalJobCount: Int,
     ambiguousMutationCount: Int,
     coordinatorFailureCodes: [String],
-    piIssueCode: PiRuntimeIssueCode?
+    piIssueCode: PiRuntimeIssueCode?,
+    herdrIssueCode: EngineHerdrIssueCode?
   ) {
     self.schemaVersion = schemaVersion
     self.nonterminalJobCount = nonterminalJobCount
     self.ambiguousMutationCount = ambiguousMutationCount
     self.coordinatorFailureCodes = coordinatorFailureCodes
     self.piIssueCode = piIssueCode
+    self.herdrIssueCode = herdrIssueCode
   }
 }
 
@@ -175,6 +233,7 @@ public struct EngineOnboardingSnapshot: Codable, Equatable, Sendable {
   public let externalAutomationAcknowledged: Bool
   public let providerDisclosureAcknowledged: Bool
   public let pi: EnginePiStatus
+  public let herdr: EngineHerdrStatus
   public let credential: EngineCredentialStatus
   public let repositoryCount: Int
   public let configuredProfileRoles: [ModelProfileRole]
@@ -187,6 +246,7 @@ public struct EngineOnboardingSnapshot: Codable, Equatable, Sendable {
     externalAutomationAcknowledged: Bool,
     providerDisclosureAcknowledged: Bool,
     pi: EnginePiStatus,
+    herdr: EngineHerdrStatus,
     credential: EngineCredentialStatus,
     repositoryCount: Int,
     configuredProfileRoles: [ModelProfileRole],
@@ -198,6 +258,7 @@ public struct EngineOnboardingSnapshot: Codable, Equatable, Sendable {
     self.externalAutomationAcknowledged = externalAutomationAcknowledged
     self.providerDisclosureAcknowledged = providerDisclosureAcknowledged
     self.pi = pi
+    self.herdr = herdr
     self.credential = credential
     self.repositoryCount = repositoryCount
     self.configuredProfileRoles = configuredProfileRoles
@@ -214,6 +275,7 @@ public struct EngineSettingsSnapshot: Codable, Equatable, Sendable {
   public let loginItemSelected: Bool
   public let loginItemStatus: LifecycleServiceStatus
   public let credential: EngineCredentialStatus
+  public let herdr: EngineHerdrStatus
 
   public init(
     repositories: [RepositoryConfiguration],
@@ -221,7 +283,8 @@ public struct EngineSettingsSnapshot: Codable, Equatable, Sendable {
     maxConcurrency: Int,
     loginItemSelected: Bool,
     loginItemStatus: LifecycleServiceStatus,
-    credential: EngineCredentialStatus
+    credential: EngineCredentialStatus,
+    herdr: EngineHerdrStatus
   ) {
     self.repositories = repositories
     self.profiles = profiles
@@ -229,6 +292,7 @@ public struct EngineSettingsSnapshot: Codable, Equatable, Sendable {
     self.loginItemSelected = loginItemSelected
     self.loginItemStatus = loginItemStatus
     self.credential = credential
+    self.herdr = herdr
   }
 }
 
@@ -298,6 +362,8 @@ public enum EngineCommandKind: String, CaseIterable, Codable, Hashable, Sendable
   case acknowledgeExternalAutomation
   case acknowledgeProviderDisclosure
   case runPiPreflight
+  case runHerdrPreflight
+  case focusInHerdr
   case replaceCredential
   case deleteCredential
   case addRepository
@@ -322,6 +388,8 @@ public enum EngineCommand: Codable, Equatable, Sendable {
   case acknowledgeExternalAutomation(Bool)
   case acknowledgeProviderDisclosure(Bool)
   case runPiPreflight
+  case runHerdrPreflight
+  case focusInHerdr
   case replaceCredential(Data)
   case deleteCredential
   case addRepository(EngineRepositoryDraft)
@@ -346,6 +414,8 @@ public enum EngineCommand: Codable, Equatable, Sendable {
     case .acknowledgeExternalAutomation: .acknowledgeExternalAutomation
     case .acknowledgeProviderDisclosure: .acknowledgeProviderDisclosure
     case .runPiPreflight: .runPiPreflight
+    case .runHerdrPreflight: .runHerdrPreflight
+    case .focusInHerdr: .focusInHerdr
     case .replaceCredential: .replaceCredential
     case .deleteCredential: .deleteCredential
     case .addRepository: .addRepository
@@ -405,7 +475,8 @@ public enum EngineCommand: Codable, Equatable, Sendable {
         throw EngineClientError(.invalidCommand)
       }
     case .snapshot, .acknowledgeExternalAutomation, .acknowledgeProviderDisclosure,
-      .runPiPreflight, .deleteCredential, .removeRepository, .setPaused, .pollNow,
+      .runPiPreflight, .runHerdrPreflight, .focusInHerdr, .deleteCredential,
+      .removeRepository, .setPaused, .pollNow,
       .setLoginEnabled, .synchronizeLoginStatus, .completeOnboarding, .rollbackOnboarding,
       .prepareForHandoff, .prepareForQuit:
       break
@@ -465,6 +536,7 @@ public enum EngineClientErrorCode: String, CaseIterable, Codable, Sendable {
   case credentialInUse
   case repositoryRejected
   case piBlocked
+  case herdrBlocked
   case loginItemFailed
   case checkpointFailed
   case internalFailure
@@ -546,10 +618,52 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
     }
     guard protocolVersion == request.protocolVersion,
       let result,
-      result.command == request.command.kind
+      result.command == request.command.kind,
+      result.state.onboarding.herdr == result.state.settings.herdr,
+      result.state.diagnostics.herdrIssueCode == result.state.settings.herdr.issueCode
     else {
       throw EngineClientError(.invalidResponse)
     }
+    try Self.validate(result.state.settings.herdr)
     return result
+  }
+
+  private static func validate(_ status: EngineHerdrStatus) throws {
+    let validSHA256: (String?) -> Bool = { value in
+      guard let value else { return false }
+      return value.wholeMatch(of: /^[0-9a-f]{64}$/) != nil
+    }
+    switch status.state {
+    case .unchecked:
+      guard status.version == nil, status.protocolVersion == nil,
+        status.executableSHA256 == nil, status.schemaSHA256 == nil,
+        status.policySHA256 == nil, status.issueCode == nil,
+        status.summary == nil, status.recovery == nil
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .ready:
+      guard status.version == HerdrCompatibilityManifest.herdr080.version,
+        status.protocolVersion == HerdrCompatibilityManifest.herdr080.protocolVersion,
+        validSHA256(status.executableSHA256), validSHA256(status.schemaSHA256),
+        validSHA256(status.policySHA256), status.issueCode == nil,
+        status.summary == nil, status.recovery == nil
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .blocked:
+      guard status.version == nil, status.protocolVersion == nil,
+        status.executableSHA256 == nil, status.schemaSHA256 == nil,
+        status.policySHA256 == nil, status.issueCode != nil,
+        validDiagnostic(status.summary), validDiagnostic(status.recovery)
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    }
+  }
+
+  private static func validDiagnostic(_ value: String?) -> Bool {
+    guard let value, (1...1_024).contains(value.utf8.count) else { return false }
+    return !value.unicodeScalars.contains { $0.value == 0 }
   }
 }

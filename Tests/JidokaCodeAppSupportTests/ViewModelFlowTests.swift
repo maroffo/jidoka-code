@@ -17,6 +17,7 @@ struct ViewModelFlowTests {
 
     await model.acknowledgeExternalAutomation(true)
     await model.runPiPreflight()
+    await model.runHerdrPreflight()
     let sentinel = "github_pat_" + String(repeating: "view-secret", count: 4)
     model.token = sentinel
     await model.validateAndImportCredential()
@@ -38,6 +39,7 @@ struct ViewModelFlowTests {
         .snapshot,
         .acknowledgeExternalAutomation,
         .runPiPreflight,
+        .runHerdrPreflight,
         .replaceCredential,
         .acknowledgeProviderDisclosure,
         .addRepository,
@@ -149,6 +151,9 @@ struct ViewModelFlowTests {
     }
     model.maxConcurrency = 8
     await model.saveMaxConcurrency()
+    await model.runHerdrPreflight()
+    await model.focusInHerdr()
+    #expect(await fake.focusCount == 1)
     #expect(model.state?.settings.maxConcurrency == 8)
     await model.setLoginItemEnabled(false)
     #expect(!model.loginItemSelected)
@@ -174,12 +179,14 @@ struct ViewModelFlowTests {
       JidokaAccessibilityID.menuStatus,
       JidokaAccessibilityID.pollNow,
       JidokaAccessibilityID.pauseResume,
+      JidokaAccessibilityID.focusInHerdr,
       JidokaAccessibilityID.settings,
       JidokaAccessibilityID.openLogs,
       JidokaAccessibilityID.quit,
       JidokaAccessibilityID.onboardingWindow,
       JidokaAccessibilityID.externalAutomationDisclosure,
       JidokaAccessibilityID.piPreflight,
+      JidokaAccessibilityID.herdrPreflight,
       JidokaAccessibilityID.tokenField,
       JidokaAccessibilityID.tokenImport,
       JidokaAccessibilityID.providerDisclosure,
@@ -189,6 +196,8 @@ struct ViewModelFlowTests {
       JidokaAccessibilityID.loginItem,
       JidokaAccessibilityID.onboardingComplete,
       JidokaAccessibilityID.settingsWindow,
+      JidokaAccessibilityID.settingsHerdrPreflight,
+      JidokaAccessibilityID.settingsFocusInHerdr,
       JidokaAccessibilityID.credentialReplacement,
       JidokaAccessibilityID.credentialDeletion,
       JidokaAccessibilityID.ambiguousRecheck,
@@ -210,6 +219,7 @@ private actor AppSupportEngineFake: EngineClient {
   private var lifecycle: EngineLifecycleState
   private var paused = false
   private var pi = EnginePiStatus.unchecked
+  private var herdr = EngineHerdrStatus.unchecked
   private var credential = EngineCredentialStatus.missing
   private var repositories: [RepositoryConfiguration]
   private var profiles: [ModelProfileConfiguration]
@@ -226,6 +236,7 @@ private actor AppSupportEngineFake: EngineClient {
   private(set) var commandKinds: [EngineCommandKind] = []
   private(set) var tokenWasReceived = false
   private(set) var pollCount = 0
+  private(set) var focusCount = 0
   private(set) var recheckCount = 0
   private(set) var authorizationEvidence: EngineAmbiguousMutationEvidence?
 
@@ -243,6 +254,7 @@ private actor AppSupportEngineFake: EngineClient {
         version: "0.84.1",
         policySHA256: String(repeating: "f", count: 64)
       ) : .unchecked
+    herdr = onboardingComplete ? Self.readyHerdr() : .unchecked
     credential =
       onboardingComplete
       ? EngineCredentialStatus(state: .valid, account: "octocat") : .missing
@@ -286,6 +298,11 @@ private actor AppSupportEngineFake: EngineClient {
         version: "0.84.1",
         policySHA256: String(repeating: "f", count: 64)
       )
+    case .runHerdrPreflight:
+      herdr = Self.readyHerdr()
+    case .focusInHerdr:
+      guard herdr.state == .ready else { throw EngineClientError(.herdrBlocked) }
+      focusCount += 1
     case .replaceCredential(let token):
       tokenWasReceived = token.count >= 20
       credential = EngineCredentialStatus(state: .valid, account: "octocat")
@@ -336,7 +353,7 @@ private actor AppSupportEngineFake: EngineClient {
       loginStatus = status
     case .completeOnboarding:
       guard externalAcknowledged, providerAcknowledged, pi.state == .ready,
-        credential.state == .valid, !repositories.isEmpty, loginSelected,
+        herdr.state == .ready, credential.state == .valid, !repositories.isEmpty, loginSelected,
         loginStatus == .enabled
       else {
         throw EngineClientError(.onboardingIncomplete)
@@ -366,6 +383,7 @@ private actor AppSupportEngineFake: EngineClient {
       externalAutomationAcknowledged: externalAcknowledged,
       providerDisclosureAcknowledged: providerAcknowledged,
       pi: pi,
+      herdr: herdr,
       credential: credential,
       repositoryCount: repositories.count,
       configuredProfileRoles: profiles.map(\.role),
@@ -388,14 +406,16 @@ private actor AppSupportEngineFake: EngineClient {
         maxConcurrency: maxConcurrency,
         loginItemSelected: loginSelected,
         loginItemStatus: loginStatus,
-        credential: credential
+        credential: credential,
+        herdr: herdr
       ),
       diagnostics: EngineDiagnostics(
         schemaVersion: 2,
         nonterminalJobCount: ambiguousMutations.count,
         ambiguousMutationCount: ambiguousMutations.count,
         coordinatorFailureCodes: [],
-        piIssueCode: pi.issueCode
+        piIssueCode: pi.issueCode,
+        herdrIssueCode: herdr.issueCode
       )
     )
   }
@@ -407,6 +427,17 @@ private actor AppSupportEngineFake: EngineClient {
       nonterminalJobCount: ambiguousMutations.count,
       ambiguousMutationCount: ambiguousMutations.count,
       databaseCheckpointed: checkpointDatabaseSucceeded
+    )
+  }
+
+  private static func readyHerdr() -> EngineHerdrStatus {
+    EngineHerdrStatus(
+      state: .ready,
+      version: "0.8.0",
+      protocolVersion: 19,
+      executableSHA256: String(repeating: "e", count: 64),
+      schemaSHA256: String(repeating: "d", count: 64),
+      policySHA256: String(repeating: "c", count: 64)
     )
   }
 

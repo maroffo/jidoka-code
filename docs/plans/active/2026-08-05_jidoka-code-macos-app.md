@@ -659,22 +659,22 @@ Pass/falsifier/disposition normativi:
 - [x] H1 typed protocol e fake NDJSON socket, senza production composition. Evidence: `docs/evidence/herdr-h1-protocol-boundary-report.md`.
 - [x] H2 topology più host synthetic a due ruoli in una sessione Herdr temporanea. Evidence: `docs/evidence/herdr-h2-topology-host-report.md`.
 - [x] H3 exact Pi TUI e result/settlement channel con parity W5. Evidence: `docs/evidence/herdr-h3-pi-tui-settlement-report.md`.
-- [ ] H4 durable mapping, recovery-first e production integration; nessun direct-RPC fallback production.
-- [ ] H5 readiness, observer UX, package e operations, poi riprendere W8.
+- [x] H4 durable mapping, recovery-first e production integration; nessun direct-RPC fallback production.
+- [x] H5 readiness, observer UX, package e operations, poi riprendere W8.
 
 ### W8: Packaging, installer, documentation and repository gates
 
 - Scope: `Packaging/`, `scripts/`, `docs/operations.md`, `Makefile`, `.gitignore` se necessario.
 - Excluded: updater, notarization automatica e migrazione automatica di tool esterni.
-- [ ] Script deterministico costruisce release binaries, `.app` layout, resource copy, nested signing in ordine e `codesign` verify.
-- [ ] `Info.plist` dichiara bundle id/version/LSUIElement/minimum OS; LaunchAgent plist bundle-relative soltanto se scelto.
-- [ ] `pkgbuild`/`productbuild` produce installer locale. Nessun postinstall root tenta di registrare login item; il primo onboarding user-context lo registra per default.
-- [ ] Supportare `SIGN_IDENTITY` esplicita; ad-hoc default soltanto se W1 l’ha approvata. Notarization è fuori scope e documentata come rischio distribuzione.
-- [ ] Verificare bundle e pkg non contengano path checkout, token sentinel, sessioni o artifact test.
+- [x] Script deterministico costruisce release binaries, `.app` layout, resource copy, nested signing in ordine e `codesign` verify.
+- [x] `Info.plist` dichiara bundle id/version/LSUIElement/minimum OS; LaunchAgent plist bundle-relative soltanto se scelto.
+- [x] `pkgbuild`/`productbuild` produce installer locale. Nessun postinstall root tenta di registrare login item; il primo onboarding user-context lo registra per default.
+- [x] Supportare `SIGN_IDENTITY` esplicita; ad-hoc resta una fixture S1 soltanto con opt-in. Notarization è fuori scope e documentata come rischio distribuzione.
+- [x] Verificare bundle e pkg non contengano path checkout, token sentinel, sessioni o artifact test.
 - [ ] Ripetere package build in un disposable staging checkout creato per il test, registrare il target e rimuovere soltanto quel path dopo build. Il bundle deve poi avviarsi con cwd `/`; il normale implementation worktree non viene spostato o nascosto.
 - [ ] CHECKPOINT C prima di `installer`: presentare exact pkg path e SHA-256, package/receipt id, target `/Applications/Jidoka Code.app`, firma, eventuale app preesistente e rollback. Dopo autorizzazione, installare, provare risorse bundled e disinstall/restore soltanto se separatamente autorizzato.
-- [ ] Documentare install, primo avvio, token capability, Pi auth, repo toggle, pause, logs, recovery, conflitto con automazioni concorrenti, uninstall manuale e no-merge contract.
-- [ ] Aggiungere target `jidoka-code-check`, `jidoka-code-test`, `jidoka-code-app`, `jidoka-code-package`; integrare build/test macOS nei root gate con exact `DEVELOPER_DIR`, in modo esplicito e non silenzioso.
+- [x] Documentare install checkpoint, primo avvio, token capability, Pi auth, repo toggle, pause, logs, recovery, conflitto con automazioni concorrenti, uninstall manuale e no-merge contract.
+- [x] Aggiungere target `jidoka-code-check`, `jidoka-code-test`, `jidoka-code-app`, `jidoka-code-package`; integrare build/test macOS nei root gate con exact `DEVELOPER_DIR`, in modo esplicito e non silenzioso.
 - [ ] Su host non-macOS il gate deve dichiarare che la release macOS non è verificabile; nessuna release può basarsi soltanto su quel risultato.
 
 ### W9: Final verification, review and supervised canary
@@ -845,8 +845,8 @@ Pass/falsifier/disposition normativi:
 - [x] 2026-08-09: W7 menu bar, onboarding, settings e lifecycle production implementati su `feat/jidoka-code-w7-menu-onboarding-lifecycle` da `origin/main@bec6629`: `EngineClient` async/XPC versionato, helper più bootstrap control plane, pause recovery-first, quit e handoff checkpointed, single-instance, exact ambiguous evidence, credential journal, log redatto e fixture UI separata. Evidenza in `docs/evidence/w7-menu-onboarding-lifecycle-report.md`; acceptance finale, package E2E, 344 test standard, ASan, TSan e S10 passano senza side effect reali.
 - [x] W7 menu bar, onboarding and lifecycle.
 - [x] 2026-08-09: H3 exact visible Pi TUI, private runtime snapshot e result/ack/release settlement completati. Full gate 396 test, S1/S10/S11/S12, ASan/TSan 83 test e review finali passano; evidence in `docs/evidence/herdr-h3-pi-tui-settlement-report.md`.
-- [ ] H visible Herdr agent runtime, prerequisite to W8.
-- [ ] W8 packaging, installer, documentation and repository gates.
+- [x] 2026-08-10: H visible Herdr agent runtime completato attraverso H5. Readiness, focus esplicito, package e operations evidence in `docs/evidence/herdr-h5-readiness-package-operations-report.md`.
+- [ ] W8 packaging, installer, documentation and repository gates. Restano disposable staging checkout, bundle identifier production, CHECKPOINT C install e verifica installed.
 - [ ] W9 final verification, review e canary autorizzato.
 
 ## Surprises and discoveries
@@ -948,7 +948,10 @@ Append-only.
 - 2026-08-09: tre cicli review/fix esauriscono il budget W7. Il blocker meccanico finale `pending_replacement_digest` è rinominato `pending_replacement_sha256`; acceptance, package E2E, ASan e TSan sono ripetuti dopo l'ultimo source edit.
 - 2026-08-09: il project owner autorizza un singolo commit W7, push non-force del branch dedicato e apertura PR. Il merge resta non autorizzato.
 - 2026-08-09: il project owner ha mergiato PR #9 e richiede che Jidoka usi l'unica sessione Herdr globale con piena visibilità di ogni agente. La tranche H parte da `origin/main@282e849bdb4fdf573a1cf4f9bddb35c6fffebeed`; il piano dedicato governa client, host, parity, recovery e package prima di W8.
+- 2026-08-10: H4 è mergiato come `8cf8033e38e1710ecac23b1621051e9a73ed417f`; H5 parte da quella base in branch/worktree separati. Il project owner autorizza branch/worktree e uso dell'identità Apple Development disponibile per package verification locale, ma non commit, push, installazione, ServiceManagement, Keychain/provider, focus o canary default-session.
+- 2026-08-10: dopo la verifica H5, il project owner autorizza separatamente un commit con hook attivi, push non-force del branch dedicato e apertura della relativa pull request. Merge e side effect W8/W9 restano non autorizzati.
+- 2026-08-10: H5 chiude dispatch su attestation Herdr binary/full-schema/handshake, espone `Open in Herdr` soltanto su comando utente con ownership rivalidata, include e firma il role host, produce un `.pkg` locale senza script e documenta shared-session operations. Installazione e remainder W8/W9 restano separati.
 
 ## Outcomes and retrospective
 
-W0, W1 S1-S9 e W2-W7 sono eseguiti. Ad-hoc è definitivamente scartato per le prove lifecycle installate; Apple Development Hikma ha soddisfatto in W1 package, lifecycle update, Keychain, Pi e workflow fidelity. Il helper resta l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53. Checkpoint B è accettato e il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5, coordinator W6 e UI/lifecycle W7 fake-first sono verificati localmente. W7 aggiunge il production `EngineClient` XPC, onboarding/settings, pause recovery-first, checkpointed quit, single-instance, credential journal, logging redatto e S10 sandboxed. La policy ammette le exact build Pi `0.84.0` e `0.84.1`. La tranche H per il runtime agente visibile in Herdr è aperta e precede W8; W8-W9, installer, Apple Development installed W7 lifecycle, runtime VoiceOver, credential e GitHub canary restano aperti e richiedono le autorizzazioni documentate.
+W0, W1 S1-S9, W2-W7 e H1-H5 sono eseguiti. Ad-hoc è definitivamente scartato per lifecycle/install e resta soltanto fixture S1 esplicita; Apple Development soddisfa la verifica locale nested app/host. Il helper resta l'unica topologia che passa tutti i threshold ed è locked dalla decisione #53. Checkpoint B è accettato e il budget provider resta esaurito esattamente a 19/19 senza retry. Durable core, broker/reconciliation GitHub, transport Git app-managed, workflow Pi W5, coordinator W6, UI/lifecycle W7 e runtime Herdr visibile H sono verificati localmente. Herdr `0.8.0` è prerequisito esterno attestato e dispatch fallisce chiuso su drift; il package locale chiude inventory e installer actions ma resta unsigned, unnotarized e non installato. W8-W9, disposable staging checkout, identifier production, CHECKPOINT C, installed lifecycle, runtime VoiceOver, credential/GitHub e default-session canary restano aperti e richiedono le autorizzazioni documentate.

@@ -445,6 +445,16 @@ private actor TopologyEngineClientFake: EngineClient {
         version: "0.84.1",
         policySHA256: String(repeating: "f", count: 64)
       ) : .unchecked
+    let herdr =
+      onboardingReady
+      ? EngineHerdrStatus(
+        state: .ready,
+        version: "0.8.0",
+        protocolVersion: 19,
+        executableSHA256: String(repeating: "e", count: 64),
+        schemaSHA256: String(repeating: "d", count: 64),
+        policySHA256: String(repeating: "c", count: 64)
+      ) : .unchecked
     let profiles = ModelProfileRole.allCases.map {
       ModelProfileConfiguration(
         role: $0,
@@ -470,6 +480,7 @@ private actor TopologyEngineClientFake: EngineClient {
       externalAutomationAcknowledged: onboardingReady,
       providerDisclosureAcknowledged: onboardingReady,
       pi: pi,
+      herdr: herdr,
       credential: credential,
       repositoryCount: repositories.count,
       configuredProfileRoles: profiles.map(\.role),
@@ -492,14 +503,16 @@ private actor TopologyEngineClientFake: EngineClient {
         maxConcurrency: 2,
         loginItemSelected: loginSelected,
         loginItemStatus: loginStatus,
-        credential: credential
+        credential: credential,
+        herdr: herdr
       ),
       diagnostics: EngineDiagnostics(
         schemaVersion: 2,
         nonterminalJobCount: 0,
         ambiguousMutationCount: 0,
         coordinatorFailureCodes: [],
-        piIssueCode: nil
+        piIssueCode: nil,
+        herdrIssueCode: nil
       )
     )
   }

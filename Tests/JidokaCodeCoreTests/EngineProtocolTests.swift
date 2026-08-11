@@ -31,6 +31,16 @@ struct EngineProtocolTests {
     #expect(throws: EngineClientError(.invalidResponse)) {
       try wrongCommand.validate(for: request)
     }
+    let incompleteReadiness = EngineXPCResponse(
+      requestID: request.requestID,
+      result: EngineCommandResponse(
+        command: .setPaused,
+        state: engineProtocolState(herdr: EngineHerdrStatus(state: .ready))
+      )
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try incompleteReadiness.validate(for: request)
+    }
   }
 
   @Test("unsupported versions and malformed request IDs fail closed")
@@ -137,6 +147,8 @@ struct EngineProtocolTests {
       .acknowledgeExternalAutomation(true),
       .acknowledgeProviderDisclosure(true),
       .runPiPreflight,
+      .runHerdrPreflight,
+      .focusInHerdr,
       .replaceCredential(Data(String(repeating: "x", count: 20).utf8)),
       .deleteCredential,
       .addRepository(
@@ -193,7 +205,9 @@ private actor EngineXPCClientFake: EngineClient {
   }
 }
 
-private func engineProtocolState() -> EngineUIState {
+private func engineProtocolState(
+  herdr: EngineHerdrStatus = .unchecked
+) -> EngineUIState {
   let credential = EngineCredentialStatus.missing
   let pi = EnginePiStatus.unchecked
   let onboarding = EngineOnboardingSnapshot(
@@ -201,6 +215,7 @@ private func engineProtocolState() -> EngineUIState {
     externalAutomationAcknowledged: false,
     providerDisclosureAcknowledged: false,
     pi: pi,
+    herdr: herdr,
     credential: credential,
     repositoryCount: 0,
     configuredProfileRoles: [],
@@ -223,14 +238,16 @@ private func engineProtocolState() -> EngineUIState {
       maxConcurrency: 2,
       loginItemSelected: false,
       loginItemStatus: .notRegistered,
-      credential: credential
+      credential: credential,
+      herdr: herdr
     ),
     diagnostics: EngineDiagnostics(
       schemaVersion: 2,
       nonterminalJobCount: 0,
       ambiguousMutationCount: 0,
       coordinatorFailureCodes: [],
-      piIssueCode: nil
+      piIssueCode: nil,
+      herdrIssueCode: nil
     )
   )
 }

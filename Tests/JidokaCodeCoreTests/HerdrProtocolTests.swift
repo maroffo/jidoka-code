@@ -290,6 +290,55 @@ struct HerdrProtocolTests {
     await server.finish()
   }
 
+  @Test("user focus encodes only exact workspace, tab, and pane targets")
+  func explicitFocusRequests() async throws {
+    let workspaceResponse = """
+      {"id":"focus-workspace","result":{"type":"workspace_info","workspace":{"workspace_id":"w-jidoka","active_tab_id":"w-jidoka:t1","label":"maroffo/jidoka-code","number":2,"pane_count":1,"tab_count":1,"focused":true,"agent_status":"working"}}}
+      """ + "\n"
+    let tabResponse = """
+      {"id":"focus-tab","result":{"type":"tab_info","tab":{"tab_id":"w-jidoka:t1","workspace_id":"w-jidoka","label":"j/imp/i42/k7m2/g2","number":1,"pane_count":1,"focused":true,"agent_status":"working"}}}
+      """ + "\n"
+    let paneResponse = """
+      {"id":"focus-pane","result":{"type":"pane_info","pane":{"pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"focused":true,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo"}}}
+      """ + "\n"
+    let server = try HerdrFakeSocketServer(
+      replies: [
+        HerdrFakeReply(Self.pong(id: "ping")),
+        HerdrFakeReply(Self.snapshot(id: "snapshot")),
+        HerdrFakeReply(workspaceResponse),
+        HerdrFakeReply(tabResponse),
+        HerdrFakeReply(paneResponse),
+      ]
+    )
+    let client = try Self.client(
+      server: server,
+      ids: ["ping", "snapshot", "focus-workspace", "focus-tab", "focus-pane"]
+    )
+    let handshake = try await client.handshake()
+    try await client.focusWorkspace(workspaceID: "w-jidoka", attestedBy: handshake)
+    try await client.focusTab(tabID: "w-jidoka:t1", attestedBy: handshake)
+    try await client.focusPane(paneID: "w-jidoka:p1", attestedBy: handshake)
+
+    let requests = await server.requests.snapshot()
+    #expect(
+      try requests.map(Self.method)
+        == ["ping", "session.snapshot", "workspace.focus", "tab.focus", "pane.focus"]
+    )
+    let workspace = try Self.object(requests[2])
+    let workspaceParameters = try #require(workspace["params"] as? [String: Any])
+    #expect(Set(workspaceParameters.keys) == ["workspace_id"])
+    #expect(workspaceParameters["workspace_id"] as? String == "w-jidoka")
+    let tab = try Self.object(requests[3])
+    let tabParameters = try #require(tab["params"] as? [String: Any])
+    #expect(Set(tabParameters.keys) == ["tab_id"])
+    #expect(tabParameters["tab_id"] as? String == "w-jidoka:t1")
+    let pane = try Self.object(requests[4])
+    let paneParameters = try #require(pane["params"] as? [String: Any])
+    #expect(Set(paneParameters.keys) == ["pane_id"])
+    #expect(paneParameters["pane_id"] as? String == "w-jidoka:p1")
+    await server.finish()
+  }
+
   @Test("socket mode owner and symlink boundaries fail before connect")
   func socketFilesystemBoundary() async throws {
     let unsafeMode = try HerdrFakeSocketServer(
