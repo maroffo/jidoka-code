@@ -72,7 +72,7 @@ INSTALLER_SIGN_IDENTITY=<developer-id-installer-sha1> \
 make jidoka-code-package
 ```
 
-`SIGNING_KEYCHAIN=<canonical-keychain-path>` may select a dedicated signing keychain. When supplied, that keychain must also be on the user's keychain search list while `codesign` runs.
+`APPLICATION_SIGNING_KEYCHAIN=<canonical-application-keychain-path>` and `INSTALLER_SIGNING_KEYCHAIN=<canonical-installer-keychain-path>` may select separate dedicated Keychains. `SIGNING_KEYCHAIN=<canonical-keychain-path>` remains a common fallback when both identities intentionally share one Keychain. Every supplied Keychain must already be unlocked and present on the user's Keychain search list while its Apple signing tool runs. Headless builds should prefer separate, temporary Application and Installer Keychains, keep them unlocked only for the bounded build, then restore the original search list and delete them. The packaging scripts never prompt for a Keychain password or mutate the search list.
 
 Notarization is an explicit network mode. The App Store Connect private key must be a canonical, single-link, current-user file with permissions `0400` or `0600`:
 
@@ -93,7 +93,7 @@ The build produces:
 - `build/package-manifest.json`;
 - `build/notarization-result.json` only after Apple returns `Accepted`.
 
-The script signs nested executables before the outer app with Developer ID Application, verifies one Team ID and trusted timestamps, enforces the closed `Packaging/app-inventory.txt`, rejects symlinks and a bundled Herdr executable, and compares the installer payload with the signed app inventory. `productbuild` signs the product with Developer ID Installer and the selected certificate fingerprint. The installer has identifier `com.maroffo.JidokaCode.pkg`, version `0.1.0`, and destination `/Applications/Jidoka Code.app`. It has no lifecycle scripts.
+The script signs nested executables before the outer app with Developer ID Application, verifies one Team ID and trusted timestamps, enforces the closed `Packaging/app-inventory.txt`, rejects symlinks and a bundled Herdr executable, and compares the installer payload with the signed app inventory. A bounded unsigned `productbuild` step assembles the archive, then a separately bounded `productsign --timestamp` step applies the Developer ID Installer signature and selected certificate fingerprint. The archive assembly and archive signing commands each have a 300-second process-group deadline; notarization wait has an explicit 30-minute limit. The runner terminates same-process-group descendants through TERM and KILL, but it is not a sandbox and cannot reclaim a descendant that daemonizes or escapes with `setsid()`. Production callers are fixed to Apple's `/usr/bin/productbuild` and `/usr/bin/productsign`; caller-selected executables are not accepted by the package script. The application identifier is `com.maroffo.JidokaCode`, the helper service is `com.maroffo.JidokaCode.Engine`, and the installer identifier is `com.maroffo.JidokaCode.pkg`, version `0.1.0`, with destination `/Applications/Jidoka Code.app`. It has no lifecycle scripts.
 
 With `NOTARIZE_PACKAGE=1`, the product is published only after Apple Notary Service returns `Accepted`, `stapler` succeeds, `stapler validate` passes, and Gatekeeper reports `Notarized Developer ID`. The manifest SHA-256 binds the post-staple package bytes and records the submission ID. Without that flag, the package remains Developer ID signed but unnotarized.
 

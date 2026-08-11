@@ -13,17 +13,20 @@ readonly APP="$BUILD_ROOT/Jidoka Code.app"
 readonly PACKAGE="$BUILD_ROOT/Jidoka Code.pkg"
 readonly PACKAGE_MANIFEST="$BUILD_ROOT/package-manifest.json"
 readonly NOTARIZATION_RESULT="$BUILD_ROOT/notarization-result.json"
+readonly BOUNDED_COMMAND="$ROOT/scripts/run-bounded-command.pl"
+readonly PACKAGE_TOOL_TIMEOUT_SECONDS=300
+readonly APPLICATION_IDENTIFIER="com.maroffo.JidokaCode"
 readonly PACKAGE_IDENTIFIER="com.maroffo.JidokaCode.pkg"
 readonly INSTALL_LOCATION="/Applications"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 readonly INSTALLER_SIGN_IDENTITY="${INSTALLER_SIGN_IDENTITY:-}"
 readonly SIGNING_KEYCHAIN="${SIGNING_KEYCHAIN:-}"
+readonly APPLICATION_SIGNING_KEYCHAIN="${APPLICATION_SIGNING_KEYCHAIN:-$SIGNING_KEYCHAIN}"
+readonly INSTALLER_SIGNING_KEYCHAIN="${INSTALLER_SIGNING_KEYCHAIN:-$SIGNING_KEYCHAIN}"
 readonly NOTARIZE_PACKAGE="${NOTARIZE_PACKAGE:-0}"
 readonly NOTARY_KEY="${NOTARY_KEY:-}"
 readonly NOTARY_KEY_ID="${NOTARY_KEY_ID:-}"
 readonly NOTARY_ISSUER="${NOTARY_ISSUER:-}"
-PRODUCTBUILD_KEYCHAIN_ARGUMENTS=()
-SECURITY_KEYCHAIN_ARGUMENTS=()
 TEMP_ROOT=""
 
 fail() {
@@ -31,29 +34,43 @@ fail() {
     exit 1
 }
 
-configure_signing_keychain() {
+run_package_tool() {
+    local name="$1"
+    local status=0
+    shift
+    "$BOUNDED_COMMAND" "$PACKAGE_TOOL_TIMEOUT_SECONDS" "$@" || status=$?
+    if [[ "$status" == "124" ]]; then
+        fail "$name exceeded ${PACKAGE_TOOL_TIMEOUT_SECONDS}s"
+    elif [[ "$status" != "0" ]]; then
+        fail "$name failed"
+    fi
+}
+
+validate_signing_keychain() {
+    local keychain="$1"
+    local name="$2"
     local canonical_parent
-    if [[ -z "$SIGNING_KEYCHAIN" ]]; then
+    if [[ -z "$keychain" ]]; then
         return
     fi
-    [[ "$SIGNING_KEYCHAIN" == /* && -f "$SIGNING_KEYCHAIN" && ! -L "$SIGNING_KEYCHAIN" ]] || \
-        fail "SIGNING_KEYCHAIN must be an absolute regular keychain file"
-    canonical_parent="$(cd "$(/usr/bin/dirname "$SIGNING_KEYCHAIN")" && pwd -P)"
-    [[ "$canonical_parent/$(/usr/bin/basename "$SIGNING_KEYCHAIN")" == "$SIGNING_KEYCHAIN" ]] || \
-        fail "SIGNING_KEYCHAIN must be canonical"
-    PRODUCTBUILD_KEYCHAIN_ARGUMENTS=(--keychain "$SIGNING_KEYCHAIN")
-    SECURITY_KEYCHAIN_ARGUMENTS=("$SIGNING_KEYCHAIN")
+    [[ "$keychain" == /* && -f "$keychain" && ! -L "$keychain" ]] || \
+        fail "$name must be an absolute regular keychain file"
+    canonical_parent="$(cd "$(/usr/bin/dirname "$keychain")" && pwd -P)"
+    [[ "$canonical_parent/$(/usr/bin/basename "$keychain")" == "$keychain" ]] || \
+        fail "$name must be canonical"
 }
 
 verify_identity() {
     local identity="$1"
     local policy="$2"
     local name="$3"
+    local keychain="$4"
     local identities
-    identities="$(
-        /usr/bin/security find-identity -v -p "$policy" \
-            "${SECURITY_KEYCHAIN_ARGUMENTS[@]}" 2>/dev/null
-    )"
+    if [[ -n "$keychain" ]]; then
+        identities="$(/usr/bin/security find-identity -v -p "$policy" "$keychain" 2>/dev/null)"
+    else
+        identities="$(/usr/bin/security find-identity -v -p "$policy" 2>/dev/null)"
+    fi
     printf '%s\n' "$identities" | /usr/bin/awk -v expected="$identity" '
         toupper($2) == toupper(expected) { found = 1 }
         END { exit(found ? 0 : 1) }
@@ -62,11 +79,13 @@ verify_identity() {
 
 certificate_sha256_for_identity() {
     local identity="$1"
+    local keychain="$2"
     local certificates
-    certificates="$(
-        /usr/bin/security find-certificate -a -Z \
-            "${SECURITY_KEYCHAIN_ARGUMENTS[@]}" 2>/dev/null
-    )"
+    if [[ -n "$keychain" ]]; then
+        certificates="$(/usr/bin/security find-certificate -a -Z "$keychain" 2>/dev/null)"
+    else
+        certificates="$(/usr/bin/security find-certificate -a -Z 2>/dev/null)"
+    fi
     /usr/bin/awk -v expected="$identity" '
         /^SHA-256 hash:/ { current = toupper($3) }
         /^SHA-1 hash:/ && toupper($3) == toupper(expected) && !found {
@@ -131,10 +150,13 @@ cleanup() {
 [[ "$INSTALLER_SIGN_IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]] || \
     fail "INSTALLER_SIGN_IDENTITY must name one explicit installer identity"
 validate_notarization_configuration
-configure_signing_keychain
-readonly -a PRODUCTBUILD_KEYCHAIN_ARGUMENTS SECURITY_KEYCHAIN_ARGUMENTS
-verify_identity "$SIGN_IDENTITY" codesigning SIGN_IDENTITY
-verify_identity "$INSTALLER_SIGN_IDENTITY" basic INSTALLER_SIGN_IDENTITY
+validate_signing_keychain "$APPLICATION_SIGNING_KEYCHAIN" APPLICATION_SIGNING_KEYCHAIN
+validate_signing_keychain "$INSTALLER_SIGNING_KEYCHAIN" INSTALLER_SIGNING_KEYCHAIN
+verify_identity "$SIGN_IDENTITY" codesigning SIGN_IDENTITY "$APPLICATION_SIGNING_KEYCHAIN"
+verify_identity \
+    "$INSTALLER_SIGN_IDENTITY" basic INSTALLER_SIGN_IDENTITY "$INSTALLER_SIGNING_KEYCHAIN"
+[[ -f "$BOUNDED_COMMAND" && -x "$BOUNDED_COMMAND" && ! -L "$BOUNDED_COMMAND" ]] || \
+    fail "bounded command runner is unavailable"
 [[ -d "$BUILD_ROOT" && ! -L "$BUILD_ROOT" ]] || /bin/mkdir -p "$BUILD_ROOT"
 [[ "$(cd "$BUILD_ROOT" && pwd -P)" == "$ROOT/build" ]] || \
     fail "build root escapes repository"
@@ -142,7 +164,11 @@ verify_identity "$INSTALLER_SIGN_IDENTITY" basic INSTALLER_SIGN_IDENTITY
 TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-package.XXXXXX")"
 readonly TEMP_ROOT
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 readonly COMPONENT_PACKAGE="$TEMP_ROOT/JidokaCode-component.pkg"
+readonly UNSIGNED_PRODUCT_PACKAGE="$TEMP_ROOT/Jidoka Code-unsigned.pkg"
 readonly PRODUCT_PACKAGE="$TEMP_ROOT/Jidoka Code.pkg"
 readonly EXPANDED_PACKAGE="$TEMP_ROOT/expanded"
 readonly RAW_PAYLOAD_LIST="$TEMP_ROOT/payload-raw.txt"
@@ -154,7 +180,7 @@ readonly SPCTL_OUTPUT="$TEMP_ROOT/spctl-package.txt"
 
 if ! /usr/bin/env \
     SIGN_IDENTITY="$SIGN_IDENTITY" \
-    SIGNING_KEYCHAIN="$SIGNING_KEYCHAIN" \
+    SIGNING_KEYCHAIN="$APPLICATION_SIGNING_KEYCHAIN" \
     ALLOW_ADHOC_SIGNING=0 \
     "$ROOT/scripts/package-app.sh"
 then
@@ -166,7 +192,7 @@ fi
 app_version="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
 app_bundle_identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"
 [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid application version"
-[[ "$app_bundle_identifier" == "com.maroffo.JidokaCode.Probe" ]] || \
+[[ "$app_bundle_identifier" == "$APPLICATION_IDENTIFIER" ]] || \
     fail "unexpected application bundle identifier"
 if LC_ALL=C /usr/bin/grep -R -F -l "$ROOT" "$APP" >/dev/null 2>&1; then
     fail "signed application contains its checkout path"
@@ -180,11 +206,18 @@ fi
     --identifier "$PACKAGE_IDENTIFIER" \
     --version "$app_version" \
     "$COMPONENT_PACKAGE"
-/usr/bin/productbuild \
-    --package "$COMPONENT_PACKAGE" \
-    --sign "$INSTALLER_SIGN_IDENTITY" \
-    "${PRODUCTBUILD_KEYCHAIN_ARGUMENTS[@]}" \
-    "$PRODUCT_PACKAGE"
+productbuild_arguments=(--package "$COMPONENT_PACKAGE" "$UNSIGNED_PRODUCT_PACKAGE")
+readonly -a productbuild_arguments
+run_package_tool productbuild /usr/bin/productbuild "${productbuild_arguments[@]}"
+[[ -f "$UNSIGNED_PRODUCT_PACKAGE" && ! -L "$UNSIGNED_PRODUCT_PACKAGE" ]] || \
+    fail "unsigned product package is missing"
+productsign_arguments=(--sign "$INSTALLER_SIGN_IDENTITY" --timestamp)
+if [[ -n "$INSTALLER_SIGNING_KEYCHAIN" ]]; then
+    productsign_arguments+=(--keychain "$INSTALLER_SIGNING_KEYCHAIN")
+fi
+productsign_arguments+=("$UNSIGNED_PRODUCT_PACKAGE" "$PRODUCT_PACKAGE")
+readonly -a productsign_arguments
+run_package_tool productsign /usr/bin/productsign "${productsign_arguments[@]}"
 [[ -f "$PRODUCT_PACKAGE" && ! -L "$PRODUCT_PACKAGE" ]] || fail "product package is missing"
 
 /usr/sbin/pkgutil --payload-files "$PRODUCT_PACKAGE" >"$RAW_PAYLOAD_LIST"
@@ -253,6 +286,7 @@ if [[ "$NOTARIZE_PACKAGE" == "1" ]]; then
         --key-id "$NOTARY_KEY_ID" \
         --issuer "$NOTARY_ISSUER" \
         --wait \
+        --timeout 30m \
         --output-format json \
         >"$NOTARY_RESPONSE"
     then
@@ -344,7 +378,7 @@ host_team="$(/usr/bin/codesign -dvvv "$APP/Contents/Helpers/JidokaCodeHerdrHost"
 [[ -n "$app_team" && "$app_team" != "not set" && "$app_team" == "$host_team" ]] || \
     fail "application and Herdr host signing teams differ"
 if ! installer_certificate_sha256="$(
-    certificate_sha256_for_identity "$INSTALLER_SIGN_IDENTITY"
+    certificate_sha256_for_identity "$INSTALLER_SIGN_IDENTITY" "$INSTALLER_SIGNING_KEYCHAIN"
 )"; then
     fail "installer signing certificate is unavailable"
 fi

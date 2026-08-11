@@ -48,6 +48,11 @@ list_rpaths() {
     '
 }
 
+codesign_identifier() {
+    /usr/bin/codesign -d --verbose=4 "$1" 2>&1 | \
+        /usr/bin/awk -F= '$1 == "Identifier" { print $2; exit }'
+}
+
 remove_developer_rpaths() {
     local executable="$1"
     local rpath
@@ -183,7 +188,121 @@ assert_cleanup_guard() {
     /bin/rm -rf -- "$parent"
 }
 
+assert_bounded_command_runner() {
+    local block_line
+    local child_command
+    local child_pid
+    local distinctive_status=0
+    local elapsed
+    local false_status=0
+    local fork_line
+    local handler_line
+    local runner="$ROOT/scripts/run-bounded-command.pl"
+    local signal_child_command
+    local signal_child_pid
+    local signal_elapsed
+    local signal_start
+    local signal_status=0
+    local start
+    local status=0
+    local unblock_line
+
+    [[ -f "$runner" && -x "$runner" && ! -L "$runner" ]] || \
+        fail "bounded command runner is unavailable"
+    /usr/bin/perl -c "$runner" >/dev/null 2>&1 || fail "bounded command runner is invalid"
+    "$runner" 2 /usr/bin/true || fail "bounded command runner changed a successful status"
+    "$runner" 2 /usr/bin/false >/dev/null 2>&1 || false_status=$?
+    [[ "$false_status" == "1" ]] || fail "bounded command runner changed a failed status"
+    /bin/cat >"$TEMP_ROOT/bounded-exit-37.sh" <<'SCRIPT'
+#!/bin/sh
+exit 37
+SCRIPT
+    /bin/chmod 0700 "$TEMP_ROOT/bounded-exit-37.sh"
+    "$runner" 2 "$TEMP_ROOT/bounded-exit-37.sh" >/dev/null 2>&1 || distinctive_status=$?
+    [[ "$distinctive_status" == "37" ]] || \
+        fail "bounded command runner changed a distinctive failed status"
+
+    block_line="$(
+        /usr/bin/grep -n -m 1 -F 'sigprocmask(SIG_BLOCK' "$runner" | /usr/bin/cut -d: -f1
+    )"
+    fork_line="$(
+        /usr/bin/grep -n -m 1 -F "my \$pid = fork();" "$runner" | /usr/bin/cut -d: -f1
+    )"
+    handler_line="$(
+        /usr/bin/grep -n -m 1 -F "\$SIG{HUP} = sub" "$runner" | /usr/bin/cut -d: -f1
+    )"
+    unblock_line="$(
+        /usr/bin/grep -n -F "defined sigprocmask(SIG_SETMASK, \$previous_signals)" \
+            "$runner" | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1
+    )"
+    [[ "$block_line" =~ ^[0-9]+$ && "$fork_line" =~ ^[0-9]+$ && \
+        "$handler_line" =~ ^[0-9]+$ && "$unblock_line" =~ ^[0-9]+$ && \
+        "$block_line" -lt "$fork_line" && "$fork_line" -lt "$handler_line" && \
+        "$handler_line" -lt "$unblock_line" ]] || \
+        fail "bounded command signal mask and handler ordering differs"
+
+    /bin/cat >"$TEMP_ROOT/bounded-resistant.sh" <<'SCRIPT'
+#!/bin/sh
+trap 'exit 0' TERM
+/bin/sh -c 'trap "" TERM; exec /bin/sleep 30' &
+echo $! >"$1"
+wait
+SCRIPT
+    /bin/chmod 0700 "$TEMP_ROOT/bounded-resistant.sh"
+    start="$(/bin/date +%s)"
+    "$runner" 1 "$TEMP_ROOT/bounded-resistant.sh" "$TEMP_ROOT/bounded-child.pid" \
+        >"$TEMP_ROOT/bounded.stdout" 2>"$TEMP_ROOT/bounded.stderr" || status=$?
+    elapsed=$(( $(/bin/date +%s) - start ))
+    [[ "$status" == "124" && "$elapsed" -lt 6 ]] || \
+        fail "bounded command runner did not enforce its deadline"
+    [[ "$(<"$TEMP_ROOT/bounded.stderr")" == "bounded command timed out after 1s" ]] || \
+        fail "bounded command runner emitted unexpected diagnostics"
+    child_pid="$(<"$TEMP_ROOT/bounded-child.pid")"
+    [[ "$child_pid" =~ ^[0-9]+$ ]] || fail "bounded command child PID is invalid"
+    if /bin/kill -0 "$child_pid" 2>/dev/null; then
+        child_command="$(/bin/ps -p "$child_pid" -o command= 2>/dev/null || true)"
+        [[ "$child_command" != "/bin/sleep 30" ]] || \
+            fail "bounded command runner left a descendant alive"
+    fi
+
+    /bin/cat >"$TEMP_ROOT/bounded-immediate-signal.sh" <<'SCRIPT'
+#!/bin/sh
+echo $$ >"$1"
+/bin/kill -TERM "$PPID"
+exec /bin/sleep 30
+SCRIPT
+    /bin/chmod 0700 "$TEMP_ROOT/bounded-immediate-signal.sh"
+    signal_start="$(/bin/date +%s)"
+    "$runner" 30 "$TEMP_ROOT/bounded-immediate-signal.sh" \
+        "$TEMP_ROOT/bounded-signal-child.pid" \
+        >"$TEMP_ROOT/bounded-signal.stdout" 2>"$TEMP_ROOT/bounded-signal.stderr" || \
+        signal_status=$?
+    signal_elapsed=$(( $(/bin/date +%s) - signal_start ))
+    [[ "$signal_status" == "143" && "$signal_elapsed" -lt 3 ]] || \
+        fail "bounded command runner did not forward an immediate TERM exactly"
+    [[ ! -s "$TEMP_ROOT/bounded-signal.stdout" && \
+        ! -s "$TEMP_ROOT/bounded-signal.stderr" ]] || \
+        fail "bounded command runner emitted output for an immediate TERM"
+    signal_child_pid="$(<"$TEMP_ROOT/bounded-signal-child.pid")"
+    [[ "$signal_child_pid" =~ ^[0-9]+$ ]] || \
+        fail "bounded command signal child PID is invalid"
+    if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then
+        signal_child_command="$(
+            /bin/ps -p "$signal_child_pid" -o command= 2>/dev/null || true
+        )"
+        [[ "$signal_child_command" != "/bin/sleep 30" ]] || \
+            fail "bounded command runner leaked an immediate-signal child"
+    fi
+    if "$runner" 1 relative-command >/dev/null 2>&1; then
+        fail "bounded command runner accepted a relative executable"
+    fi
+}
+
+TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-s1.XXXXXX")"
+readonly TEMP_ROOT
+trap cleanup EXIT
 assert_cleanup_guard
+assert_bounded_command_runner
 if missing_identity_error="$(
     /usr/bin/env -u SIGN_IDENTITY -u INSTALLER_SIGN_IDENTITY \
         "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
@@ -203,6 +322,83 @@ fi
 [[ "$missing_installer_identity_error" == \
     *"INSTALLER_SIGN_IDENTITY must name one explicit installer identity"* ]] || \
     fail "installer package did not fail closed on installer signing identity"
+if implicit_keychain_app_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        SIGNING_KEYCHAIN='' \
+        ALLOW_ADHOC_SIGNING=0 \
+        "$ROOT/scripts/package-app.sh" 2>&1 >/dev/null
+)"; then
+    fail "application package accepted an unknown login-Keychain identity"
+fi
+[[ "$implicit_keychain_app_error" == *"SIGN_IDENTITY is not a valid local identity"* && \
+    "$implicit_keychain_app_error" != *"unbound variable"* ]] || \
+    fail "application package did not handle an implicit login Keychain"
+if implicit_keychain_installer_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        INSTALLER_SIGN_IDENTITY=1111111111111111111111111111111111111111 \
+        SIGNING_KEYCHAIN='' \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package accepted an unknown login-Keychain identity"
+fi
+[[ "$implicit_keychain_installer_error" == *"SIGN_IDENTITY is not a valid local identity"* && \
+    "$implicit_keychain_installer_error" != *"unbound variable"* ]] || \
+    fail "installer package did not handle an implicit login Keychain"
+readonly MISSING_COMMON_KEYCHAIN="/tmp/jidoka-code-missing-common.keychain-db"
+readonly MISSING_APPLICATION_KEYCHAIN="/tmp/jidoka-code-missing-application.keychain-db"
+readonly MISSING_INSTALLER_KEYCHAIN="/tmp/jidoka-code-missing-installer.keychain-db"
+VALID_APPLICATION_KEYCHAIN="$(cd "$TEMP_ROOT" && pwd -P)/application.keychain-db"
+readonly VALID_APPLICATION_KEYCHAIN
+/usr/bin/touch "$VALID_APPLICATION_KEYCHAIN"
+/bin/chmod 0600 "$VALID_APPLICATION_KEYCHAIN"
+[[ ! -e "$MISSING_COMMON_KEYCHAIN" && ! -L "$MISSING_COMMON_KEYCHAIN" ]]
+[[ ! -e "$MISSING_APPLICATION_KEYCHAIN" && ! -L "$MISSING_APPLICATION_KEYCHAIN" ]]
+[[ ! -e "$MISSING_INSTALLER_KEYCHAIN" && ! -L "$MISSING_INSTALLER_KEYCHAIN" ]]
+if invalid_common_keychain_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        INSTALLER_SIGN_IDENTITY=1111111111111111111111111111111111111111 \
+        SIGNING_KEYCHAIN="$MISSING_COMMON_KEYCHAIN" \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package accepted a missing common Keychain"
+fi
+[[ "$invalid_common_keychain_error" == \
+    *"APPLICATION_SIGNING_KEYCHAIN must be an absolute regular keychain file"* ]] || \
+    fail "common Keychain did not route to the application signing path"
+if invalid_common_installer_keychain_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        INSTALLER_SIGN_IDENTITY=1111111111111111111111111111111111111111 \
+        SIGNING_KEYCHAIN="$MISSING_COMMON_KEYCHAIN" \
+        APPLICATION_SIGNING_KEYCHAIN="$VALID_APPLICATION_KEYCHAIN" \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package accepted a missing common Installer Keychain"
+fi
+[[ "$invalid_common_installer_keychain_error" == \
+    *"INSTALLER_SIGNING_KEYCHAIN must be an absolute regular keychain file"* ]] || \
+    fail "common Keychain did not route to the installer signing path"
+if invalid_application_keychain_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        INSTALLER_SIGN_IDENTITY=1111111111111111111111111111111111111111 \
+        APPLICATION_SIGNING_KEYCHAIN="$MISSING_APPLICATION_KEYCHAIN" \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package accepted a missing application Keychain"
+fi
+[[ "$invalid_application_keychain_error" == \
+    *"APPLICATION_SIGNING_KEYCHAIN must be an absolute regular keychain file"* ]] || \
+    fail "installer package did not validate its application Keychain"
+if invalid_installer_keychain_error="$(
+    SIGN_IDENTITY=0000000000000000000000000000000000000000 \
+        INSTALLER_SIGN_IDENTITY=1111111111111111111111111111111111111111 \
+        INSTALLER_SIGNING_KEYCHAIN="$MISSING_INSTALLER_KEYCHAIN" \
+        "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
+)"; then
+    fail "installer package accepted a missing installer Keychain"
+fi
+[[ "$invalid_installer_keychain_error" == \
+    *"INSTALLER_SIGNING_KEYCHAIN must be an absolute regular keychain file"* ]] || \
+    fail "installer package did not validate its installer Keychain"
 if invalid_notarize_error="$(
     SIGN_IDENTITY=0000000000000000000000000000000000000000 \
         INSTALLER_SIGN_IDENTITY=0000000000000000000000000000000000000000 \
@@ -227,16 +423,58 @@ fi
     fail "installer package must use one pkgbuild step"
 [[ "$(/usr/bin/grep -Fc '/usr/bin/productbuild' "$ROOT/scripts/package-installer.sh")" == "1" ]] || \
     fail "installer package must use one productbuild step"
+[[ "$(/usr/bin/grep -Fc '/usr/bin/productsign' "$ROOT/scripts/package-installer.sh")" == "1" ]] || \
+    fail "installer package must use one productsign step"
 [[ "$(/usr/bin/grep -Fc '/usr/bin/xcrun notarytool submit' "$ROOT/scripts/package-installer.sh")" == "1" ]] || \
     fail "installer package must use one explicit notary submission step"
 /usr/bin/grep -Fq -- "--sign \"\$INSTALLER_SIGN_IDENTITY\"" \
     "$ROOT/scripts/package-installer.sh" || \
     fail "product package must use the explicit installer identity"
+/usr/bin/grep -Fq -- "--timeout 30m" "$ROOT/scripts/package-installer.sh" || \
+    fail "notarization wait must have an explicit timeout"
 [[ "$(/usr/bin/grep -Ec '(^|/)installer([[:space:]]|$)' "$ROOT/scripts/package-installer.sh")" == "0" ]] || \
     fail "package builder must not install its output"
-TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-s1.XXXXXX")"
-readonly TEMP_ROOT
-trap cleanup EXIT
+productbuild_plan="$(
+    /usr/bin/awk \
+        '/^productbuild_arguments=/{capture=1} capture{print} /^readonly -a productbuild_arguments$/{exit}' \
+        "$ROOT/scripts/package-installer.sh"
+)"
+# shellcheck disable=SC2016
+readonly expected_productbuild_plan='productbuild_arguments=(--package "$COMPONENT_PACKAGE" "$UNSIGNED_PRODUCT_PACKAGE")
+readonly -a productbuild_arguments'
+[[ "$productbuild_plan" == "$expected_productbuild_plan" ]] || \
+    fail "unsigned productbuild argv differs"
+productsign_plan="$(
+    /usr/bin/awk \
+        '/^productsign_arguments=/{capture=1} capture{print} /^readonly -a productsign_arguments$/{exit}' \
+        "$ROOT/scripts/package-installer.sh"
+)"
+# shellcheck disable=SC2016
+readonly expected_productsign_plan='productsign_arguments=(--sign "$INSTALLER_SIGN_IDENTITY" --timestamp)
+if [[ -n "$INSTALLER_SIGNING_KEYCHAIN" ]]; then
+    productsign_arguments+=(--keychain "$INSTALLER_SIGNING_KEYCHAIN")
+fi
+productsign_arguments+=("$UNSIGNED_PRODUCT_PACKAGE" "$PRODUCT_PACKAGE")
+readonly -a productsign_arguments'
+[[ "$productsign_plan" == "$expected_productsign_plan" ]] || \
+    fail "timestamped productsign argv differs"
+/usr/bin/grep -Fxq 'readonly PACKAGE_IDENTIFIER="com.maroffo.JidokaCode.pkg"' \
+    "$ROOT/scripts/package-installer.sh" || fail "installer receipt identifier differs"
+/usr/bin/grep -Fxq 'readonly INSTALL_LOCATION="/Applications"' \
+    "$ROOT/scripts/package-installer.sh" || fail "installer destination differs"
+/usr/bin/perl -0ne '
+    $found = 1 if /startMainQuitObserver \{ \[weak self\] in\n\s+self\?\.prepareForRequestedTermination\(\)\n\s+\}/;
+    END { exit($found ? 0 : 1) }
+' "$ROOT/Sources/JidokaCodeApp/ApplicationComposition.swift" || \
+    fail "main quit notification bypasses durable preparation"
+if /usr/bin/grep -Fq 'NSApplication.shared.terminate' \
+    "$ROOT/Sources/JidokaCodeApp/LifecycleCLI.swift"; then
+    fail "lifecycle notification terminates before durable preparation"
+fi
+/usr/bin/grep -Fq \
+    "macOS release verification is unavailable on \$HOST_OS; release remains unverified" \
+    "$ROOT/scripts/verify-toolchain.sh" || \
+    fail "non-macOS release gate is not explicit"
 readonly COPIED_APP="$TEMP_ROOT/Jidoka Code.app"
 readonly MUTATED_APP="$TEMP_ROOT/Jidoka Code Mutated.app"
 readonly MUTATED_RUNNER_APP="$TEMP_ROOT/Jidoka Code Runner Mutated.app"
@@ -251,7 +489,7 @@ JIDOKA_PI_RESOURCE_ROOT="$SOURCE_APP/Contents/Resources/Pi" \
 
 /usr/bin/plutil -lint "$SOURCE_APP/Contents/Info.plist"
 [[ "$(/usr/bin/plutil -extract CFBundleIdentifier raw "$SOURCE_APP/Contents/Info.plist")" == \
-    "com.maroffo.JidokaCode.Probe" ]]
+    "com.maroffo.JidokaCode" ]] || fail "application bundle identifier is not production"
 [[ "$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$SOURCE_APP/Contents/Info.plist")" == "14.0" ]]
 
 expected_inventory="$(<"$ROOT/Packaging/app-inventory.txt")"
@@ -259,16 +497,16 @@ actual_inventory="$(cd "$SOURCE_APP" && /usr/bin/find . -print | LC_ALL=C /usr/b
 [[ "$actual_inventory" == "$expected_inventory" ]] || fail "bundle inventory differs from allowlist"
 [[ -z "$(/usr/bin/find "$SOURCE_APP" -type l -print)" ]] || fail "bundle contains symbolic links"
 
-launch_agent_plist="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist"
+launch_agent_plist="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist"
 /usr/bin/plutil -lint "$launch_agent_plist"
 [[ "$(/usr/bin/plutil -extract Label raw "$launch_agent_plist")" == \
-    "com.maroffo.JidokaCode.EngineProbe" ]]
+    "com.maroffo.JidokaCode.Engine" ]] || fail "launch agent identifier is not production"
 [[ "$(/usr/bin/plutil -extract BundleProgram raw "$launch_agent_plist")" == \
     "Contents/Helpers/JidokaCodeEngineProbe" ]]
 [[ "$(/usr/bin/plutil -extract ProgramArguments.3 raw "$launch_agent_plist")" == "1" ]]
 [[ "$(/usr/bin/plutil -extract RunAtLoad raw "$launch_agent_plist")" == "true" ]]
 [[ "$(/usr/bin/plutil -extract KeepAlive.SuccessfulExit raw "$launch_agent_plist")" == "false" ]]
-[[ "$(/usr/bin/plutil -extract 'MachServices.com\.maroffo\.JidokaCode\.EngineProbe' raw "$launch_agent_plist")" == "true" ]] || \
+[[ "$(/usr/bin/plutil -extract 'MachServices.com\.maroffo\.JidokaCode\.Engine' raw "$launch_agent_plist")" == "true" ]] || \
     fail "launch agent Mach service differs from allowlist"
 
 herdr_schema="$SOURCE_APP/Contents/Resources/Herdr/api-schema-0.8.0.json"
@@ -423,6 +661,16 @@ done
 /usr/bin/codesign --verify --strict "$SOURCE_PUSH_GUARD"
 /usr/bin/codesign --verify --strict "$SOURCE_HERDR_HOST"
 /usr/bin/codesign --verify --strict --deep "$SOURCE_APP"
+[[ "$(codesign_identifier "$SOURCE_APP")" == "com.maroffo.JidokaCode" ]] || \
+    fail "application code-signing identifier differs"
+[[ "$(codesign_identifier "$SOURCE_ENGINE")" == "com.maroffo.JidokaCode.Engine" ]] || \
+    fail "engine code-signing identifier differs"
+[[ "$(codesign_identifier "$SOURCE_ASKPASS")" == "com.maroffo.JidokaCode.AskPass" ]] || \
+    fail "askpass code-signing identifier differs"
+[[ "$(codesign_identifier "$SOURCE_PUSH_GUARD")" == "com.maroffo.JidokaCode.PushGuard" ]] || \
+    fail "push-guard code-signing identifier differs"
+[[ "$(codesign_identifier "$SOURCE_HERDR_HOST")" == "com.maroffo.JidokaCode.HerdrHost" ]] || \
+    fail "Herdr host code-signing identifier differs"
 
 app_minos="$(/usr/bin/otool -l "$SOURCE_EXECUTABLE" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
 engine_minos="$(/usr/bin/otool -l "$SOURCE_ENGINE" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
@@ -511,12 +759,12 @@ fi
 
 assert_exact_json_keys "$preflight_stdout" bundleIdentifier manifestSHA256 resourceName schemaVersion status workingDirectory
 assert_exact_json_keys "$engine_stdout" identifier status workingDirectory
-[[ "$(/usr/bin/plutil -extract bundleIdentifier raw "$preflight_stdout")" == "com.maroffo.JidokaCode.Probe" ]]
+[[ "$(/usr/bin/plutil -extract bundleIdentifier raw "$preflight_stdout")" == "com.maroffo.JidokaCode" ]]
 [[ "$(/usr/bin/plutil -extract resourceName raw "$preflight_stdout")" == "jidoka-code" ]]
 [[ "$(/usr/bin/plutil -extract schemaVersion raw "$preflight_stdout")" == "1" ]]
 [[ "$(/usr/bin/plutil -extract status raw "$preflight_stdout")" == "ok" ]]
 [[ "$(/usr/bin/plutil -extract workingDirectory raw "$preflight_stdout")" == "/" ]]
-[[ "$(/usr/bin/plutil -extract identifier raw "$engine_stdout")" == "com.maroffo.JidokaCode.EngineProbe" ]]
+[[ "$(/usr/bin/plutil -extract identifier raw "$engine_stdout")" == "com.maroffo.JidokaCode.Engine" ]]
 [[ "$(/usr/bin/plutil -extract status raw "$engine_stdout")" == "ok" ]]
 [[ "$(/usr/bin/plutil -extract workingDirectory raw "$engine_stdout")" == "/" ]]
 manifest_digest="$(/usr/bin/shasum -a 256 "$COPIED_APP/Contents/Resources/Pi/manifest.json" | /usr/bin/awk '{print $1}')"
@@ -526,7 +774,7 @@ manifest_digest="$(/usr/bin/shasum -a 256 "$COPIED_APP/Contents/Resources/Pi/man
 /usr/bin/ditto "$COPIED_APP" "$MUTATED_APP"
 mutated_manifest="$MUTATED_APP/Contents/Resources/Pi/manifest.json"
 printf '%s\n' '{"name":"jidoka-code","purpose":"mutated-e2e","schemaVersion":1}' >"$mutated_manifest"
-/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe "$MUTATED_APP"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode "$MUTATED_APP"
 mutated_stdout="$TEMP_ROOT/mutated.json"
 mutated_stderr="$TEMP_ROOT/mutated.stderr"
 run_packaged_command "$MUTATED_APP/Contents/MacOS/Jidoka Code" --preflight "$mutated_stdout" "$mutated_stderr"
@@ -538,34 +786,34 @@ reported_mutated_digest="$(/usr/bin/plutil -extract manifestSHA256 raw "$mutated
     fail "preflight did not consume mutated packaged bytes"
 
 printf '%s\n' '{"name":"jidoka-code","schemaVersion":2}' >"$mutated_manifest"
-/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe "$MUTATED_APP"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode "$MUTATED_APP"
 assert_failure "$MUTATED_APP/Contents/MacOS/Jidoka Code" 'unsupportedSchema(2)'
 /bin/rm -f -- "$mutated_manifest"
-/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe "$MUTATED_APP"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode "$MUTATED_APP"
 assert_failure "$MUTATED_APP/Contents/MacOS/Jidoka Code" 'manifestMissing'
 
 /usr/bin/ditto "$COPIED_APP" "$MUTATED_RUNNER_APP"
 printf '\n' >>"$MUTATED_RUNNER_APP/Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs"
-/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe "$MUTATED_RUNNER_APP"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode "$MUTATED_RUNNER_APP"
 assert_pi_runner_failure "$MUTATED_RUNNER_APP"
 
 /usr/bin/ditto "$COPIED_APP" "$MUTATED_ATTESTATION_APP"
 printf '\n' \
     >>"$MUTATED_ATTESTATION_APP/Contents/Resources/Pi/runtime/pi-runtime-attestation.mjs"
-/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe \
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode \
     "$MUTATED_ATTESTATION_APP"
 assert_pi_runner_failure "$MUTATED_ATTESTATION_APP"
 
 /usr/bin/ditto "$COPIED_APP" "$MUTATED_POLICY_APP"
 printf '\n' >>"$MUTATED_POLICY_APP/Contents/Resources/Pi/runtime/pi-runtime-builds.json"
-/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe \
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode \
     "$MUTATED_POLICY_APP"
 assert_pi_policy_failure "$MUTATED_POLICY_APP"
 
 /usr/bin/ditto "$COPIED_APP" "$MUTATED_WORKFLOW_APP"
 printf '\n' \
     >>"$MUTATED_WORKFLOW_APP/Contents/Resources/Pi/skills/jidoka-code-plan/SKILL.md"
-/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe \
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode \
     "$MUTATED_WORKFLOW_APP"
 if JIDOKA_PI_RESOURCE_ROOT="$MUTATED_WORKFLOW_APP/Contents/Resources/Pi" \
     /opt/homebrew/Cellar/node/26.6.0/bin/node \

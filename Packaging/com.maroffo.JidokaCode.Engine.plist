@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.maroffo.JidokaCode.EngineProbe</string>
+    <string>com.maroffo.JidokaCode.Engine</string>
     <key>BundleProgram</key>
     <string>Contents/Helpers/JidokaCodeEngineProbe</string>
     <key>ProgramArguments</key>
@@ -17,7 +17,7 @@
     <true/>
     <key>MachServices</key>
     <dict>
-        <key>com.maroffo.JidokaCode.EngineProbe</key>
+        <key>com.maroffo.JidokaCode.Engine</key>
         <true/>
     </dict>
     <key>KeepAlive</key>

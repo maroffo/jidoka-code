@@ -7,12 +7,16 @@ readonly EXPECTED_XCODE_BUILD="Build version 17F113"
 readonly EXPECTED_SDK_NAME="MacOSX26.5.sdk"
 readonly EXPECTED_SWIFT_VERSION="Apple Swift version 6.3.3"
 readonly EXPECTED_SWIFT_FORMAT_VERSION="6.3.0"
+HOST_OS="$(/usr/bin/uname -s)"
+readonly HOST_OS
 
 fail() {
     printf 'toolchain verification failed: %s\n' "$1" >&2
     exit 1
 }
 
+[[ "$HOST_OS" == "Darwin" ]] || \
+    fail "macOS release verification is unavailable on $HOST_OS; release remains unverified"
 [[ "${DEVELOPER_DIR:-}" == "$EXPECTED_DEVELOPER_DIR" ]] || \
     fail "DEVELOPER_DIR must be $EXPECTED_DEVELOPER_DIR"
 [[ -d "$DEVELOPER_DIR" && ! -L "$DEVELOPER_DIR" ]] || \

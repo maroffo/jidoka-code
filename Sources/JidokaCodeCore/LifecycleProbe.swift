@@ -1,11 +1,11 @@
 import Foundation
 
 public enum LifecycleProbeConstants {
-  public static let appBundleIdentifier = "com.maroffo.JidokaCode.Probe"
-  public static let helperIdentifier = "com.maroffo.JidokaCode.EngineProbe"
-  public static let launchAgentPlistName = "com.maroffo.JidokaCode.EngineProbe.plist"
+  public static let appBundleIdentifier = "com.maroffo.JidokaCode"
+  public static let helperIdentifier = "com.maroffo.JidokaCode.Engine"
+  public static let launchAgentPlistName = "com.maroffo.JidokaCode.Engine.plist"
   public static let maximumRoundTrips = 1_000
-  public static let mainQuitNotification = "com.maroffo.JidokaCode.Probe.lifecycle.quit"
+  public static let mainQuitNotification = "com.maroffo.JidokaCode.lifecycle.quit"
 }
 
 public enum EngineTopology: String, Codable, Sendable {

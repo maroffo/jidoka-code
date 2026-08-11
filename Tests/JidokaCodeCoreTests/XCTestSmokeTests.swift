@@ -3,10 +3,17 @@ import XCTest
 @testable import JidokaCodeCore
 
 final class XCTestSmokeTests: XCTestCase {
-  func testExpectedIdentityIsStable() {
+  func testExpectedProductionIdentitiesAreStable() {
+    XCTAssertEqual(PackagedPreflight.expectedBundleIdentifier, "com.maroffo.JidokaCode")
+    XCTAssertEqual(LifecycleProbeConstants.appBundleIdentifier, "com.maroffo.JidokaCode")
+    XCTAssertEqual(LifecycleProbeConstants.helperIdentifier, "com.maroffo.JidokaCode.Engine")
     XCTAssertEqual(
-      PackagedPreflight.expectedBundleIdentifier,
-      "com.maroffo.JidokaCode.Probe"
+      LifecycleProbeConstants.launchAgentPlistName,
+      "com.maroffo.JidokaCode.Engine.plist"
+    )
+    XCTAssertEqual(
+      LifecycleProbeConstants.mainQuitNotification,
+      "com.maroffo.JidokaCode.lifecycle.quit"
     )
   }
 }

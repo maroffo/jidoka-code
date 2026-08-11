@@ -14,8 +14,8 @@ readonly APP_PARENT="$HOME/Applications"
 readonly TARGET_APP="$APP_PARENT/Jidoka Code Probe.app"
 readonly TARGET_BIN="$TARGET_APP/Contents/MacOS/Jidoka Code"
 readonly TARGET_HELPER="$TARGET_APP/Contents/Helpers/JidokaCodeEngineProbe"
-readonly TARGET_PLIST="$TARGET_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist"
-readonly SERVICE_LABEL="com.maroffo.JidokaCode.EngineProbe"
+readonly TARGET_PLIST="$TARGET_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist"
+readonly SERVICE_LABEL="com.maroffo.JidokaCode.Engine"
 readonly SPIKE_PARENT="$HOME/Library/Application Support/JidokaCode/Spike"
 readonly LOCK_DIR="$SPIKE_PARENT/S2.lock"
 readonly EVENT_DIR="$SPIKE_PARENT/S2"
@@ -74,10 +74,10 @@ set_launch_agent_generation_two() {
 sign_outer_app() {
     local app="$1"
     if [[ "$SIGN_IDENTITY" == "-" ]]; then
-        /usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode.Probe "$app"
+        /usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode "$app"
     else
         /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --timestamp=none --options runtime \
-            --identifier com.maroffo.JidokaCode.Probe "$app"
+            --identifier com.maroffo.JidokaCode "$app"
     fi
 }
 
@@ -596,15 +596,19 @@ EVIDENCE_DIR="$ROOT/build/evidence/$RUN_ID"
 readonly EVIDENCE_DIR
 trap cleanup_on_exit EXIT
 
-"$ROOT/scripts/package-app.sh"
-readonly SOURCE_PLIST="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist"
+if [[ "$MODE" == "preflight" ]]; then
+    ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
+else
+    "$ROOT/scripts/package-app.sh"
+fi
+readonly SOURCE_PLIST="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist"
 /usr/bin/plutil -lint "$SOURCE_PLIST"
 [[ "$(json_value "$SOURCE_PLIST" Label)" == "$SERVICE_LABEL" ]]
 [[ "$(json_value "$SOURCE_PLIST" BundleProgram)" == "Contents/Helpers/JidokaCodeEngineProbe" ]]
 [[ "$(json_value "$SOURCE_PLIST" ProgramArguments.3)" == "1" ]]
 [[ "$(json_value "$SOURCE_PLIST" RunAtLoad)" == "true" ]]
 [[ "$(json_value "$SOURCE_PLIST" KeepAlive.SuccessfulExit)" == "false" ]]
-[[ "$(json_value "$SOURCE_PLIST" 'MachServices.com\.maroffo\.JidokaCode\.EngineProbe')" == "true" ]]
+[[ "$(json_value "$SOURCE_PLIST" 'MachServices.com\.maroffo\.JidokaCode\.Engine')" == "true" ]]
 generation_two_preflight="$TEMP_ROOT/generation-two.plist"
 /bin/cp "$SOURCE_PLIST" "$generation_two_preflight"
 set_launch_agent_generation_two "$generation_two_preflight"
@@ -741,7 +745,7 @@ require_no_binary "$TARGET_BIN"
 
 staging_app="$TEMP_ROOT/Jidoka Code Probe v2.app"
 /usr/bin/ditto "$TARGET_APP" "$staging_app"
-staging_plist="$staging_app/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.EngineProbe.plist"
+staging_plist="$staging_app/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist"
 set_launch_agent_generation_two "$staging_plist"
 sign_outer_app "$staging_app"
 /usr/bin/codesign --verify --strict --deep "$staging_app"

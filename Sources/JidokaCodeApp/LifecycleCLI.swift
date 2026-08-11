@@ -117,23 +117,23 @@ private final class MainQuitObserver: @unchecked Sendable {
   private var token: NSObjectProtocol?
 
   @MainActor
-  func start() {
+  func start(onQuit: @escaping @MainActor () -> Void) {
     guard token == nil else { return }
     token = DistributedNotificationCenter.default().addObserver(
       forName: Notification.Name(LifecycleProbeConstants.mainQuitNotification),
       object: nil,
       queue: .main
     ) { _ in
-      Task { @MainActor in
-        NSApplication.shared.terminate(nil)
+      MainActor.assumeIsolated {
+        onQuit()
       }
     }
   }
 }
 
 @MainActor
-func startMainQuitObserver() {
-  MainQuitObserver.shared.start()
+func startMainQuitObserver(onQuit: @escaping @MainActor () -> Void) {
+  MainQuitObserver.shared.start(onQuit: onQuit)
 }
 
 private final class XPCResultBox: @unchecked Sendable {

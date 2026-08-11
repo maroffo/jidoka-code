@@ -2,3 +2,4 @@
 .build/
 build/
 .pi-subagents/
+.pi-loop.json.lock
