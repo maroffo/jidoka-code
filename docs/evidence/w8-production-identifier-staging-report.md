@@ -1,10 +1,14 @@
 # W8 production identifiers and disposable staging evidence
 
-Date: 2026-08-11
+Date: 2026-08-12
 
-Branch: `feat/jidoka-code-w8-w9-closure`
+Product branch: `feat/jidoka-code-w8-w9-closure`
 
-Base: `origin/main@6350acc454878b7fed2d84ea6802ef8ebf804b56`
+Evidence branch: `chore/jidoka-code-w8-final-package`
+
+Original W8 base: `origin/main@6350acc454878b7fed2d84ea6802ef8ebf804b56`
+
+Product-bearing merge: `origin/main@c218e52bec331b3380e619cd2c6bfff8ae1e7b31`
 
 ## Outcome
 
@@ -46,9 +50,43 @@ S1 now proves:
 
 During investigation, a forced full-payload signing hang returned within 300 seconds and cleanup was observed for package publication, temp paths, descendants, disposable checkout, temporary Keychain, and the user search list. No redacted transcript from that run was retained, so this observation is context only and is not used as durable completion evidence. The executable S1 timeout and cleanup falsifiers remain in source and are rerun by `make test-e2e`.
 
+## Final disposable staging and notarization result
+
+The complete product-bearing merge was reproduced without a patch in a clean detached disposable worktree. The package was signed through separate temporary Application and Installer Keychains, submitted to Apple, accepted, stapled, and copied with the portable application outside staging. The exact staging worktree was then removed before the copied application and helper ran their credentialless preflights from cwd `/`.
+
+```text
+product_commit=c218e52bec331b3380e619cd2c6bfff8ae1e7b31
+source_tree=d8e64a3d0343b33bf17a287a47a1b13460ad4243
+source_archive_sha256=fd2f87c246af831bd4205713a65e9ce629d3e4ea4c86eee1883740b55195467d
+staging_removed=true
+package_path=build/w8-final-portable/Jidoka Code.pkg
+package_sha256=94382d030a09e796b06d8cc8d79403b98f5cc0d384ca6c6366f4afea49b72366
+manifest_sha256=3e9b86c7889678776136a9fcbf4395e39838f0ade772d5808e1662ff630e1ddb
+notarization_result_sha256=2e617836ec35ab7be5f1bc90271fdac328581a534aa92aa52e0b6a81ae024cc2
+notarization_submission_id=28ff9634-1006-42a4-b1f5-c567100c0a7e
+notarization_status=Accepted
+trusted_installer_timestamp=2026-08-12 06:06:33 +0000
+preflight_sha256=8c0eb9aadbfd8962f27f492977de2a2935fb284ad465b8fb5ed6330c3b3827ff
+engine_preflight_sha256=dcd600f7477568aef6c1d4ae33e0f708d0a1dc22158870c95746fe1a234878e3
+app_bundle_identifier=com.maroffo.JidokaCode
+helper_identifier=com.maroffo.JidokaCode.Engine
+package_identifier=com.maroffo.JidokaCode.pkg
+install_location=/Applications/Jidoka Code.app
+launch_cwd=/
+keychain_search_list_restored=true
+temporary_keychains_removed=true
+installed=false
+receipt_present=false
+launchd_job_present=false
+```
+
+Independent parent audit recomputed the commit tree, source archive, package, manifest, notarization result, application preflight, and helper preflight digests listed above, and matched the package and notarization digests recorded by the manifest. It also checked `codesign --verify --strict --deep`, `stapler validate`, package and application Gatekeeper assessments, and the Developer ID Installer signature with trusted timestamp. Gatekeeper reported `Notarized Developer ID` for both app and package. The closed installer audit matched 65 payload entries and 65 AppleDouble metadata entries to `Packaging/app-inventory.txt`, found zero lifecycle scripts, and verified receipt, version, destination, non-relocatable payload, no postinstall action, exact app/helper identities, no symlinks, and no staging or credential path.
+
+The final local artifacts are retained under ignored path `build/w8-final-portable/`. The product bytes are bound to merge `c218e52…`; this evidence-only follow-up does not alter the distributed artifact.
+
 ## Historical disposable staging result
 
-This retained staging run proves the production identifiers and bounded signing flow for source patch `7b4509e3…`, but it predates the later durable-termination and S9 ownership fixes from final review. It is historical evidence, not evidence that the complete current dirty tree is reproducible or ready for CHECKPOINT C. A new disposable staging run from the final tree remains required.
+The earlier staging run proves the production identifiers and bounded signing flow for source patch `7b4509e3…`, but it predates the later durable-termination and S9 ownership fixes from final review. It remains historical evidence and is superseded by the final merge-bound result above.
 
 The historical staging checkout was created detached from the exact base, received a byte-identical patch plus the then-new untracked files, and matched the implementation worktree status at that time before build.
 
@@ -74,29 +112,28 @@ Historical local evidence is retained under ignored path `build/w8-staging-porta
 
 ## Verification status
 
-Fresh after the final reviewer-fix source edits and before only this evidence-text update:
+The product-bearing merge passed direct `make check` with 448 tests in 71 suites before this documentation-only follow-up. The retained merged-tree log is `build/evidence/w8-merged-final-check.log`, mode `0600`, SHA-256 `a8d48fd2206a42b39557b1a3c1e4847704880329519492b8046eb3938083df42`.
 
-- direct `make check`: passed 448 tests in 71 suites; retained local log `build/evidence/w8-final-source-check.log`, SHA-256 `233254cd461d66e7ce0fafa1f2bb7ad557445c6786d33a1e2396e1fdce631211`;
-- direct `make test-e2e`: S1 package, S10 UI, S11 isolated Herdr, and S12 exact Pi TUI passed;
-- `make jidoka-code-test-s2-preflight jidoka-code-test-s3-preflight jidoka-code-test-s9-preflight`: passed; S9 reported `normal_app_launch=not-run default_socket_contacts=0`;
-- strict Swift format, Bash syntax, ShellCheck, Perl syntax, and `git diff --check`: passed;
-- focused durable-termination tests cover successful notification ordering plus concurrent AppKit true/false completion; S1 covers distinctive exit 37, immediate TERM status 143, TERM-resistant same-group cleanup, both common-Keychain fallback arms, and exact package command plans.
+The prior current-source closure also passed:
 
-These gates validate the current source behavior, but they do not replace the still-open final disposable staging, Developer ID build/notarization, installed lifecycle, or W9 canary evidence.
+- direct `make test-e2e`: S1 package, S10 UI, S11 isolated Herdr, and S12 exact Pi TUI;
+- `make jidoka-code-test-s2-preflight jidoka-code-test-s3-preflight jidoka-code-test-s9-preflight`, with S9 reporting `normal_app_launch=not-run default_socket_contacts=0`;
+- strict Swift format, Bash syntax, ShellCheck, Perl syntax, and `git diff --check`;
+- focused durable-termination tests for successful notification ordering and concurrent AppKit true/false completion;
+- S1 falsifiers for distinctive exit 37, immediate TERM status 143, TERM-resistant same-group cleanup, both common-Keychain fallback arms, and exact package command plans.
+
+After this evidence update, direct `make check` passed 448 tests in 71 suites, direct `make test-e2e` passed S1/S10/S11/S12, and S2/S3/S9 preflights passed with S9 reporting `normal_app_launch=not-run default_socket_contacts=0`. Independent DX and security closure reviews found no Critical or Major issue; two DX Minor findings about open-gate wording and digest scope were corrected in this revision. Installed lifecycle, runtime accessibility, application credentials, and the W9 default-session canary remain separate unchecked surfaces.
 
 ## Side effects and remaining gates
 
-Temporary Application and Installer Keychains were created from the already authorized local P12 archives, kept unlocked only for the bounded signing run, added temporarily to the user search list, then deleted. The original search list containing only `login.keychain-db` was restored. No secret, Key ID, Issuer ID, password, P12 path, Keychain path, or private-key material is stored in source or package manifests.
+The exact Application and Installer identities were exported separately from the login Keychain into short-lived P12 files protected by distinct random passwords. Those P12 files populated separate temporary Application and Installer Keychains. The export files, passwords, Keychains, and credential input were deleted after the bounded build; the original search list containing only `login.keychain-db` was restored. No secret, Key ID, Issuer ID, password, P12 path, Keychain path, or private-key material is stored in source, package manifests, or retained logs.
 
-The historical staging package is Developer ID signed but deliberately unnotarized. It is not an installation candidate. `/Applications/Jidoka Code.app`, receipt `com.maroffo.JidokaCode.pkg`, and launchd job `com.maroffo.JidokaCode.Engine` remain absent.
+The historical `c73d854…` package remains signed but unnotarized and is not an installation candidate. The final `94382d03…` package is the only CHECKPOINT C candidate. `/Applications/Jidoka Code.app`, receipt `com.maroffo.JidokaCode.pkg`, and launchd job `com.maroffo.JidokaCode.Engine` remain absent.
 
 During reviewer-fix validation, an earlier `S9 --preflight-only` implementation launched the packaged production app with a synthetic `HOME`. On macOS, `FileManager.homeDirectoryForCurrentUser` still resolved the real account home, so those runs updated the persistent `~/Library/Application Support/JidokaCode/IPC/ui-instance.lock`. Exact build-app processes were terminated and the owned temporary directories were removed; no installed app, receipt, helper process, or launchd job remained. Retained evidence cannot prove that these starts never attempted the default Herdr socket, so default-session contact for those runs is `unknown`, not a W9 canary or completion signal. The lock file was not deleted. S9 preflight now exits after static package/topology checks without launching production composition and reports `normal_app_launch=not-run default_socket_contacts=0`; the production launch remains live-mode and authorization gated.
 
 Open gates:
 
-1. reproduce the complete final tree in a new disposable staging checkout and replace the historical staging hashes;
-2. rerun fresh full local verification and independent closure review after the final staging evidence update;
-3. build and notarize the final production-identifier package;
-4. present CHECKPOINT C with exact final package path, digest, receipt, destination, signature, installed-state precondition, and rollback;
-5. only after explicit authorization, install and verify the installed user flow and ServiceManagement lifecycle;
-6. CHECKPOINT D remains separate for credentials, provider calls, GitHub mutations, and the default-session canary.
+1. present CHECKPOINT C with exact final package path, digest, receipt, destination, signature, installed-state precondition, and rollback;
+2. only after explicit authorization, install and verify the installed user flow and ServiceManagement lifecycle;
+3. CHECKPOINT D remains separate for application credentials, provider calls, GitHub mutations, and the default-session canary.
