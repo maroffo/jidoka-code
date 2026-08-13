@@ -188,6 +188,110 @@ assert_cleanup_guard() {
     /bin/rm -rf -- "$parent"
 }
 
+assert_component_relocation_policy() {
+    local app="$1"
+    local component_root="$TEMP_ROOT/component-policy-root"
+    local legacy_expanded="$TEMP_ROOT/component-policy-legacy-expanded"
+    local legacy_package="$TEMP_ROOT/component-policy-legacy.pkg"
+    local locked_bom_modes="$TEMP_ROOT/component-policy-locked-bom-modes.txt"
+    local locked_expanded="$TEMP_ROOT/component-policy-locked-expanded"
+    local locked_package="$TEMP_ROOT/component-policy-locked.pkg"
+    local locked_package_info
+    local policy="$ROOT/Packaging/app-component.plist"
+
+    [[ -f "$policy" && ! -L "$policy" ]] || fail "component policy is unavailable"
+    /usr/bin/plutil -lint "$policy" >/dev/null || fail "component policy is invalid"
+    [[ "$(/usr/bin/xmllint --xpath 'count(/plist/array/dict)' "$policy")" == "1" && \
+        "$(/usr/bin/xmllint --xpath 'count(/plist/array/dict/key)' "$policy")" == "5" && \
+        "$(/usr/bin/plutil -extract 0.RootRelativeBundlePath raw "$policy")" == \
+            "Jidoka Code.app" && \
+        "$(/usr/bin/plutil -extract 0.BundleIsRelocatable raw "$policy")" == "false" && \
+        "$(/usr/bin/plutil -extract 0.BundleIsVersionChecked raw "$policy")" == "true" && \
+        "$(/usr/bin/plutil -extract 0.BundleHasStrictIdentifier raw "$policy")" == "true" && \
+        "$(/usr/bin/plutil -extract 0.BundleOverwriteAction raw "$policy")" == "upgrade" ]] || \
+        fail "component policy values differ"
+
+    /bin/mkdir -m 0755 "$component_root"
+    /usr/bin/ditto "$app" "$component_root/Jidoka Code.app"
+    /usr/bin/pkgbuild \
+        --component "$app" \
+        --install-location /Applications \
+        --identifier com.maroffo.JidokaCode.pkg \
+        --version 0.1.0 \
+        "$legacy_package" >/dev/null
+    /usr/sbin/pkgutil --expand "$legacy_package" "$legacy_expanded"
+    [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/relocate/bundle)' \
+        "$legacy_expanded/PackageInfo")" == "1" && \
+        "$(/usr/bin/xmllint --xpath \
+            "count(/pkg-info/relocate/bundle[@id='com.maroffo.JidokaCode'])" \
+            "$legacy_expanded/PackageInfo")" == "1" ]] || \
+        fail "legacy component mode no longer reproduces production bundle relocation"
+
+    /usr/bin/pkgbuild \
+        --root "$component_root" \
+        --component-plist "$policy" \
+        --install-location /Applications \
+        --identifier com.maroffo.JidokaCode.pkg \
+        --version 0.1.0 \
+        "$locked_package" >/dev/null
+    /usr/sbin/pkgutil --expand "$locked_package" "$locked_expanded"
+    locked_package_info="$locked_expanded/PackageInfo"
+    [[ "$(/usr/bin/xmllint --xpath \
+        "count(/pkg-info[@identifier='com.maroffo.JidokaCode.pkg' and @version='0.1.0' and @install-location='/Applications' and @postinstall-action='none' and @auth='root' and @relocatable='false'])" \
+        "$locked_package_info")" == "1" ]] || fail "locked component package policy differs"
+    [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle)' \
+        "$locked_package_info")" == "1" && \
+        "$(/usr/bin/xmllint --xpath \
+            "count(/pkg-info/bundle[@id='com.maroffo.JidokaCode' and @path='./Jidoka Code.app'])" \
+            "$locked_package_info")" == "1" && \
+        "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle-version/bundle)' \
+            "$locked_package_info")" == "1" && \
+        "$(/usr/bin/xmllint --xpath \
+            "count(/pkg-info/bundle-version/bundle[@id='com.maroffo.JidokaCode'])" \
+            "$locked_package_info")" == "1" ]] || fail "locked component bundle identity differs"
+    [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/relocate/bundle)' \
+        "$locked_package_info")" == "0" ]] || \
+        fail "locked component policy still permits bundle relocation"
+    [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/strict-identifier/bundle)' \
+        "$locked_package_info")" == "1" && \
+        "$(/usr/bin/xmllint --xpath \
+            "count(/pkg-info/strict-identifier/bundle[@id='com.maroffo.JidokaCode'])" \
+            "$locked_package_info")" == "1" ]] || \
+        fail "locked component policy lost the strict identifier"
+    [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/upgrade-bundle/bundle)' \
+        "$locked_package_info")" == "1" && \
+        "$(/usr/bin/xmllint --xpath \
+            "count(/pkg-info/upgrade-bundle/bundle[@id='com.maroffo.JidokaCode'])" \
+            "$locked_package_info")" == "1" && \
+        "$(/usr/bin/xmllint --xpath 'count(/pkg-info/update-bundle/bundle)' \
+            "$locked_package_info")" == "0" && \
+        "$(/usr/bin/xmllint --xpath 'count(/pkg-info/atomic-update-bundle/bundle)' \
+            "$locked_package_info")" == "0" ]] || \
+        fail "locked component overwrite policy differs"
+    /usr/bin/lsbom -p fm "$locked_expanded/Bom" >"$locked_bom_modes"
+    /usr/bin/awk -F '\t' '
+        function normalized_path(path) {
+            gsub(/\/\._/, "/", path)
+            return path
+        }
+        function is_executable(path) {
+            return path == "./Jidoka Code.app/Contents/MacOS/Jidoka Code" \
+                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeEngineProbe" \
+                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeAskPass" \
+                || path == "./Jidoka Code.app/Contents/Helpers/GitHooks/pre-push" \
+                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeHerdrHost"
+        }
+        $1 == "." { if ($2 != "40755") exit 1; root = 1; next }
+        {
+            path = normalized_path($1)
+            expected = ($2 ~ /^40/) ? "40755" : (is_executable(path) ? "100755" : "100644")
+            if ($2 != expected) exit 1
+            entries += 1
+        }
+        END { if (!root || entries == 0) exit 1 }
+    ' "$locked_bom_modes" || fail "locked component package BOM modes differ"
+}
+
 assert_bounded_command_runner() {
     local block_line
     local child_command
@@ -434,6 +538,23 @@ fi
     fail "notarization wait must have an explicit timeout"
 [[ "$(/usr/bin/grep -Ec '(^|/)installer([[:space:]]|$)' "$ROOT/scripts/package-installer.sh")" == "0" ]] || \
     fail "package builder must not install its output"
+pkgbuild_plan="$(
+    /usr/bin/awk \
+        '/^pkgbuild_arguments=\(/{capture=1} capture{print} /^readonly -a pkgbuild_arguments$/{exit}' \
+        "$ROOT/scripts/package-installer.sh"
+)"
+# shellcheck disable=SC2016
+readonly expected_pkgbuild_plan='pkgbuild_arguments=(
+    --root "$COMPONENT_ROOT"
+    --component-plist "$COMPONENT_POLICY"
+    --install-location "$INSTALL_LOCATION"
+    --identifier "$PACKAGE_IDENTIFIER"
+    --version "$app_version"
+    "$COMPONENT_PACKAGE"
+)
+readonly -a pkgbuild_arguments'
+[[ "$pkgbuild_plan" == "$expected_pkgbuild_plan" ]] || \
+    fail "non-relocatable pkgbuild argv differs"
 productbuild_plan="$(
     /usr/bin/awk \
         '/^productbuild_arguments=/{capture=1} capture{print} /^readonly -a productbuild_arguments$/{exit}' \
@@ -482,7 +603,22 @@ readonly MUTATED_ATTESTATION_APP="$TEMP_ROOT/Jidoka Code Attestation Mutated.app
 readonly MUTATED_POLICY_APP="$TEMP_ROOT/Jidoka Code Policy Mutated.app"
 readonly MUTATED_WORKFLOW_APP="$TEMP_ROOT/Jidoka Code Workflow Mutated.app"
 
-ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
+(
+    umask 077
+    ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
+)
+[[ -z "$(/usr/bin/find "$SOURCE_APP" -type d ! -perm 0755 -print)" ]] || \
+    fail "packaged bundle inherited a restrictive directory mode"
+for path in \
+    "$SOURCE_EXECUTABLE" "$SOURCE_ENGINE" "$SOURCE_ASKPASS" \
+    "$SOURCE_PUSH_GUARD" "$SOURCE_HERDR_HOST"
+do
+    [[ "$(/usr/bin/stat -f '%OLp' "$path")" == "755" ]] || \
+        fail "packaged executable inherited a restrictive mode"
+done
+[[ -z "$(/usr/bin/find "$SOURCE_APP" -type f ! -perm -0100 ! -perm 0644 -print)" ]] || \
+    fail "packaged resource mode differs"
+assert_component_relocation_policy "$SOURCE_APP"
 JIDOKA_PI_RESOURCE_ROOT="$SOURCE_APP/Contents/Resources/Pi" \
     /opt/homebrew/Cellar/node/26.6.0/bin/node \
     "$ROOT/scripts/tests/test-jidoka-extension-rpc.mjs"

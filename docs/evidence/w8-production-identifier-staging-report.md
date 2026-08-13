@@ -50,9 +50,9 @@ S1 now proves:
 
 During investigation, a forced full-payload signing hang returned within 300 seconds and cleanup was observed for package publication, temp paths, descendants, disposable checkout, temporary Keychain, and the user search list. No redacted transcript from that run was retained, so this observation is context only and is not used as durable completion evidence. The executable S1 timeout and cleanup falsifiers remain in source and are rerun by `make test-e2e`.
 
-## Final disposable staging and notarization result
+## Revoked disposable staging and notarization result
 
-The complete product-bearing merge was reproduced without a patch in a clean detached disposable worktree. The package was signed through separate temporary Application and Installer Keychains, submitted to Apple, accepted, stapled, and copied with the portable application outside staging. The exact staging worktree was then removed before the copied application and helper ran their credentialless preflights from cwd `/`.
+The complete product-bearing merge was reproduced without a patch in a clean detached disposable worktree. The package was signed through separate temporary Application and Installer Keychains, submitted to Apple, accepted, stapled, and copied with the portable application outside staging. The exact staging worktree was then removed before the copied application and helper ran their credentialless preflights from cwd `/`. The later authorized installation falsified the package destination guarantee, so this package is revoked despite its valid signature and notarization.
 
 ```text
 product_commit=c218e52bec331b3380e619cd2c6bfff8ae1e7b31
@@ -80,9 +80,13 @@ receipt_present=false
 launchd_job_present=false
 ```
 
-Independent parent audit recomputed the commit tree, source archive, package, manifest, notarization result, application preflight, and helper preflight digests listed above, and matched the package and notarization digests recorded by the manifest. It also checked `codesign --verify --strict --deep`, `stapler validate`, package and application Gatekeeper assessments, and the Developer ID Installer signature with trusted timestamp. Gatekeeper reported `Notarized Developer ID` for both app and package. The closed installer audit matched 65 payload entries and 65 AppleDouble metadata entries to `Packaging/app-inventory.txt`, found zero lifecycle scripts, and verified receipt, version, destination, non-relocatable payload, no postinstall action, exact app/helper identities, no symlinks, and no staging or credential path.
+Independent parent audit recomputed the commit tree, source archive, package, manifest, notarization result, application preflight, and helper preflight digests listed above, and matched the package and notarization digests recorded by the manifest. It also checked `codesign --verify --strict --deep`, `stapler validate`, package and application Gatekeeper assessments, and the Developer ID Installer signature with trusted timestamp. Gatekeeper reported `Notarized Developer ID` for both app and package. The closed installer audit matched 65 payload entries and 65 AppleDouble metadata entries to `Packaging/app-inventory.txt`, found zero lifecycle scripts, and verified receipt, version, the declared destination, no postinstall action, exact app/helper identities, no symlinks, and no staging or credential path. Its non-relocation check was insufficient: `PackageInfo` had a top-level `relocatable="false"` attribute while still containing one `/pkg-info/relocate/bundle` target.
 
-The final local artifacts are retained under ignored path `build/w8-final-portable/`. The product bytes are bound to merge `c218e52…`; this evidence-only follow-up does not alter the distributed artifact.
+The authorized CHECKPOINT C install wrote receipt `com.maroffo.JidokaCode.pkg`, but PackageKit logged `Applications/Jidoka Code.app relocated to .../build/Jidoka Code.app`. `/Applications/Jidoka Code.app` remained absent. The relocated root-owned bundle and the receipt are retained as failure evidence; no application or helper process and no production launchd job appeared. The installed payload also exposed caller-umask drift: directory and executable modes were `0700`, which would be unsuitable for a root-owned application in `/Applications`.
+
+The fix replaces `pkgbuild --component` with a controlled root plus `Packaging/app-component.plist`, where `BundleIsRelocatable=false` and the other Apple defaults remain locked. Package audit now requires zero `/pkg-info/relocate/bundle` nodes, one strict production identifier, and upgrade-only overwrite policy. `package-app.sh` fixes `umask 022` and verifies directory `0755`, executable `0755`, and resource `0644` modes after all Mach-O mutation and signing. S1 permanently reproduces the vulnerable relocation metadata, proves the locked package has no relocation target, and invokes packaging under hostile `umask 077`.
+
+The revoked local artifacts are retained under ignored path `build/w8-final-portable/`. Package `94382d03…` must not be installed again or presented as a CHECKPOINT C candidate. A new source-bound package, signing/notarization run, and digest are required.
 
 ## Historical disposable staging result
 
@@ -112,28 +116,37 @@ Historical local evidence is retained under ignored path `build/w8-staging-porta
 
 ## Verification status
 
-The product-bearing merge passed direct `make check` with 448 tests in 71 suites before this documentation-only follow-up. The retained merged-tree log is `build/evidence/w8-merged-final-check.log`, mode `0600`, SHA-256 `a8d48fd2206a42b39557b1a3c1e4847704880329519492b8046eb3938083df42`.
+The pre-installation product merge and evidence-only closure passed their recorded gates, including direct `make check` with 448 tests in 71 suites. Those runs predate CHECKPOINT C and do not attest the relocation and mode fix. The retained merged-tree log remains historical evidence at `build/evidence/w8-merged-final-check.log`, mode `0600`, SHA-256 `a8d48fd2206a42b39557b1a3c1e4847704880329519492b8046eb3938083df42`.
 
-The prior current-source closure also passed:
+Fresh fix verification runs in a byte-identical detached worktree under the canonical `/Users` tree, leaving the failed receipt and relocated root-owned bundle untouched. The current source delta is based on `22692c3e14e55aed300d1bbef8b3a028e05e69d5`. Delta digests recorded before later evidence edits are provenance snapshots only; the final commit tree will supersede them as source authority.
 
-- direct `make test-e2e`: S1 package, S10 UI, S11 isolated Herdr, and S12 exact Pi TUI;
-- `make jidoka-code-test-s2-preflight jidoka-code-test-s3-preflight jidoka-code-test-s9-preflight`, with S9 reporting `normal_app_launch=not-run default_socket_contacts=0`;
-- strict Swift format, Bash syntax, ShellCheck, Perl syntax, and `git diff --check`;
-- focused durable-termination tests for successful notification ordering and concurrent AppKit true/false completion;
-- S1 falsifiers for distinctive exit 37, immediate TERM status 143, TERM-resistant same-group cleanup, both common-Keychain fallback arms, and exact package command plans.
+Fresh passing gates:
 
-After this evidence update, direct `make check` passed 448 tests in 71 suites, direct `make test-e2e` passed S1/S10/S11/S12, and S2/S3/S9 preflights passed with S9 reporting `normal_app_launch=not-run default_socket_contacts=0`. Independent DX and security closure reviews found no Critical or Major issue; two DX Minor findings about open-gate wording and digest scope were corrected in this revision. Installed lifecycle, runtime accessibility, application credentials, and the W9 default-session canary remain separate unchecked surfaces.
+- final direct `make check` on the definitive code and test tree: 448 tests in 71 suites passed in 843.978 seconds. The detached verifier log is `build/evidence/w8-install-fix-final-check.log`, mode `0600`, SHA-256 `a6836a5dae0a37d1d77c91c4807f0ae2a2b0bb3a19e379cef68c5dac14a744e9`. This evidence-only result recording followed the run;
+- direct `make test-e2e`: S1 package, S10 UI, S11 isolated Herdr, and S12 exact Pi TUI passed together after all fixture and review fixes;
+- `make jidoka-code-test-s2-preflight jidoka-code-test-s3-preflight jidoka-code-test-s9-preflight` passed after all fixture and review fixes, with S9 reporting `normal_app_launch=not-run default_socket_contacts=0`;
+- Bash syntax, ShellCheck, Node syntax, plist validation, and `git diff --check` passed after the review fixes;
+- S1 runs `package-app.sh` below hostile `umask 077`, reproduces exactly one legacy relocation target for `com.maroffo.JidokaCode`, and requires the locked package to have exact singleton receipt, bundle/path, bundle-version, strict-identifier and upgrade-bundle metadata, zero relocation/update/atomic-update targets, and the expected component-package BOM modes;
+- S11 now creates its private descriptor root below canonical `build/evidence`, rather than the `/tmp` symlink spelling rejected by the host's canonical-path boundary. S11 harness SHA-256 is `a4f5e2f0f88380596868e206ba6c47a3b7642ab522453a20572647adc25aac3d`;
+- S12 gives runtime-snapshot attestation a separate bounded 120-second pre-spawn window, validates the host's atomically written child-process record, then requires locked-editor visibility before the deterministic fixture provider emits its first output. S12 harness SHA-256 is `1f250e898a20ba88643c887367332ead4ce0b82190daa8cf4470fc486c7ea8d1`; fixture-provider SHA-256 is `132c605ddce5e6871a133098f19958fe734399d0ec79c5aaa2759e0d6ce48d35`.
+
+Independent architecture, security, test, and DX reviews initially found two PackageInfo-closure concerns and two S12/S1 test concerns. Exact singleton PackageInfo assertions and the child-spawn/editor/provider-output causal ordering resolved the actionable findings. A suggested AppleDouble `0644` rule was rejected against executable evidence: the actual component BOM gives each `._` entry the same type/mode as its associated payload, and the separate normalized metadata inventory must match the complete application inventory. Targeted closure reported 0 Critical, 0 Major, and 0 Minor findings.
+
+Disposable signed/notarized staging and installation remain open. Installed lifecycle, runtime accessibility, application credentials, and the W9 default-session canary remain separate unchecked surfaces.
 
 ## Side effects and remaining gates
 
 The exact Application and Installer identities were exported separately from the login Keychain into short-lived P12 files protected by distinct random passwords. Those P12 files populated separate temporary Application and Installer Keychains. The export files, passwords, Keychains, and credential input were deleted after the bounded build; the original search list containing only `login.keychain-db` was restored. No secret, Key ID, Issuer ID, password, P12 path, Keychain path, or private-key material is stored in source, package manifests, or retained logs.
 
-The historical `c73d854…` package remains signed but unnotarized and is not an installation candidate. The final `94382d03…` package is the only CHECKPOINT C candidate. `/Applications/Jidoka Code.app`, receipt `com.maroffo.JidokaCode.pkg`, and launchd job `com.maroffo.JidokaCode.Engine` remain absent.
+The historical `c73d854…` package remains signed but unnotarized and is not an installation candidate. Package `94382d03…` is signed and notarized but revoked by the installed relocation and mode falsifiers. `/Applications/Jidoka Code.app` and launchd job `com.maroffo.JidokaCode.Engine` remain absent; receipt `com.maroffo.JidokaCode.pkg` and the relocated root-owned worktree bundle remain present as failure evidence pending explicit cleanup authorization.
 
 During reviewer-fix validation, an earlier `S9 --preflight-only` implementation launched the packaged production app with a synthetic `HOME`. On macOS, `FileManager.homeDirectoryForCurrentUser` still resolved the real account home, so those runs updated the persistent `~/Library/Application Support/JidokaCode/IPC/ui-instance.lock`. Exact build-app processes were terminated and the owned temporary directories were removed; no installed app, receipt, helper process, or launchd job remained. Retained evidence cannot prove that these starts never attempted the default Herdr socket, so default-session contact for those runs is `unknown`, not a W9 canary or completion signal. The lock file was not deleted. S9 preflight now exits after static package/topology checks without launching production composition and reports `normal_app_launch=not-run default_socket_contacts=0`; the production launch remains live-mode and authorization gated.
 
 Open gates:
 
-1. present CHECKPOINT C with exact final package path, digest, receipt, destination, signature, installed-state precondition, and rollback;
-2. only after explicit authorization, install and verify the installed user flow and ServiceManagement lifecycle;
-3. CHECKPOINT D remains separate for application credentials, provider calls, GitHub mutations, and the default-session canary.
+1. obtain owner merge of this verified source fix;
+2. reproduce the exact merged source in disposable staging, sign and notarize a replacement package, and record a new digest;
+3. obtain explicit cleanup authorization for the retained failed receipt and relocated bundle;
+4. present a new CHECKPOINT C for the replacement digest before any second installation;
+5. only after explicit authorization, install and verify the installed user flow and ServiceManagement lifecycle;
+6. CHECKPOINT D remains separate for application credentials, provider calls, GitHub mutations, and the default-session canary.

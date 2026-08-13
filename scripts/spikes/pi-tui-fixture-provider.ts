@@ -1,10 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 
 const configuration = JSON.parse(readFileSync(process.env.JIDOKA_CODE_CONFIG!, "utf8"));
 const fixtureMode = process.env.JIDOKA_TUI_FIXTURE_MODE ?? "multi-turn";
 const providerCallPath = process.env.JIDOKA_TUI_FIXTURE_PROVIDER_CALL!;
+const providerOutputStartedPath = `${providerCallPath}.output-started`;
 let requestSequence = 0;
 
 const result = {
@@ -26,7 +27,7 @@ const result = {
   },
 };
 
-function recordProviderCall(model: any) {
+function recordProviderCall(model: any): number {
   requestSequence += 1;
   appendFileSync(
     providerCallPath,
@@ -38,12 +39,16 @@ function recordProviderCall(model: any) {
     })}\n`,
     { mode: 0o600 },
   );
+  return requestSequence;
 }
 
 function streamFixture(model: any) {
-  recordProviderCall(model);
+  const currentRequestSequence = recordProviderCall(model);
   const stream = createAssistantMessageEventStream();
   setTimeout(() => {
+    if (fixtureMode === "crash-after-recorded-result" && currentRequestSequence === 1) {
+      writeFileSync(providerOutputStartedPath, "started\n", { flag: "wx", mode: 0o600 });
+    }
     const output: any = {
       role: "assistant",
       content: [],
@@ -62,7 +67,7 @@ function streamFixture(model: any) {
       timestamp: Date.now(),
     };
     stream.push({ type: "start", partial: output });
-    const toolCall = requestSequence === 1
+    const toolCall = currentRequestSequence === 1
       ? {
           type: "toolCall",
           id: "jidoka-h3-preflight-call",

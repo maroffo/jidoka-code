@@ -88,6 +88,8 @@ readonly WORKFLOW_CONFIGURATION="$CHANNEL_ROOT/workflow.json"
 readonly TUI_CONFIGURATION="$CHANNEL_ROOT/tui-fresh.json"
 readonly PROMPT_FILE="$CHANNEL_ROOT/prompt.txt"
 readonly PROVIDER_CALL="$CHANNEL_ROOT/causal-provider-call.json"
+readonly PROVIDER_OUTPUT_STARTED="$PROVIDER_CALL.output-started"
+readonly CHILD_PROCESS_RECORD="$CHANNEL_ROOT/child-process-$FRESH_LAUNCH_ATTEMPT_ID.json"
 readonly FAILURE_CHANNEL_ROOT="$TMP/failure-channel"
 readonly FAILURE_SESSION_ROOT="$TMP/failure-sessions"
 readonly FAILURE_WORKFLOW_CONFIGURATION="$FAILURE_CHANNEL_ROOT/workflow.json"
@@ -294,16 +296,50 @@ readonly pane_id tab_id
 HERDR_SOCKET_PATH="$SOCKET" herdr terminal session observe \
     "$pane_id" --cols 120 --rows 40 >"$TMP/observer.out" 2>"$TMP/observer.err" &
 observer_pid=$!
+# Runtime snapshot attestation precedes spawn and may traverse tens of thousands of files.
+# Start the UI visibility deadline only after the host has atomically recorded the child.
+for _ in $(/usr/bin/seq 1 2400); do
+    [[ -f "$CHILD_PROCESS_RECORD" ]] && break
+    [[ ! -f "$RUN_ROOT/$FRESH_LAUNCH_ATTEMPT_ID/failure.json" ]] || \
+        fail "host failed before Pi child launch"
+    [[ ! -f "$CHANNEL_ROOT/result.json" ]] || fail "result raced Pi child launch"
+    [[ ! -f "$PROVIDER_OUTPUT_STARTED" ]] || fail "provider output preceded Pi child launch"
+    /bin/sleep 0.05
+done
+[[ -f "$CHILD_PROCESS_RECORD" ]] || fail "Pi child did not start before bounded deadline"
+if ! "$NODE" - "$CHILD_PROCESS_RECORD" "$FRESH_LAUNCH_ATTEMPT_ID" <<'NODE'
+const fs = require("node:fs");
+const file = process.argv[2], launchAttemptID = process.argv[3];
+const stat = fs.lstatSync(file);
+const value = JSON.parse(fs.readFileSync(file, "utf8"));
+if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid()
+    || stat.nlink !== 1 || (stat.mode & 0o077) !== 0
+    || value.schemaVersion !== 1 || value.launchAttemptID !== launchAttemptID
+    || !Number.isSafeInteger(value.processID) || value.processID <= 0
+    || value.processGroupID !== value.processID
+    || !Number.isSafeInteger(value.startSeconds) || value.startSeconds <= 0
+    || !Number.isSafeInteger(value.startMicroseconds)
+    || value.startMicroseconds < 0 || value.startMicroseconds >= 1_000_000) process.exit(1);
+NODE
+then
+    fail "Pi child process record is invalid"
+fi
 for _ in $(/usr/bin/seq 1 1000); do
     HERDR_SOCKET_PATH="$SOCKET" herdr pane read \
         "$pane_id" --source recent --lines 80 --format text \
         >"$TMP/pre-result-screen.txt" 2>/dev/null || true
-    /usr/bin/grep -Fq "interactive input is locked" "$TMP/pre-result-screen.txt" && break
+    if /usr/bin/grep -Fq "interactive input is locked" "$TMP/pre-result-screen.txt"; then
+        [[ ! -f "$PROVIDER_OUTPUT_STARTED" ]] || \
+            fail "provider output preceded locked observer visibility"
+        break
+    fi
     [[ ! -f "$CHANNEL_ROOT/result.json" ]] || fail "result raced pre-result input probe"
+    [[ ! -f "$PROVIDER_OUTPUT_STARTED" ]] || \
+        fail "provider output preceded locked observer visibility"
     /bin/sleep 0.02
 done
 /usr/bin/grep -Fq "interactive input is locked" "$TMP/pre-result-screen.txt" || \
-    fail "locked observer editor was not visible before provider result"
+    fail "locked observer editor was not visible before provider output"
 HERDR_SOCKET_PATH="$SOCKET" herdr pane send-text "$pane_id" "$MANUAL_SENTINEL" >/dev/null
 HERDR_SOCKET_PATH="$SOCKET" herdr pane send-keys "$pane_id" enter >/dev/null
 HERDR_SOCKET_PATH="$SOCKET" herdr pane send-text \

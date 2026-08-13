@@ -47,7 +47,9 @@ readonly CHILD="$BIN_DIR/JidokaCodeHerdrFixture"
 [[ -f "$HOST" && -x "$HOST" && ! -L "$HOST" ]] || fail "missing host product"
 [[ -f "$CHILD" && -x "$CHILD" && ! -L "$CHILD" ]] || fail "missing fixture product"
 
-TMP="$(/usr/bin/mktemp -d /tmp/jidoka-herdr-s11.XXXXXX)"
+/bin/mkdir -p "$ROOT/build/evidence"
+TMP="$(/usr/bin/mktemp -d "$ROOT/build/evidence/jidoka-herdr-s11.XXXXXX")"
+TMP="$(cd "$TMP" && pwd -P)"
 readonly TMP
 readonly RUN_ROOT="$TMP/runs"
 readonly WORK_ROOT="$TMP/work"
