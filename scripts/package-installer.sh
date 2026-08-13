@@ -18,6 +18,7 @@ readonly PACKAGE_TOOL_TIMEOUT_SECONDS=300
 readonly APPLICATION_IDENTIFIER="com.maroffo.JidokaCode"
 readonly PACKAGE_IDENTIFIER="com.maroffo.JidokaCode.pkg"
 readonly INSTALL_LOCATION="/Applications"
+readonly COMPONENT_POLICY="$ROOT/Packaging/app-component.plist"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 readonly INSTALLER_SIGN_IDENTITY="${INSTALLER_SIGN_IDENTITY:-}"
 readonly SIGNING_KEYCHAIN="${SIGNING_KEYCHAIN:-}"
@@ -96,6 +97,55 @@ certificate_sha256_for_identity() {
     ' <<<"$certificates"
 }
 
+validate_component_policy() {
+    /usr/bin/plutil -lint "$COMPONENT_POLICY" >/dev/null || \
+        fail "application component policy is invalid"
+    [[ "$(/usr/bin/xmllint --xpath 'count(/plist/array/dict)' "$COMPONENT_POLICY")" == "1" && \
+        "$(/usr/bin/xmllint --xpath 'count(/plist/array/dict/key)' "$COMPONENT_POLICY")" == "5" ]] || \
+        fail "application component policy shape differs"
+    for key in \
+        RootRelativeBundlePath BundleIsRelocatable BundleIsVersionChecked \
+        BundleHasStrictIdentifier BundleOverwriteAction
+    do
+        [[ "$(/usr/bin/xmllint --xpath "count(/plist/array/dict/key[text()='$key'])" "$COMPONENT_POLICY")" == "1" ]] || \
+            fail "application component policy keys differ"
+    done
+    [[ "$(/usr/bin/plutil -extract 0.RootRelativeBundlePath raw "$COMPONENT_POLICY")" == \
+        "Jidoka Code.app" && \
+        "$(/usr/bin/plutil -extract 0.BundleIsRelocatable raw "$COMPONENT_POLICY")" == "false" && \
+        "$(/usr/bin/plutil -extract 0.BundleIsVersionChecked raw "$COMPONENT_POLICY")" == "true" && \
+        "$(/usr/bin/plutil -extract 0.BundleHasStrictIdentifier raw "$COMPONENT_POLICY")" == "true" && \
+        "$(/usr/bin/plutil -extract 0.BundleOverwriteAction raw "$COMPONENT_POLICY")" == "upgrade" ]] || \
+        fail "application component policy values differ"
+}
+
+verify_installer_bom_modes() {
+    local bom="$1"
+    local output="$2"
+    /usr/bin/lsbom -p fm "$bom" >"$output" || fail "installer BOM is unreadable"
+    /usr/bin/awk -F '\t' '
+        function normalized_path(path) {
+            gsub(/\/\._/, "/", path)
+            return path
+        }
+        function is_executable(path) {
+            return path == "./Jidoka Code.app/Contents/MacOS/Jidoka Code" \
+                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeEngineProbe" \
+                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeAskPass" \
+                || path == "./Jidoka Code.app/Contents/Helpers/GitHooks/pre-push" \
+                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeHerdrHost"
+        }
+        $1 == "." { if ($2 != "40755") exit 1; root = 1; next }
+        {
+            path = normalized_path($1)
+            expected = ($2 ~ /^40/) ? "40755" : (is_executable(path) ? "100755" : "100644")
+            if ($2 != expected) exit 1
+            entries += 1
+        }
+        END { if (!root || entries == 0) exit 1 }
+    ' "$output" || fail "installer BOM modes differ"
+}
+
 validate_notarization_configuration() {
     local canonical_parent
     local key_mode
@@ -157,6 +207,9 @@ verify_identity \
     "$INSTALLER_SIGN_IDENTITY" basic INSTALLER_SIGN_IDENTITY "$INSTALLER_SIGNING_KEYCHAIN"
 [[ -f "$BOUNDED_COMMAND" && -x "$BOUNDED_COMMAND" && ! -L "$BOUNDED_COMMAND" ]] || \
     fail "bounded command runner is unavailable"
+[[ -f "$COMPONENT_POLICY" && ! -L "$COMPONENT_POLICY" ]] || \
+    fail "application component policy is unavailable"
+validate_component_policy
 [[ -d "$BUILD_ROOT" && ! -L "$BUILD_ROOT" ]] || /bin/mkdir -p "$BUILD_ROOT"
 [[ "$(cd "$BUILD_ROOT" && pwd -P)" == "$ROOT/build" ]] || \
     fail "build root escapes repository"
@@ -167,6 +220,8 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+readonly COMPONENT_ROOT="$TEMP_ROOT/component-root"
+readonly COMPONENT_APP="$COMPONENT_ROOT/Jidoka Code.app"
 readonly COMPONENT_PACKAGE="$TEMP_ROOT/JidokaCode-component.pkg"
 readonly UNSIGNED_PRODUCT_PACKAGE="$TEMP_ROOT/Jidoka Code-unsigned.pkg"
 readonly PRODUCT_PACKAGE="$TEMP_ROOT/Jidoka Code.pkg"
@@ -175,6 +230,7 @@ readonly RAW_PAYLOAD_LIST="$TEMP_ROOT/payload-raw.txt"
 readonly PAYLOAD_LIST="$TEMP_ROOT/payload.txt"
 readonly METADATA_PAYLOAD_LIST="$TEMP_ROOT/payload-metadata.txt"
 readonly EXPECTED_PAYLOAD_LIST="$TEMP_ROOT/expected-payload.txt"
+readonly BOM_MODE_LIST="$TEMP_ROOT/bom-modes.txt"
 readonly NOTARY_RESPONSE="$TEMP_ROOT/notarization-result.json"
 readonly SPCTL_OUTPUT="$TEMP_ROOT/spctl-package.txt"
 
@@ -200,12 +256,20 @@ elif [[ "$?" -ne 1 ]]; then
     fail "could not audit the signed application for checkout paths"
 fi
 
-/usr/bin/pkgbuild \
-    --component "$APP" \
-    --install-location "$INSTALL_LOCATION" \
-    --identifier "$PACKAGE_IDENTIFIER" \
-    --version "$app_version" \
+/bin/mkdir -m 0755 "$COMPONENT_ROOT"
+/usr/bin/ditto "$APP" "$COMPONENT_APP"
+[[ -d "$COMPONENT_APP" && ! -L "$COMPONENT_APP" ]] || \
+    fail "component application copy is missing"
+pkgbuild_arguments=(
+    --root "$COMPONENT_ROOT"
+    --component-plist "$COMPONENT_POLICY"
+    --install-location "$INSTALL_LOCATION"
+    --identifier "$PACKAGE_IDENTIFIER"
+    --version "$app_version"
     "$COMPONENT_PACKAGE"
+)
+readonly -a pkgbuild_arguments
+/usr/bin/pkgbuild "${pkgbuild_arguments[@]}"
 productbuild_arguments=(--package "$COMPONENT_PACKAGE" "$UNSIGNED_PRODUCT_PACKAGE")
 readonly -a productbuild_arguments
 run_package_tool productbuild /usr/bin/productbuild "${productbuild_arguments[@]}"
@@ -259,16 +323,34 @@ LC_ALL=C /usr/bin/sort -o "$METADATA_PAYLOAD_LIST" "$METADATA_PAYLOAD_LIST"
 package_info="$(/usr/bin/find "$EXPANDED_PACKAGE" -type f -name PackageInfo -print)"
 [[ "$(printf '%s\n' "$package_info" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" == "1" ]] || \
     fail "installer PackageInfo is ambiguous"
-/usr/bin/grep -Fq "identifier=\"$PACKAGE_IDENTIFIER\"" "$package_info" || \
-    fail "installer identifier differs"
-/usr/bin/grep -Fq "version=\"$app_version\"" "$package_info" || \
-    fail "installer version differs"
-/usr/bin/grep -Fq "install-location=\"$INSTALL_LOCATION\"" "$package_info" || \
-    fail "installer location differs"
-/usr/bin/grep -Fq 'relocatable="false"' "$package_info" || \
-    fail "installer payload must not be relocatable"
-/usr/bin/grep -Fq 'postinstall-action="none"' "$package_info" || \
-    fail "installer postinstall action differs"
+bom_file="$(/usr/bin/find "$EXPANDED_PACKAGE" -type f -name Bom -print)"
+[[ "$(printf '%s\n' "$bom_file" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" == "1" ]] || \
+    fail "installer BOM is ambiguous"
+verify_installer_bom_modes "$bom_file" "$BOM_MODE_LIST"
+[[ "$(/usr/bin/xmllint --xpath \
+    "count(/pkg-info[@identifier='$PACKAGE_IDENTIFIER' and @version='$app_version' and @install-location='$INSTALL_LOCATION' and @postinstall-action='none' and @auth='root' and @relocatable='false'])" \
+    "$package_info")" == "1" ]] || fail "installer package identity or policy differs"
+[[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle)' "$package_info")" == "1" && \
+    "$(/usr/bin/xmllint --xpath \
+        "count(/pkg-info/bundle[@id='$app_bundle_identifier' and @path='./Jidoka Code.app'])" \
+        "$package_info")" == "1" && \
+    "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle-version/bundle)' "$package_info")" == "1" && \
+    "$(/usr/bin/xmllint --xpath \
+        "count(/pkg-info/bundle-version/bundle[@id='$app_bundle_identifier'])" \
+        "$package_info")" == "1" ]] || fail "installer application bundle identity differs"
+[[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/relocate/bundle)' "$package_info")" == "0" ]] || \
+    fail "installer application bundle is relocatable"
+[[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/strict-identifier/bundle)' "$package_info")" == "1" && \
+    "$(/usr/bin/xmllint --xpath \
+        "count(/pkg-info/strict-identifier/bundle[@id='$app_bundle_identifier'])" \
+        "$package_info")" == "1" ]] || fail "installer application strict identifier differs"
+[[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/upgrade-bundle/bundle)' "$package_info")" == "1" && \
+    "$(/usr/bin/xmllint --xpath \
+        "count(/pkg-info/upgrade-bundle/bundle[@id='$app_bundle_identifier'])" \
+        "$package_info")" == "1" && \
+    "$(/usr/bin/xmllint --xpath 'count(/pkg-info/update-bundle/bundle)' "$package_info")" == "0" && \
+    "$(/usr/bin/xmllint --xpath 'count(/pkg-info/atomic-update-bundle/bundle)' "$package_info")" == "0" ]] || \
+    fail "installer application overwrite policy differs"
 readonly DISTRIBUTION="$EXPANDED_PACKAGE/Distribution"
 [[ -f "$DISTRIBUTION" && ! -L "$DISTRIBUTION" ]] || fail "installer distribution is missing"
 /usr/bin/grep -Fq 'require-scripts="false"' "$DISTRIBUTION" || \

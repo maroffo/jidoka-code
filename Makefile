@@ -17,6 +17,7 @@ jidoka-code-check:
 	@if DEVELOPER_DIR=/tmp ./scripts/verify-toolchain.sh >/dev/null 2>&1; then echo "toolchain verifier accepted an invalid path" >&2; exit 1; fi
 	shellcheck scripts/verify-toolchain.sh scripts/package-app.sh scripts/package-installer.sh scripts/spikes/test-s1-package.sh scripts/spikes/test-s2-lifecycle.sh scripts/spikes/test-s3-keychain.sh scripts/spikes/test-s4-pi.sh scripts/spikes/test-s5-s7-local.sh scripts/spikes/test-s8-workflows.sh scripts/spikes/test-s9-topology.sh scripts/spikes/test-s10-ui.sh scripts/spikes/test-s11-herdr.sh scripts/spikes/test-s12-pi-tui.sh
 	/usr/bin/perl -c scripts/run-bounded-command.pl
+	/usr/bin/plutil -lint Packaging/app-component.plist
 	/usr/bin/plutil -convert xml1 -o /dev/null Resources/Herdr/runtime-builds.json
 	test "$$(/usr/bin/plutil -extract protocol raw Resources/Herdr/api-schema-0.8.0.json)" = "19"
 	test "$$(/usr/bin/shasum -a 256 Resources/Herdr/api-schema-0.8.0.json | /usr/bin/awk '{print $$1}')" = "88ff414aa996e390c2db05a37b95d28dbe4e81b98329f6ed7f7a2cc5c6ebf51a"

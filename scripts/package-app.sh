@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
 readonly DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 export DEVELOPER_DIR
@@ -83,6 +84,32 @@ assert_portable_macho() {
             *) fail "non-portable rpath in $executable: $rpath" ;;
         esac
     done < <(list_rpaths "$executable")
+}
+
+verify_bundle_modes() {
+    local mode
+    local path
+    while IFS= read -r -d '' path; do
+        mode="$(/usr/bin/stat -f '%OLp' "$path")"
+        [[ "$mode" == "755" ]] || fail "bundle directory mode differs: $path"
+    done < <(/usr/bin/find "$APP" -type d -print0)
+
+    for path in \
+        "$APP_EXECUTABLE" "$ENGINE_EXECUTABLE" "$ASKPASS_EXECUTABLE" \
+        "$PUSH_GUARD_EXECUTABLE" "$HERDR_HOST_EXECUTABLE"
+    do
+        mode="$(/usr/bin/stat -f '%OLp' "$path")"
+        [[ "$mode" == "755" ]] || fail "bundle executable mode differs: $path"
+    done
+
+    while IFS= read -r -d '' path; do
+        case "$path" in
+            "$APP_EXECUTABLE"|"$ENGINE_EXECUTABLE"|"$ASKPASS_EXECUTABLE"|\
+            "$PUSH_GUARD_EXECUTABLE"|"$HERDR_HOST_EXECUTABLE") continue ;;
+        esac
+        mode="$(/usr/bin/stat -f '%OLp' "$path")"
+        [[ "$mode" == "644" ]] || fail "bundle resource mode differs: $path"
+    done < <(/usr/bin/find "$APP" -type f -print0)
 }
 
 sign_path() {
@@ -354,6 +381,7 @@ sign_path "$ASKPASS_EXECUTABLE" com.maroffo.JidokaCode.AskPass
 sign_path "$PUSH_GUARD_EXECUTABLE" com.maroffo.JidokaCode.PushGuard
 sign_path "$HERDR_HOST_EXECUTABLE" com.maroffo.JidokaCode.HerdrHost
 sign_path "$APP" com.maroffo.JidokaCode
+verify_bundle_modes
 /usr/bin/codesign --verify --strict "$ENGINE_EXECUTABLE"
 /usr/bin/codesign --verify --strict "$ASKPASS_EXECUTABLE"
 /usr/bin/codesign --verify --strict "$PUSH_GUARD_EXECUTABLE"
