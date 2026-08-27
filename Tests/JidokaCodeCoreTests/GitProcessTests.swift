@@ -56,6 +56,72 @@ struct GitProcessTests {
     }
   }
 
+  @Test("same-second PID reuse cannot bind an original process group")
+  func sameSecondPIDReuseSignalTargets() {
+    let recorded = SupervisedProcessIdentity(
+      processID: 41_001,
+      startSeconds: 900,
+      startMicroseconds: 100
+    )
+    let reused = SupervisedProcessEvidence(
+      identity: SupervisedProcessIdentity(
+        processID: recorded.processID,
+        startSeconds: recorded.startSeconds,
+        startMicroseconds: recorded.startMicroseconds + 1
+      ),
+      parentProcessID: 1,
+      processGroupID: recorded.processID,
+      sessionID: recorded.processID
+    )
+    let reusedTargets = SupervisedProcessTracker.signalTargetsForTesting(
+      recordedIdentities: [recorded],
+      currentEvidence: [recorded.processID: reused],
+      originalProcessGroup: recorded.processID,
+      callerProcessGroup: 99
+    )
+    #expect(reusedTargets.processGroups.isEmpty)
+    #expect(reusedTargets.identities.isEmpty)
+
+    let escapedDescendant = SupervisedProcessIdentity(
+      processID: 41_002,
+      startSeconds: 901,
+      startMicroseconds: 300
+    )
+    let descendantEvidence = SupervisedProcessEvidence(
+      identity: escapedDescendant,
+      parentProcessID: 1,
+      processGroupID: 51_002,
+      sessionID: 51_002
+    )
+    let descendantTargets = SupervisedProcessTracker.signalTargetsForTesting(
+      recordedIdentities: [recorded, escapedDescendant],
+      currentEvidence: [
+        recorded.processID: reused,
+        escapedDescendant.processID: descendantEvidence,
+      ],
+      originalProcessGroup: recorded.processID,
+      callerProcessGroup: 99
+    )
+    #expect(descendantTargets.processGroups == [descendantEvidence.processGroupID])
+    #expect(!descendantTargets.processGroups.contains(recorded.processID))
+    #expect(descendantTargets.identities == [escapedDescendant])
+
+    let matching = SupervisedProcessEvidence(
+      identity: recorded,
+      parentProcessID: 1,
+      processGroupID: recorded.processID,
+      sessionID: recorded.processID
+    )
+    let matchingTargets = SupervisedProcessTracker.signalTargetsForTesting(
+      recordedIdentities: [recorded],
+      currentEvidence: [recorded.processID: matching],
+      originalProcessGroup: recorded.processID,
+      callerProcessGroup: 99
+    )
+    #expect(matchingTargets.processGroups == [recorded.processID])
+    #expect(matchingTargets.identities == [recorded])
+  }
+
   @Test("argv stays discrete and output is captured without a shell")
   func discreteArguments() async throws {
     let fixture = try GitTestRoot(prefix: "jidoka-process")
@@ -157,7 +223,9 @@ struct GitProcessTests {
         ),
         timeoutSeconds: 3
       ))
-    #expect(escaped.timedOut)
+    #expect(escaped.exitCode == 0)
+    #expect(escaped.terminationSignal == nil)
+    #expect(!escaped.timedOut)
     let escapedPID = try #require(
       Int32(
         String(contentsOf: escapedPIDFile, encoding: .utf8)
@@ -172,7 +240,17 @@ struct GitProcessTests {
     #expect(errno == ESRCH)
 
     let outputScript = fixture.root.appendingPathComponent("output.sh")
-    try writeExecutable(outputScript, "#!/bin/sh\nexec /usr/bin/yes bounded\n")
+    try writeExecutable(
+      outputScript,
+      """
+      #!/bin/sh
+      /usr/bin/yes flood-a &
+      /usr/bin/yes flood-b &
+      /usr/bin/yes flood-c &
+      /usr/bin/yes flood-d &
+      wait
+      """
+    )
     let bounded = try await BoundedProcessRunner().run(
       GitProcessRequest(
         executable: outputScript,
@@ -186,8 +264,108 @@ struct GitProcessTests {
         maximumOutputBytes: 1_024
       ))
     #expect(bounded.outputLimitExceeded)
+    #expect(bounded.stdoutLimitExceeded)
+    #expect(!bounded.stderrLimitExceeded)
     #expect(bounded.stdout.count == 1_024)
+    #expect(bounded.durationSeconds < 2)
     #expect(!bounded.succeeded)
+  }
+
+  @Test(
+    "observed session-escaping descendants are identity-cleaned with exact leader status",
+    arguments: [Int32(0), Int32(37)]
+  )
+  func escapedDescendantPreservesLeaderStatus(exitCode: Int32) async throws {
+    let fixture = try GitTestRoot(prefix: "jidoka-process-escape-status")
+    defer { fixture.remove() }
+    let pidFile = fixture.root.appendingPathComponent("escaped-\(exitCode).pid")
+    let script = fixture.root.appendingPathComponent("escaped-\(exitCode).sh")
+    try writeExecutable(
+      script,
+      """
+      #!/bin/sh
+      /usr/bin/python3 -c 'import os,time; os.setsid(); open("\(pidFile.path)", "w").write(str(os.getpid())); os.close(1); os.close(2); time.sleep(30)' &
+      attempt=0
+      while [ ! -s '\(pidFile.path)' ] && [ "$attempt" -lt 100 ]
+      do
+        /bin/sleep 0.01
+        attempt=$((attempt + 1))
+      done
+      test -s '\(pidFile.path)'
+      /bin/sleep 0.2
+      exit \(exitCode)
+      """
+    )
+    let task = Task {
+      try await BoundedProcessRunner().run(
+        GitProcessRequest(
+          executable: script,
+          arguments: [],
+          workingDirectory: fixture.root,
+          environment: try CredentiallessEnvironment.make(
+            homeDirectory: fixture.root.path,
+            temporaryDirectory: fixture.root.path
+          ),
+          timeoutSeconds: 3
+        ))
+    }
+    let identity = try await recordedIdentity(at: pidFile)
+    defer {
+      if SupervisedProcessTracker.matches(identity) {
+        _ = Darwin.kill(identity.processID, SIGKILL)
+      }
+    }
+    let result = try await task.value
+    #expect(result.exitCode == exitCode)
+    #expect(result.terminationSignal == nil)
+    #expect(!result.timedOut)
+    #expect(!SupervisedProcessTracker.matches(identity))
+  }
+
+  @Test("timeout removes an observed session escape by PID and microsecond start time")
+  func escapedDescendantTimeout() async throws {
+    let fixture = try GitTestRoot(prefix: "jidoka-process-escape-timeout")
+    defer { fixture.remove() }
+    let pidFile = fixture.root.appendingPathComponent("escaped.pid")
+    let script = fixture.root.appendingPathComponent("escaped-timeout.sh")
+    try writeExecutable(
+      script,
+      """
+      #!/bin/sh
+      /usr/bin/python3 -c 'import os,time; os.setsid(); open("\(pidFile.path)", "w").write(str(os.getpid())); os.close(1); os.close(2); time.sleep(30)' &
+      attempt=0
+      while [ ! -s '\(pidFile.path)' ] && [ "$attempt" -lt 100 ]
+      do
+        /bin/sleep 0.01
+        attempt=$((attempt + 1))
+      done
+      test -s '\(pidFile.path)'
+      /bin/sleep 30
+      """
+    )
+    let task = Task {
+      try await BoundedProcessRunner().run(
+        GitProcessRequest(
+          executable: script,
+          arguments: [],
+          workingDirectory: fixture.root,
+          environment: try CredentiallessEnvironment.make(
+            homeDirectory: fixture.root.path,
+            temporaryDirectory: fixture.root.path
+          ),
+          timeoutSeconds: 0.5
+        ))
+    }
+    let identity = try await recordedIdentity(at: pidFile)
+    defer {
+      if SupervisedProcessTracker.matches(identity) {
+        _ = Darwin.kill(identity.processID, SIGKILL)
+      }
+    }
+    let result = try await task.value
+    #expect(result.timedOut)
+    #expect(!result.succeeded)
+    #expect(!SupervisedProcessTracker.matches(identity))
   }
 
   @Test("symlink executables and working directories fail closed")
@@ -208,5 +386,19 @@ struct GitProcessTests {
           timeoutSeconds: 5
         ))
     }
+  }
+
+  private func recordedIdentity(at pidFile: URL) async throws -> SupervisedProcessIdentity {
+    for _ in 0..<200 {
+      if let value = try? String(contentsOf: pidFile, encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+        let processID = pid_t(value),
+        let identity = SupervisedProcessTracker.identity(processID)
+      {
+        return identity
+      }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    throw GitProcessError.cleanupFailed
   }
 }

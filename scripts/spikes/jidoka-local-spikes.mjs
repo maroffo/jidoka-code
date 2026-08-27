@@ -21,7 +21,11 @@ import { tmpdir } from "node:os";
 
 const developerDirectory = process.env.DEVELOPER_DIR;
 const gitPath = "/usr/bin/git";
-const nodePath = "/opt/homebrew/Cellar/node/26.6.0/bin/node";
+const releaseRuntimeRoot = realpathSync(process.env.JIDOKA_RELEASE_RUNTIME_ROOT ?? "");
+const nodePath = realpathSync(process.execPath);
+if (nodePath !== `${releaseRuntimeRoot}/node/bin/node`) {
+  fail("Node is outside the attested release runtime");
+}
 if (typeof developerDirectory !== "string" || developerDirectory.length === 0) {
   fail("DEVELOPER_DIR is required");
 }
@@ -49,7 +53,6 @@ function attestSystemRuntime() {
     [gitPath]: "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818",
     [gitHTTPBackendPath]:
       "4026051f87a437197a913d4ca5d3196f1d749bf6060f84c74cc374263988110a",
-    [nodePath]: "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040",
   };
   const observed = {};
   for (const [path, expectedSHA256] of Object.entries(expected)) {
@@ -59,6 +62,7 @@ function attestSystemRuntime() {
     if (digest !== expectedSHA256) fail(`system runtime digest drift: ${path}`);
     observed[path] = digest;
   }
+  observed[nodePath] = sha256(readFileSync(nodePath));
   return observed;
 }
 

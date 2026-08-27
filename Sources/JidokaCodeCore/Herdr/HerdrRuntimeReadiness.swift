@@ -411,6 +411,12 @@ public actor HerdrRuntimeReadinessChecker: HerdrRuntimeReadinessChecking {
 
     do {
       let handshake = try await handshaker.handshake()
+      guard let peerExecutable = handshake.socketIdentity.peerEvidence?.executable,
+        peerExecutable.path == attestation.executable.path,
+        peerExecutable.contentSHA256 == attestation.executableSHA256
+      else {
+        throw HerdrSocketClientError.unsafePeer
+      }
       guard handshake.pong.version == attestation.version else {
         return Self.blocked(for: HerdrCompatibilityError.versionMismatch)
       }

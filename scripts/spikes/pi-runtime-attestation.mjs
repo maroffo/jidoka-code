@@ -9,9 +9,9 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-const piRoot = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent";
-const nodePath = "/opt/homebrew/Cellar/node/26.6.0/bin/node";
 const expectedPackageName = "@earendil-works/pi-coding-agent";
+const expectedReleaseManifestSHA256 =
+  "fe15573a58a4604a3695b092ba8b07ae2432da7b7f07743a8d54a4421ab3aa83";
 const maximumRuntimeFileBytes = 16 * 1_048_576;
 const maximumNodeLibraryBytes = 128 * 1_048_576;
 export const expectedPiRuntimePaths = Object.freeze([
@@ -119,7 +119,7 @@ export function validateNodePolicy(policy) {
   ) {
     fail("Node runtime policy is malformed");
   }
-  const executableDigests = new Set();
+  const buildIdentities = new Set();
   for (const [version, build] of Object.entries(policy.builds)) {
     parseVersion(version);
     if (
@@ -127,13 +127,11 @@ export function validateNodePolicy(policy) {
       !exactKeys(build.executable, ["canonicalPath", "sha256"]) ||
       !validAbsolutePath(build.executable.canonicalPath) ||
       !isDigest(build.executable.sha256) ||
-      executableDigests.has(build.executable.sha256) ||
       !Array.isArray(build.dynamicLibraries) ||
       build.dynamicLibraries.length > 128
     ) {
       fail(`Node runtime policy build is invalid: ${version}`);
     }
-    executableDigests.add(build.executable.sha256);
     const loadPaths = [];
     const canonicalPaths = [];
     for (const library of build.dynamicLibraries) {
@@ -155,6 +153,19 @@ export function validateNodePolicy(policy) {
     ) {
       fail(`Node dynamic-library inventory is ambiguous: ${version}`);
     }
+    const identity = JSON.stringify([
+      build.executable.canonicalPath,
+      build.executable.sha256,
+      ...build.dynamicLibraries.flatMap((library) => [
+        library.loadPath,
+        library.canonicalPath,
+        library.sha256,
+      ]),
+    ]);
+    if (buildIdentities.has(identity)) {
+      fail(`Node runtime policy build is ambiguous: ${version}`);
+    }
+    buildIdentities.add(identity);
   }
   return policy;
 }
@@ -192,7 +203,10 @@ function digestRegularFile(path, description, maximumBytes = maximumRuntimeFileB
   return sha256(readFileSync(path));
 }
 
-export function attestPackageTree(root = piRoot) {
+export function attestPackageTree(root) {
+  if (typeof root !== "string" || !root.startsWith("/")) {
+    fail("Pi package root must be one explicit absolute path");
+  }
   const canonicalRoot = realpathSync(root);
   const entries = [];
   function walk(directory, relativeDirectory = "") {
@@ -379,7 +393,10 @@ function resolveMachODependency(
   fail(`missing Node dependency: ${dependency}`);
 }
 
-export function attestNodeDependencyClosure(build, executablePath = nodePath) {
+export function attestNodeDependencyClosure(build, executablePath) {
+  if (!validAbsolutePath(executablePath)) {
+    fail("Node dependency closure executable path must be explicit");
+  }
   const expected = new Set(build.dynamicLibraries.map((library) => library.canonicalPath));
   const images = new Map([[executablePath, readFileSync(executablePath)]]);
   for (const library of build.dynamicLibraries) {
@@ -416,13 +433,112 @@ export function attestNodeDependencyClosure(build, executablePath = nodePath) {
   return [...reachable].sort();
 }
 
+export function attestReleaseRuntime({
+  expectedManifestSHA256 = expectedReleaseManifestSHA256,
+  nodeExecutable = process.execPath,
+  runtimeRoot,
+}) {
+  if (
+    expectedManifestSHA256 !== expectedReleaseManifestSHA256 ||
+    !validAbsolutePath(runtimeRoot) ||
+    !validAbsolutePath(nodeExecutable)
+  ) {
+    fail("release runtime authority input is invalid");
+  }
+  const rootStat = lstatSync(runtimeRoot);
+  const canonicalRoot = realpathSync(runtimeRoot);
+  if (
+    !rootStat.isDirectory() ||
+    rootStat.isSymbolicLink() ||
+    canonicalRoot !== runtimeRoot ||
+    JSON.stringify(readdirSync(canonicalRoot).sort()) !==
+      JSON.stringify(["licenses", "node", "pi", "runtime-manifest.json"])
+  ) {
+    fail("release runtime root is unsafe or inexact");
+  }
+  const manifestPath = `${canonicalRoot}/runtime-manifest.json`;
+  const manifestData = readFileSync(manifestPath);
+  if (sha256(manifestData) !== expectedManifestSHA256 || manifestData.at(-1) !== 0x0a) {
+    fail("release runtime manifest digest differs");
+  }
+  const manifest = JSON.parse(manifestData);
+  if (
+    !exactKeys(manifest, [
+      "licenses", "node", "pi", "rootEntries", "runtimeID", "schemaVersion",
+    ]) ||
+    manifest.schemaVersion !== 2 ||
+    !exactKeys(manifest.node, [
+      "adHocCodeDirectorySHA256", "architecture", "entitlementPolicy", "identifier",
+      "machoDependencies", "mode", "productionCodeDirectorySHA256", "relativePath",
+      "signatureTeam", "sizeAtAdHocQualification", "upstream", "version",
+    ]) ||
+    !isDigest(manifest.node?.adHocCodeDirectorySHA256) ||
+    !isDigest(manifest.node?.productionCodeDirectorySHA256) ||
+    manifest.node?.adHocCodeDirectorySHA256 === manifest.node?.productionCodeDirectorySHA256 ||
+    manifest.node?.identifier !== "works.earendil.jidoka.runtime.node" ||
+    manifest.node?.relativePath !== "node/bin/node" ||
+    manifest.node?.version !== process.versions.node ||
+    manifest.pi?.package !== expectedPackageName ||
+    manifest.pi?.relativeRoot !== "pi" ||
+    manifest.pi?.cliRelativePath !== "dist/cli.js" ||
+    !exactKeys(manifest.pi?.criticalFiles, expectedPiRuntimePaths) ||
+    !exactKeys(manifest.pi?.packageTree, ["entryCount", "sha256"])
+  ) {
+    fail("release runtime manifest shape differs");
+  }
+  const canonicalNode = realpathSync(nodeExecutable);
+  const expectedNode = `${canonicalRoot}/${manifest.node.relativePath}`;
+  if (canonicalNode !== expectedNode || realpathSync(process.execPath) !== expectedNode) {
+    fail("release Node executable differs");
+  }
+  const packageRoot = `${canonicalRoot}/${manifest.pi.relativeRoot}`;
+  const metadataPath = `${packageRoot}/package.json`;
+  const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+  if (metadata.name !== manifest.pi.package || metadata.version !== manifest.pi.version) {
+    fail("release Pi package identity differs");
+  }
+  const digests = { [manifestPath]: expectedManifestSHA256 };
+  for (const relativePath of expectedPiRuntimePaths) {
+    const path = `${packageRoot}/${relativePath}`;
+    const digest = digestRegularFile(path, "release Pi runtime");
+    if (digest !== manifest.pi.criticalFiles[relativePath]) {
+      fail(`release Pi runtime digest differs: ${relativePath}`);
+    }
+    digests[path] = digest;
+  }
+  const tree = attestPackageTree(packageRoot);
+  if (
+    tree.entryCount !== manifest.pi.packageTree.entryCount ||
+    tree.sha256 !== manifest.pi.packageTree.sha256
+  ) {
+    fail("release Pi package tree differs");
+  }
+  digests[`${packageRoot}/#package-tree-v1`] = tree.sha256;
+  const [major, minor, patch] = parseVersion(manifest.pi.version);
+  return {
+    compatibility: {
+      maximumVersionExclusive: `${major}.${minor}.${patch + 1}`,
+      minimumVersion: manifest.pi.version,
+      policySHA256: expectedManifestSHA256,
+    },
+    digests,
+    nodeVersion: manifest.node.version,
+    version: manifest.pi.version,
+  };
+}
+
 export function attestSystemRuntime({
   attestation,
   expectedNodePolicySHA256,
   expectedPolicySHA256,
+  nodePath,
   nodePolicyRelativePath,
+  piRoot,
   policyRelativePath,
 }) {
+  if (!validAbsolutePath(nodePath) || !validAbsolutePath(piRoot)) {
+    fail("diagnostic runtime paths must be explicit and absolute");
+  }
   const policyFile = attestation.files[policyRelativePath];
   if (policyFile?.sha256 !== expectedPolicySHA256) {
     fail("Pi runtime policy digest mismatch");
@@ -451,7 +567,7 @@ export function attestSystemRuntime({
     }
     digests[path] = digest;
   }
-  const tree = attestPackageTree();
+  const tree = attestPackageTree(piRoot);
   if (
     tree.entryCount !== selected.build.packageTree.entryCount ||
     tree.sha256 !== selected.build.packageTree.sha256
@@ -461,11 +577,12 @@ export function attestSystemRuntime({
   digests[`${piRoot}/#package-tree-v1`] = tree.sha256;
 
   const nodeDigest = digestRegularFile(nodePath, "Node executable");
-  const nodeEntry = Object.entries(nodePolicy.builds).find(([, build]) =>
+  const nodeEntries = Object.entries(nodePolicy.builds).filter(([, build]) =>
     build.executable.canonicalPath === nodePath && build.executable.sha256 === nodeDigest
   );
-  if (nodeEntry === undefined) fail("Node executable build is not attested");
-  const [nodeVersion, nodeBuild] = nodeEntry;
+  if (nodeEntries.length !== 1) fail("Node executable build is not uniquely attested");
+  const [nodeVersion, nodeBuild] = nodeEntries[0];
+  if (process.versions.node !== nodeVersion) fail("Node runtime version does not match policy");
   digests[nodePath] = nodeDigest;
   for (const library of nodeBuild.dynamicLibraries) {
     const sourcePath = library.loadPath.startsWith("@")
@@ -484,7 +601,7 @@ export function attestSystemRuntime({
     }
     digests[library.canonicalPath] = digest;
   }
-  attestNodeDependencyClosure(nodeBuild);
+  attestNodeDependencyClosure(nodeBuild, nodePath);
   return {
     compatibility: {
       ...selected.compatibility,

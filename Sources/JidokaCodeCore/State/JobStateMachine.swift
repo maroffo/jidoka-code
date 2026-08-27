@@ -85,7 +85,10 @@ public enum JobEvent: String, CaseIterable, Codable, Sendable {
   case lateEffectAttributed
   case humanRetryAuthorized
   case humanAbort
+  case operatorRetire
+  case operatorRetryConfigurationRepair
   case acquireRecoveryLease
+  case canaryTopologyRecovered
 }
 
 public enum JobLeaseEffect: String, Codable, Sendable {
@@ -149,6 +152,7 @@ public struct JobTransitionEffect: Equatable, Sendable {
   public let disposition: ObjectDispositionState?
   public let mutationGenerationDelta: Int
   public let terminalReason: String?
+  public let clearsTerminalReason: Bool
 
   init(
     from: JobState,
@@ -160,7 +164,8 @@ public struct JobTransitionEffect: Equatable, Sendable {
     nextStep: JobStepKind? = nil,
     disposition: ObjectDispositionState? = nil,
     mutationGenerationDelta: Int = 0,
-    terminalReason: String? = nil
+    terminalReason: String? = nil,
+    clearsTerminalReason: Bool = false
   ) {
     self.from = from
     self.to = to
@@ -172,6 +177,7 @@ public struct JobTransitionEffect: Equatable, Sendable {
     self.disposition = disposition
     self.mutationGenerationDelta = mutationGenerationDelta
     self.terminalReason = terminalReason
+    self.clearsTerminalReason = clearsTerminalReason
   }
 }
 
@@ -326,8 +332,27 @@ public enum JobStateMachine {
         disposition: .ambiguous,
         terminalReason: context.reason
       )
+    case (.queued, .operatorRetire), (.blocked, .operatorRetire):
+      return effect(
+        state,
+        .blocked,
+        deadline: .clear,
+        disposition: .superseded,
+        terminalReason: context.reason
+      )
+    case (.blocked, .operatorRetryConfigurationRepair):
+      return effect(
+        state,
+        .queued,
+        attemptDelta: 1,
+        deadline: .clear,
+        disposition: .humanRetryAuthorized,
+        clearsTerminalReason: true
+      )
     case (.reconciliationQueued, .acquireRecoveryLease):
       return effect(state, .reconciling, lease: .acquireRecovery)
+    case (.reconciliationQueued, .canaryTopologyRecovered):
+      return effect(state, .preparing, lease: .acquireRecovery)
     default:
       throw JobStateMachineError.invalidTransition(from: state, event: event)
     }
@@ -371,7 +396,8 @@ public enum JobStateMachine {
     nextStep: JobStepKind? = nil,
     disposition: ObjectDispositionState? = nil,
     mutationGenerationDelta: Int = 0,
-    terminalReason: String? = nil
+    terminalReason: String? = nil,
+    clearsTerminalReason: Bool = false
   ) -> JobTransitionEffect {
     JobTransitionEffect(
       from: from,
@@ -383,7 +409,8 @@ public enum JobStateMachine {
       nextStep: nextStep,
       disposition: disposition,
       mutationGenerationDelta: mutationGenerationDelta,
-      terminalReason: terminalReason
+      terminalReason: terminalReason,
+      clearsTerminalReason: clearsTerminalReason
     )
   }
 

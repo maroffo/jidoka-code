@@ -19,9 +19,12 @@ import { tmpdir } from "node:os";
 import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const nodePath = "/opt/homebrew/Cellar/node/26.6.0/bin/node";
-const typeboxPath =
-  "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox";
+const releaseRuntimeRoot = realpathSync(process.env.JIDOKA_RELEASE_RUNTIME_ROOT ?? "");
+const nodePath = realpathSync(process.execPath);
+const typeboxPath = `${releaseRuntimeRoot}/pi/node_modules/typebox`;
+if (nodePath !== `${releaseRuntimeRoot}/node/bin/node`) {
+  throw new Error("Node is outside the attested release runtime");
+}
 const expectedRuntimeSHA256 =
   "b6bae1cb282d95b3c1a3e6e4f37c5b967aa5bd3885ec3050c5d7bddb72b4a19b";
 
@@ -116,7 +119,8 @@ function runParent(sourceRuntimePath) {
         JIDOKA_PROVIDER_ATTEMPT_ID: attemptId,
         JIDOKA_PROVIDER_GATE: "1",
         JIDOKA_PROVIDER_LEDGER: ledgerPath,
-        PATH: "/opt/homebrew/bin:/usr/bin:/bin",
+        JIDOKA_RELEASE_RUNTIME_ROOT: releaseRuntimeRoot,
+        PATH: "/usr/bin:/bin",
         TMPDIR: tmpdir(),
       },
       timeout: 10_000,

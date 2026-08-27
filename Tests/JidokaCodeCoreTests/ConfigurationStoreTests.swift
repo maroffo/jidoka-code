@@ -93,7 +93,7 @@ struct ConfigurationStoreTests {
     await reopenedDatabase.close()
   }
 
-  @Test("W7 settings migrate from W6 and credential replacement metadata is durable")
+  @Test("W8 settings migrate from W6 and credential replacement metadata is durable")
   func applicationSettingsMigration() async throws {
     let fixture = try ConfigurationFixture()
     defer { fixture.remove() }
@@ -140,10 +140,13 @@ struct ConfigurationStoreTests {
     await legacy.close()
 
     let upgraded = try SQLiteStore(databaseURL: fixture.databaseURL)
-    #expect(upgraded.migrationBackups.count == 3)
+    #expect(upgraded.migrationBackups.count == 8)
     let settingsBackupURL = try #require(upgraded.migrationBackups.first)
     let herdrBackupURL = try #require(upgraded.migrationBackups.dropFirst().first)
-    let commandBackupURL = try #require(upgraded.migrationBackups.last)
+    let commandBackupURL = upgraded.migrationBackups[2]
+    let primeBackupURL = upgraded.migrationBackups[5]
+    let resetBackupURL = upgraded.migrationBackups[6]
+    let replacementBackupURL = try #require(upgraded.migrationBackups.last)
     let settingsBackup = try SQLiteStore(
       databaseURL: settingsBackupURL,
       migrations: [firstMigration]
@@ -173,6 +176,30 @@ struct ConfigurationStoreTests {
       ) == 0
     )
     await commandBackup.close()
+    let primeBackup = try SQLiteStore(
+      databaseURL: primeBackupURL,
+      migrations: Array(DatabaseSchema.migrations.prefix(6))
+    )
+    #expect(try await primeBackup.schemaVersion() == 6)
+    #expect(try await primeBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
+    #expect(try await primeBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    await primeBackup.close()
+    let resetBackup = try SQLiteStore(
+      databaseURL: resetBackupURL,
+      migrations: Array(DatabaseSchema.migrations.prefix(7))
+    )
+    #expect(try await resetBackup.schemaVersion() == 7)
+    #expect(try await resetBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
+    #expect(try await resetBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    await resetBackup.close()
+    let replacementBackup = try SQLiteStore(
+      databaseURL: replacementBackupURL,
+      migrations: Array(DatabaseSchema.migrations.prefix(8))
+    )
+    #expect(try await replacementBackup.schemaVersion() == 8)
+    #expect(try await replacementBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
+    #expect(try await replacementBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    await replacementBackup.close()
 
     let store = ConfigurationStore(database: upgraded)
     var snapshot = try await store.snapshot()
@@ -234,6 +261,7 @@ struct ConfigurationStoreTests {
     let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
     let reopened = try await ConfigurationStore(database: reopenedDatabase).snapshot()
     #expect(reopened.app.onboardingComplete)
+    #expect(!reopened.app.paused)
     #expect(reopened.app.externalAutomationAcknowledged)
     #expect(reopened.app.providerDisclosureAcknowledged)
     #expect(reopened.app.githubAccount == "hubot")

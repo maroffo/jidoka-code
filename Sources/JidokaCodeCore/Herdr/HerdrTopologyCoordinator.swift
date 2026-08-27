@@ -129,6 +129,12 @@ actor HerdrTopologyMutationGate {
   }
 }
 
+struct HerdrUnknownTopologyInspection: Sendable {
+  let binding: HerdrTopologyBinding
+  let intent: HerdrTopologyStoredIntent
+  let layout: HerdrLayoutDescription
+}
+
 actor HerdrTopologyCoordinator {
   private let api: any HerdrTopologyAPI
   private let intents: any HerdrTopologyIntentStoring
@@ -246,6 +252,38 @@ actor HerdrTopologyCoordinator {
     for plan: HerdrTopologyPlan,
     workspace: HerdrWorkspaceBinding
   ) async throws -> HerdrTopologyBinding {
+    try await recoverJobTab(
+      for: plan,
+      workspace: workspace,
+      requireUnknown: false
+    ).binding
+  }
+
+  func inspectUnknownJobTab(
+    for plan: HerdrTopologyPlan,
+    workspace: HerdrWorkspaceBinding
+  ) async throws -> HerdrUnknownTopologyInspection {
+    let recovered = try await recoverJobTab(
+      for: plan,
+      workspace: workspace,
+      requireUnknown: true
+    )
+    return HerdrUnknownTopologyInspection(
+      binding: recovered.binding,
+      intent: recovered.intent,
+      layout: recovered.layout
+    )
+  }
+
+  private func recoverJobTab(
+    for plan: HerdrTopologyPlan,
+    workspace: HerdrWorkspaceBinding,
+    requireUnknown: Bool
+  ) async throws -> (
+    binding: HerdrTopologyBinding,
+    intent: HerdrTopologyStoredIntent,
+    layout: HerdrLayoutDescription
+  ) {
     try Self.validateFilesystem(plan)
     guard workspace.workspaceID == plan.boundWorkspaceID else {
       throw HerdrTopologyError.bindingLost
@@ -269,6 +307,9 @@ actor HerdrTopologyCoordinator {
     else {
       throw HerdrTopologyError.bindingLost
     }
+    guard (stored.state == .unknown) == requireUnknown else {
+      throw HerdrTopologyError.mutationUnknown
+    }
     let layout: HerdrLayoutDescription
     let attribution: HerdrTopologyMutationAttribution
     switch stored.state {
@@ -285,20 +326,10 @@ actor HerdrTopologyCoordinator {
       )
       attribution = storedAttribution
     case .sendStarted:
-      var candidates: [HerdrLayoutDescription] = []
-      for tab in workspace.handshake.snapshot.tabs {
-        guard
-          let candidate = try? await api.exportLayout(
-            tabID: tab.tabID,
-            attestedBy: workspace.handshake
-          ),
-          Self.matchesRecovered(actual: candidate.root, expected: expectedRoot)
-        else { continue }
-        candidates.append(candidate)
-      }
-      guard candidates.count == 1, let candidate = candidates.first else {
-        throw HerdrTopologyError.mutationUnknown
-      }
+      let candidate = try await uniqueRecoveredLayout(
+        workspace: workspace,
+        expectedRoot: expectedRoot
+      )
       layout = candidate
       attribution = HerdrTopologyMutationAttribution(
         workspaceID: workspace.workspaceID,
@@ -309,7 +340,16 @@ actor HerdrTopologyCoordinator {
     case .prepared:
       throw HerdrTopologyError.bindingLost
     case .unknown:
-      throw HerdrTopologyError.mutationUnknown
+      let candidate = try await uniqueRecoveredLayout(
+        workspace: workspace,
+        expectedRoot: expectedRoot
+      )
+      layout = candidate
+      attribution = HerdrTopologyMutationAttribution(
+        workspaceID: workspace.workspaceID,
+        tabID: candidate.tabID,
+        paneIDs: try Self.paneIDs(from: candidate.root)
+      )
     }
     guard Self.matchesRecovered(actual: layout.root, expected: expectedRoot),
       attribution.tabID == layout.tabID,
@@ -320,12 +360,37 @@ actor HerdrTopologyCoordinator {
     else {
       throw HerdrTopologyError.mutationUnknown
     }
-    return try Self.binding(
-      plan: plan,
-      workspaceID: layout.workspaceID,
-      layout: layout,
-      snapshot: workspace.handshake.snapshot
+    return (
+      try Self.binding(
+        plan: plan,
+        workspaceID: layout.workspaceID,
+        layout: layout,
+        snapshot: workspace.handshake.snapshot
+      ),
+      stored,
+      layout
     )
+  }
+
+  private func uniqueRecoveredLayout(
+    workspace: HerdrWorkspaceBinding,
+    expectedRoot: HerdrLayoutNode
+  ) async throws -> HerdrLayoutDescription {
+    var candidates: [HerdrLayoutDescription] = []
+    for tab in workspace.handshake.snapshot.tabs {
+      guard
+        let candidate = try? await api.exportLayout(
+          tabID: tab.tabID,
+          attestedBy: workspace.handshake
+        ),
+        Self.matchesRecovered(actual: candidate.root, expected: expectedRoot)
+      else { continue }
+      candidates.append(candidate)
+    }
+    guard candidates.count == 1, let candidate = candidates.first else {
+      throw HerdrTopologyError.mutationUnknown
+    }
+    return candidate
   }
 
   nonisolated static func mutationKey(
@@ -914,7 +979,7 @@ actor HerdrTopologyCoordinator {
         && actualPane.label == expectedPane.label
         && actualPane.workingDirectory == expectedPane.workingDirectory
         && actualPane.command == expectedPane.command
-        && actualPane.environment == expectedPane.environment
+        && environmentMatches(actual: actualPane.environment, expected: expectedPane.environment)
     case (.split(let actualSplit), .split(let expectedSplit)):
       return actualSplit.direction == expectedSplit.direction
         && abs(actualSplit.ratio - expectedSplit.ratio) < 0.000_001
@@ -934,7 +999,7 @@ actor HerdrTopologyCoordinator {
       return actualPane.paneID != nil
         && actualPane.workingDirectory == expectedPane.workingDirectory
         && actualPane.command == expectedPane.command
-        && actualPane.environment == expectedPane.environment
+        && environmentMatches(actual: actualPane.environment, expected: expectedPane.environment)
     case (.split(let actualSplit), .split(let expectedSplit)):
       return actualSplit.direction == expectedSplit.direction
         && abs(actualSplit.ratio - expectedSplit.ratio) < 0.000_001
@@ -943,6 +1008,13 @@ actor HerdrTopologyCoordinator {
     default:
       return false
     }
+  }
+
+  private static func environmentMatches(
+    actual: [String: String],
+    expected: [String: String]
+  ) -> Bool {
+    actual.isEmpty || actual == expected
   }
 
   private static func paneIDs(from root: HerdrLayoutNode) throws -> [String] {

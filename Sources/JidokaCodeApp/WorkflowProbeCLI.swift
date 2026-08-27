@@ -1,15 +1,13 @@
 import CryptoKit
-import Darwin
 import Foundation
 import JidokaCodeCore
 
 private enum WorkflowProbeCLIConstants {
-  static let nodeURL = URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node")
   static let runnerRelativePath = "runtime/pi-rpc-workflow-probe.mjs"
-  static let runnerSHA256 = "731267cc54cf7018258afc4393ca3357166c10c43b23601c420c597eb196f772"
+  static let runnerSHA256 = "1c04d87ddb1f235c144001cd1d59fb3d80a9ad788ac1a8a33a79d12e1ce8f80b"
   static let runtimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs"
   static let runtimeAttestationSHA256 =
-    "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e"
+    "d062dad354b15d8bc0dc377e8aa6835d0eaf884cf68925dad4b8aace5d0cd413"
   static let maximumOutputBytes = 1_048_576
 }
 
@@ -28,13 +26,19 @@ enum WorkflowProbeCLI {
     let command = try WorkflowProbeCommand.parse(arguments)
     let resourceRoot = try packagedResourceRoot()
     let runnerURL = try packagedRunner(in: resourceRoot)
+    let runtime = try releaseRuntime()
     let ledgerURL = try canonicalProviderLedgerURL()
     let workspaceURL = try createTemporaryWorkspace()
     defer {
       try? removeTemporaryWorkspace(workspaceURL)
     }
+    let finalRuntime = try releaseRuntime()
+    guard finalRuntime.releaseIdentity == runtime.releaseIdentity else {
+      throw WorkflowProbeCLIError.invalidNodeRuntime
+    }
     return try executeRunner(
       runnerURL: runnerURL,
+      runtime: finalRuntime,
       resourceRoot: resourceRoot,
       ledgerURL: ledgerURL,
       workspaceURL: workspaceURL,
@@ -47,6 +51,29 @@ enum WorkflowProbeCLI {
     if data.last != 0x0A {
       FileHandle.standardOutput.write(Data([0x0A]))
     }
+  }
+
+  private static func releaseRuntime() throws -> PiResolvedRuntime {
+    guard let resources = Bundle.main.resourceURL else {
+      throw WorkflowProbeCLIError.invalidNodeRuntime
+    }
+    let runtimeRoot = resources.appendingPathComponent(
+      ReleaseOwnedPiRuntimeResolver.runtimeDirectoryName,
+      isDirectory: true
+    )
+    #if DEBUG || JIDOKA_ADHOC_RUNTIME_TESTING
+      return try ReleaseOwnedPiRuntimeVerifier.verifyAdHocBundle(
+        runtimeRoot: runtimeRoot,
+        containingApplicationURL: Bundle.main.bundleURL
+      )
+    #else
+      return try ReleaseOwnedPiRuntimeBoundaryAuthority.rpcProcess(
+        using: ReleaseOwnedPiRuntimeResolver(
+          runtimeRoot: runtimeRoot,
+          containingApplicationURL: Bundle.main.bundleURL
+        )
+      )
+    #endif
   }
 
   private static func packagedResourceRoot() throws -> URL {
@@ -161,12 +188,17 @@ enum WorkflowProbeCLI {
 
   private static func executeRunner(
     runnerURL: URL,
+    runtime: PiResolvedRuntime,
     resourceRoot: URL,
     ledgerURL: URL,
     workspaceURL: URL,
     command: WorkflowProbeCommand
   ) throws -> Data {
-    let nodeValues = try WorkflowProbeCLIConstants.nodeURL.resourceValues(forKeys: [
+    let nodeURL = runtime.nodeURL
+    guard let releaseIdentity = runtime.releaseIdentity else {
+      throw WorkflowProbeCLIError.invalidNodeRuntime
+    }
+    let nodeValues = try nodeURL.resourceValues(forKeys: [
       .isExecutableKey,
       .isRegularFileKey,
       .isSymbolicLinkKey,
@@ -179,39 +211,34 @@ enum WorkflowProbeCLI {
       throw WorkflowProbeCLIError.invalidNodeRuntime
     }
 
-    let process = Process()
-    let standardOutput = Pipe()
-    let standardError = Pipe()
-    let termination = DispatchSemaphore(value: 0)
-    process.executableURL = WorkflowProbeCLIConstants.nodeURL
-    process.arguments = [runnerURL.path, command.rawValue, resourceRoot.path, ledgerURL.path]
-    process.currentDirectoryURL = URL(fileURLWithPath: "/", isDirectory: true)
-    process.environment = [
-      "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
-      "JIDOKA_WORKFLOW_WORKSPACE": workspaceURL.path,
-      "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
-      "TMPDIR": FileManager.default.temporaryDirectory.path,
-    ]
-    process.standardOutput = standardOutput
-    process.standardError = standardError
-    process.terminationHandler = { _ in termination.signal() }
-    try process.run()
-
-    let timeout: DispatchTimeInterval = command == .live ? .seconds(2_100) : .seconds(180)
-    guard termination.wait(timeout: .now() + timeout) == .success else {
-      process.terminate()
-      if termination.wait(timeout: .now() + .seconds(8)) != .success {
-        kill(process.processIdentifier, SIGKILL)
-        _ = termination.wait(timeout: .now() + .seconds(2))
-      }
-      throw WorkflowProbeCLIError.timeout
+    let result = try BoundedProcessRunner().runSynchronously(
+      GitProcessRequest(
+        executable: nodeURL,
+        arguments: [
+          runnerURL.path, command.rawValue, resourceRoot.path, ledgerURL.path,
+        ],
+        workingDirectory: URL(fileURLWithPath: "/", isDirectory: true),
+        environment: [
+          "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+          "JIDOKA_RELEASE_MANIFEST_SHA256": releaseIdentity.manifestSHA256,
+          "JIDOKA_RELEASE_RUNTIME_ROOT": releaseIdentity.canonicalRoot,
+          "JIDOKA_WORKFLOW_WORKSPACE": workspaceURL.path,
+          "PATH": "/usr/bin:/bin",
+          "TMPDIR": FileManager.default.temporaryDirectory.path,
+        ],
+        timeoutSeconds: command == .live ? 2_100 : 180,
+        maximumOutputBytes: WorkflowProbeCLIConstants.maximumOutputBytes
+      )
+    )
+    guard !result.timedOut else { throw WorkflowProbeCLIError.timeout }
+    guard !result.outputLimitExceeded else { throw WorkflowProbeCLIError.invalidOutput }
+    guard result.exitCode == 0, result.terminationSignal == nil else {
+      throw WorkflowProbeCLIError.runnerFailed(
+        result.exitCode ?? 128 + (result.terminationSignal ?? 0)
+      )
     }
-
-    let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-    let errorOutput = standardError.fileHandleForReading.readDataToEndOfFile()
-    guard process.terminationStatus == 0 else {
-      throw WorkflowProbeCLIError.runnerFailed(process.terminationStatus)
-    }
+    let output = result.stdout
+    let errorOutput = result.stderr
     guard
       errorOutput.isEmpty,
       !output.isEmpty,

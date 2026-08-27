@@ -241,6 +241,120 @@ struct PullRequestReviewJobWorkflowTests {
     await reopened.database.close()
   }
 
+  @Test("topology recovery bypasses a stale attempt review-selection event exactly once")
+  func topologyRecoveryReviewSelection() async throws {
+    let fixture = try await PullRequestReviewJobFixture()
+    defer { fixture.remove() }
+    let jobID = fixture.job.id.uuidString.lowercased()
+    let scope = JobCanaryScope(
+      jobID: fixture.job.id,
+      boundaryEpochSeconds: JobCanaryScope.authorizedBoundaryEpochSeconds,
+      repairEvidenceSHA256: String(repeating: "a", count: 64),
+      maximumCommentParts: 8
+    )
+    let canary = JobCanaryAuthorization(
+      scope: scope,
+      previewEvidenceSHA256: String(repeating: "b", count: 64)
+    )
+    let evidenceSHA256 = String(repeating: "c", count: 64)
+    let prefix = "canary:\(canary.authorizationSHA256):m8:"
+    let attempt = try #require(try await fixture.jobs.job(id: fixture.job.id)).attempt
+    try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
+    )
+    try await fixture.database.execute(
+      """
+      INSERT INTO job_transitions(
+        job_id, event_key, from_state, to_state, reason,
+        attempt_before, attempt_after, step_before, step_after, created_at
+      ) VALUES
+        (?, ?, 'queued', 'leased', 'exact canary admission', \(attempt), \(attempt), 0, 0, 1),
+        (?, ?, 'preparing', 'runningPi', 'stale review selection', \(attempt), \(attempt), 0, 0, 2),
+        (?, ?, 'runningPi', 'runningPi', 'architecture authorized', \(attempt), \(attempt), 0, 0, 3),
+        (?, ?, 'runningPi', 'reconciliationQueued', 'Pi interrupted', \(attempt), \(attempt), 0, 0, 4),
+        (?, ?, 'reconciliationQueued', 'reconciliationQueued', 'recovery authorized', \(attempt), \(attempt), 0, 0, 5),
+        (?, ?, 'reconciliationQueued', 'preparing', 'recovery resumed', \(attempt), \(attempt), 0, 0, 6)
+      """,
+      bindings: [
+        .text(jobID), .text(prefix + "admit:" + jobID),
+        .text(jobID), .text("pr:\(jobID):a\(attempt):s0:run-review"),
+        .text(jobID), .text(prefix + "pi:architecture:r1"),
+        .text(jobID), .text("job:\(jobID):a\(attempt):s0:pi-interrupted"),
+        .text(jobID), .text(prefix + "topology-recovery:" + evidenceSHA256),
+        .text(jobID), .text(prefix + "topology-resume:" + evidenceSHA256),
+      ]
+    )
+    try await fixture.database.execute(
+      "UPDATE repository_leases SET heartbeat = 6 WHERE job_id = ? AND active = 1",
+      bindings: [.text(jobID)]
+    )
+
+    await #expect(throws: DurableJobStoreError.canaryRecoveryRequired) {
+      _ = try await fixture.jobs.selectCanaryReviewAfterTopologyRecovery(
+        jobID: fixture.job.id,
+        recoveryEvidenceSHA256: String(repeating: "d", count: 64),
+        now: fixture.now
+      )
+    }
+    try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+    )
+    await #expect(throws: DurableJobStoreError.canaryRecoveryRequired) {
+      _ = try await fixture.jobs.selectCanaryReviewAfterTopologyRecovery(
+        jobID: fixture.job.id,
+        recoveryEvidenceSHA256: evidenceSHA256,
+        now: fixture.now
+      )
+    }
+    try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
+    )
+    try await fixture.database.execute(
+      "UPDATE repository_leases SET heartbeat = 7 WHERE job_id = ? AND active = 1",
+      bindings: [.text(jobID)]
+    )
+    await #expect(throws: DurableJobStoreError.canaryRecoveryRequired) {
+      _ = try await fixture.jobs.selectCanaryReviewAfterTopologyRecovery(
+        jobID: fixture.job.id,
+        recoveryEvidenceSHA256: evidenceSHA256,
+        now: fixture.now
+      )
+    }
+    try await fixture.database.execute(
+      "UPDATE repository_leases SET heartbeat = 6 WHERE job_id = ? AND active = 1",
+      bindings: [.text(jobID)]
+    )
+    let selected = try await fixture.jobs.selectCanaryReviewAfterTopologyRecovery(
+      jobID: fixture.job.id,
+      recoveryEvidenceSHA256: evidenceSHA256,
+      now: fixture.now
+    )
+    #expect(selected.state == .runningPi)
+    let replayed = try await fixture.jobs.selectCanaryReviewAfterTopologyRecovery(
+      jobID: fixture.job.id,
+      recoveryEvidenceSHA256: evidenceSHA256,
+      now: fixture.now
+    )
+    #expect(replayed.state == .runningPi)
+
+    try await fixture.workflow.runRecoveredCanary(
+      jobID: fixture.job.id,
+      recoveryEvidenceSHA256: evidenceSHA256
+    )
+
+    #expect(try await fixture.jobs.job(id: fixture.job.id)?.state == .succeeded)
+    #expect(await fixture.api.createCommentCount == 1)
+    #expect(
+      try await fixture.database.scalarInt(
+        "SELECT COUNT(*) FROM job_transitions WHERE job_id = ? AND event_key GLOB ?",
+        bindings: [
+          .text(jobID),
+          .text(prefix + "topology-run-review:*"),
+        ]
+      ) == 1
+    )
+  }
+
   @Test("REST and fetched Git commit divergence stops before review or publication")
   func commitSourceMismatch() async throws {
     let fixture = try await PullRequestReviewJobFixture()

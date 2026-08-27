@@ -5,12 +5,25 @@ import Testing
 
 @Suite("Versioned application engine protocol")
 struct EngineProtocolTests {
+  @Test("production helper allowlist covers every non-ServiceManagement command")
+  func productionHelperAllowlist() {
+    let applicationControlOnly: Set<EngineCommandKind> = [
+      .setLoginEnabled,
+      .prepareForHandoff,
+    ]
+    #expect(
+      EngineCommandKind.productionHelperAllowedCommands
+        == Set(EngineCommandKind.allCases).subtracting(applicationControlOnly)
+    )
+  }
+
   @Test("request and response bind version, identity, and operation")
   func exactEnvelope() throws {
     let request = EngineXPCRequest(
       requestID: "11111111-1111-1111-1111-111111111111",
       command: .setPaused(true)
     )
+    #expect(request.protocolVersion == EngineProtocolVersion.current)
     try request.validate()
     let state = engineProtocolState()
     let result = EngineCommandResponse(command: .setPaused, state: state)
@@ -31,6 +44,30 @@ struct EngineProtocolTests {
     #expect(throws: EngineClientError(.invalidResponse)) {
       try wrongCommand.validate(for: request)
     }
+    let invalidCatalogState = engineProtocolState()
+    let catalogData = try JSONEncoder().encode(invalidCatalogState)
+    var catalogObject = try #require(
+      JSONSerialization.jsonObject(with: catalogData) as? [String: Any]
+    )
+    var settings = try #require(catalogObject["settings"] as? [String: Any])
+    var catalog = try #require(settings["modelCatalog"] as? [String: Any])
+    var models = try #require(catalog["models"] as? [[String: Any]])
+    models[0]["reasoning"] = false
+    catalog["models"] = models
+    settings["modelCatalog"] = catalog
+    catalogObject["settings"] = settings
+    let malformedCatalogState = try JSONDecoder().decode(
+      EngineUIState.self,
+      from: JSONSerialization.data(withJSONObject: catalogObject)
+    )
+    let invalidCatalog = EngineXPCResponse(
+      requestID: request.requestID,
+      result: EngineCommandResponse(command: .setPaused, state: malformedCatalogState)
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try invalidCatalog.validate(for: request)
+    }
+
     let incompleteReadiness = EngineXPCResponse(
       requestID: request.requestID,
       result: EngineCommandResponse(
@@ -40,6 +77,667 @@ struct EngineProtocolTests {
     )
     #expect(throws: EngineClientError(.invalidResponse)) {
       try incompleteReadiness.validate(for: request)
+    }
+  }
+
+  @Test("maintenance responses remain bound to exact scope count and evidence")
+  func maintenanceResponseBoundary() throws {
+    let scope = JobMaintenanceScope(
+      operation: .retireBefore,
+      boundaryEpochSeconds: JobMaintenanceScope.authorizedBoundaryEpochSeconds
+    )
+    let state = engineProtocolState(paused: true)
+    let previewRequest = EngineXPCRequest(
+      requestID: "11111111-1111-1111-1111-111111111111",
+      command: .previewJobMaintenance(scope)
+    )
+    let previewReport = JobMaintenanceReport(
+      scope: scope,
+      candidateCount: 87,
+      evidenceSHA256: String(repeating: "a", count: 64),
+      appliedCount: 0,
+      replayed: false
+    )
+    let previewResponse = EngineXPCResponse(
+      requestID: previewRequest.requestID,
+      result: EngineCommandResponse(
+        command: .previewJobMaintenance,
+        state: state,
+        jobMaintenance: previewReport
+      )
+    )
+    #expect(try previewResponse.validate(for: previewRequest).jobMaintenance == previewReport)
+
+    let authorization = JobMaintenanceAuthorization(
+      scope: scope,
+      expectedCount: 87,
+      evidenceSHA256: previewReport.evidenceSHA256
+    )
+    let unpausedPreview = EngineXPCResponse(
+      requestID: previewRequest.requestID,
+      result: EngineCommandResponse(
+        command: .previewJobMaintenance,
+        state: engineProtocolState(),
+        jobMaintenance: previewReport
+      )
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try unpausedPreview.validate(for: previewRequest)
+    }
+
+    let applyRequest = EngineXPCRequest(
+      requestID: "22222222-2222-2222-2222-222222222222",
+      command: .applyJobMaintenance(authorization)
+    )
+    let checkpoint = EngineCheckpointReceipt(
+      checkpointID: try #require(
+        UUID(uuidString: "33333333-3333-3333-3333-333333333333")
+      ),
+      completedAt: Date(timeIntervalSince1970: 2_000),
+      nonterminalJobCount: 156,
+      ambiguousMutationCount: 0,
+      databaseCheckpointed: true
+    )
+    let appliedReport = JobMaintenanceReport(
+      scope: scope,
+      candidateCount: 87,
+      evidenceSHA256: previewReport.evidenceSHA256,
+      appliedCount: 87,
+      replayed: false
+    )
+    let validApply = EngineXPCResponse(
+      requestID: applyRequest.requestID,
+      result: EngineCommandResponse(
+        command: .applyJobMaintenance,
+        state: state,
+        checkpoint: checkpoint,
+        jobMaintenance: appliedReport
+      )
+    )
+    #expect(try validApply.validate(for: applyRequest).jobMaintenance == appliedReport)
+
+    let malformedReports = [
+      JobMaintenanceReport(
+        scope: scope,
+        candidateCount: 86,
+        evidenceSHA256: previewReport.evidenceSHA256,
+        appliedCount: 86,
+        replayed: false
+      ),
+      JobMaintenanceReport(
+        scope: scope,
+        candidateCount: 87,
+        evidenceSHA256: String(repeating: "b", count: 64),
+        appliedCount: 87,
+        replayed: false
+      ),
+    ]
+    for malformed in malformedReports {
+      let response = EngineXPCResponse(
+        requestID: applyRequest.requestID,
+        result: EngineCommandResponse(
+          command: .applyJobMaintenance,
+          state: state,
+          checkpoint: checkpoint,
+          jobMaintenance: malformed
+        )
+      )
+      #expect(throws: EngineClientError(.invalidResponse)) {
+        try response.validate(for: applyRequest)
+      }
+    }
+    let missingCheckpoint = EngineXPCResponse(
+      requestID: applyRequest.requestID,
+      result: EngineCommandResponse(
+        command: .applyJobMaintenance,
+        state: state,
+        jobMaintenance: appliedReport
+      )
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try missingCheckpoint.validate(for: applyRequest)
+    }
+    let unrelatedRequest = EngineXPCRequest(
+      requestID: "44444444-4444-4444-4444-444444444444",
+      command: .snapshot
+    )
+    let unrelatedMaintenance = EngineXPCResponse(
+      requestID: unrelatedRequest.requestID,
+      result: EngineCommandResponse(
+        command: .snapshot,
+        state: state,
+        jobMaintenance: previewReport
+      )
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try unrelatedMaintenance.validate(for: unrelatedRequest)
+    }
+  }
+
+  @Test("canary responses require paused exact evidence and checkpoint authority")
+  func canaryResponseBoundary() throws {
+    let scope = JobCanaryScope(
+      jobID: UUID(uuidString: "aaaaaaaa-1111-1111-1111-111111111111")!,
+      boundaryEpochSeconds: JobCanaryScope.authorizedBoundaryEpochSeconds,
+      repairEvidenceSHA256: String(repeating: "a", count: 64),
+      maximumCommentParts: 8
+    )
+    let evidence = String(repeating: "b", count: 64)
+    let preview = JobCanaryReport(
+      scope: scope,
+      previewEvidenceSHA256: evidence,
+      authorizationSHA256: nil,
+      status: .preview,
+      repositoryOwner: "owner",
+      repositoryName: "repo",
+      objectNumber: 42,
+      revisionKey: String(repeating: "c", count: 40),
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      thinking: "max",
+      resourceTreeSHA256: String(repeating: "d", count: 64),
+      replayed: false
+    )
+    let previewRequest = EngineXPCRequest(command: .previewJobCanary(scope))
+    let previewResponse = EngineXPCResponse(
+      requestID: previewRequest.requestID,
+      result: EngineCommandResponse(
+        command: .previewJobCanary,
+        state: engineProtocolState(paused: true),
+        jobCanary: preview
+      )
+    )
+    #expect(try previewResponse.validate(for: previewRequest).jobCanary == preview)
+    let authorization = JobCanaryAuthorization(
+      scope: scope,
+      previewEvidenceSHA256: evidence
+    )
+    let settled = JobCanaryReport(
+      scope: scope,
+      previewEvidenceSHA256: evidence,
+      authorizationSHA256: authorization.authorizationSHA256,
+      status: .settled,
+      repositoryOwner: preview.repositoryOwner,
+      repositoryName: preview.repositoryName,
+      objectNumber: preview.objectNumber,
+      revisionKey: preview.revisionKey,
+      provider: preview.provider,
+      model: preview.model,
+      thinking: preview.thinking,
+      resourceTreeSHA256: preview.resourceTreeSHA256,
+      replayed: false
+    )
+    let executeRequest = EngineXPCRequest(command: .executeJobCanary(authorization))
+    let checkpoint = EngineCheckpointReceipt(
+      checkpointID: UUID(), completedAt: Date(), nonterminalJobCount: 155,
+      ambiguousMutationCount: 0, databaseCheckpointed: true
+    )
+    let executeResponse = EngineXPCResponse(
+      requestID: executeRequest.requestID,
+      result: EngineCommandResponse(
+        command: .executeJobCanary,
+        state: engineProtocolState(paused: true),
+        checkpoint: checkpoint,
+        jobCanary: settled
+      )
+    )
+    #expect(try executeResponse.validate(for: executeRequest).jobCanary == settled)
+    let unpaused = EngineXPCResponse(
+      requestID: previewRequest.requestID,
+      result: EngineCommandResponse(
+        command: .previewJobCanary,
+        state: engineProtocolState(),
+        jobCanary: preview
+      )
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try unpaused.validate(for: previewRequest)
+    }
+    let missingCheckpoint = EngineXPCResponse(
+      requestID: executeRequest.requestID,
+      result: EngineCommandResponse(
+        command: .executeJobCanary,
+        state: engineProtocolState(paused: true),
+        jobCanary: settled
+      )
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try missingCheckpoint.validate(for: executeRequest)
+    }
+
+    let recoveryPreview = JobCanaryRecoveryReport(
+      jobID: scope.jobID,
+      canaryAuthorizationSHA256: authorization.authorizationSHA256,
+      recoveryEvidenceSHA256: String(repeating: "e", count: 64),
+      recoveryAuthorizationSHA256: nil,
+      status: .preview,
+      repositoryOwner: preview.repositoryOwner,
+      repositoryName: preview.repositoryName,
+      objectNumber: preview.objectNumber,
+      revisionKey: preview.revisionKey,
+      provider: preview.provider,
+      model: preview.model,
+      thinking: preview.thinking,
+      resourceTreeSHA256: preview.resourceTreeSHA256,
+      unknownIntentID: "layout-unknown",
+      unknownIntentSHA256: String(repeating: "f", count: 64),
+      unknownPayloadSHA256: String(repeating: "1", count: 64),
+      layoutSHA256: String(repeating: "2", count: 64),
+      hostExecutableSHA256: String(repeating: "4", count: 64),
+      roles: [.architecture, .security, .test, .synthesis],
+      replayed: false
+    )
+    let recoveryPreviewRequest = EngineXPCRequest(
+      command: .previewJobCanaryRecovery(authorization)
+    )
+    let recoveryPreviewResponse = EngineXPCResponse(
+      requestID: recoveryPreviewRequest.requestID,
+      result: EngineCommandResponse(
+        command: .previewJobCanaryRecovery,
+        state: engineProtocolState(paused: true),
+        jobCanaryRecovery: recoveryPreview
+      )
+    )
+    #expect(
+      try recoveryPreviewResponse.validate(for: recoveryPreviewRequest).jobCanaryRecovery
+        == recoveryPreview
+    )
+    let recoveryAuthorization = JobCanaryRecoveryAuthorization(
+      canary: authorization,
+      recoveryEvidenceSHA256: recoveryPreview.recoveryEvidenceSHA256
+    )
+    let recovered = JobCanaryRecoveryReport(
+      jobID: recoveryPreview.jobID,
+      canaryAuthorizationSHA256: recoveryPreview.canaryAuthorizationSHA256,
+      recoveryEvidenceSHA256: recoveryPreview.recoveryEvidenceSHA256,
+      recoveryAuthorizationSHA256: recoveryAuthorization.authorizationSHA256,
+      status: .recovered,
+      repositoryOwner: recoveryPreview.repositoryOwner,
+      repositoryName: recoveryPreview.repositoryName,
+      objectNumber: recoveryPreview.objectNumber,
+      revisionKey: recoveryPreview.revisionKey,
+      provider: recoveryPreview.provider,
+      model: recoveryPreview.model,
+      thinking: recoveryPreview.thinking,
+      resourceTreeSHA256: recoveryPreview.resourceTreeSHA256,
+      unknownIntentID: recoveryPreview.unknownIntentID,
+      unknownIntentSHA256: recoveryPreview.unknownIntentSHA256,
+      unknownPayloadSHA256: recoveryPreview.unknownPayloadSHA256,
+      layoutSHA256: recoveryPreview.layoutSHA256,
+      hostExecutableSHA256: recoveryPreview.hostExecutableSHA256,
+      roles: recoveryPreview.roles,
+      replayed: false
+    )
+    let recoveryExecuteRequest = EngineXPCRequest(
+      command: .executeJobCanaryRecovery(recoveryAuthorization)
+    )
+    let recoveryExecuteResponse = EngineXPCResponse(
+      requestID: recoveryExecuteRequest.requestID,
+      result: EngineCommandResponse(
+        command: .executeJobCanaryRecovery,
+        state: engineProtocolState(paused: true),
+        checkpoint: checkpoint,
+        jobCanary: settled,
+        jobCanaryRecovery: recovered
+      )
+    )
+    #expect(
+      try recoveryExecuteResponse.validate(for: recoveryExecuteRequest).jobCanaryRecovery
+        == recovered
+    )
+
+    let retryPreview = JobCanaryPiRetryReport(
+      jobID: scope.jobID,
+      canaryAuthorizationSHA256: authorization.authorizationSHA256,
+      recoveryEvidenceSHA256: recoveryAuthorization.recoveryEvidenceSHA256,
+      retryEvidenceSHA256: String(repeating: "5", count: 64),
+      retryAuthorizationSHA256: nil,
+      agentAuthorityProtocol: JobCanaryPiRetryEvidence.agentAuthorityResetProtocolV1,
+      failedPrimeIntentID: "prime-33333333-3333-4333-8333-333333333333",
+      failedPrimeIntentSHA256: String(repeating: "6", count: 64),
+      failedPrimePayloadSHA256: String(repeating: "7", count: 64),
+      stalePaneRevision: 3,
+      stalePaneHadTokens: true,
+      stalePaneTokensSHA256: String(repeating: "8", count: 64),
+      status: .preview,
+      runID: "run-11111111-1111-1111-1111-111111111111",
+      failedLaunchAttemptID: "launch-22222222-2222-2222-2222-222222222222",
+      provider: preview.provider,
+      model: preview.model,
+      thinking: preview.thinking,
+      credentialType: "oauth",
+      credentialExpiresAtMilliseconds: 1_900_000_000_000,
+      replayed: false
+    )
+    let retryPreviewRequest = EngineXPCRequest(
+      command: .previewJobCanaryPiRetry(recoveryAuthorization)
+    )
+    let retryPreviewResponse = EngineXPCResponse(
+      requestID: retryPreviewRequest.requestID,
+      result: EngineCommandResponse(
+        command: .previewJobCanaryPiRetry,
+        state: engineProtocolState(paused: true),
+        jobCanaryPiRetry: retryPreview
+      )
+    )
+    #expect(
+      try retryPreviewResponse.validate(for: retryPreviewRequest).jobCanaryPiRetry
+        == retryPreview
+    )
+    let retryAuthorization = JobCanaryPiRetryAuthorization(
+      recovery: recoveryAuthorization,
+      retryEvidenceSHA256: retryPreview.retryEvidenceSHA256
+    )
+    let retryAuthorized = JobCanaryPiRetryReport(
+      jobID: retryPreview.jobID,
+      canaryAuthorizationSHA256: retryPreview.canaryAuthorizationSHA256,
+      recoveryEvidenceSHA256: retryPreview.recoveryEvidenceSHA256,
+      retryEvidenceSHA256: retryPreview.retryEvidenceSHA256,
+      retryAuthorizationSHA256: retryAuthorization.authorizationSHA256,
+      agentAuthorityProtocol: retryPreview.agentAuthorityProtocol,
+      failedPrimeIntentID: retryPreview.failedPrimeIntentID,
+      failedPrimeIntentSHA256: retryPreview.failedPrimeIntentSHA256,
+      failedPrimePayloadSHA256: retryPreview.failedPrimePayloadSHA256,
+      stalePaneRevision: retryPreview.stalePaneRevision,
+      stalePaneHadTokens: retryPreview.stalePaneHadTokens,
+      stalePaneTokensSHA256: retryPreview.stalePaneTokensSHA256,
+      status: .authorized,
+      runID: retryPreview.runID,
+      failedLaunchAttemptID: retryPreview.failedLaunchAttemptID,
+      provider: retryPreview.provider,
+      model: retryPreview.model,
+      thinking: retryPreview.thinking,
+      credentialType: retryPreview.credentialType,
+      credentialExpiresAtMilliseconds: retryPreview.credentialExpiresAtMilliseconds,
+      replayed: false
+    )
+    let retryExecuteRequest = EngineXPCRequest(
+      command: .executeJobCanaryPiRetry(retryAuthorization)
+    )
+    let retryExecuteResponse = EngineXPCResponse(
+      requestID: retryExecuteRequest.requestID,
+      result: EngineCommandResponse(
+        command: .executeJobCanaryPiRetry,
+        state: engineProtocolState(paused: true),
+        checkpoint: checkpoint,
+        jobCanary: settled,
+        jobCanaryPiRetry: retryAuthorized
+      )
+    )
+    #expect(
+      try retryExecuteResponse.validate(for: retryExecuteRequest).jobCanaryPiRetry
+        == retryAuthorized
+    )
+
+    let replacementRequest = JobCanaryRoleHostReplacementRequest(
+      retry: retryAuthorization,
+      incidentAuditSHA256: JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+      plannedReplacementRoleHostID: "rolehost-44444444-4444-4444-8444-444444444444",
+      plannedLaunchAttemptID: "launch-55555555-5555-4555-8555-555555555555"
+    )
+    let q4Binding = replacementQ4Binding()
+    let replacementPreview = try JobCanaryRoleHostReplacementReport(
+      jobID: scope.jobID,
+      runID: retryPreview.runID,
+      predecessorRoleHostID: "rolehost-66666666-6666-4666-8666-666666666666",
+      replacementRoleHostID: replacementRequest.plannedReplacementRoleHostID,
+      plannedLaunchAttemptID: replacementRequest.plannedLaunchAttemptID,
+      incidentAuditSHA256: replacementRequest.incidentAuditSHA256,
+      replacementEvidenceSHA256: String(repeating: "9", count: 64),
+      replacementAuthorizationSHA256: nil,
+      q4Binding: q4Binding,
+      outcome: .preview,
+      replayed: false
+    )
+    let replacementPreviewRequest = EngineXPCRequest(
+      command: .previewJobCanaryRoleHostReplacement(replacementRequest)
+    )
+    let replacementPreviewResponse = EngineXPCResponse(
+      requestID: replacementPreviewRequest.requestID,
+      result: EngineCommandResponse(
+        command: .previewJobCanaryRoleHostReplacement,
+        state: engineProtocolState(paused: true),
+        jobCanaryRoleHostReplacement: replacementPreview
+      )
+    )
+    #expect(
+      try replacementPreviewResponse.validate(for: replacementPreviewRequest)
+        .jobCanaryRoleHostReplacement == replacementPreview
+    )
+    let replacementAuthorization = JobCanaryRoleHostReplacementAuthorization(
+      request: replacementRequest,
+      replacementEvidenceSHA256: replacementPreview.replacementEvidenceSHA256,
+      q4Binding: q4Binding
+    )
+    let replacementAuthorized = try JobCanaryRoleHostReplacementReport(
+      jobID: replacementPreview.jobID,
+      runID: replacementPreview.runID,
+      predecessorRoleHostID: replacementPreview.predecessorRoleHostID,
+      replacementRoleHostID: replacementPreview.replacementRoleHostID,
+      plannedLaunchAttemptID: replacementPreview.plannedLaunchAttemptID,
+      incidentAuditSHA256: replacementPreview.incidentAuditSHA256,
+      replacementEvidenceSHA256: replacementPreview.replacementEvidenceSHA256,
+      replacementAuthorizationSHA256: replacementAuthorization.authorizationSHA256,
+      q4Binding: q4Binding,
+      outcome: .q4Settled,
+      replayed: false
+    )
+    let replacementExecuteRequest = EngineXPCRequest(
+      command: .executeJobCanaryRoleHostReplacement(replacementAuthorization)
+    )
+    let replacementExecuteResponse = EngineXPCResponse(
+      requestID: replacementExecuteRequest.requestID,
+      result: EngineCommandResponse(
+        command: .executeJobCanaryRoleHostReplacement,
+        state: engineProtocolState(paused: true),
+        checkpoint: checkpoint,
+        jobCanary: settled,
+        jobCanaryRoleHostReplacement: replacementAuthorized
+      )
+    )
+    #expect(
+      try replacementExecuteResponse.validate(for: replacementExecuteRequest)
+        .jobCanaryRoleHostReplacement == replacementAuthorized
+    )
+
+    let terminalQuery = try JobCanaryRoleHostReplacementReport(
+      jobID: replacementPreview.jobID,
+      runID: replacementPreview.runID,
+      predecessorRoleHostID: replacementPreview.predecessorRoleHostID,
+      replacementRoleHostID: replacementPreview.replacementRoleHostID,
+      plannedLaunchAttemptID: replacementPreview.plannedLaunchAttemptID,
+      incidentAuditSHA256: replacementPreview.incidentAuditSHA256,
+      replacementEvidenceSHA256: replacementPreview.replacementEvidenceSHA256,
+      replacementAuthorizationSHA256: replacementAuthorization.authorizationSHA256,
+      q4Binding: q4Binding,
+      outcome: .q4Failed(failureCode: "CHILD_FAILED"),
+      replayed: true
+    )
+    let terminalQueryResponse = EngineXPCResponse(
+      requestID: replacementPreviewRequest.requestID,
+      result: EngineCommandResponse(
+        command: .previewJobCanaryRoleHostReplacement,
+        state: engineProtocolState(paused: true),
+        jobCanaryRoleHostReplacement: terminalQuery
+      )
+    )
+    #expect(
+      try terminalQueryResponse.validate(for: replacementPreviewRequest)
+        .jobCanaryRoleHostReplacement == terminalQuery
+    )
+  }
+
+  @Test("replacement terminal outcomes serialize only closed status and effect shapes")
+  func replacementTerminalOutcomeSerialization() throws {
+    let binding = replacementQ4Binding()
+    let outcomes: [JobCanaryRoleHostReplacementOutcome] = [
+      .preview,
+      .noRemoteEffectFailure(failureCode: "INVALID_PREPARATION"),
+      .remoteEffectAmbiguous,
+      .q4Prepared,
+      .q4Enqueued,
+      .q4OutcomeAmbiguous(failureCode: nil),
+      .q4OutcomeAmbiguous(failureCode: "RUNTIME_INTERRUPTED"),
+      .q4Failed(failureCode: "CHILD_FAILED"),
+      .q4Settled,
+      .replacementHostLost,
+    ]
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    for outcome in outcomes {
+      let report = try JobCanaryRoleHostReplacementReport(
+        jobID: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
+        runID: "run-22222222-2222-4222-8222-222222222222",
+        predecessorRoleHostID: "rolehost-33333333-3333-4333-8333-333333333333",
+        replacementRoleHostID: "rolehost-44444444-4444-4444-8444-444444444444",
+        plannedLaunchAttemptID: "launch-55555555-5555-4555-8555-555555555555",
+        incidentAuditSHA256: String(repeating: "8", count: 64),
+        replacementEvidenceSHA256: String(repeating: "9", count: 64),
+        replacementAuthorizationSHA256: outcome == .preview
+          ? nil : String(repeating: "a", count: 64),
+        q4Binding: binding,
+        outcome: outcome,
+        replayed: false
+      )
+      let encoded = try encoder.encode(report)
+      let decoded = try JSONDecoder().decode(
+        JobCanaryRoleHostReplacementReport.self,
+        from: encoded
+      )
+      #expect(decoded == report)
+      #expect(decoded.status == outcome.status)
+      #expect(decoded.effectCertainty == outcome.effectCertainty)
+      #expect(decoded.failureCode == outcome.failureCode)
+      let object = try #require(
+        try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+      )
+      #expect(object["remoteEffectsExecuted"] == nil)
+      #expect(object["status"] as? String == outcome.status.rawValue)
+      #expect(
+        object["effectCertainty"] as? String == outcome.effectCertainty.rawValue
+      )
+    }
+
+    let validFailure = try JobCanaryRoleHostReplacementReport(
+      jobID: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,
+      runID: "run-22222222-2222-4222-8222-222222222222",
+      predecessorRoleHostID: "rolehost-33333333-3333-4333-8333-333333333333",
+      replacementRoleHostID: "rolehost-44444444-4444-4444-8444-444444444444",
+      plannedLaunchAttemptID: "launch-55555555-5555-4555-8555-555555555555",
+      incidentAuditSHA256: String(repeating: "8", count: 64),
+      replacementEvidenceSHA256: String(repeating: "9", count: 64),
+      replacementAuthorizationSHA256: String(repeating: "a", count: 64),
+      q4Binding: binding,
+      outcome: .q4Failed(failureCode: "CHILD_FAILED"),
+      replayed: false
+    )
+    let validData = try encoder.encode(validFailure)
+    let base = try #require(
+      try JSONSerialization.jsonObject(with: validData) as? [String: Any]
+    )
+    let terminalRules:
+      [(
+        status: JobCanaryRoleHostReplacementStatus,
+        effect: JobCanaryRoleHostReplacementEffectCertainty,
+        allowsNoFailure: Bool,
+        allowsValidFailure: Bool
+      )] = [
+        (.noRemoteEffectFailure, .knownNoRemoteEffect, false, true),
+        (.remoteEffectAmbiguous, .possibleRemoteEffect, true, false),
+        (.q4Prepared, .confirmedReplacementEffect, true, false),
+        (.q4Enqueued, .confirmedReplacementEffect, true, false),
+        (.q4OutcomeAmbiguous, .confirmedReplacementEffect, true, true),
+        (.q4Failed, .confirmedReplacementEffect, false, true),
+        (.q4Settled, .confirmedReplacementEffect, true, false),
+        (.replacementHostLost, .confirmedReplacementEffect, true, false),
+      ]
+    let effects: [JobCanaryRoleHostReplacementEffectCertainty] = [
+      .knownNoRemoteEffect, .possibleRemoteEffect, .confirmedReplacementEffect,
+    ]
+    let failureCodes: [String?] = [nil, "CHILD_FAILED", "lowercase"]
+    for rule in terminalRules {
+      for effect in effects {
+        for failureCode in failureCodes {
+          var object = base
+          object["status"] = rule.status.rawValue
+          object["effectCertainty"] = effect.rawValue
+          if let failureCode {
+            object["failureCode"] = failureCode
+          } else {
+            object.removeValue(forKey: "failureCode")
+          }
+          let data = try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+          )
+          let failureIsValid =
+            failureCode == nil
+            ? rule.allowsNoFailure
+            : failureCode == "CHILD_FAILED" && rule.allowsValidFailure
+          let shapeIsValid = effect == rule.effect && failureIsValid
+          if shapeIsValid {
+            let decoded = try JSONDecoder().decode(
+              JobCanaryRoleHostReplacementReport.self,
+              from: data
+            )
+            #expect(decoded.status == rule.status)
+            #expect(decoded.effectCertainty == rule.effect)
+            #expect(decoded.failureCode == failureCode)
+          } else {
+            #expect(throws: (any Error).self) {
+              _ = try JSONDecoder().decode(
+                JobCanaryRoleHostReplacementReport.self,
+                from: data
+              )
+            }
+          }
+        }
+      }
+    }
+
+    for (key, value) in [
+      ("status", "unknownTerminalStatus"),
+      ("effectCertainty", "unknownEffectCertainty"),
+    ] {
+      var object = base
+      object[key] = value
+      let data = try JSONSerialization.data(
+        withJSONObject: object,
+        options: [.sortedKeys, .withoutEscapingSlashes]
+      )
+      #expect(throws: (any Error).self) {
+        _ = try JSONDecoder().decode(
+          JobCanaryRoleHostReplacementReport.self,
+          from: data
+        )
+      }
+    }
+  }
+
+  @Test("schema 9 decodes the immutable schema 7 retry report fixture")
+  func schemaSevenRetryReportCompatibility() throws {
+    let fixture = Data(
+      """
+      {"canaryAuthorizationSHA256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","credentialExpiresAtMilliseconds":1900000000000,"credentialType":"oauth","failedLaunchAttemptID":"launch-22222222-2222-4222-8222-222222222222","jobID":"11111111-1111-4111-8111-111111111111","model":"gpt-5.6-sol","provider":"openai-codex","recoveryEvidenceSHA256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","replayed":false,"retryEvidenceSHA256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","runID":"run-33333333-3333-4333-8333-333333333333","status":"preview","thinking":"max"}
+      """.utf8
+    )
+    let report = try JSONDecoder().decode(JobCanaryPiRetryReport.self, from: fixture)
+    #expect(report.agentAuthorityProtocol == nil)
+    #expect(report.failedPrimeIntentID == nil)
+    #expect(report.stalePaneTokensSHA256 == nil)
+
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    let encoded = try encoder.encode(report)
+    let object = try #require(
+      try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    )
+    for resetKey in [
+      "agentAuthorityProtocol", "failedPrimeIntentID", "failedPrimeIntentSHA256",
+      "failedPrimePayloadSHA256", "stalePaneRevision", "stalePaneHadTokens",
+      "stalePaneTokensSHA256",
+    ] {
+      #expect(object[resetKey] == nil)
     }
   }
 
@@ -142,8 +840,35 @@ struct EngineProtocolTests {
       implementationEnabled: true,
       enabled: true
     )
+    let maintenanceScope = JobMaintenanceScope(
+      operation: .retireBefore,
+      boundaryEpochSeconds: JobMaintenanceScope.authorizedBoundaryEpochSeconds
+    )
+    let canaryScope = JobCanaryScope(
+      jobID: UUID(),
+      boundaryEpochSeconds: JobCanaryScope.authorizedBoundaryEpochSeconds,
+      repairEvidenceSHA256: String(repeating: "d", count: 64),
+      maximumCommentParts: 8
+    )
+    let replacementRetry = JobCanaryPiRetryAuthorization(
+      recovery: JobCanaryRecoveryAuthorization(
+        canary: JobCanaryAuthorization(
+          scope: canaryScope,
+          previewEvidenceSHA256: String(repeating: "e", count: 64)
+        ),
+        recoveryEvidenceSHA256: String(repeating: "f", count: 64)
+      ),
+      retryEvidenceSHA256: String(repeating: "1", count: 64)
+    )
+    let replacementRequest = JobCanaryRoleHostReplacementRequest(
+      retry: replacementRetry,
+      incidentAuditSHA256: JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+      plannedReplacementRoleHostID: "rolehost-77777777-7777-4777-8777-777777777777",
+      plannedLaunchAttemptID: "launch-88888888-8888-4888-8888-888888888888"
+    )
     let commands: [EngineCommand] = [
       .snapshot,
+      .refreshModelCatalog,
       .acknowledgeExternalAutomation(true),
       .acknowledgeProviderDisclosure(true),
       .runPiPreflight,
@@ -175,6 +900,65 @@ struct EngineProtocolTests {
       .pollNow,
       .recheckAmbiguousMutation(EngineAmbiguousMutationEvidence(mutation)),
       .authorizeRetry(EngineAmbiguousMutationEvidence(mutation)),
+      .previewJobMaintenance(maintenanceScope),
+      .applyJobMaintenance(
+        JobMaintenanceAuthorization(
+          scope: maintenanceScope,
+          expectedCount: 87,
+          evidenceSHA256: String(repeating: "c", count: 64)
+        )
+      ),
+      .previewJobCanary(canaryScope),
+      .executeJobCanary(
+        JobCanaryAuthorization(
+          scope: canaryScope,
+          previewEvidenceSHA256: String(repeating: "e", count: 64)
+        )
+      ),
+      .previewJobCanaryRecovery(
+        JobCanaryAuthorization(
+          scope: canaryScope,
+          previewEvidenceSHA256: String(repeating: "e", count: 64)
+        )
+      ),
+      .executeJobCanaryRecovery(
+        JobCanaryRecoveryAuthorization(
+          canary: JobCanaryAuthorization(
+            scope: canaryScope,
+            previewEvidenceSHA256: String(repeating: "e", count: 64)
+          ),
+          recoveryEvidenceSHA256: String(repeating: "f", count: 64)
+        )
+      ),
+      .previewJobCanaryPiRetry(
+        JobCanaryRecoveryAuthorization(
+          canary: JobCanaryAuthorization(
+            scope: canaryScope,
+            previewEvidenceSHA256: String(repeating: "e", count: 64)
+          ),
+          recoveryEvidenceSHA256: String(repeating: "f", count: 64)
+        )
+      ),
+      .executeJobCanaryPiRetry(
+        JobCanaryPiRetryAuthorization(
+          recovery: JobCanaryRecoveryAuthorization(
+            canary: JobCanaryAuthorization(
+              scope: canaryScope,
+              previewEvidenceSHA256: String(repeating: "e", count: 64)
+            ),
+            recoveryEvidenceSHA256: String(repeating: "f", count: 64)
+          ),
+          retryEvidenceSHA256: String(repeating: "1", count: 64)
+        )
+      ),
+      .previewJobCanaryRoleHostReplacement(replacementRequest),
+      .executeJobCanaryRoleHostReplacement(
+        JobCanaryRoleHostReplacementAuthorization(
+          request: replacementRequest,
+          replacementEvidenceSHA256: String(repeating: "2", count: 64),
+          q4Binding: replacementQ4Binding()
+        )
+      ),
       .setLoginEnabled(true),
       .synchronizeLoginStatus(selected: true, status: .enabled),
       .completeOnboarding,
@@ -205,8 +989,21 @@ private actor EngineXPCClientFake: EngineClient {
   }
 }
 
+private func replacementQ4Binding() -> JobCanaryRoleHostReplacementQ4Binding {
+  JobCanaryRoleHostReplacementQ4Binding(
+    descriptorSHA256: String(repeating: "1", count: 64),
+    configurationSHA256: String(repeating: "2", count: 64),
+    promptSHA256: String(repeating: "3", count: 64),
+    workflowConfigurationSHA256: String(repeating: "4", count: 64),
+    priorLaunchDescriptorSHA256: String(repeating: "5", count: 64),
+    priorLaunchConfigurationSHA256: String(repeating: "6", count: 64),
+    resourceTreeSHA256: String(repeating: "7", count: 64)
+  )
+}
+
 private func engineProtocolState(
-  herdr: EngineHerdrStatus = .unchecked
+  herdr: EngineHerdrStatus = .unchecked,
+  paused: Bool = false
 ) -> EngineUIState {
   let credential = EngineCredentialStatus.missing
   let pi = EnginePiStatus.unchecked
@@ -227,7 +1024,7 @@ private func engineProtocolState(
     revision: 0,
     lifecycle: .onboarding,
     operationalStatus: .active,
-    paused: false,
+    paused: paused,
     passRunning: false,
     activities: [],
     ambiguousMutations: [],
@@ -239,7 +1036,20 @@ private func engineProtocolState(
       loginItemSelected: false,
       loginItemStatus: .notRegistered,
       credential: credential,
-      herdr: herdr
+      herdr: herdr,
+      modelCatalog: PiModelCatalog(
+        models: [
+          PiModelCatalogEntry(
+            provider: "openai-codex",
+            id: "gpt-5.6-sol",
+            name: "GPT-5.6 Sol",
+            reasoning: true,
+            input: [.text, .image],
+            contextWindow: 200_000,
+            maxTokens: 64_000,
+            thinkingLevels: ModelThinkingLevel.allCases
+          )
+        ])
     ),
     diagnostics: EngineDiagnostics(
       schemaVersion: 2,

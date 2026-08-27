@@ -8,7 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 readonly ROOT
-readonly NODE="/opt/homebrew/Cellar/node/26.6.0/bin/node"
+JIDOKA_RELEASE_RUNTIME_ROOT="${JIDOKA_RELEASE_RUNTIME_ROOT:-$ROOT/build/runtime-input/qualified-runtime}"
+readonly JIDOKA_RELEASE_RUNTIME_ROOT
+export JIDOKA_RELEASE_RUNTIME_ROOT
+NODE="$("$ROOT/scripts/qualified-runtime-node.sh")"
+readonly NODE
 readonly FIXTURE="$SCRIPT_DIR/herdr-s11-fixture.mjs"
 
 fail() {

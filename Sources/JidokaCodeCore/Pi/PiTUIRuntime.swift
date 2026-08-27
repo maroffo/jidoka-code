@@ -26,7 +26,7 @@ public struct PiTUIModelIdentity: Equatable, Sendable {
 
   public init(provider: String, modelID: String, thinkingLevel: String) throws {
     guard provider.wholeMatch(of: /^[a-z0-9][a-z0-9._-]{0,63}$/) != nil,
-      modelID.wholeMatch(of: /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/) != nil,
+      modelID.wholeMatch(of: /^[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,199}$/) != nil,
       ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
         .contains(thinkingLevel)
     else {
@@ -321,11 +321,68 @@ public struct PiTUIResultExpectation: Equatable, Sendable {
   }
 }
 
+struct PiTUIPreSessionFailureEvidence: Equatable, Sendable {
+  let sessionID: String
+  let sessionRecordSHA256: String
+  let missingSessionFile: URL
+}
+
 public struct PiTUISessionIdentity: Equatable, Sendable {
   public let sessionID: String
   public let sessionFile: URL
   public let originLaunchMode: PiTUILaunchMode
   public let originResumeBoundarySHA256: String?
+
+  static func loadPreSessionFailure(
+    from channelDirectory: URL,
+    configuration: PiTUIRunConfiguration
+  ) throws -> PiTUIPreSessionFailureEvidence {
+    guard configuration.launchMode == .fresh,
+      configuration.expectedSessionID == nil,
+      configuration.resumeBoundarySHA256 == nil,
+      try PiTUIFileProtocol.canonicalExistingURL(channelDirectory)
+        == configuration.channelDirectory
+    else {
+      throw PiTUIRuntimeError.identityMismatch
+    }
+    let data = try PiTUIFileProtocol.readPrivateFile(
+      channelDirectory.appendingPathComponent("session.json"),
+      maximumBytes: 64 * 1_024
+    )
+    guard data.last == 0x0A,
+      let object = try JSONSerialization.jsonObject(
+        with: Data(data.dropLast())
+      ) as? [String: Any],
+      Set(object.keys)
+        == Set([
+          "originLaunchMode", "originResumeBoundarySHA256", "runID", "runNonce",
+          "schemaVersion", "sessionFile", "sessionID",
+        ]),
+      object["schemaVersion"] as? Int == 2,
+      object["runID"] as? String == configuration.runID,
+      object["runNonce"] as? String == configuration.runNonce,
+      object["originLaunchMode"] as? String == PiTUILaunchMode.fresh.rawValue,
+      object["originResumeBoundarySHA256"] is NSNull,
+      let sessionID = object["sessionID"] as? String,
+      sessionID.wholeMatch(
+        of: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+      ) != nil,
+      let sessionFile = object["sessionFile"] as? String
+    else {
+      throw PiTUIRuntimeError.identityMismatch
+    }
+    let sessionURL = URL(fileURLWithPath: sessionFile).standardizedFileURL
+    guard PiTUIFileProtocol.isChild(sessionURL, of: configuration.sessionDirectory),
+      !FileManager.default.fileExists(atPath: sessionURL.path)
+    else {
+      throw PiTUIRuntimeError.identityMismatch
+    }
+    return PiTUIPreSessionFailureEvidence(
+      sessionID: sessionID,
+      sessionRecordSHA256: PiTUIFileProtocol.sha256(data),
+      missingSessionFile: sessionURL
+    )
+  }
 
   public static func load(
     from channelDirectory: URL,
@@ -676,7 +733,7 @@ public enum PiTUIInvocationBuilder {
       Set(object.keys)
         == Set([
           "compaction", "defaultProjectTrust", "enableInstallTelemetry", "lastChangelogVersion",
-          "retry", "transport",
+          "retry", "theme", "transport",
         ]),
       let compaction = object["compaction"] as? [String: Any],
       Set(compaction.keys) == Set(["enabled"]),
@@ -690,6 +747,7 @@ public enum PiTUIInvocationBuilder {
       let provider = retry["provider"] as? [String: Any],
       Set(provider.keys) == Set(["maxRetries"]),
       provider["maxRetries"] as? Int == 0,
+      object["theme"] as? String == "dark",
       object["transport"] as? String == "sse"
     else {
       return false
@@ -765,6 +823,9 @@ public enum PiTUIInvocationBuilder {
 public struct PiTUIHostInvocationDescriptor: Codable, Equatable, Sendable {
   public let schemaVersion: Int
   public let resourceRoot: String
+  public let releaseRuntimeRoot: String?
+  public let releaseRuntimeIdentity: PiReleaseRuntimeIdentity?
+  public let releaseRuntimeIdentitySHA256: String?
   public let homeDirectory: String
   public let agentDirectory: String
   public let temporaryDirectory: String
@@ -780,6 +841,7 @@ public struct PiTUIHostInvocationDescriptor: Codable, Equatable, Sendable {
 
   public init(
     resourceRoot: URL,
+    runtime: PiResolvedRuntime? = nil,
     homeDirectory: URL,
     agentDirectory: URL,
     temporaryDirectory: URL,
@@ -803,8 +865,17 @@ public struct PiTUIHostInvocationDescriptor: Codable, Equatable, Sendable {
     else {
       throw PiTUIRuntimeError.invalidConfiguration
     }
-    self.schemaVersion = 1
+    let releaseIdentity = runtime?.releaseIdentity
+    guard runtime == nil || releaseIdentity != nil,
+      releaseIdentity.map({ GitHubInputValidation.validSHA256($0.authoritySHA256) }) ?? true
+    else {
+      throw PiTUIRuntimeError.invalidConfiguration
+    }
+    self.schemaVersion = releaseIdentity == nil ? 1 : 2
     self.resourceRoot = try PiTUIFileProtocol.canonicalExistingURL(resourceRoot).path
+    self.releaseRuntimeRoot = releaseIdentity?.canonicalRoot
+    self.releaseRuntimeIdentity = releaseIdentity
+    self.releaseRuntimeIdentitySHA256 = releaseIdentity?.authoritySHA256
     self.homeDirectory = try PiTUIFileProtocol.canonicalExistingURL(homeDirectory).path
     self.agentDirectory = try PiTUIFileProtocol.canonicalExistingURL(agentDirectory).path
     self.temporaryDirectory = try PiTUIFileProtocol.canonicalExistingURL(temporaryDirectory).path
@@ -825,10 +896,30 @@ public struct PiTUIHostInvocationDescriptor: Codable, Equatable, Sendable {
     self.fixtureProviderCall = fixtureProviderCall?.standardizedFileURL.path
   }
 
+  func validateReleaseRuntime(_ runtime: PiResolvedRuntime) throws {
+    guard schemaVersion == 2,
+      let releaseRuntimeRoot,
+      let releaseRuntimeIdentity,
+      let releaseRuntimeIdentitySHA256,
+      releaseRuntimeRoot == releaseRuntimeIdentity.canonicalRoot,
+      releaseRuntimeIdentitySHA256 == releaseRuntimeIdentity.authoritySHA256,
+      GitHubInputValidation.validSHA256(releaseRuntimeIdentitySHA256),
+      runtime.releaseIdentity == releaseRuntimeIdentity
+    else {
+      throw PiTUIRuntimeError.identityMismatch
+    }
+  }
+
   func resolved(runtime resolvedRuntime: PiResolvedRuntime? = nil) throws
     -> PiTUIResolvedHostInvocation
   {
-    guard schemaVersion == 1,
+    guard schemaVersion == 2,
+      let releaseRuntimeRoot,
+      let releaseRuntimeIdentity,
+      let releaseRuntimeIdentitySHA256,
+      releaseRuntimeRoot == releaseRuntimeIdentity.canonicalRoot,
+      releaseRuntimeIdentitySHA256 == releaseRuntimeIdentity.authoritySHA256,
+      GitHubInputValidation.validSHA256(releaseRuntimeIdentitySHA256),
       workflowConfigurationSHA256.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
       tuiConfigurationSHA256.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
       (1_000...3_600_000).contains(executionTimeoutMilliseconds),
@@ -844,11 +935,18 @@ public struct PiTUIHostInvocationDescriptor: Codable, Equatable, Sendable {
     let workflowURL = URL(fileURLWithPath: workflowConfiguration)
     let tuiURL = URL(fileURLWithPath: tuiConfiguration)
     let resources = try PiTUIResourceCatalog.inspect(resourceRoot: resourceRootURL)
-    let sourceRuntime =
-      try resolvedRuntime
-      ?? PiRuntimeResolver(
-        configuration: .standard(resourceRoot: resources.workflowResources.resourceRoot)
-      ).resolve()
+    let sourceRuntime: PiResolvedRuntime
+    if let resolvedRuntime {
+      sourceRuntime = resolvedRuntime
+    } else {
+      sourceRuntime = try ReleaseOwnedPiRuntimeBoundaryAuthority.tuiHost(
+        using: ReleaseOwnedPiRuntimeResolver(
+          runtimeRoot: URL(fileURLWithPath: releaseRuntimeRoot, isDirectory: true),
+          containingApplicationURL: releaseRuntimeIdentity.containingApplicationURL()
+        )
+      )
+    }
+    try validateReleaseRuntime(sourceRuntime)
     let workflow = try PiWorkflowRuntimeConfiguration.load(from: workflowURL)
     let tui = try PiTUIRunConfiguration.load(from: tuiURL)
     let expectedCommands = try resources.workflowResources.expectedCommandProvenance(
@@ -880,15 +978,7 @@ public struct PiTUIHostInvocationDescriptor: Codable, Equatable, Sendable {
     else {
       throw PiTUIRuntimeError.invalidConfiguration
     }
-    let runtime =
-      if resolvedRuntime == nil {
-        try PiRuntimeResolver.materializePrivateSnapshot(
-          of: sourceRuntime,
-          in: temporaryURL
-        )
-      } else {
-        sourceRuntime
-      }
+    let runtime = sourceRuntime
 
     let arguments: [String]
     var environment = try PiTUIInvocationBuilder.environment(
@@ -900,12 +990,7 @@ public struct PiTUIHostInvocationDescriptor: Codable, Equatable, Sendable {
       piVersion: runtime.piVersion,
       offline: offline
     )
-    if let libraryDirectory = runtime.nodeDynamicLibraryDirectoryURL {
-      guard PiTUIFileProtocol.isChild(libraryDirectory, of: temporaryURL) else {
-        throw PiTUIRuntimeError.invalidConfiguration
-      }
-      environment["DYLD_LIBRARY_PATH"] = libraryDirectory.path
-    } else if resolvedRuntime == nil {
+    guard runtime.nodeDynamicLibraryDirectoryURL == nil else {
       throw PiTUIRuntimeError.invalidConfiguration
     }
     if let fixtureProviderExtension, let fixtureProviderCall {

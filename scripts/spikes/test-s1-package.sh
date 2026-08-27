@@ -14,11 +14,46 @@ readonly SOURCE_ENGINE="$SOURCE_APP/Contents/Helpers/JidokaCodeEngineProbe"
 readonly SOURCE_ASKPASS="$SOURCE_APP/Contents/Helpers/JidokaCodeAskPass"
 readonly SOURCE_PUSH_GUARD="$SOURCE_APP/Contents/Helpers/GitHooks/pre-push"
 readonly SOURCE_HERDR_HOST="$SOURCE_APP/Contents/Helpers/JidokaCodeHerdrHost"
+SOURCE_RELEASE_RUNTIME_ROOT="${JIDOKA_RELEASE_RUNTIME_ROOT:-$ROOT/build/runtime-input/qualified-runtime}"
+readonly SOURCE_RELEASE_RUNTIME_ROOT
+BOUNDED_COMMAND_RUNNER=""
+# Ten minutes permits full strict validation of the 14,551-entry runtime while
+# turning a pathological verifier into a bounded, process-group-scoped failure.
+readonly PACKAGED_EXECUTABLE_TIMEOUT_SECONDS=600
+readonly PUSH_GUARD_EOF_BOUND_SECONDS=10
+JIDOKA_RELEASE_RUNTIME_ROOT=""
+NODE_BIN=""
+NORMAL_RELEASE_EXECUTABLE=""
 TEMP_ROOT=""
 
 fail() {
     printf 'S1 package E2E failed: %s\n' "$1" >&2
     exit 1
+}
+
+build_bounded_command_runner() {
+    local bin_dir
+    local runner
+    local scratch="$ROOT/.build/s1-bounded-command"
+    /usr/bin/xcrun swift build \
+        --scratch-path "$scratch" \
+        --configuration release \
+        --product JidokaCodeBoundedCommand >&2
+    bin_dir="$(
+        /usr/bin/xcrun swift build \
+            --scratch-path "$scratch" \
+            --configuration release \
+            --show-bin-path
+    )"
+    bin_dir="$(cd "$bin_dir" && pwd -P)"
+    case "$bin_dir" in
+        "$ROOT/.build/"*) ;;
+        *) fail "native bounded command directory escapes .build" ;;
+    esac
+    runner="$bin_dir/JidokaCodeBoundedCommand"
+    [[ -f "$runner" && -x "$runner" && ! -L "$runner" ]] || \
+        fail "native bounded command runner is unavailable"
+    printf '%s\n' "$runner"
 }
 
 cleanup_owned_path() {
@@ -33,6 +68,13 @@ cleanup_owned_path() {
 }
 
 cleanup() {
+    if [[ -n "${runtime_inventory:-}" && -L "$runtime_inventory" && \
+        "$(/usr/bin/readlink "$runtime_inventory")" == "${runtime_inventory_sentinel:-}" ]]; then
+        /bin/rm -f -- "$runtime_inventory"
+        if [[ -f "${runtime_inventory_backup:-}" ]]; then
+            /bin/mv "$runtime_inventory_backup" "$runtime_inventory"
+        fi
+    fi
     if [[ -n "$TEMP_ROOT" && -e "$TEMP_ROOT" ]]; then
         cleanup_owned_path "$TEMP_ROOT" || printf 'refusing unexpected cleanup path: %s\n' "$TEMP_ROOT" >&2
     fi
@@ -105,9 +147,10 @@ assert_exact_json_keys() {
 
 run_packaged_command() {
     local executable="$1"
-    local argument="$2"
-    local stdout_path="$3"
-    local stderr_path="$4"
+    local stdout_path="$2"
+    local stderr_path="$3"
+    local status=0
+    shift 3
     /bin/mkdir -p "$TEMP_ROOT/home" "$TEMP_ROOT/runtime-tmp"
     (
         cd /
@@ -115,8 +158,29 @@ run_packaged_command() {
             HOME="$TEMP_ROOT/home" \
             PATH="/usr/bin:/bin" \
             TMPDIR="$TEMP_ROOT/runtime-tmp" \
-            "$executable" "$argument"
-    ) >"$stdout_path" 2>"$stderr_path"
+            "$BOUNDED_COMMAND_RUNNER" \
+            "$PACKAGED_EXECUTABLE_TIMEOUT_SECONDS" \
+            "$executable" "$@"
+    ) </dev/null >"$stdout_path" 2>"$stderr_path" || status=$?
+    case "$status" in
+        0) return 0 ;;
+        124)
+            fail "packaged executable timed out after ${PACKAGED_EXECUTABLE_TIMEOUT_SECONDS}s: $executable"
+            ;;
+        125) fail "packaged executable identity cleanup failed: $executable" ;;
+        126) fail "packaged executable output exceeded its bounded capture: $executable" ;;
+        *) return "$status" ;;
+    esac
+}
+
+monotonic_seconds() {
+    /usr/bin/perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
+        -e 'printf "%.9f\n", clock_gettime(CLOCK_MONOTONIC)'
+}
+
+elapsed_seconds_since() {
+    /usr/bin/perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC \
+        -e 'printf "%.3f\n", clock_gettime(CLOCK_MONOTONIC) - $ARGV[0]' "$1"
 }
 
 assert_failure() {
@@ -124,7 +188,9 @@ assert_failure() {
     local expected_error="$2"
     local stdout_path="$TEMP_ROOT/failure.stdout"
     local stderr_path="$TEMP_ROOT/failure.stderr"
-    if run_packaged_command "$executable" --preflight "$stdout_path" "$stderr_path"; then
+    if run_packaged_command \
+        "$executable" "$stdout_path" "$stderr_path" --preflight
+    then
         fail "preflight unexpectedly succeeded: $expected_error"
     fi
     [[ ! -s "$stdout_path" ]] || fail "failed preflight wrote stdout"
@@ -136,14 +202,12 @@ assert_pi_runner_failure() {
     local app="$1"
     local stdout_path="$TEMP_ROOT/pi-runner-failure.stdout"
     local stderr_path="$TEMP_ROOT/pi-runner-failure.stderr"
-    if (
-        cd /
-        /usr/bin/env -i \
-            HOME="$TEMP_ROOT/home" \
-            PATH="/opt/homebrew/bin:/usr/bin:/bin" \
-            TMPDIR="$TEMP_ROOT/runtime-tmp" \
-            "$app/Contents/MacOS/Jidoka Code" --pi-probe preflight
-    ) >"$stdout_path" 2>"$stderr_path"; then
+    if run_packaged_command \
+        "$app/Contents/MacOS/Jidoka Code" \
+        "$stdout_path" \
+        "$stderr_path" \
+        --pi-probe preflight
+    then
         fail "mutated packaged Pi runner unexpectedly executed"
     fi
     [[ ! -s "$stdout_path" ]] || fail "mutated packaged Pi runner wrote stdout"
@@ -155,19 +219,179 @@ assert_pi_policy_failure() {
     local app="$1"
     local stdout_path="$TEMP_ROOT/pi-policy-failure.stdout"
     local stderr_path="$TEMP_ROOT/pi-policy-failure.stderr"
-    if (
-        cd /
-        /usr/bin/env -i \
-            HOME="$TEMP_ROOT/home" \
-            PATH="/opt/homebrew/bin:/usr/bin:/bin" \
-            TMPDIR="$TEMP_ROOT/runtime-tmp" \
-            "$app/Contents/MacOS/Jidoka Code" --pi-probe preflight
-    ) >"$stdout_path" 2>"$stderr_path"; then
+    if run_packaged_command \
+        "$app/Contents/MacOS/Jidoka Code" \
+        "$stdout_path" \
+        "$stderr_path" \
+        --pi-probe preflight
+    then
         fail "mutated packaged Pi policy unexpectedly executed"
     fi
     [[ ! -s "$stdout_path" ]] || fail "mutated packaged Pi policy wrote stdout"
     /usr/bin/grep -Fq 'runnerFailed(1)' "$stderr_path" || \
         fail "mutated packaged Pi policy did not fail runtime attestation"
+}
+
+assert_release_runtime_valid() {
+    local app="$1"
+    local stdout_path="$TEMP_ROOT/release-runtime-valid.stdout"
+    local stderr_path="$TEMP_ROOT/release-runtime-valid.stderr"
+    run_packaged_command \
+        "$app/Contents/MacOS/Jidoka Code" \
+        "$stdout_path" \
+        "$stderr_path" \
+        --release-runtime-verify-adhoc || \
+        fail "fresh release runtime clone failed before mutation"
+    [[ -s "$stdout_path" && ! -s "$stderr_path" ]] || \
+        fail "fresh release runtime clone emitted invalid verification output"
+    assert_exact_json_keys \
+        "$stdout_path" schemaVersion runtimeID manifestSHA256 runtimeIdentitySHA256
+}
+
+assert_release_runtime_failure() {
+    local app="$1"
+    local expected_code="$2"
+    local expected_detail="$3"
+    local stdout_path="$TEMP_ROOT/release-runtime-failure.stdout"
+    local stderr_path="$TEMP_ROOT/release-runtime-failure.stderr"
+    if run_packaged_command \
+        "$app/Contents/MacOS/Jidoka Code" \
+        "$stdout_path" \
+        "$stderr_path" \
+        --release-runtime-verify-adhoc
+    then
+        fail "mutated release runtime unexpectedly passed"
+    fi
+    [[ ! -s "$stdout_path" ]] || fail "mutated release runtime wrote stdout"
+    /usr/bin/grep -Fxq \
+        "release runtime bundle failed validation: ${expected_code}: ${expected_detail}" \
+        "$stderr_path" || \
+        fail "mutated release runtime did not report ${expected_code}: ${expected_detail}"
+}
+
+assert_fresh_release_runtime_mutation() {
+    local mutation="$1"
+    local app="$MUTATED_RELEASE_RUNTIME_APP"
+    local runtime="$app/Contents/Resources/PiRuntime"
+    local sdk="$runtime/pi/dist/core/sdk.js"
+    local manifest="$runtime/runtime-manifest.json"
+    local expected_code
+    local expected_detail
+
+    /bin/rm -rf -- "$app"
+    /bin/cp -cR "$COPIED_APP" "$app"
+    assert_release_runtime_valid "$app"
+    case "$mutation" in
+        pi-bytes)
+            expected_code="releaseRuntimeDrift"
+            expected_detail="release Pi critical file differs"
+            printf '\n' >>"$sdk"
+            ;;
+        manifest-bytes)
+            expected_code="releaseManifestDrift"
+            expected_detail="release runtime manifest digest differs"
+            /bin/chmod 0644 "$manifest"
+            printf '\n' >>"$manifest"
+            /bin/chmod 0444 "$manifest"
+            ;;
+        writable-mode)
+            expected_code="unsafeReleaseRuntime"
+            expected_detail="release runtime file metadata is unsafe"
+            /bin/chmod 0666 "$sdk"
+            ;;
+        extra-entry)
+            expected_code="releaseRuntimeDrift"
+            expected_detail="release Pi package tree differs"
+            printf 'extra\n' >"$runtime/pi/extra-runtime-entry"
+            ;;
+        hard-link)
+            expected_code="unsafeReleaseRuntime"
+            expected_detail="release runtime file metadata is unsafe"
+            /bin/ln "$sdk" "$runtime/pi/dist/core/sdk-hard-link.js"
+            ;;
+        acl)
+            expected_code="unsafeReleaseRuntime"
+            expected_detail="release runtime file metadata is unsafe"
+            /bin/chmod +a 'everyone allow write' "$sdk"
+            ;;
+        escaping-symlink)
+            expected_code="releaseRuntimeDrift"
+            expected_detail="release Pi package symbolic link escapes its root"
+            /bin/ln -s ../runtime-manifest.json "$runtime/pi/escaping-runtime-link"
+            ;;
+        unsigned-node)
+            expected_code="releaseSignatureInvalid"
+            expected_detail="release application or Node signature differs"
+            /usr/bin/codesign --remove-signature "$runtime/node/bin/node"
+            ;;
+        *) fail "unknown release runtime mutation: $mutation" ;;
+    esac
+    /usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode "$app"
+    assert_release_runtime_failure "$app" "$expected_code" "$expected_detail"
+    /bin/rm -rf -- "$app"
+}
+
+build_normal_release_oracles() {
+    local normal_stderr="$TEMP_ROOT/normal-release-adhoc.stderr"
+    local normal_stdout="$TEMP_ROOT/normal-release-adhoc.stdout"
+    local scratch="$TEMP_ROOT/normal-release-build"
+    local strings_path="$TEMP_ROOT/normal-release.strings"
+
+    /usr/bin/xcrun swift build \
+        --scratch-path "$scratch" \
+        --configuration release \
+        --product JidokaCodeApp
+    NORMAL_RELEASE_EXECUTABLE="$(
+        /usr/bin/xcrun swift build \
+            --scratch-path "$scratch" \
+            --configuration release \
+            --show-bin-path
+    )/JidokaCodeApp"
+    [[ -f "$NORMAL_RELEASE_EXECUTABLE" && -x "$NORMAL_RELEASE_EXECUTABLE" && \
+        ! -L "$NORMAL_RELEASE_EXECUTABLE" ]] || fail "normal release app product is unavailable"
+    if run_packaged_command \
+        "$NORMAL_RELEASE_EXECUTABLE" \
+        "$normal_stdout" \
+        "$normal_stderr" \
+        --release-runtime-verify-adhoc
+    then
+        fail "normal release binary exposed ad hoc runtime verification"
+    fi
+    [[ ! -s "$normal_stdout" ]] || fail "normal release ad hoc rejection wrote stdout"
+    /usr/bin/grep -Fxq 'unsupported release runtime verification command' \
+        "$normal_stderr" || fail "normal release binary recognized the ad hoc verifier"
+    /usr/bin/strings "$NORMAL_RELEASE_EXECUTABLE" >"$strings_path"
+    for forbidden in \
+        '--release-runtime-verify-adhoc' \
+        '--release-runtime-verify-developer-id' \
+        '/opt/homebrew/bin/pi' \
+        '/opt/homebrew/bin/node' \
+        '/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js' \
+        '/usr/local/bin/pi' \
+        '/usr/local/bin/node' \
+        '/usr/bin/node'
+    do
+        if /usr/bin/grep -Fq -- "$forbidden" "$strings_path"; then
+            fail "normal release binary contains forbidden runtime authority: $forbidden"
+        fi
+    done
+}
+
+assert_production_authority_failure() {
+    local app="$1"
+    local stderr_path="$TEMP_ROOT/production-authority-failure.stderr"
+    local stdout_path="$TEMP_ROOT/production-authority-failure.stdout"
+    if run_packaged_command \
+        "$app/Contents/MacOS/Jidoka Code" \
+        "$stdout_path" \
+        "$stderr_path" \
+        --release-runtime-verify-production
+    then
+        fail "ad hoc re-sign obtained production runtime authority"
+    fi
+    [[ ! -s "$stdout_path" ]] || fail "production authority rejection wrote stdout"
+    /usr/bin/grep -Fq 'unsafeReleaseRuntime' "$stderr_path" || \
+        fail "user-renamable production runtime did not fail the installed-path policy"
 }
 
 assert_cleanup_guard() {
@@ -191,8 +415,7 @@ assert_cleanup_guard() {
 assert_component_relocation_policy() {
     local app="$1"
     local component_root="$TEMP_ROOT/component-policy-root"
-    local legacy_expanded="$TEMP_ROOT/component-policy-legacy-expanded"
-    local legacy_package="$TEMP_ROOT/component-policy-legacy.pkg"
+    local expected_bom_modes="$TEMP_ROOT/component-policy-expected-bom-modes.txt"
     local locked_bom_modes="$TEMP_ROOT/component-policy-locked-bom-modes.txt"
     local locked_expanded="$TEMP_ROOT/component-policy-locked-expanded"
     local locked_package="$TEMP_ROOT/component-policy-locked.pkg"
@@ -213,19 +436,6 @@ assert_component_relocation_policy() {
 
     /bin/mkdir -m 0755 "$component_root"
     /usr/bin/ditto "$app" "$component_root/Jidoka Code.app"
-    /usr/bin/pkgbuild \
-        --component "$app" \
-        --install-location /Applications \
-        --identifier com.maroffo.JidokaCode.pkg \
-        --version 0.1.0 \
-        "$legacy_package" >/dev/null
-    /usr/sbin/pkgutil --expand "$legacy_package" "$legacy_expanded"
-    [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/relocate/bundle)' \
-        "$legacy_expanded/PackageInfo")" == "1" && \
-        "$(/usr/bin/xmllint --xpath \
-            "count(/pkg-info/relocate/bundle[@id='com.maroffo.JidokaCode'])" \
-            "$legacy_expanded/PackageInfo")" == "1" ]] || \
-        fail "legacy component mode no longer reproduces production bundle relocation"
 
     /usr/bin/pkgbuild \
         --root "$component_root" \
@@ -269,81 +479,145 @@ assert_component_relocation_policy() {
             "$locked_package_info")" == "0" ]] || \
         fail "locked component overwrite policy differs"
     /usr/bin/lsbom -p fm "$locked_expanded/Bom" >"$locked_bom_modes"
+    (
+        cd "$component_root"
+        while IFS= read -r -d '' path; do
+            printf '%s\t%s\n' "$path" "$(/usr/bin/stat -f '%p' "$path")"
+        done < <(/usr/bin/find . -print0)
+    ) | LC_ALL=C /usr/bin/sort >"$expected_bom_modes"
     /usr/bin/awk -F '\t' '
         function normalized_path(path) {
             gsub(/\/\._/, "/", path)
             return path
         }
-        function is_executable(path) {
-            return path == "./Jidoka Code.app/Contents/MacOS/Jidoka Code" \
-                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeEngineProbe" \
-                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeAskPass" \
-                || path == "./Jidoka Code.app/Contents/Helpers/GitHooks/pre-push" \
-                || path == "./Jidoka Code.app/Contents/Helpers/JidokaCodeHerdrHost"
-        }
-        $1 == "." { if ($2 != "40755") exit 1; root = 1; next }
+        NR == FNR { expected[$1] = $2; expected_count += 1; next }
         {
             path = normalized_path($1)
-            expected = ($2 ~ /^40/) ? "40755" : (is_executable(path) ? "100755" : "100644")
-            if ($2 != expected) exit 1
-            entries += 1
+            if (!(path in expected) || $2 != expected[path]) exit 1
+            if (!(path in seen)) seen_count += 1
+            seen[path] = 1
         }
-        END { if (!root || entries == 0) exit 1 }
-    ' "$locked_bom_modes" || fail "locked component package BOM modes differ"
+        END { if (seen_count != expected_count) exit 1 }
+    ' "$expected_bom_modes" "$locked_bom_modes" || \
+        fail "locked component package BOM modes differ"
+}
+
+assert_recorded_process_identity_absent() {
+    local identity_file="$1"
+    local label="$2"
+    local current_identity
+    local pid
+    local recorded_microseconds
+    local recorded_seconds
+    IFS='|' read -r pid recorded_seconds recorded_microseconds <"$identity_file"
+    [[ "$pid" =~ ^[0-9]+$ && "$recorded_seconds" =~ ^[0-9]+$ && \
+        "$recorded_microseconds" =~ ^[0-9]+$ ]] || \
+        fail "$label identity evidence is invalid"
+    current_identity="$(
+        "$BOUNDED_COMMAND_RUNNER" --process-identity "$pid" 2>/dev/null || true
+    )"
+    if [[ "$current_identity" == \
+        "$pid|$recorded_seconds|$recorded_microseconds" ]]; then
+        /bin/kill -KILL "$pid" 2>/dev/null || true
+        fail "$label retained the matching PID/microsecond-start identity"
+    fi
 }
 
 assert_bounded_command_runner() {
-    local block_line
     local child_command
     local child_pid
     local distinctive_status=0
+    local early_pid_file
+    local escaped_identity_file
+    local escaped_status
     local elapsed
+    local expected_status
     local false_status=0
-    local fork_line
-    local handler_line
-    local runner="$ROOT/scripts/run-bounded-command.pl"
-    local signal_child_command
+    local flood_elapsed
+    local flood_start
+    local flood_status=0
+    local runner="$BOUNDED_COMMAND_RUNNER"
     local signal_child_pid
     local signal_elapsed
     local signal_start
     local signal_status=0
     local start
+    local stderr_overflow_status=0
+    local stdout_overflow_status=0
     local status=0
-    local unblock_line
 
     [[ -f "$runner" && -x "$runner" && ! -L "$runner" ]] || \
         fail "bounded command runner is unavailable"
-    /usr/bin/perl -c "$runner" >/dev/null 2>&1 || fail "bounded command runner is invalid"
     "$runner" 2 /usr/bin/true || fail "bounded command runner changed a successful status"
     "$runner" 2 /usr/bin/false >/dev/null 2>&1 || false_status=$?
     [[ "$false_status" == "1" ]] || fail "bounded command runner changed a failed status"
-    /bin/cat >"$TEMP_ROOT/bounded-exit-37.sh" <<'SCRIPT'
-#!/bin/sh
-exit 37
-SCRIPT
-    /bin/chmod 0700 "$TEMP_ROOT/bounded-exit-37.sh"
-    "$runner" 2 "$TEMP_ROOT/bounded-exit-37.sh" >/dev/null 2>&1 || distinctive_status=$?
+    "$runner" 2 /bin/sh -c 'exit 37' >/dev/null 2>&1 || distinctive_status=$?
     [[ "$distinctive_status" == "37" ]] || \
         fail "bounded command runner changed a distinctive failed status"
+    for expected_status in 0 37; do
+        escaped_identity_file="$TEMP_ROOT/bounded-escaped-$expected_status.identity"
+        early_pid_file="$TEMP_ROOT/bounded-escaped-$expected_status.pid"
+        escaped_status=0
+        # shellcheck disable=SC2016
+        "$runner" 5 /bin/sh -c \
+            '/usr/bin/python3 -c '\''import os,sys,time; os.setsid(); open(sys.argv[1], "w").write(str(os.getpid())); os.close(0); os.close(1); os.close(2); time.sleep(30)'\'' "$1" & child=$!; attempt=0; while [ ! -s "$1" ] && [ "$attempt" -lt 100 ]; do /bin/sleep 0.01; attempt=$((attempt + 1)); done; "$4" --process-identity "$child" >"$2"; /bin/sleep 0.2; exit "$3"' \
+            bounded-escaped "$early_pid_file" "$escaped_identity_file" "$expected_status" \
+            "$runner" \
+            >/dev/null 2>&1 || escaped_status=$?
+        [[ "$escaped_status" == "$expected_status" ]] || \
+            fail "bounded command runner changed an escaped-child leader status"
+        assert_recorded_process_identity_absent \
+            "$escaped_identity_file" "bounded escaped-child status $expected_status"
+    done
 
-    block_line="$(
-        /usr/bin/grep -n -m 1 -F 'sigprocmask(SIG_BLOCK' "$runner" | /usr/bin/cut -d: -f1
-    )"
-    fork_line="$(
-        /usr/bin/grep -n -m 1 -F "my \$pid = fork();" "$runner" | /usr/bin/cut -d: -f1
-    )"
-    handler_line="$(
-        /usr/bin/grep -n -m 1 -F "\$SIG{HUP} = sub" "$runner" | /usr/bin/cut -d: -f1
-    )"
-    unblock_line="$(
-        /usr/bin/grep -n -F "defined sigprocmask(SIG_SETMASK, \$previous_signals)" \
-            "$runner" | /usr/bin/tail -n 1 | /usr/bin/cut -d: -f1
-    )"
-    [[ "$block_line" =~ ^[0-9]+$ && "$fork_line" =~ ^[0-9]+$ && \
-        "$handler_line" =~ ^[0-9]+$ && "$unblock_line" =~ ^[0-9]+$ && \
-        "$block_line" -lt "$fork_line" && "$fork_line" -lt "$handler_line" && \
-        "$handler_line" -lt "$unblock_line" ]] || \
-        fail "bounded command signal mask and handler ordering differs"
+    escaped_identity_file="$TEMP_ROOT/bounded-escaped-timeout.identity"
+    early_pid_file="$TEMP_ROOT/bounded-escaped-timeout.pid"
+    status=0
+    # shellcheck disable=SC2016
+    "$runner" 1 /bin/sh -c \
+        '/usr/bin/python3 -c '\''import os,sys,time; os.setsid(); open(sys.argv[1], "w").write(str(os.getpid())); os.close(0); os.close(1); os.close(2); time.sleep(30)'\'' "$1" & child=$!; attempt=0; while [ ! -s "$1" ] && [ "$attempt" -lt 100 ]; do /bin/sleep 0.01; attempt=$((attempt + 1)); done; "$3" --process-identity "$child" >"$2"; /bin/sleep 30' \
+        bounded-escaped-timeout "$early_pid_file" "$escaped_identity_file" "$runner" \
+        >/dev/null 2>"$TEMP_ROOT/bounded-escaped-timeout.stderr" || status=$?
+    [[ "$status" == "124" && \
+        "$(<"$TEMP_ROOT/bounded-escaped-timeout.stderr")" == \
+            "bounded command timed out after 1s" ]] || \
+        fail "bounded command runner did not type an escaped-child timeout"
+    assert_recorded_process_identity_absent \
+        "$escaped_identity_file" "bounded escaped-child timeout"
+
+    JIDOKA_BOUNDED_STDOUT_LIMIT_BYTES=16 \
+        "$runner" 2 /bin/sh -c 'printf 12345678901234567' \
+        >"$TEMP_ROOT/bounded-overflow.stdout" \
+        2>"$TEMP_ROOT/bounded-overflow.stderr" || stdout_overflow_status=$?
+    [[ "$stdout_overflow_status" == "126" && \
+        "$(<"$TEMP_ROOT/bounded-overflow.stdout")" == "1234567890123456" && \
+        "$(<"$TEMP_ROOT/bounded-overflow.stderr")" == \
+            "bounded command stdout exceeded 16 bytes" ]] || \
+        fail "bounded command runner stdout overflow oracle differs"
+    JIDOKA_BOUNDED_STDERR_LIMIT_BYTES=16 \
+        "$runner" 2 /bin/sh -c 'printf 12345678901234567 >&2' \
+        >"$TEMP_ROOT/bounded-stderr-overflow.stdout" \
+        2>"$TEMP_ROOT/bounded-stderr-overflow.stderr" || stderr_overflow_status=$?
+    [[ "$stderr_overflow_status" == "126" && \
+        ! -s "$TEMP_ROOT/bounded-stderr-overflow.stdout" && \
+        "$(<"$TEMP_ROOT/bounded-stderr-overflow.stderr")" == \
+            $'1234567890123456bounded command stderr exceeded 16 bytes' ]] || \
+        fail "bounded command runner stderr overflow oracle differs"
+
+    flood_start="$(monotonic_seconds)"
+    JIDOKA_BOUNDED_STDOUT_LIMIT_BYTES=4096 \
+        "$runner" 5 /bin/sh -c \
+            '/usr/bin/yes flood-a & /usr/bin/yes flood-b & /usr/bin/yes flood-c & /usr/bin/yes flood-d & wait' \
+        >"$TEMP_ROOT/bounded-flood.stdout" \
+        2>"$TEMP_ROOT/bounded-flood.stderr" || flood_status=$?
+    flood_elapsed="$(elapsed_seconds_since "$flood_start")"
+    [[ "$flood_status" == "126" && \
+        "$(/usr/bin/stat -f '%z' "$TEMP_ROOT/bounded-flood.stdout")" == "4096" && \
+        "$(<"$TEMP_ROOT/bounded-flood.stderr")" == \
+            "bounded command stdout exceeded 4096 bytes" ]] || \
+        fail "persistent multi-writer flood did not produce exact overflow"
+    /usr/bin/awk -v elapsed="$flood_elapsed" 'BEGIN { exit !(elapsed < 2.0) }' || \
+        fail "persistent multi-writer flood postponed overflow cleanup"
 
     /bin/cat >"$TEMP_ROOT/bounded-resistant.sh" <<'SCRIPT'
 #!/bin/sh
@@ -354,7 +628,8 @@ wait
 SCRIPT
     /bin/chmod 0700 "$TEMP_ROOT/bounded-resistant.sh"
     start="$(/bin/date +%s)"
-    "$runner" 1 "$TEMP_ROOT/bounded-resistant.sh" "$TEMP_ROOT/bounded-child.pid" \
+    "$runner" 1 /bin/sh "$TEMP_ROOT/bounded-resistant.sh" \
+        "$TEMP_ROOT/bounded-child.pid" \
         >"$TEMP_ROOT/bounded.stdout" 2>"$TEMP_ROOT/bounded.stderr" || status=$?
     elapsed=$(( $(/bin/date +%s) - start ))
     [[ "$status" == "124" && "$elapsed" -lt 6 ]] || \
@@ -371,14 +646,23 @@ SCRIPT
 
     /bin/cat >"$TEMP_ROOT/bounded-immediate-signal.sh" <<'SCRIPT'
 #!/bin/sh
-echo $$ >"$1"
+/usr/bin/python3 -c 'import os,sys,time; os.setsid(); open(sys.argv[1], "w").write(str(os.getpid())); os.close(0); os.close(1); os.close(2); time.sleep(30)' "$1" &
+child=$!
+attempt=0
+while [ ! -s "$1" ] && [ "$attempt" -lt 100 ]; do
+    /bin/sleep 0.01
+    attempt=$((attempt + 1))
+done
+"$3" --process-identity "$child" >"$2"
 /bin/kill -TERM "$PPID"
-exec /bin/sleep 30
+wait
 SCRIPT
     /bin/chmod 0700 "$TEMP_ROOT/bounded-immediate-signal.sh"
     signal_start="$(/bin/date +%s)"
-    "$runner" 30 "$TEMP_ROOT/bounded-immediate-signal.sh" \
+    "$runner" 30 /bin/sh "$TEMP_ROOT/bounded-immediate-signal.sh" \
         "$TEMP_ROOT/bounded-signal-child.pid" \
+        "$TEMP_ROOT/bounded-signal-child.identity" \
+        "$runner" \
         >"$TEMP_ROOT/bounded-signal.stdout" 2>"$TEMP_ROOT/bounded-signal.stderr" || \
         signal_status=$?
     signal_elapsed=$(( $(/bin/date +%s) - signal_start ))
@@ -390,23 +674,44 @@ SCRIPT
     signal_child_pid="$(<"$TEMP_ROOT/bounded-signal-child.pid")"
     [[ "$signal_child_pid" =~ ^[0-9]+$ ]] || \
         fail "bounded command signal child PID is invalid"
-    if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then
-        signal_child_command="$(
-            /bin/ps -p "$signal_child_pid" -o command= 2>/dev/null || true
-        )"
-        [[ "$signal_child_command" != "/bin/sleep 30" ]] || \
-            fail "bounded command runner leaked an immediate-signal child"
-    fi
+    assert_recorded_process_identity_absent \
+        "$TEMP_ROOT/bounded-signal-child.identity" \
+        "bounded escaped-child immediate signal"
     if "$runner" 1 relative-command >/dev/null 2>&1; then
         fail "bounded command runner accepted a relative executable"
     fi
 }
 
 TEMP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/jidoka-code-s1.XXXXXX")"
+TEMP_ROOT="$(cd "$TEMP_ROOT" && pwd -P)"
 readonly TEMP_ROOT
 trap cleanup EXIT
+/bin/mkdir -p "$TEMP_ROOT/home" "$TEMP_ROOT/runtime-tmp"
+[[ "$SOURCE_RELEASE_RUNTIME_ROOT" == /* && -d "$SOURCE_RELEASE_RUNTIME_ROOT" && \
+    ! -L "$SOURCE_RELEASE_RUNTIME_ROOT" ]] || fail "documented runtime input root is unavailable"
+canonical_source_runtime="$(cd "$SOURCE_RELEASE_RUNTIME_ROOT" && pwd -P)"
+[[ "$canonical_source_runtime" == "$SOURCE_RELEASE_RUNTIME_ROOT" ]] || \
+    fail "documented runtime input root must be canonical"
+relocated_runtime="$TEMP_ROOT/relocated-release-runtime"
+/usr/bin/ditto --norsrc --noextattr --noqtn \
+    "$SOURCE_RELEASE_RUNTIME_ROOT" \
+    "$relocated_runtime"
+JIDOKA_RELEASE_RUNTIME_ROOT="$(cd "$relocated_runtime" && pwd -P)"
+readonly JIDOKA_RELEASE_RUNTIME_ROOT
+export JIDOKA_RELEASE_RUNTIME_ROOT
+NODE_BIN="$JIDOKA_RELEASE_RUNTIME_ROOT/node/bin/node"
+readonly NODE_BIN
+RELOCATED_NODE_SHA256="$(/usr/bin/shasum -a 256 "$NODE_BIN" | /usr/bin/awk '{print $1}')"
+readonly RELOCATED_NODE_SHA256
+[[ -f "$NODE_BIN" && ! -L "$NODE_BIN" && ! -e "$TEMP_ROOT/staging" ]] || \
+    fail "relocated runtime input is not one self-contained root"
+[[ "$(/usr/bin/find "$TEMP_ROOT" -path '*/node/bin/node' -print)" == "$NODE_BIN" ]] || \
+    fail "runtime relocation copied an undocumented sibling Node"
+BOUNDED_COMMAND_RUNNER="$(build_bounded_command_runner)"
+readonly BOUNDED_COMMAND_RUNNER
 assert_cleanup_guard
 assert_bounded_command_runner
+build_normal_release_oracles
 if missing_identity_error="$(
     /usr/bin/env -u SIGN_IDENTITY -u INSTALLER_SIGN_IDENTITY \
         "$ROOT/scripts/package-installer.sh" 2>&1 >/dev/null
@@ -602,11 +907,101 @@ readonly MUTATED_RUNNER_APP="$TEMP_ROOT/Jidoka Code Runner Mutated.app"
 readonly MUTATED_ATTESTATION_APP="$TEMP_ROOT/Jidoka Code Attestation Mutated.app"
 readonly MUTATED_POLICY_APP="$TEMP_ROOT/Jidoka Code Policy Mutated.app"
 readonly MUTATED_WORKFLOW_APP="$TEMP_ROOT/Jidoka Code Workflow Mutated.app"
+readonly MUTATED_RELEASE_RUNTIME_APP="$TEMP_ROOT/Jidoka Code Release Runtime Mutated.app"
+readonly MUTATED_APP_EXECUTABLE_APP="$TEMP_ROOT/Jidoka Code Executable Mutated.app"
+
+native_code_mutated_runtime="$TEMP_ROOT/native-code-mutated-runtime"
+/bin/cp -cR "$JIDOKA_RELEASE_RUNTIME_ROOT" "$native_code_mutated_runtime"
+native_code_mutation="$native_code_mutated_runtime/pi/node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-arm64/darwin-modifiers.node"
+/usr/bin/codesign --remove-signature "$native_code_mutation"
+if /usr/bin/env \
+    JIDOKA_RELEASE_RUNTIME_ROOT="$native_code_mutated_runtime" \
+    ALLOW_ADHOC_SIGNING=1 \
+    "$ROOT/scripts/package-app.sh" \
+    >"$TEMP_ROOT/native-code-mutation.stdout" \
+    2>"$TEMP_ROOT/native-code-mutation.stderr"
+then
+    fail "packaging accepted an unsigned release Pi native module"
+fi
+/usr/bin/grep -Fq 'release Pi native-code signature is invalid' \
+    "$TEMP_ROOT/native-code-mutation.stderr" || \
+    fail "unsigned release Pi native module failed opaquely"
+/bin/rm -rf -- "$native_code_mutated_runtime"
+
+native_code_extra_runtime="$TEMP_ROOT/native-code-extra-runtime"
+/bin/cp -cR "$JIDOKA_RELEASE_RUNTIME_ROOT" "$native_code_extra_runtime"
+/bin/cp \
+    "$native_code_extra_runtime/pi/node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-arm64/darwin-modifiers.node" \
+    "$native_code_extra_runtime/pi/unexpected-native.node"
+if /usr/bin/env \
+    JIDOKA_RELEASE_RUNTIME_ROOT="$native_code_extra_runtime" \
+    ALLOW_ADHOC_SIGNING=1 \
+    "$ROOT/scripts/package-app.sh" \
+    >"$TEMP_ROOT/native-code-extra.stdout" \
+    2>"$TEMP_ROOT/native-code-extra.stderr"
+then
+    fail "packaging accepted an extra release Pi native module"
+fi
+/usr/bin/grep -Fq 'release Pi Mach-O inventory differs' \
+    "$TEMP_ROOT/native-code-extra.stderr" || \
+    fail "extra release Pi native module failed opaquely"
+/bin/rm -rf -- "$native_code_extra_runtime"
+
+native_code_identity_runtime="$TEMP_ROOT/native-code-identity-runtime"
+/bin/cp -cR "$JIDOKA_RELEASE_RUNTIME_ROOT" "$native_code_identity_runtime"
+native_code_identity_mutation="$native_code_identity_runtime/pi/node_modules/@mariozechner/clipboard-darwin-universal/clipboard.darwin-universal.node"
+/usr/bin/codesign --force --sign - --options runtime \
+    --identifier works.earendil.jidoka.runtime.pi.clipboard \
+    "$native_code_identity_mutation"
+if /usr/bin/env \
+    JIDOKA_RELEASE_RUNTIME_ROOT="$native_code_identity_runtime" \
+    ALLOW_ADHOC_SIGNING=1 \
+    "$ROOT/scripts/package-app.sh" \
+    >"$TEMP_ROOT/native-code-identity.stdout" \
+    2>"$TEMP_ROOT/native-code-identity.stderr"
+then
+    fail "packaging accepted an ad hoc release Pi native module"
+fi
+/usr/bin/grep -Fq 'release Pi native-code identity differs' \
+    "$TEMP_ROOT/native-code-identity.stderr" || \
+    fail "ad hoc release Pi native module failed opaquely"
+/bin/rm -rf -- "$native_code_identity_runtime"
+
+runtime_inventory="$ROOT/build/runtime-inventory.txt"
+runtime_inventory_backup="$TEMP_ROOT/runtime-inventory.backup"
+runtime_inventory_sentinel="$TEMP_ROOT/runtime-inventory-sentinel"
+if [[ -L "$runtime_inventory" ]]; then
+    fail "pre-existing runtime inventory is already redirected"
+fi
+if [[ -e "$runtime_inventory" ]]; then
+    [[ -f "$runtime_inventory" ]] || fail "pre-existing runtime inventory is unsafe"
+    /bin/mv "$runtime_inventory" "$runtime_inventory_backup"
+fi
+printf 'sentinel\n' >"$runtime_inventory_sentinel"
+/bin/ln -s "$runtime_inventory_sentinel" "$runtime_inventory"
+if (
+    umask 077
+    ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
+) >"$TEMP_ROOT/inventory-symlink.stdout" 2>"$TEMP_ROOT/inventory-symlink.stderr"; then
+    fail "packaging accepted a redirected runtime inventory"
+fi
+/usr/bin/grep -Fq 'generated release runtime inventory must not be a symbolic link' \
+    "$TEMP_ROOT/inventory-symlink.stderr" || fail "runtime inventory symlink failed opaquely"
+[[ "$(<"$runtime_inventory_sentinel")" == "sentinel" ]] || \
+    fail "runtime inventory symlink target was modified"
+/bin/rm -f -- "$runtime_inventory"
+if [[ -f "$runtime_inventory_backup" ]]; then
+    /bin/mv "$runtime_inventory_backup" "$runtime_inventory"
+fi
 
 (
     umask 077
     ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
 )
+[[ "$(/usr/bin/shasum -a 256 "$NODE_BIN" | /usr/bin/awk '{print $1}')" == \
+    "$RELOCATED_NODE_SHA256" ]] || fail "packaging mutated the staged runtime Node input"
+/usr/bin/codesign --verify --strict "$NODE_BIN" || \
+    fail "packaging invalidated the staged runtime Node input"
 [[ -z "$(/usr/bin/find "$SOURCE_APP" -type d ! -perm 0755 -print)" ]] || \
     fail "packaged bundle inherited a restrictive directory mode"
 for path in \
@@ -616,11 +1011,12 @@ do
     [[ "$(/usr/bin/stat -f '%OLp' "$path")" == "755" ]] || \
         fail "packaged executable inherited a restrictive mode"
 done
-[[ -z "$(/usr/bin/find "$SOURCE_APP" -type f ! -perm -0100 ! -perm 0644 -print)" ]] || \
-    fail "packaged resource mode differs"
+[[ -z "$(/usr/bin/find "$SOURCE_APP" -type f \
+    ! -path "$SOURCE_APP/Contents/Resources/PiRuntime/*" \
+    ! -perm -0100 ! -perm 0644 -print)" ]] || fail "packaged resource mode differs"
 assert_component_relocation_policy "$SOURCE_APP"
 JIDOKA_PI_RESOURCE_ROOT="$SOURCE_APP/Contents/Resources/Pi" \
-    /opt/homebrew/Cellar/node/26.6.0/bin/node \
+    "$NODE_BIN" \
     "$ROOT/scripts/tests/test-jidoka-extension-rpc.mjs"
 
 /usr/bin/plutil -lint "$SOURCE_APP/Contents/Info.plist"
@@ -628,10 +1024,20 @@ JIDOKA_PI_RESOURCE_ROOT="$SOURCE_APP/Contents/Resources/Pi" \
     "com.maroffo.JidokaCode" ]] || fail "application bundle identifier is not production"
 [[ "$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$SOURCE_APP/Contents/Info.plist")" == "14.0" ]]
 
-expected_inventory="$(<"$ROOT/Packaging/app-inventory.txt")"
+expected_inventory="$({
+    /bin/cat "$ROOT/Packaging/app-inventory.txt"
+    /bin/cat "$ROOT/build/runtime-inventory.txt"
+} | LC_ALL=C /usr/bin/sort)"
 actual_inventory="$(cd "$SOURCE_APP" && /usr/bin/find . -print | LC_ALL=C /usr/bin/sort)"
 [[ "$actual_inventory" == "$expected_inventory" ]] || fail "bundle inventory differs from allowlist"
-[[ -z "$(/usr/bin/find "$SOURCE_APP" -type l -print)" ]] || fail "bundle contains symbolic links"
+[[ -z "$(/usr/bin/find "$SOURCE_APP" -type l \
+    ! -path "$SOURCE_APP/Contents/Resources/PiRuntime/pi/*" -print)" ]] || \
+    fail "bundle contains a non-runtime symbolic link"
+run_packaged_command \
+    "$SOURCE_EXECUTABLE" \
+    /dev/null \
+    /dev/stderr \
+    --release-runtime-verify-adhoc || fail "packaged release runtime verifier failed"
 
 launch_agent_plist="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist"
 /usr/bin/plutil -lint "$launch_agent_plist"
@@ -670,7 +1076,7 @@ assert_resource_digest() {
 }
 assert_resource_digest \
     workflow-resources.json \
-    4d7be2b7ed582f2195bf19953dc74420be12c9066c2a9565b64f09afc204d566
+    230c9a45b9dd53443837166c6e8b60adac67d3bfeb32249de8ca5228f1e1357d
 assert_resource_digest \
     tui-resources.json \
     5392fec5eb544dbe0c721692440e8445604d3c05509a39b450f2bb964245f07f
@@ -690,23 +1096,26 @@ assert_resource_digest \
     runtime/jidoka-extension-contract.mjs \
     1a2a90b0b53bf68ead774b34b3b90045bd1ca8ffacf3f3a462b520a86d6498f8
 assert_resource_digest \
+    runtime/jidoka-model-catalog.mjs \
+    6057a1a9be5bef7fc029504b1599fcdae4079c3b3eb5829bfa1580c319fb95ba
+assert_resource_digest \
     runtime/jidoka-tui-contract.mjs \
     3019e69f4e92356b55b8c149a420d2ab9816014a6be670ccd4db6887553d64ac
 assert_resource_digest \
     runtime/node-runtime-builds.json \
-    fd707070911b53f3930864c3ec6dcfabc7b4440bcf44c3012882751fb99bf906
+    cfe0b91f93c46d1c912085ac48a2bac31f8529bc2834c36f6e715ae7f272939d
 assert_resource_digest \
     runtime/pi-rpc-profile-probe.mjs \
-    83d081f9337bc1531e8c516e4248c324de26e325a4f8ef3895eb3df3417d45e9
+    085fc4f44e77e051c05e2e68c4f755748ebfca227eb3b6782c1e0e3cce727b9d
 assert_resource_digest \
     runtime/pi-rpc-workflow-probe.mjs \
-    731267cc54cf7018258afc4393ca3357166c10c43b23601c420c597eb196f772
+    1c04d87ddb1f235c144001cd1d59fb3d80a9ad788ac1a8a33a79d12e1ce8f80b
 assert_resource_digest \
     runtime/pi-runtime-attestation.mjs \
-    a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e
+    d062dad354b15d8bc0dc377e8aa6835d0eaf884cf68925dad4b8aace5d0cd413
 assert_resource_digest \
     runtime/pi-runtime-builds.json \
-    324d6a1738c08fd7dfbc1ca8fb324ed64d8fc3ac5bd1e2c293062cf4d4238248
+    a9fd4478272c9d368ce3b1f253cb63a4a936a9354f876c4c30eba64dc694a7f4
 assert_resource_digest \
     skills/jidoka-code-issue-triage/SKILL.md \
     c4200a92833135446a61f374467aeb8f35e4a25826fe7b34baa016c206c46f0f
@@ -745,7 +1154,7 @@ assert_resource_digest \
     9d75a49c6b45136189b002574e193ce5e82a6606c26979199ed7c4ee5264f843
 [[ "$(/usr/bin/shasum -a 256 "$SOURCE_APP/Contents/Resources/Spikes/jidoka-local-spikes.mjs" | \
     /usr/bin/awk '{print $1}')" == \
-    "59a4b657195d443c49f9211d25978dcdb29e64da0baea7e172c59ff5605b32e7" ]] || \
+    "c16e11605ecb8b818bd51abbdbe824414d9c2d19a1d010d3265c48c99cf05ecf" ]] || \
     fail "packaged local spike runner digest differs"
 
 for path in \
@@ -761,6 +1170,7 @@ for path in \
     "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-runtime.ts" \
     "$SOURCE_APP/Contents/Resources/Pi/extensions/jidoka-tui-runtime.ts" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/jidoka-extension-contract.mjs" \
+    "$SOURCE_APP/Contents/Resources/Pi/runtime/jidoka-model-catalog.mjs" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/jidoka-tui-contract.mjs" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/node-runtime-builds.json" \
     "$SOURCE_APP/Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs" \
@@ -780,13 +1190,16 @@ for path in \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-triage-fidelity/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Spikes/jidoka-local-spikes.mjs" \
+    "$SOURCE_APP/Contents/Resources/PiRuntime/runtime-manifest.json" \
+    "$SOURCE_APP/Contents/Resources/PiRuntime/licenses/node-LICENSE" \
     "$SOURCE_APP/Contents/_CodeSignature/CodeResources"
 do
     [[ -f "$path" && ! -L "$path" ]] || fail "expected regular bundle file: $path"
 done
 for path in \
     "$SOURCE_EXECUTABLE" "$SOURCE_ENGINE" "$SOURCE_ASKPASS" \
-    "$SOURCE_PUSH_GUARD" "$SOURCE_HERDR_HOST"
+    "$SOURCE_PUSH_GUARD" "$SOURCE_HERDR_HOST" \
+    "$SOURCE_APP/Contents/Resources/PiRuntime/node/bin/node"
 do
     [[ -f "$path" && -x "$path" && ! -L "$path" ]] || fail "expected executable: $path"
     assert_portable_macho "$path"
@@ -796,6 +1209,7 @@ done
 /usr/bin/codesign --verify --strict "$SOURCE_ASKPASS"
 /usr/bin/codesign --verify --strict "$SOURCE_PUSH_GUARD"
 /usr/bin/codesign --verify --strict "$SOURCE_HERDR_HOST"
+/usr/bin/codesign --verify --strict "$SOURCE_APP/Contents/Resources/PiRuntime/node/bin/node"
 /usr/bin/codesign --verify --strict --deep "$SOURCE_APP"
 [[ "$(codesign_identifier "$SOURCE_APP")" == "com.maroffo.JidokaCode" ]] || \
     fail "application code-signing identifier differs"
@@ -807,6 +1221,8 @@ done
     fail "push-guard code-signing identifier differs"
 [[ "$(codesign_identifier "$SOURCE_HERDR_HOST")" == "com.maroffo.JidokaCode.HerdrHost" ]] || \
     fail "Herdr host code-signing identifier differs"
+[[ "$(codesign_identifier "$SOURCE_APP/Contents/Resources/PiRuntime/node/bin/node")" == \
+    "works.earendil.jidoka.runtime.node" ]] || fail "runtime Node identifier differs"
 
 app_minos="$(/usr/bin/otool -l "$SOURCE_EXECUTABLE" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
 engine_minos="$(/usr/bin/otool -l "$SOURCE_ENGINE" | /usr/bin/awk '$1 == "minos" { print $2; exit }')"
@@ -818,7 +1234,13 @@ herdr_host_minos="$(/usr/bin/otool -l "$SOURCE_HERDR_HOST" | /usr/bin/awk '$1 ==
     "$herdr_host_minos" == "14.0" ]] || \
     fail "unexpected minimum OS"
 
-BIN_DIR="$(/usr/bin/xcrun swift build --configuration release --show-bin-path)"
+BIN_DIR="$(
+    /usr/bin/xcrun swift build \
+        --scratch-path "$ROOT/.build/adhoc-runtime-testing" \
+        -Xswiftc -DJIDOKA_ADHOC_RUNTIME_TESTING \
+        --configuration release \
+        --show-bin-path
+)"
 BIN_DIR="$(cd "$BIN_DIR" && pwd -P)"
 normalize_unsigned_product() {
     local source="$1"
@@ -852,6 +1274,41 @@ normalize_unsigned_product "$SOURCE_HERDR_HOST" "$TEMP_ROOT/actual-herdr-host"
 /usr/bin/ditto "$SOURCE_APP" "$COPIED_APP"
 [[ "$COPIED_APP" != "$ROOT"/* ]]
 /usr/bin/codesign --verify --strict --deep "$COPIED_APP"
+
+/usr/bin/ditto "$COPIED_APP" "$MUTATED_APP_EXECUTABLE_APP"
+original_app_executable_sha256="$(
+    /usr/bin/shasum -a 256 "$MUTATED_APP_EXECUTABLE_APP/Contents/MacOS/Jidoka Code" | \
+        /usr/bin/awk '{print $1}'
+)"
+/usr/bin/install -m 0755 \
+    "$NORMAL_RELEASE_EXECUTABLE" \
+    "$MUTATED_APP_EXECUTABLE_APP/Contents/MacOS/Jidoka Code"
+/usr/bin/strip -S "$MUTATED_APP_EXECUTABLE_APP/Contents/MacOS/Jidoka Code"
+remove_developer_rpaths "$MUTATED_APP_EXECUTABLE_APP/Contents/MacOS/Jidoka Code"
+[[ "$(/usr/bin/shasum -a 256 \
+    "$MUTATED_APP_EXECUTABLE_APP/Contents/MacOS/Jidoka Code" | /usr/bin/awk '{print $1}')" != \
+    "$original_app_executable_sha256" ]] || fail "normal release app mutation changed no bytes"
+/usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode \
+    "$MUTATED_APP_EXECUTABLE_APP"
+/usr/bin/codesign --verify --strict --deep "$MUTATED_APP_EXECUTABLE_APP"
+production_authority_start="$(monotonic_seconds)"
+assert_production_authority_failure "$MUTATED_APP_EXECUTABLE_APP"
+production_authority_rejection_seconds="$(elapsed_seconds_since "$production_authority_start")"
+printf 'production_authority_rejection_seconds=%s\n' \
+    "$production_authority_rejection_seconds"
+if run_packaged_command \
+    "$MUTATED_APP_EXECUTABLE_APP/Contents/MacOS/Jidoka Code" \
+    "$TEMP_ROOT/mutated-app-adhoc.stdout" \
+    "$TEMP_ROOT/mutated-app-adhoc.stderr" \
+    --release-runtime-verify-adhoc
+then
+    fail "mutated normal release app exposed ad hoc runtime verification"
+fi
+[[ ! -s "$TEMP_ROOT/mutated-app-adhoc.stdout" ]] || \
+    fail "mutated normal release ad hoc rejection wrote stdout"
+/usr/bin/grep -Fxq 'unsupported release runtime verification command' \
+    "$TEMP_ROOT/mutated-app-adhoc.stderr" || \
+    fail "mutated normal release app recognized ad hoc runtime verification"
 if /usr/bin/grep -R -a -F "$ROOT" "$COPIED_APP" >/dev/null; then
     fail "packaged bundle leaks checkout path"
 fi
@@ -863,16 +1320,24 @@ preflight_stdout="$TEMP_ROOT/preflight.json"
 preflight_stderr="$TEMP_ROOT/preflight.stderr"
 engine_stdout="$TEMP_ROOT/engine.json"
 engine_stderr="$TEMP_ROOT/engine.stderr"
-run_packaged_command "$COPIED_APP/Contents/MacOS/Jidoka Code" --preflight "$preflight_stdout" "$preflight_stderr"
-run_packaged_command "$COPIED_APP/Contents/Helpers/JidokaCodeEngineProbe" --probe "$engine_stdout" "$engine_stderr"
+run_packaged_command \
+    "$COPIED_APP/Contents/MacOS/Jidoka Code" \
+    "$preflight_stdout" \
+    "$preflight_stderr" \
+    --preflight
+run_packaged_command \
+    "$COPIED_APP/Contents/Helpers/JidokaCodeEngineProbe" \
+    "$engine_stdout" \
+    "$engine_stderr" \
+    --probe
 [[ ! -s "$preflight_stderr" && ! -s "$engine_stderr" ]] || fail "successful probe wrote stderr"
 askpass_stdout="$TEMP_ROOT/askpass.stdout"
 askpass_stderr="$TEMP_ROOT/askpass.stderr"
 if run_packaged_command \
     "$COPIED_APP/Contents/Helpers/JidokaCodeAskPass" \
-    "Password for https://github.com" \
     "$askpass_stdout" \
-    "$askpass_stderr"
+    "$askpass_stderr" \
+    "Password for https://github.com"
 then
     fail "packaged askpass succeeded without a one-shot capability"
 fi
@@ -881,17 +1346,30 @@ fi
     fail "failed packaged askpass disclosed unexpected diagnostics"
 push_guard_stdout="$TEMP_ROOT/push-guard.stdout"
 push_guard_stderr="$TEMP_ROOT/push-guard.stderr"
-if run_packaged_command \
+push_guard_open_stdin="$TEMP_ROOT/push-guard-open-stdin"
+/usr/bin/mkfifo "$push_guard_open_stdin"
+exec 9<>"$push_guard_open_stdin"
+push_guard_start="$(monotonic_seconds)"
+push_guard_status=0
+run_packaged_command \
     "$COPIED_APP/Contents/Helpers/GitHooks/pre-push" \
-    "origin" \
     "$push_guard_stdout" \
-    "$push_guard_stderr"
-then
+    "$push_guard_stderr" \
+    "origin" <&9 || push_guard_status=$?
+push_guard_seconds="$(elapsed_seconds_since "$push_guard_start")"
+exec 9>&-
+/bin/rm -f -- "$push_guard_open_stdin"
+[[ "$push_guard_status" -ne 0 ]] || \
     fail "packaged push guard succeeded without an old-zero capability"
-fi
 [[ ! -s "$push_guard_stdout" ]] || fail "failed packaged push guard wrote stdout"
 [[ "$(<"$push_guard_stderr")" == "JIDOKA_PUSH_GUARD_FAILED" ]] || \
     fail "failed packaged push guard disclosed unexpected diagnostics"
+/usr/bin/awk \
+    -v elapsed="$push_guard_seconds" \
+    -v bound="$PUSH_GUARD_EOF_BOUND_SECONDS" \
+    'BEGIN { exit !(elapsed < bound) }' || \
+    fail "packaged push guard did not receive EOF within ${PUSH_GUARD_EOF_BOUND_SECONDS}s"
+printf 'push_guard_open_stdin_seconds=%s\n' "$push_guard_seconds"
 
 assert_exact_json_keys "$preflight_stdout" bundleIdentifier manifestSHA256 resourceName schemaVersion status workingDirectory
 assert_exact_json_keys "$engine_stdout" identifier status workingDirectory
@@ -907,13 +1385,30 @@ manifest_digest="$(/usr/bin/shasum -a 256 "$COPIED_APP/Contents/Resources/Pi/man
 [[ "$(/usr/bin/plutil -extract manifestSHA256 raw "$preflight_stdout")" == "$manifest_digest" ]] || \
     fail "reported manifest digest differs from packaged bytes"
 
+for release_runtime_mutation in \
+    pi-bytes \
+    manifest-bytes \
+    writable-mode \
+    extra-entry \
+    hard-link \
+    acl \
+    escaping-symlink \
+    unsigned-node
+do
+    assert_fresh_release_runtime_mutation "$release_runtime_mutation"
+done
+
 /usr/bin/ditto "$COPIED_APP" "$MUTATED_APP"
 mutated_manifest="$MUTATED_APP/Contents/Resources/Pi/manifest.json"
 printf '%s\n' '{"name":"jidoka-code","purpose":"mutated-e2e","schemaVersion":1}' >"$mutated_manifest"
 /usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode "$MUTATED_APP"
 mutated_stdout="$TEMP_ROOT/mutated.json"
 mutated_stderr="$TEMP_ROOT/mutated.stderr"
-run_packaged_command "$MUTATED_APP/Contents/MacOS/Jidoka Code" --preflight "$mutated_stdout" "$mutated_stderr"
+run_packaged_command \
+    "$MUTATED_APP/Contents/MacOS/Jidoka Code" \
+    "$mutated_stdout" \
+    "$mutated_stderr" \
+    --preflight
 [[ ! -s "$mutated_stderr" ]] || fail "valid mutated manifest wrote stderr"
 assert_exact_json_keys "$mutated_stdout" bundleIdentifier manifestSHA256 resourceName schemaVersion status workingDirectory
 mutated_digest="$(/usr/bin/shasum -a 256 "$mutated_manifest" | /usr/bin/awk '{print $1}')"
@@ -952,7 +1447,7 @@ printf '\n' \
 /usr/bin/codesign --force --sign - --identifier com.maroffo.JidokaCode \
     "$MUTATED_WORKFLOW_APP"
 if JIDOKA_PI_RESOURCE_ROOT="$MUTATED_WORKFLOW_APP/Contents/Resources/Pi" \
-    /opt/homebrew/Cellar/node/26.6.0/bin/node \
+    "$NODE_BIN" \
     "$ROOT/scripts/tests/test-jidoka-extension-rpc.mjs" \
     >"$TEMP_ROOT/mutated-workflow.stdout" 2>"$TEMP_ROOT/mutated-workflow.stderr"
 then

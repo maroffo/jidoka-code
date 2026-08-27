@@ -25,6 +25,7 @@
 ./Contents/Resources/Pi/manifest.json
 ./Contents/Resources/Pi/runtime
 ./Contents/Resources/Pi/runtime/jidoka-extension-contract.mjs
+./Contents/Resources/Pi/runtime/jidoka-model-catalog.mjs
 ./Contents/Resources/Pi/runtime/jidoka-tui-contract.mjs
 ./Contents/Resources/Pi/runtime/node-runtime-builds.json
 ./Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs

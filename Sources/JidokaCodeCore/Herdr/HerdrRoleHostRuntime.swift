@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
-  public let schemaVersion: Int
+  public private(set) var schemaVersion: Int
   public let roleHostID: String
   public let repositoryID: String
   public let jobID: String
@@ -17,6 +17,10 @@ public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
   public let displayAgent: String
   public let hostExecutable: String
   public let hostExecutableSHA256: String
+  public private(set) var predecessorRoleHostID: String?
+  public private(set) var replacementEvidenceSHA256: String?
+  public private(set) var incidentAuditSHA256: String?
+  public private(set) var initialQueueSequence: Int?
 
   public init(
     roleHostID: String,
@@ -65,10 +69,56 @@ public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
     self.displayAgent = displayAgent
     self.hostExecutable = canonicalExecutable.path
     self.hostExecutableSHA256 = try Self.sha256(canonicalExecutable)
+    self.predecessorRoleHostID = nil
+    self.replacementEvidenceSHA256 = nil
+    self.incidentAuditSHA256 = nil
+    self.initialQueueSequence = nil
+  }
+
+  init(
+    replacementRoleHostID: String,
+    predecessorRoleHostID: String,
+    replacementEvidenceSHA256: String,
+    incidentAuditSHA256: String,
+    repositoryID: String,
+    jobID: String,
+    generation: Int,
+    allowedWorkflows: Set<PiWorkflowKind>,
+    expectedWorkspaceID: String,
+    workingDirectory: URL,
+    agentAlias: String,
+    title: String,
+    displayAgent: String,
+    hostExecutable: URL
+  ) throws {
+    try self.init(
+      roleHostID: replacementRoleHostID,
+      repositoryID: repositoryID,
+      jobID: jobID,
+      generation: generation,
+      role: .architecture,
+      allowedWorkflows: allowedWorkflows,
+      expectedWorkspaceID: expectedWorkspaceID,
+      workingDirectory: workingDirectory,
+      agentAlias: agentAlias,
+      title: title,
+      displayAgent: displayAgent,
+      hostExecutable: hostExecutable
+    )
+    guard predecessorRoleHostID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
+      predecessorRoleHostID != replacementRoleHostID,
+      replacementEvidenceSHA256.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
+      incidentAuditSHA256.wholeMatch(of: /^[0-9a-f]{64}$/) != nil
+    else { throw HerdrHostError.invalidDescriptor }
+    self.schemaVersion = 3
+    self.predecessorRoleHostID = predecessorRoleHostID
+    self.replacementEvidenceSHA256 = replacementEvidenceSHA256
+    self.incidentAuditSHA256 = incidentAuditSHA256
+    self.initialQueueSequence = 4
   }
 
   func validate(roleHostID expectedRoleHostID: String) throws {
-    guard schemaVersion == 2, roleHostID == expectedRoleHostID,
+    guard [2, 3].contains(schemaVersion), roleHostID == expectedRoleHostID,
       repositoryID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
       jobID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
       (1...1_000_000).contains(generation),
@@ -88,6 +138,22 @@ public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
       Self.validDisplay(displayAgent, maximumBytes: 96),
       hostExecutableSHA256.wholeMatch(of: /^[0-9a-f]{64}$/) != nil
     else {
+      throw HerdrHostError.invalidDescriptor
+    }
+    switch schemaVersion {
+    case 2:
+      guard predecessorRoleHostID == nil, replacementEvidenceSHA256 == nil,
+        incidentAuditSHA256 == nil, initialQueueSequence == nil
+      else { throw HerdrHostError.invalidDescriptor }
+    case 3:
+      guard role == .architecture,
+        predecessorRoleHostID?.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
+        predecessorRoleHostID != roleHostID,
+        replacementEvidenceSHA256?.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
+        incidentAuditSHA256?.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
+        initialQueueSequence == 4
+      else { throw HerdrHostError.invalidDescriptor }
+    default:
       throw HerdrHostError.invalidDescriptor
     }
     let executableURL = URL(fileURLWithPath: hostExecutable)
@@ -216,6 +282,13 @@ public enum HerdrRoleHostDescriptorStore {
   private static let shutdownName = "shutdown.json"
   private static let maximumRecordBytes = 1_048_576
 
+  static func digest(
+    _ descriptor: HerdrRoleHostBootstrapDescriptor
+  ) throws -> String {
+    try descriptor.validate(roleHostID: descriptor.roleHostID)
+    return PiTUIFileProtocol.sha256(try encoded(descriptor))
+  }
+
   @discardableResult
   public static func prepare(
     _ descriptor: HerdrRoleHostBootstrapDescriptor,
@@ -293,6 +366,11 @@ public enum HerdrRoleHostDescriptorStore {
     _ command: HerdrRoleHostCommand,
     in root: URL
   ) throws {
+    let descriptor = try load(roleHostID: command.roleHostID, from: root)
+    let initialSequence = descriptor.initialQueueSequence ?? 1
+    guard command.sequence >= initialSequence else {
+      throw HerdrHostError.queueCommandMismatch
+    }
     let directory = try roleDirectory(command.roleHostID, root: root)
     try PiTUIFileProtocol.createPrivateFile(
       data: try encoded(command),
@@ -315,11 +393,24 @@ public enum HerdrRoleHostDescriptorStore {
     )
   }
 
+  static func hasNoCommandEffects(
+    roleHostID: String,
+    root: URL
+  ) throws -> Bool {
+    let directory = try roleDirectory(roleHostID, root: root)
+    let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+    return Set(names) == Set([descriptorName, digestName, startName])
+  }
+
   static func command(
     roleHostID: String,
     sequence: Int,
     root: URL
   ) throws -> HerdrRoleHostCommand? {
+    let descriptor = try load(roleHostID: roleHostID, from: root)
+    guard sequence >= descriptor.initialQueueSequence ?? 1 else {
+      throw HerdrHostError.queueCommandMismatch
+    }
     let directory = try roleDirectory(roleHostID, root: root)
     let url = directory.appendingPathComponent(commandName(sequence))
     guard FileManager.default.fileExists(atPath: url.path) else { return nil }
@@ -340,6 +431,22 @@ public enum HerdrRoleHostDescriptorStore {
     than sequence: Int,
     root: URL
   ) throws -> Bool {
+    try hasCommand(roleHostID: roleHostID, root: root) { $0 > sequence }
+  }
+
+  static func hasLowerCommand(
+    roleHostID: String,
+    than sequence: Int,
+    root: URL
+  ) throws -> Bool {
+    try hasCommand(roleHostID: roleHostID, root: root) { $0 < sequence }
+  }
+
+  private static func hasCommand(
+    roleHostID: String,
+    root: URL,
+    matching predicate: (Int) -> Bool
+  ) throws -> Bool {
     let directory = try roleDirectory(roleHostID, root: root)
     return try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { name in
       guard name.hasPrefix("command-"), name.hasSuffix(".json"),
@@ -347,7 +454,7 @@ public enum HerdrRoleHostDescriptorStore {
       else {
         return false
       }
-      return value > sequence
+      return predicate(value)
     }
   }
 
@@ -601,13 +708,21 @@ public enum HerdrRoleHostRuntime {
     else {
       throw HerdrHostError.incompatiblePane
     }
+    let initialSequence = descriptor.initialQueueSequence ?? 1
+    guard
+      !(try HerdrRoleHostDescriptorStore.hasLowerCommand(
+        roleHostID: roleHostID,
+        than: initialSequence,
+        root: root
+      ))
+    else { throw HerdrHostError.queueSequenceGap }
     try HerdrRoleHostDescriptorStore.recordStart(
       roleHostID: roleHostID,
       identity: identity,
       root: root
     )
 
-    var sequence = 1
+    var sequence = initialSequence
     while true {
       if Task.isCancelled { throw HerdrHostError.cancelled }
       if try HerdrRoleHostDescriptorStore.shutdownRequested(
@@ -641,13 +756,18 @@ public enum HerdrRoleHostRuntime {
       try HerdrRoleHostDescriptorStore.recordStarted(command: command, in: root)
       let completion: HerdrRoleHostCommandCompletion
       do {
-        let commandEnvironment = environment.merging([
+        var commandEnvironment = environment.merging([
           "HERDR_PANE_ID": command.expectedPaneID,
           "HERDR_TAB_ID": command.expectedTabID,
           "HERDR_WORKSPACE_ID": command.expectedWorkspaceID,
           "JIDOKA_CODE_HERDR_EXPECTED_TERMINAL_ID": command.expectedTerminalID,
           "JIDOKA_CODE_HERDR_SEQUENCE_BASE": String(command.sequence * 2 - 1),
         ]) { _, replacement in replacement }
+        if command.sequence > 1 {
+          commandEnvironment["JIDOKA_CODE_HERDR_REUSE_ALIAS"] = "1"
+        } else {
+          commandEnvironment.removeValue(forKey: "JIDOKA_CODE_HERDR_REUSE_ALIAS")
+        }
         let status = try await execute(command, root, commandEnvironment)
         guard status == 0 else { throw HerdrHostError.childFailed(status) }
         completion = HerdrRoleHostCommandCompletion(

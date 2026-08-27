@@ -5,8 +5,12 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 
-const nodePath = "/opt/homebrew/Cellar/node/26.6.0/bin/node";
-const piPath = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
+const releaseRuntimeRoot = realpathSync(process.env.JIDOKA_RELEASE_RUNTIME_ROOT ?? "");
+const nodePath = realpathSync(process.execPath);
+const piPath = `${releaseRuntimeRoot}/pi/dist/cli.js`;
+if (nodePath !== `${releaseRuntimeRoot}/node/bin/node`) {
+  throw new Error("Node is outside the attested release runtime");
+}
 const service = "com.maroffo.JidokaCode.test.github";
 const account = "eabf21b6-02df-4854-b9a8-c8a21eafdbca";
 const requestID = "jidoka-s3-keychain-denial";
@@ -51,7 +55,7 @@ const argv = [
 ];
 const environment = {
   HOME: homedir(),
-  PATH: "/opt/homebrew/bin:/usr/bin:/bin",
+  PATH: "/usr/bin:/bin",
   TMPDIR: tmpdir(),
 };
 

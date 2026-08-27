@@ -13,11 +13,300 @@ struct ApplicationEngineClientTests {
       JidokaApplicationInstance.activationNotification == "com.maroffo.JidokaCode.ui.activate")
   }
 
-  @Test("first onboarding checkpoints bootstrap before registration and helper handoff")
-  func enableAndComplete() async throws {
+  @Test("maintenance CLI accepts only closed evidence-bound commands")
+  func maintenanceCLI() throws {
+    let boundary = String(JobMaintenanceScope.authorizedBoundaryEpochSeconds)
+    let evidence = String(repeating: "a", count: 64)
+    #expect(
+      try JobMaintenanceCLI.parse(["preview-retire-before", boundary])
+        == .previewJobMaintenance(
+          JobMaintenanceScope(
+            operation: .retireBefore,
+            boundaryEpochSeconds: JobMaintenanceScope.authorizedBoundaryEpochSeconds
+          )
+        )
+    )
+    #expect(
+      try JobMaintenanceCLI.parse([
+        "apply-retry-resource-failures-after", boundary, "4", evidence,
+      ])
+        == .applyJobMaintenance(
+          JobMaintenanceAuthorization(
+            scope: JobMaintenanceScope(
+              operation: .retryResourceFailuresAfter,
+              boundaryEpochSeconds: JobMaintenanceScope.authorizedBoundaryEpochSeconds
+            ),
+            expectedCount: 4,
+            evidenceSHA256: evidence
+          )
+        )
+    )
+    for invalid in [
+      ["preview-retire-before"],
+      ["preview-retire-before", "not-an-epoch"],
+      ["preview-retire-before", "1786924799"],
+      ["apply-retire-before", boundary, "0", evidence],
+      ["apply-retire-before", boundary, "1", "short"],
+      ["unknown", boundary],
+    ] {
+      #expect(throws: EngineClientError(.invalidCommand)) {
+        _ = try JobMaintenanceCLI.parse(invalid)
+      }
+    }
+  }
+
+  @Test("canary CLI accepts only exact bounded commands")
+  func canaryCLI() throws {
+    let id = "aaaaaaaa-1111-1111-1111-111111111111"
+    let boundary = String(JobCanaryScope.authorizedBoundaryEpochSeconds)
+    let repair = String(repeating: "a", count: 64)
+    let preview = String(repeating: "b", count: 64)
+    let recovery = String(repeating: "c", count: 64)
+    let retry = String(repeating: "d", count: 64)
+    let replacementEvidence = String(repeating: "e", count: 64)
+    let q4Binding = JobCanaryRoleHostReplacementQ4Binding(
+      descriptorSHA256: String(repeating: "1", count: 64),
+      configurationSHA256: String(repeating: "2", count: 64),
+      promptSHA256: String(repeating: "3", count: 64),
+      workflowConfigurationSHA256: String(repeating: "4", count: 64),
+      priorLaunchDescriptorSHA256: String(repeating: "5", count: 64),
+      priorLaunchConfigurationSHA256: String(repeating: "6", count: 64),
+      resourceTreeSHA256: String(repeating: "7", count: 64)
+    )
+    let q4Arguments = [
+      q4Binding.descriptorSHA256,
+      q4Binding.configurationSHA256,
+      q4Binding.promptSHA256,
+      q4Binding.workflowConfigurationSHA256,
+      q4Binding.priorLaunchDescriptorSHA256,
+      q4Binding.priorLaunchConfigurationSHA256,
+      q4Binding.resourceTreeSHA256,
+    ]
+    let replacementHostID = "rolehost-11111111-1111-4111-8111-111111111111"
+    let replacementLaunchID = "launch-22222222-2222-4222-8222-222222222222"
+    let scope = JobCanaryScope(
+      jobID: UUID(uuidString: id)!,
+      boundaryEpochSeconds: JobCanaryScope.authorizedBoundaryEpochSeconds,
+      repairEvidenceSHA256: repair,
+      maximumCommentParts: 8
+    )
+    #expect(
+      try JobCanaryCLI.parse(["preview", id, boundary, repair, "8"])
+        == .previewJobCanary(scope)
+    )
+    let canary = JobCanaryAuthorization(scope: scope, previewEvidenceSHA256: preview)
+    #expect(
+      try JobCanaryCLI.parse(["execute", id, boundary, repair, "8", preview])
+        == .executeJobCanary(canary)
+    )
+    #expect(
+      try JobCanaryCLI.parse(["preview-recovery", id, boundary, repair, "8", preview])
+        == .previewJobCanaryRecovery(canary)
+    )
+    let recoveryAuthorization = JobCanaryRecoveryAuthorization(
+      canary: canary,
+      recoveryEvidenceSHA256: recovery
+    )
+    #expect(
+      try JobCanaryCLI.parse([
+        "execute-recovery", id, boundary, repair, "8", preview, recovery,
+      ])
+        == .executeJobCanaryRecovery(recoveryAuthorization)
+    )
+    #expect(
+      try JobCanaryCLI.parse([
+        "preview-pi-retry", id, boundary, repair, "8", preview, recovery,
+      ])
+        == .previewJobCanaryPiRetry(recoveryAuthorization)
+    )
+    #expect(
+      try JobCanaryCLI.parse([
+        "execute-pi-retry", id, boundary, repair, "8", preview, recovery, retry,
+      ])
+        == .executeJobCanaryPiRetry(
+          JobCanaryPiRetryAuthorization(
+            recovery: recoveryAuthorization,
+            retryEvidenceSHA256: retry
+          )
+        )
+    )
+    let retryAuthorization = JobCanaryPiRetryAuthorization(
+      recovery: recoveryAuthorization,
+      retryEvidenceSHA256: retry
+    )
+    let replacementRequest = JobCanaryRoleHostReplacementRequest(
+      retry: retryAuthorization,
+      incidentAuditSHA256: JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+      plannedReplacementRoleHostID: replacementHostID,
+      plannedLaunchAttemptID: replacementLaunchID
+    )
+    #expect(
+      try JobCanaryCLI.parse([
+        "preview-host-replacement", id, boundary, repair, "8", preview, recovery, retry,
+        JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+        replacementHostID, replacementLaunchID, "3", "true",
+        JobCanaryRoleHostReplacementRequest.authorizedStalePaneTokensSHA256,
+      ]) == .previewJobCanaryRoleHostReplacement(replacementRequest)
+    )
+    #expect(
+      try JobCanaryCLI.parse(
+        [
+          "execute-host-replacement", id, boundary, repair, "8", preview, recovery, retry,
+          JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+          replacementHostID, replacementLaunchID, "3", "true",
+          JobCanaryRoleHostReplacementRequest.authorizedStalePaneTokensSHA256,
+          replacementEvidence,
+        ] + q4Arguments
+      )
+        == .executeJobCanaryRoleHostReplacement(
+          JobCanaryRoleHostReplacementAuthorization(
+            request: replacementRequest,
+            replacementEvidenceSHA256: replacementEvidence,
+            q4Binding: q4Binding
+          )
+        )
+    )
+    for invalid in [
+      ["preview", id, boundary, repair],
+      ["preview", id.uppercased(), boundary, repair, "8"],
+      ["preview", id, "1786924799", repair, "8"],
+      ["preview", id, boundary, repair + "0", "8"],
+      ["preview", id, boundary, repair, "0"],
+      ["preview", id, boundary, repair, "65"],
+      ["execute", id, boundary, repair, "8", "short"],
+      ["preview-recovery", id, boundary, repair, "8", "short"],
+      ["execute-recovery", id, boundary, repair, "8", preview, "short"],
+      ["preview-pi-retry", id, boundary, repair, "8", preview, "short"],
+      ["execute-pi-retry", id, boundary, repair, "8", preview, recovery, "short"],
+      [
+        "preview-host-replacement", id, boundary, repair, "8", preview, recovery, retry,
+        String(repeating: "f", count: 64), replacementHostID, replacementLaunchID,
+        "3", "true", JobCanaryRoleHostReplacementRequest.authorizedStalePaneTokensSHA256,
+      ],
+      [
+        "execute-host-replacement", id, boundary, repair, "8", preview, recovery, retry,
+        JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+        "rolehost-not-a-uuid", replacementLaunchID, "3", "true",
+        JobCanaryRoleHostReplacementRequest.authorizedStalePaneTokensSHA256,
+        replacementEvidence,
+      ] + q4Arguments,
+      [
+        "preview-host-replacement", id, boundary, repair, "8", preview, recovery, retry,
+        JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+        replacementHostID, replacementLaunchID, "4", "true",
+        JobCanaryRoleHostReplacementRequest.authorizedStalePaneTokensSHA256,
+      ],
+      [
+        "execute-host-replacement", id, boundary, repair, "8", preview, recovery, retry,
+        JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+        replacementHostID, replacementLaunchID, "3", "true",
+        JobCanaryRoleHostReplacementRequest.authorizedStalePaneTokensSHA256,
+        replacementEvidence,
+      ] + ["short"] + Array(q4Arguments.dropFirst()),
+    ] {
+      #expect(throws: EngineClientError(.invalidCommand)) {
+        _ = try JobCanaryCLI.parse(invalid)
+      }
+    }
+  }
+
+  @Test(
+    "application XPC and CLI JSON preserve every typed replacement outcome",
+    arguments: ApplicationReplacementOutcomeCase.allCases
+  )
+  func replacementXPCAndCLIJSON(
+    outcomeCase: ApplicationReplacementOutcomeCase
+  ) throws {
+    let authorization = applicationReplacementAuthorization()
+    let command = EngineCommand.executeJobCanaryRoleHostReplacement(authorization)
+    try command.validate()
+    let request = EngineXPCRequest(
+      requestID: "11111111-1111-4111-8111-111111111111",
+      command: command
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    let requestData = try encoder.encode(request)
+    let decodedRequest = try JSONDecoder().decode(EngineXPCRequest.self, from: requestData)
+    #expect(decodedRequest == request)
+    try decodedRequest.validate()
+
+    let replacement = try applicationReplacementReport(
+      authorization: authorization,
+      outcome: outcomeCase.outcome
+    )
+    let canary = applicationReplacementCanary(authorization: authorization)
+    let checkpoint = EngineCheckpointReceipt(
+      checkpointID: UUID(uuidString: "22222222-2222-4222-8222-222222222222")!,
+      completedAt: Date(timeIntervalSince1970: 2_000),
+      nonterminalJobCount: 155,
+      ambiguousMutationCount: 0,
+      databaseCheckpointed: true
+    )
+    let report = JobCanaryCLIReport(
+      action: EngineCommandKind.executeJobCanaryRoleHostReplacement.rawValue,
+      canary: canary,
+      recovery: nil,
+      retry: nil,
+      replacement: replacement,
+      checkpoint: checkpoint
+    )
+    let reportData = try encoder.encode(report)
+    let decoded = try JSONDecoder().decode(JobCanaryCLIReport.self, from: reportData)
+    #expect(decoded.action == report.action)
+    #expect(decoded.canary == canary)
+    #expect(decoded.replacement == replacement)
+    #expect(decoded.checkpoint == checkpoint)
+    #expect(try encoder.encode(decoded) == reportData)
+    let json = String(decoding: reportData, as: UTF8.self)
+    #expect(json.contains("\"status\":\"\(replacement.status.rawValue)\""))
+    #expect(json.contains("\"effectCertainty\":\"\(replacement.effectCertainty.rawValue)\""))
+    #expect(!json.localizedCaseInsensitiveContains("credential"))
+    #expect(!json.contains(String(repeating: "a", count: 32)))
+    #expect(!json.contains(String(repeating: "b", count: 32)))
+
+    let projectRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let clientSource = try String(
+      contentsOf: projectRoot.appendingPathComponent(
+        "Sources/JidokaCodeApp/ApplicationEngineClient.swift"
+      ),
+      encoding: .utf8
+    )
+    #expect(clientSource.contains("try request.validate()"))
+    #expect(clientSource.contains("let requestData = try encoder.encode(request)"))
+    #expect(clientSource.contains("JSONDecoder().decode(EngineXPCResponse.self"))
+    #expect(clientSource.contains("box.finish(.success(try response.validate(for: request)))"))
+  }
+
+  @Test("canary CLI keeps the pane-inspection preview on the bounded long timeout")
+  func canaryCLITimeouts() {
+    #expect(JobCanaryCLI.responseTimeoutSeconds(for: .previewJobCanaryPiRetry) == 3_500)
+    #expect(JobCanaryCLI.responseTimeoutSeconds(for: .executeJobCanary) == 3_500)
+    #expect(JobCanaryCLI.responseTimeoutSeconds(for: .executeJobCanaryRecovery) == 3_500)
+    #expect(JobCanaryCLI.responseTimeoutSeconds(for: .executeJobCanaryPiRetry) == 3_500)
+    #expect(
+      JobCanaryCLI.responseTimeoutSeconds(for: .previewJobCanaryRoleHostReplacement)
+        == 3_500
+    )
+    #expect(
+      JobCanaryCLI.responseTimeoutSeconds(for: .executeJobCanaryRoleHostReplacement)
+        == 3_500
+    )
+    #expect(JobCanaryCLI.responseTimeoutSeconds(for: .previewJobCanary) == 30)
+    #expect(JobCanaryCLI.responseTimeoutSeconds(for: .previewJobCanaryRecovery) == 30)
+  }
+
+  @Test(
+    "first onboarding checkpoints bootstrap before registration and helper handoff",
+    arguments: [LifecycleServiceStatus.notRegistered, .notFound]
+  )
+  func enableAndComplete(initialStatus: LifecycleServiceStatus) async throws {
     let events = TopologyEventLog()
     let login = LoginItemControllerFake(
-      status: .notRegistered,
+      status: initialStatus,
       registeredStatus: .enabled,
       events: events
     )
@@ -39,6 +328,7 @@ struct ApplicationEngineClientTests {
     let enabled = try await client.send(.setLoginEnabled(true))
     #expect(enabled.state.settings.loginItemStatus == .enabled)
     #expect(enabled.state.settings.loginItemSelected)
+    #expect(enabled.state.settings.repositories.isEmpty)
     let completed = try await client.send(.completeOnboarding)
     #expect(completed.state.lifecycle == .ready)
 
@@ -55,6 +345,174 @@ struct ApplicationEngineClientTests {
       ]
     )
     #expect(await factory.count == 1)
+  }
+
+  @Test("an enabled helper receives the exact credential ACL before its first request")
+  func enabledHelperPreparesCredentialAccess() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .enabled,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: true,
+      loginStatus: .enabled,
+      events: events
+    )
+    let preparer = BackgroundCredentialAccessPreparerFake(events: events)
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let uptime = TestUptimeClock(value: 100)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      backgroundCredentialAccess: preparer,
+      uptime: { uptime.value },
+      bootstrapFactory: { await factory.make() }
+    )
+
+    _ = try await client.send(.snapshot)
+    _ = try await client.send(.snapshot)
+    #expect(await preparer.count == 1)
+    uptime.advance(by: 60)
+    _ = try await client.send(.snapshot)
+
+    #expect(await preparer.count == 2)
+    #expect(await factory.count == 0)
+    #expect(
+      await events.values == [
+        "credential-access:prepare",
+        "helper:snapshot",
+        "helper:snapshot",
+        "credential-access:prepare",
+        "helper:snapshot",
+      ])
+  }
+
+  @Test("credential ACL migration failure never reaches the helper")
+  func credentialAccessFailureIsClosed() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .enabled,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: true,
+      loginStatus: .enabled,
+      events: events
+    )
+    let uptime = TestUptimeClock(value: 100)
+    let preparer = BackgroundCredentialAccessPreparerFake(
+      events: events,
+      shouldFail: true,
+      onPrepare: { uptime.advance(by: 30) }
+    )
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      backgroundCredentialAccess: preparer,
+      uptime: { uptime.value },
+      bootstrapFactory: { await factory.make() }
+    )
+
+    await #expect(throws: EngineClientError(.unavailable)) {
+      _ = try await client.send(.snapshot)
+    }
+    await #expect(throws: EngineClientError(.unavailable)) {
+      _ = try await client.send(.snapshot)
+    }
+    #expect(await preparer.count == 1)
+    uptime.advance(by: 59)
+    await #expect(throws: EngineClientError(.unavailable)) {
+      _ = try await client.send(.snapshot)
+    }
+    #expect(await preparer.count == 1)
+    uptime.advance(by: 1)
+    await #expect(throws: EngineClientError(.unavailable)) {
+      _ = try await client.send(.snapshot)
+    }
+    #expect(await preparer.count == 2)
+    #expect(
+      await events.values == [
+        "credential-access:prepare",
+        "credential-access:prepare",
+      ])
+    #expect(await factory.count == 0)
+  }
+
+  @Test("an unregistered agent missing from BTM uses bootstrap and can quit durably")
+  func notFoundUsesBootstrap() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .notFound,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: false,
+      loginStatus: .notRegistered,
+      events: events
+    )
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      bootstrapFactory: { await factory.make() }
+    )
+
+    let snapshot = try await client.send(.snapshot)
+    #expect(snapshot.state.settings.loginItemStatus == .notFound)
+    #expect(!snapshot.state.settings.loginItemSelected)
+    let quitting = try await client.send(.prepareForQuit)
+    #expect(quitting.checkpoint?.databaseCheckpointed == true)
+    #expect(await factory.count == 1)
+    #expect(!(await events.values).contains(where: { $0.hasPrefix("helper:") }))
+    try expectOrder(
+      await events.values,
+      [
+        "bootstrap-1:created",
+        "bootstrap-1:snapshot",
+        "bootstrap-1:synchronizeLoginStatus",
+        "bootstrap-1:prepareForQuit",
+      ]
+    )
+  }
+
+  @Test("a cold agent missing from BTM can quit durably before any snapshot")
+  func notFoundColdQuitUsesBootstrap() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .notFound,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: false,
+      loginStatus: .notRegistered,
+      events: events
+    )
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      bootstrapFactory: { await factory.make() }
+    )
+
+    let quitting = try await client.send(.prepareForQuit)
+    #expect(quitting.checkpoint?.databaseCheckpointed == true)
+    #expect(await factory.count == 1)
+    #expect(!(await events.values).contains(where: { $0.hasPrefix("helper:") }))
+    #expect(await events.values == ["bootstrap-1:created", "bootstrap-1:prepareForQuit"])
   }
 
   @Test("requires approval remains on the bootstrap control plane without starting jobs")
@@ -177,8 +635,8 @@ struct ApplicationEngineClientTests {
     #expect(!(await events.values).contains("login:unregister"))
   }
 
-  @Test("post-registration helper failure checkpoints, unregisters, and restores bootstrap")
-  func postRegistrationFailureRollsBack() async throws {
+  @Test("ambiguous helper startup failure preserves registered recovery authority")
+  func postRegistrationStartupFailureRemainsRegistered() async throws {
     let events = TopologyEventLog()
     let login = LoginItemControllerFake(
       status: .notRegistered,
@@ -203,11 +661,44 @@ struct ApplicationEngineClientTests {
     await #expect(throws: EngineClientError(.loginItemFailed)) {
       _ = try await client.send(.setLoginEnabled(true))
     }
+    try expectOrder(await events.values, ["login:register", "helper:snapshot"])
+    #expect(!(await events.values).contains("helper:prepareForQuit"))
+    #expect(!(await events.values).contains("login:unregister"))
+    #expect(await factory.count == 1)
+  }
+
+  @Test("post-registration control-plane failure checkpoints before rollback")
+  func postRegistrationControlPlaneFailureRollsBack() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .notRegistered,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: false,
+      loginStatus: .notRegistered,
+      events: events,
+      failingKinds: [.synchronizeLoginStatus]
+    )
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      bootstrapFactory: { await factory.make() }
+    )
+
+    await #expect(throws: EngineClientError(.loginItemFailed)) {
+      _ = try await client.send(.setLoginEnabled(true))
+    }
     try expectOrder(
       await events.values,
       [
         "login:register",
         "helper:snapshot",
+        "helper:synchronizeLoginStatus",
         "helper:prepareForQuit",
         "login:unregister",
       ]
@@ -362,6 +853,112 @@ struct ApplicationEngineClientTests {
   }
 }
 
+enum ApplicationReplacementOutcomeCase: CaseIterable, Sendable {
+  case noRemoteEffectFailure
+  case remoteEffectAmbiguous
+  case q4Prepared
+  case q4Enqueued
+  case q4OutcomeAmbiguous
+  case q4Failed
+  case q4Settled
+  case replacementHostLost
+
+  var outcome: JobCanaryRoleHostReplacementOutcome {
+    switch self {
+    case .noRemoteEffectFailure:
+      .noRemoteEffectFailure(failureCode: "INVALID_PREPARATION")
+    case .remoteEffectAmbiguous: .remoteEffectAmbiguous
+    case .q4Prepared: .q4Prepared
+    case .q4Enqueued: .q4Enqueued
+    case .q4OutcomeAmbiguous:
+      .q4OutcomeAmbiguous(failureCode: "RUNTIME_INTERRUPTED")
+    case .q4Failed: .q4Failed(failureCode: "CHILD_FAILED")
+    case .q4Settled: .q4Settled
+    case .replacementHostLost: .replacementHostLost
+    }
+  }
+}
+
+private func applicationReplacementAuthorization()
+  -> JobCanaryRoleHostReplacementAuthorization
+{
+  let canary = JobCanaryAuthorization(
+    scope: JobCanaryScope(
+      jobID: UUID(uuidString: "aaaaaaaa-1111-4111-8111-111111111111")!,
+      boundaryEpochSeconds: JobCanaryScope.authorizedBoundaryEpochSeconds,
+      repairEvidenceSHA256: String(repeating: "c", count: 64),
+      maximumCommentParts: 8
+    ),
+    previewEvidenceSHA256: String(repeating: "d", count: 64)
+  )
+  let request = JobCanaryRoleHostReplacementRequest(
+    retry: JobCanaryPiRetryAuthorization(
+      recovery: JobCanaryRecoveryAuthorization(
+        canary: canary,
+        recoveryEvidenceSHA256: String(repeating: "e", count: 64)
+      ),
+      retryEvidenceSHA256: String(repeating: "f", count: 64)
+    ),
+    incidentAuditSHA256: JobCanaryRoleHostReplacementRequest.authorizedIncidentAuditSHA256,
+    plannedReplacementRoleHostID: "rolehost-11111111-1111-4111-8111-111111111111",
+    plannedLaunchAttemptID: "launch-22222222-2222-4222-8222-222222222222"
+  )
+  return JobCanaryRoleHostReplacementAuthorization(
+    request: request,
+    replacementEvidenceSHA256: String(repeating: "9", count: 64),
+    q4Binding: JobCanaryRoleHostReplacementQ4Binding(
+      descriptorSHA256: String(repeating: "1", count: 64),
+      configurationSHA256: String(repeating: "2", count: 64),
+      promptSHA256: String(repeating: "3", count: 64),
+      workflowConfigurationSHA256: String(repeating: "4", count: 64),
+      priorLaunchDescriptorSHA256: String(repeating: "5", count: 64),
+      priorLaunchConfigurationSHA256: String(repeating: "6", count: 64),
+      resourceTreeSHA256: String(repeating: "7", count: 64)
+    )
+  )
+}
+
+private func applicationReplacementCanary(
+  authorization: JobCanaryRoleHostReplacementAuthorization
+) -> JobCanaryReport {
+  JobCanaryReport(
+    scope: authorization.request.retry.recovery.canary.scope,
+    previewEvidenceSHA256:
+      authorization.request.retry.recovery.canary.previewEvidenceSHA256,
+    authorizationSHA256:
+      authorization.request.retry.recovery.canary.authorizationSHA256,
+    status: .recoveryRequired,
+    repositoryOwner: "fixture",
+    repositoryName: "replacement",
+    objectNumber: 42,
+    revisionKey: String(repeating: "8", count: 40),
+    provider: "fixture",
+    model: "fixture",
+    thinking: "off",
+    resourceTreeSHA256: authorization.q4Binding.resourceTreeSHA256,
+    replayed: false
+  )
+}
+
+private func applicationReplacementReport(
+  authorization: JobCanaryRoleHostReplacementAuthorization,
+  outcome: JobCanaryRoleHostReplacementOutcome
+) throws -> JobCanaryRoleHostReplacementReport {
+  try JobCanaryRoleHostReplacementReport(
+    jobID: authorization.request.retry.recovery.canary.scope.jobID,
+    runID: "run-33333333-3333-4333-8333-333333333333",
+    predecessorRoleHostID: "rolehost-44444444-4444-4444-8444-444444444444",
+    replacementRoleHostID: authorization.request.plannedReplacementRoleHostID,
+    plannedLaunchAttemptID: authorization.request.plannedLaunchAttemptID,
+    incidentAuditSHA256: authorization.request.incidentAuditSHA256,
+    replacementEvidenceSHA256: authorization.replacementEvidenceSHA256,
+    replacementAuthorizationSHA256: authorization.authorizationSHA256,
+    q4Binding: authorization.q4Binding,
+    outcome: outcome,
+    replayed: false
+  )
+}
+
 @MainActor
 private final class TerminationCheckpointProbe {
   var callCount = 0
@@ -388,11 +985,52 @@ private final class TestEngineTopologyLock: EngineTopologyLocking, @unchecked Se
   func release() {}
 }
 
+private final class TestUptimeClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedValue: TimeInterval
+
+  init(value: TimeInterval) {
+    storedValue = value
+  }
+
+  var value: TimeInterval {
+    lock.withLock { storedValue }
+  }
+
+  func advance(by interval: TimeInterval) {
+    lock.withLock { storedValue += interval }
+  }
+}
+
 private actor TopologyEventLog {
   private(set) var values: [String] = []
 
   func append(_ value: String) {
     values.append(value)
+  }
+}
+
+private actor BackgroundCredentialAccessPreparerFake: BackgroundCredentialAccessPreparing {
+  private let events: TopologyEventLog
+  private let shouldFail: Bool
+  private let onPrepare: @Sendable () -> Void
+  private(set) var count = 0
+
+  init(
+    events: TopologyEventLog,
+    shouldFail: Bool = false,
+    onPrepare: @escaping @Sendable () -> Void = {}
+  ) {
+    self.events = events
+    self.shouldFail = shouldFail
+    self.onPrepare = onPrepare
+  }
+
+  func prepare() async throws {
+    count += 1
+    onPrepare()
+    await events.append("credential-access:prepare")
+    if shouldFail { throw GitHubTokenStoreError.invalidAccessPolicy }
   }
 }
 
@@ -520,18 +1158,7 @@ private actor TopologyEngineClientFake: EngineClient {
         thinking: .max
       )
     }
-    let repository = RepositoryConfiguration(
-      id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
-      nodeID: "R_node",
-      owner: "owner",
-      name: "repo",
-      defaultBranch: "main",
-      reviewEnabled: true,
-      triageEnabled: true,
-      implementationEnabled: true,
-      enabled: true
-    )
-    let repositories = onboardingReady ? [repository] : []
+    let repositories: [RepositoryConfiguration] = []
     let onboarding = EngineOnboardingSnapshot(
       duplicateInstanceCheckPassed: true,
       externalAutomationAcknowledged: onboardingReady,

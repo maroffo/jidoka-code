@@ -81,6 +81,12 @@ public struct PiRuntimeTreeAttestation: Equatable, Sendable {
   }
 }
 
+public enum PiRuntimeProvenance: Equatable, Sendable {
+  case externalDiagnostic
+  case legacyPrivateSnapshot
+  case releaseOwned(PiReleaseRuntimeIdentity)
+}
+
 public struct PiResolvedRuntime: Equatable, Sendable {
   public let nodeURL: URL
   public let nodeVersion: PiSemanticVersion
@@ -94,6 +100,12 @@ public struct PiResolvedRuntime: Equatable, Sendable {
   public let piVersion: PiSemanticVersion
   public let piRuntimeSHA256: [String: String]
   public let compatibility: PiRuntimeCompatibility
+  public let provenance: PiRuntimeProvenance
+
+  public var releaseIdentity: PiReleaseRuntimeIdentity? {
+    guard case .releaseOwned(let identity) = provenance else { return nil }
+    return identity
+  }
 
   public init(
     nodeURL: URL,
@@ -107,7 +119,8 @@ public struct PiResolvedRuntime: Equatable, Sendable {
     piPackageRootURL: URL,
     piVersion: PiSemanticVersion,
     piRuntimeSHA256: [String: String],
-    compatibility: PiRuntimeCompatibility
+    compatibility: PiRuntimeCompatibility,
+    provenance: PiRuntimeProvenance = .externalDiagnostic
   ) {
     self.nodeURL = nodeURL
     self.nodeVersion = nodeVersion
@@ -121,6 +134,7 @@ public struct PiResolvedRuntime: Equatable, Sendable {
     self.piVersion = piVersion
     self.piRuntimeSHA256 = piRuntimeSHA256
     self.compatibility = compatibility
+    self.provenance = provenance
   }
 }
 
@@ -134,6 +148,12 @@ public enum PiRuntimeIssueCode: String, Codable, Sendable {
   case invalidPiShebang
   case nodeRuntimeNotFound
   case unattestedNodeBuild
+  case releaseRuntimeMissing
+  case malformedReleaseManifest
+  case releaseManifestDrift
+  case unsafeReleaseRuntime
+  case releaseSignatureInvalid
+  case releaseRuntimeDrift
 }
 
 public struct PiRuntimeResolutionError: Error, Equatable, Sendable {
@@ -163,375 +183,557 @@ public enum PiRuntimePreflightResult: Equatable, Sendable {
   case blocked(PiRuntimePreflightIssue)
 }
 
-public struct PiRuntimeResolverConfiguration: Sendable {
-  public let piCandidates: [URL]
-  public let nodeCandidates: [URL]
-  public let piPolicyURL: URL
-  public let nodePolicyURL: URL
-  public let maximumRuntimeFileBytes: Int
-  public let maximumNodeLibraryBytes: Int
-
-  public init(
-    piCandidates: [URL],
-    nodeCandidates: [URL],
-    piPolicyURL: URL,
-    nodePolicyURL: URL,
-    maximumRuntimeFileBytes: Int = 16 * 1_048_576,
-    maximumNodeLibraryBytes: Int = 128 * 1_048_576
-  ) {
-    self.piCandidates = piCandidates
-    self.nodeCandidates = nodeCandidates
-    self.piPolicyURL = piPolicyURL
-    self.nodePolicyURL = nodePolicyURL
-    self.maximumRuntimeFileBytes = maximumRuntimeFileBytes
-    self.maximumNodeLibraryBytes = maximumNodeLibraryBytes
+#if DEBUG
+  protocol PiExternalRuntimeLookupObserving: Sendable {
+    func externalRuntimeLookupAttempted() throws
   }
 
-  public static func standard(resourceRoot: URL) -> PiRuntimeResolverConfiguration {
-    PiRuntimeResolverConfiguration(
-      piCandidates: [
-        URL(fileURLWithPath: "/opt/homebrew/bin/pi"),
-        URL(
-          fileURLWithPath:
-            "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+  enum PiExternalRuntimeLookupTestSeam {
+    @TaskLocal static var observer: (any PiExternalRuntimeLookupObserving)?
+  }
+
+  struct PiRuntimeResolverConfiguration: Sendable {
+    let piCandidates: [URL]
+    let nodeCandidates: [URL]
+    let piPolicyURL: URL
+    let nodePolicyURL: URL
+    let maximumRuntimeFileBytes: Int
+    let maximumNodeLibraryBytes: Int
+
+    init(
+      piCandidates: [URL],
+      nodeCandidates: [URL],
+      piPolicyURL: URL,
+      nodePolicyURL: URL,
+      maximumRuntimeFileBytes: Int = 16 * 1_048_576,
+      maximumNodeLibraryBytes: Int = 128 * 1_048_576
+    ) {
+      self.piCandidates = piCandidates
+      self.nodeCandidates = nodeCandidates
+      self.piPolicyURL = piPolicyURL
+      self.nodePolicyURL = nodePolicyURL
+      self.maximumRuntimeFileBytes = maximumRuntimeFileBytes
+      self.maximumNodeLibraryBytes = maximumNodeLibraryBytes
+    }
+
+    static func diagnosticSystem(resourceRoot: URL) -> PiRuntimeResolverConfiguration {
+      PiRuntimeResolverConfiguration(
+        piCandidates: [
+          URL(fileURLWithPath: "/opt/homebrew/bin/pi"),
+          URL(
+            fileURLWithPath:
+              "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+          ),
+          URL(fileURLWithPath: "/usr/local/bin/pi"),
+        ],
+        nodeCandidates: [
+          URL(fileURLWithPath: "/opt/homebrew/bin/node"),
+          URL(fileURLWithPath: "/usr/local/bin/node"),
+          URL(fileURLWithPath: "/usr/bin/node"),
+        ],
+        piPolicyURL: resourceRoot.appendingPathComponent(
+          "runtime/pi-runtime-builds.json",
+          isDirectory: false
         ),
-        URL(fileURLWithPath: "/usr/local/bin/pi"),
-      ],
-      nodeCandidates: [
-        URL(fileURLWithPath: "/opt/homebrew/bin/node"),
-        URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node"),
-        URL(fileURLWithPath: "/usr/local/bin/node"),
-        URL(fileURLWithPath: "/usr/bin/node"),
-      ],
-      piPolicyURL: resourceRoot.appendingPathComponent(
-        "runtime/pi-runtime-builds.json",
-        isDirectory: false
-      ),
-      nodePolicyURL: resourceRoot.appendingPathComponent(
-        "runtime/node-runtime-builds.json",
-        isDirectory: false
+        nodePolicyURL: resourceRoot.appendingPathComponent(
+          "runtime/node-runtime-builds.json",
+          isDirectory: false
+        )
       )
-    )
+    }
+
+    // Internal compatibility spelling retained only for deterministic diagnostics and tests.
+    static func standard(resourceRoot: URL) -> PiRuntimeResolverConfiguration {
+      diagnosticSystem(resourceRoot: resourceRoot)
+    }
   }
+#endif
+
+public enum PiRuntimeResolutionBoundary: String, CaseIterable, Hashable, Sendable {
+  case applicationStartup
+  case localEngineStartup
+  case engineHelperStartup
+  case modelCatalogProcess
+  case rpcProcess
+  case tuiHost
+  case initialHerdrPreparation
+  case herdrRecoveryRetry
+  case descriptorCreate
+  case descriptorDecode
+  case replacementCandidate
+  case preCredentialExecution
+  case finalPreSendProof
 }
 
 public protocol PiRuntimeResolving: Sendable {
   func resolve() throws -> PiResolvedRuntime
+  func resolve(at boundary: PiRuntimeResolutionBoundary) throws -> PiResolvedRuntime
 }
 
-public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
-  private static let expectedPackageName = "@earendil-works/pi-coding-agent"
-  private static let expectedPiRuntimePaths: Set<String> = [
-    "dist/cli.js",
-    "dist/core/sdk.js",
-    "node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js",
-    "package.json",
-  ]
+extension PiRuntimeResolving {
+  public func resolve(at boundary: PiRuntimeResolutionBoundary) throws -> PiResolvedRuntime {
+    _ = boundary
+    return try resolve()
+  }
+}
 
-  private let configuration: PiRuntimeResolverConfiguration
-
-  public init(configuration: PiRuntimeResolverConfiguration) {
-    self.configuration = configuration
+public enum ReleaseOwnedPiRuntimeBoundaryAuthority {
+  public static func applicationStartup(
+    using resolver: ReleaseOwnedPiRuntimeResolver
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .applicationStartup, using: resolver)
   }
 
-  public func preflight() -> PiRuntimePreflightResult {
-    do {
-      return .ready(try resolve())
-    } catch let error as PiRuntimeResolutionError {
-      return .blocked(Self.actionableIssue(for: error))
-    } catch {
-      return .blocked(
-        PiRuntimePreflightIssue(
-          code: .invalidPiPackage,
-          summary: "Pi runtime validation failed.",
-          recovery: "Reinstall an attested Pi and Node build, then run preflight again."
-        )
-      )
+  public static func engineHelperStartup(
+    using resolver: ReleaseOwnedPiRuntimeResolver
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .engineHelperStartup, using: resolver)
+  }
+
+  public static func rpcProcess(
+    using resolver: ReleaseOwnedPiRuntimeResolver
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .rpcProcess, using: resolver)
+  }
+
+  static func applicationStartup(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .applicationStartup, using: resolver)
+  }
+
+  #if DEBUG
+    static func applicationStartupForTesting(
+      using resolver: any PiRuntimeResolving
+    ) throws -> PiResolvedRuntime {
+      try resolve(at: .applicationStartup, using: resolver)
     }
-  }
 
-  public func resolve() throws -> PiResolvedRuntime {
-    guard (1...64 * 1_024 * 1_024).contains(configuration.maximumRuntimeFileBytes),
-      (1...512 * 1_024 * 1_024).contains(configuration.maximumNodeLibraryBytes)
-    else {
-      throw PiRuntimeResolutionError(
-        code: .malformedCompatibilityPolicy,
-        detail: "invalid runtime file bound"
-      )
+    static func engineHelperStartupForTesting(
+      using resolver: any PiRuntimeResolving
+    ) throws -> PiResolvedRuntime {
+      try resolve(at: .engineHelperStartup, using: resolver)
     }
-    let piPolicyData = try readPolicy(configuration.piPolicyURL)
-    let nodePolicyData = try readPolicy(configuration.nodePolicyURL)
-    let piPolicy = try Self.parsePiPolicy(piPolicyData)
-    let nodePolicy = try Self.parseNodePolicy(nodePolicyData)
-    let piResolution = try resolvePi(policy: piPolicy)
-    let nodeResolution = try resolveNode(
-      policy: nodePolicy,
-      shebang: piResolution.shebang
-    )
-    return PiResolvedRuntime(
-      nodeURL: nodeResolution.url,
-      nodeVersion: nodeResolution.version,
-      nodeSHA256: nodeResolution.digest,
-      nodeDynamicLibrarySHA256: nodeResolution.dynamicLibraryDigests,
-      nodeDynamicLibraryLoadPaths: nodeResolution.dynamicLibraryLoadPaths,
-      piCLIURL: piResolution.cliURL,
-      piPackageRootURL: piResolution.packageRoot,
-      piVersion: piResolution.version,
-      piRuntimeSHA256: piResolution.digests,
-      compatibility: PiRuntimeCompatibility(
-        minimumVersion: piPolicy.minimum,
-        maximumVersionExclusive: piPolicy.maximum,
-        policySHA256: Self.sha256(piPolicyData)
-      )
-    )
+  #endif
+
+  static func localEngineStartup(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .localEngineStartup, using: resolver)
   }
 
-  private func resolvePi(policy: PiPolicy) throws -> PiResolution {
-    var failures: [PiRuntimeResolutionError] = []
-    for candidate in uniqueCanonicalCandidates(configuration.piCandidates) {
-      guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
+  static func modelCatalogProcess(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .modelCatalogProcess, using: resolver)
+  }
+
+  static func rpcProcess(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .rpcProcess, using: resolver)
+  }
+
+  static func tuiHost(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .tuiHost, using: resolver)
+  }
+
+  static func initialHerdrPreparation(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .initialHerdrPreparation, using: resolver)
+  }
+
+  static func herdrRecoveryRetry(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .herdrRecoveryRetry, using: resolver)
+  }
+
+  static func descriptorCreate(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .descriptorCreate, using: resolver)
+  }
+
+  static func descriptorDecode(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .descriptorDecode, using: resolver)
+  }
+
+  static func replacementCandidate(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .replacementCandidate, using: resolver)
+  }
+
+  static func preCredentialExecution(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .preCredentialExecution, using: resolver)
+  }
+
+  static func finalPreSendProof(
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolve(at: .finalPreSendProof, using: resolver)
+  }
+
+  private static func resolve(
+    at boundary: PiRuntimeResolutionBoundary,
+    using resolver: any PiRuntimeResolving
+  ) throws -> PiResolvedRuntime {
+    try resolver.resolve(at: boundary)
+  }
+}
+
+struct PiRuntimeResolver: Sendable {
+  #if DEBUG
+    private static let expectedPackageName = "@earendil-works/pi-coding-agent"
+    private static let expectedPiRuntimePaths: Set<String> = [
+      "dist/cli.js",
+      "dist/core/sdk.js",
+      "node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js",
+      "package.json",
+    ]
+
+    private let configuration: PiRuntimeResolverConfiguration
+
+    init(configuration: PiRuntimeResolverConfiguration) {
+      self.configuration = configuration
+    }
+
+    func preflight() -> PiRuntimePreflightResult {
       do {
-        return try validatePiCandidate(candidate, policy: policy)
+        return .ready(try resolve())
       } catch let error as PiRuntimeResolutionError {
-        failures.append(error)
-      }
-    }
-    if let failure = Self.preferredFailure(failures) { throw failure }
-    throw PiRuntimeResolutionError(
-      code: .piRuntimeNotFound,
-      detail: "no Pi candidate exists"
-    )
-  }
-
-  private func validatePiCandidate(_ candidate: URL, policy: PiPolicy) throws -> PiResolution {
-    let cliURL = candidate.resolvingSymlinksInPath().standardizedFileURL
-    let suffix = "/dist/cli.js"
-    guard cliURL.path.hasSuffix(suffix) else {
-      throw PiRuntimeResolutionError(
-        code: .invalidPiPackage,
-        detail: "Pi candidate is not the package CLI"
-      )
-    }
-    let packageRoot = URL(
-      fileURLWithPath: String(cliURL.path.dropLast(suffix.count)),
-      isDirectory: true
-    )
-    let packageURL = packageRoot.appendingPathComponent("package.json", isDirectory: false)
-    let packageData = try readRuntimeFile(packageURL, failureCode: .invalidPiPackage)
-    guard let metadata = try? JSONSerialization.jsonObject(with: packageData) as? [String: Any],
-      metadata["name"] as? String == Self.expectedPackageName,
-      let versionString = metadata["version"] as? String
-    else {
-      throw PiRuntimeResolutionError(
-        code: .invalidPiPackage,
-        detail: "Pi package identity is invalid"
-      )
-    }
-    let version: PiSemanticVersion
-    do {
-      version = try PiSemanticVersion(versionString)
-    } catch {
-      throw PiRuntimeResolutionError(
-        code: .invalidPiPackage,
-        detail: "Pi package version is malformed"
-      )
-    }
-    guard version >= policy.minimum, version < policy.maximum else {
-      throw PiRuntimeResolutionError(
-        code: .unsupportedPiVersion,
-        detail: "Pi \(version) is outside the supported range"
-      )
-    }
-    guard let build = policy.builds[versionString] else {
-      throw PiRuntimeResolutionError(
-        code: .unattestedPiBuild,
-        detail: "Pi \(version) has no attested build"
-      )
-    }
-    var digests: [String: String] = [:]
-    for relativePath in Self.expectedPiRuntimePaths.sorted() {
-      let fileURL = packageRoot.appendingPathComponent(relativePath, isDirectory: false)
-      let data =
-        relativePath == "package.json"
-        ? packageData
-        : try readRuntimeFile(fileURL, failureCode: .unattestedPiBuild)
-      let digest = Self.sha256(data)
-      guard digest == build.criticalFiles[relativePath] else {
-        throw PiRuntimeResolutionError(
-          code: .unattestedPiBuild,
-          detail: "Pi runtime digest mismatch for \(relativePath)"
-        )
-      }
-      digests[relativePath] = digest
-    }
-    let tree: PiRuntimeTreeAttestation
-    do {
-      tree = try Self.attestPackageTree(
-        packageRoot,
-        maximumFileBytes: configuration.maximumRuntimeFileBytes
-      )
-    } catch {
-      throw PiRuntimeResolutionError(
-        code: .unattestedPiBuild,
-        detail: "Pi package tree is missing, redirected, or unsafe"
-      )
-    }
-    guard tree == build.packageTree else {
-      throw PiRuntimeResolutionError(
-        code: .unattestedPiBuild,
-        detail: "Pi package tree digest or inventory mismatch"
-      )
-    }
-    digests["package-tree-v1"] = tree.sha256
-    let cliData = try readRuntimeFile(cliURL, failureCode: .invalidPiPackage)
-    let shebang = try Self.parseShebang(cliData)
-    return PiResolution(
-      cliURL: cliURL,
-      packageRoot: packageRoot,
-      version: version,
-      digests: digests,
-      shebang: shebang
-    )
-  }
-
-  private func resolveNode(policy: NodePolicy, shebang: PiShebang) throws -> NodeResolution {
-    var candidates = configuration.nodeCandidates
-    if case .absolute(let path) = shebang {
-      candidates.insert(URL(fileURLWithPath: path), at: 0)
-    }
-    var observedCandidate = false
-    for candidate in uniqueCanonicalCandidates(candidates) {
-      guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
-      observedCandidate = true
-      let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
-      if case .absolute(let expectedPath) = shebang,
-        resolved.path != URL(fileURLWithPath: expectedPath).resolvingSymlinksInPath().path
-      {
-        continue
-      }
-      guard FileManager.default.isExecutableFile(atPath: resolved.path),
-        let data = try? readRuntimeFile(resolved, failureCode: .unattestedNodeBuild)
-      else {
-        continue
-      }
-      let digest = Self.sha256(data)
-      guard
-        let match = policy.builds.first(where: { _, build in
-          build.executable.canonicalPath == resolved.path
-            && build.executable.sha256 == digest
-        }),
-        let version = try? PiSemanticVersion(match.key)
-      else {
-        continue
-      }
-      do {
-        let dynamicLibraryDigests = try validateNodeLibraries(
-          match.value.dynamicLibraries,
-          executableURL: resolved,
-          executableData: data
-        )
-        return NodeResolution(
-          url: resolved,
-          version: version,
-          digest: digest,
-          dynamicLibraryDigests: dynamicLibraryDigests,
-          dynamicLibraryLoadPaths: Dictionary(
-            uniqueKeysWithValues: match.value.dynamicLibraries.map {
-              ($0.loadPath, $0.canonicalPath)
-            }
+        return .blocked(Self.actionableIssue(for: error))
+      } catch {
+        return .blocked(
+          PiRuntimePreflightIssue(
+            code: .invalidPiPackage,
+            summary: "Pi runtime validation failed.",
+            recovery: "Reinstall an attested Pi and Node build, then run preflight again."
           )
         )
-      } catch {
-        continue
       }
     }
-    throw PiRuntimeResolutionError(
-      code: observedCandidate ? .unattestedNodeBuild : .nodeRuntimeNotFound,
-      detail: observedCandidate
-        ? "no Node candidate and dynamic-library closure match the packaged digest policy"
-        : "no Node candidate exists"
-    )
-  }
 
-  private func validateNodeLibraries(
-    _ libraries: [NodeDynamicLibrary],
-    executableURL: URL,
-    executableData: Data
-  ) throws -> [String: String] {
-    var observed: [String: String] = [:]
-    var libraryData: [String: Data] = [:]
-    for library in libraries {
-      let loadURL: URL
-      if library.loadPath.hasPrefix("@") {
-        loadURL = URL(fileURLWithPath: library.canonicalPath, isDirectory: false)
-      } else {
-        loadURL = URL(fileURLWithPath: library.loadPath, isDirectory: false)
-      }
-      let canonical = loadURL.resolvingSymlinksInPath().standardizedFileURL
-      guard canonical.path == library.canonicalPath else {
+    func resolve() throws -> PiResolvedRuntime {
+      try PiExternalRuntimeLookupTestSeam.observer?.externalRuntimeLookupAttempted()
+      guard (1...64 * 1_024 * 1_024).contains(configuration.maximumRuntimeFileBytes),
+        (1...512 * 1_024 * 1_024).contains(configuration.maximumNodeLibraryBytes)
+      else {
         throw PiRuntimeResolutionError(
-          code: .unattestedNodeBuild,
-          detail: "Node dynamic-library target mismatch for \(library.loadPath)"
+          code: .malformedCompatibilityPolicy,
+          detail: "invalid runtime file bound"
         )
       }
-      let data = try Self.readRegularFile(
-        canonical,
-        maximumBytes: configuration.maximumNodeLibraryBytes
+      let piPolicyData = try readPolicy(configuration.piPolicyURL)
+      let nodePolicyData = try readPolicy(configuration.nodePolicyURL)
+      let piPolicy = try Self.parsePiPolicy(piPolicyData)
+      let nodePolicy = try Self.parseNodePolicy(nodePolicyData)
+      let piResolution = try resolvePi(policy: piPolicy)
+      let nodeResolution = try resolveNode(
+        policy: nodePolicy,
+        shebang: piResolution.shebang
       )
-      let digest = Self.sha256(data)
-      guard digest == library.sha256 else {
-        throw PiRuntimeResolutionError(
-          code: .unattestedNodeBuild,
-          detail: "Node dynamic-library digest mismatch for \(library.loadPath)"
+      return PiResolvedRuntime(
+        nodeURL: nodeResolution.url,
+        nodeVersion: nodeResolution.version,
+        nodeSHA256: nodeResolution.digest,
+        nodeDynamicLibrarySHA256: nodeResolution.dynamicLibraryDigests,
+        nodeDynamicLibraryLoadPaths: nodeResolution.dynamicLibraryLoadPaths,
+        piCLIURL: piResolution.cliURL,
+        piPackageRootURL: piResolution.packageRoot,
+        piVersion: piResolution.version,
+        piRuntimeSHA256: piResolution.digests,
+        compatibility: PiRuntimeCompatibility(
+          minimumVersion: piPolicy.minimum,
+          maximumVersionExclusive: piPolicy.maximum,
+          policySHA256: Self.sha256(piPolicyData)
         )
-      }
-      observed[library.canonicalPath] = digest
-      libraryData[library.canonicalPath] = data
+      )
     }
-    try Self.validateMachODependencyClosure(
-      executableURL: executableURL,
-      executableData: executableData,
-      libraries: libraries,
-      libraryData: libraryData
-    )
-    return observed
-  }
 
-  private static func validateMachODependencyClosure(
-    executableURL: URL,
-    executableData: Data,
-    libraries: [NodeDynamicLibrary],
-    libraryData: [String: Data]
-  ) throws {
-    let expectedPaths = Set(libraries.map(\.canonicalPath))
-    var images = libraryData
-    images[executableURL.path] = executableData
-    let executableMetadata = try parseMachO(executableData)
-    var reachable: Set<String> = []
-    var pending = [executableURL.path]
-    while let imagePath = pending.popLast() {
-      guard let data = images[imagePath] else {
-        throw unattestedNodeClosureError()
+    private func resolvePi(policy: PiPolicy) throws -> PiResolution {
+      var failures: [PiRuntimeResolutionError] = []
+      for candidate in uniqueCanonicalCandidates(configuration.piCandidates) {
+        guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
+        do {
+          return try validatePiCandidate(candidate, policy: policy)
+        } catch let error as PiRuntimeResolutionError {
+          failures.append(error)
+        }
       }
-      let metadata = try parseMachO(data)
-      for dependency in metadata.dependencies where !systemMachODependency(dependency) {
-        let canonicalPath = try resolveMachODependency(
-          dependency,
-          imagePath: imagePath,
-          imageRPaths: metadata.rpaths,
-          executableURL: executableURL,
-          executableRPaths: executableMetadata.rpaths,
-          expectedPaths: expectedPaths
+      if let failure = Self.preferredFailure(failures) { throw failure }
+      throw PiRuntimeResolutionError(
+        code: .piRuntimeNotFound,
+        detail: "no Pi candidate exists"
+      )
+    }
+
+    private func validatePiCandidate(_ candidate: URL, policy: PiPolicy) throws -> PiResolution {
+      let cliURL = candidate.resolvingSymlinksInPath().standardizedFileURL
+      let suffix = "/dist/cli.js"
+      guard cliURL.path.hasSuffix(suffix) else {
+        throw PiRuntimeResolutionError(
+          code: .invalidPiPackage,
+          detail: "Pi candidate is not the package CLI"
         )
-        guard expectedPaths.contains(canonicalPath) else {
+      }
+      let packageRoot = URL(
+        fileURLWithPath: String(cliURL.path.dropLast(suffix.count)),
+        isDirectory: true
+      )
+      let packageURL = packageRoot.appendingPathComponent("package.json", isDirectory: false)
+      let packageData = try readRuntimeFile(packageURL, failureCode: .invalidPiPackage)
+      guard let metadata = try? JSONSerialization.jsonObject(with: packageData) as? [String: Any],
+        metadata["name"] as? String == Self.expectedPackageName,
+        let versionString = metadata["version"] as? String
+      else {
+        throw PiRuntimeResolutionError(
+          code: .invalidPiPackage,
+          detail: "Pi package identity is invalid"
+        )
+      }
+      let version: PiSemanticVersion
+      do {
+        version = try PiSemanticVersion(versionString)
+      } catch {
+        throw PiRuntimeResolutionError(
+          code: .invalidPiPackage,
+          detail: "Pi package version is malformed"
+        )
+      }
+      guard version >= policy.minimum, version < policy.maximum else {
+        throw PiRuntimeResolutionError(
+          code: .unsupportedPiVersion,
+          detail: "Pi \(version) is outside the supported range"
+        )
+      }
+      guard let build = policy.builds[versionString] else {
+        throw PiRuntimeResolutionError(
+          code: .unattestedPiBuild,
+          detail: "Pi \(version) has no attested build"
+        )
+      }
+      var digests: [String: String] = [:]
+      for relativePath in Self.expectedPiRuntimePaths.sorted() {
+        let fileURL = packageRoot.appendingPathComponent(relativePath, isDirectory: false)
+        let data =
+          relativePath == "package.json"
+          ? packageData
+          : try readRuntimeFile(fileURL, failureCode: .unattestedPiBuild)
+        let digest = Self.sha256(data)
+        guard digest == build.criticalFiles[relativePath] else {
+          throw PiRuntimeResolutionError(
+            code: .unattestedPiBuild,
+            detail: "Pi runtime digest mismatch for \(relativePath)"
+          )
+        }
+        digests[relativePath] = digest
+      }
+      let tree: PiRuntimeTreeAttestation
+      do {
+        tree = try Self.attestPackageTree(
+          packageRoot,
+          maximumFileBytes: configuration.maximumRuntimeFileBytes
+        )
+      } catch {
+        throw PiRuntimeResolutionError(
+          code: .unattestedPiBuild,
+          detail: "Pi package tree is missing, redirected, or unsafe"
+        )
+      }
+      guard tree == build.packageTree else {
+        throw PiRuntimeResolutionError(
+          code: .unattestedPiBuild,
+          detail: "Pi package tree digest or inventory mismatch"
+        )
+      }
+      digests["package-tree-v1"] = tree.sha256
+      let cliData = try readRuntimeFile(cliURL, failureCode: .invalidPiPackage)
+      let shebang = try Self.parseShebang(cliData)
+      return PiResolution(
+        cliURL: cliURL,
+        packageRoot: packageRoot,
+        version: version,
+        digests: digests,
+        shebang: shebang
+      )
+    }
+
+    private func resolveNode(policy: NodePolicy, shebang: PiShebang) throws -> NodeResolution {
+      var candidates = configuration.nodeCandidates
+      if case .absolute(let path) = shebang {
+        candidates.insert(URL(fileURLWithPath: path), at: 0)
+      }
+      var observedCandidate = false
+      for candidate in uniqueCanonicalCandidates(candidates) {
+        guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
+        observedCandidate = true
+        let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
+        if case .absolute(let expectedPath) = shebang,
+          resolved.path != URL(fileURLWithPath: expectedPath).resolvingSymlinksInPath().path
+        {
+          continue
+        }
+        guard FileManager.default.isExecutableFile(atPath: resolved.path),
+          let data = try? readRuntimeFile(resolved, failureCode: .unattestedNodeBuild)
+        else {
+          continue
+        }
+        let digest = Self.sha256(data)
+        let matchingBuilds = policy.builds
+          .filter { _, build in
+            build.executable.canonicalPath == resolved.path
+              && build.executable.sha256 == digest
+          }
+          .sorted { $0.key < $1.key }
+        var resolution: NodeResolution?
+        for (versionString, build) in matchingBuilds {
+          guard let version = try? PiSemanticVersion(versionString),
+            let dynamicLibraryDigests = try? validateNodeLibraries(
+              build.dynamicLibraries,
+              executableURL: resolved,
+              executableData: data
+            )
+          else { continue }
+          guard resolution == nil else {
+            throw PiRuntimeResolutionError(
+              code: .unattestedNodeBuild,
+              detail: "multiple Node build policies match one runtime closure"
+            )
+          }
+          resolution = NodeResolution(
+            url: resolved,
+            version: version,
+            digest: digest,
+            dynamicLibraryDigests: dynamicLibraryDigests,
+            dynamicLibraryLoadPaths: Dictionary(
+              uniqueKeysWithValues: build.dynamicLibraries.map {
+                ($0.loadPath, $0.canonicalPath)
+              }
+            )
+          )
+        }
+        if let resolution { return resolution }
+      }
+      throw PiRuntimeResolutionError(
+        code: observedCandidate ? .unattestedNodeBuild : .nodeRuntimeNotFound,
+        detail: observedCandidate
+          ? "no Node candidate and dynamic-library closure match the packaged digest policy"
+          : "no Node candidate exists"
+      )
+    }
+
+    private func validateNodeLibraries(
+      _ libraries: [NodeDynamicLibrary],
+      executableURL: URL,
+      executableData: Data
+    ) throws -> [String: String] {
+      var observed: [String: String] = [:]
+      var libraryData: [String: Data] = [:]
+      for library in libraries {
+        let loadURL: URL
+        if library.loadPath.hasPrefix("@") {
+          loadURL = URL(fileURLWithPath: library.canonicalPath, isDirectory: false)
+        } else {
+          loadURL = URL(fileURLWithPath: library.loadPath, isDirectory: false)
+        }
+        let canonical = loadURL.resolvingSymlinksInPath().standardizedFileURL
+        guard canonical.path == library.canonicalPath else {
+          throw PiRuntimeResolutionError(
+            code: .unattestedNodeBuild,
+            detail: "Node dynamic-library target mismatch for \(library.loadPath)"
+          )
+        }
+        let data = try Self.readRegularFile(
+          canonical,
+          maximumBytes: configuration.maximumNodeLibraryBytes
+        )
+        let digest = Self.sha256(data)
+        guard digest == library.sha256 else {
+          throw PiRuntimeResolutionError(
+            code: .unattestedNodeBuild,
+            detail: "Node dynamic-library digest mismatch for \(library.loadPath)"
+          )
+        }
+        observed[library.canonicalPath] = digest
+        libraryData[library.canonicalPath] = data
+      }
+      try Self.validateMachODependencyClosure(
+        executableURL: executableURL,
+        executableData: executableData,
+        libraries: libraries,
+        libraryData: libraryData
+      )
+      return observed
+    }
+
+    private static func validateMachODependencyClosure(
+      executableURL: URL,
+      executableData: Data,
+      libraries: [NodeDynamicLibrary],
+      libraryData: [String: Data]
+    ) throws {
+      let expectedPaths = Set(libraries.map(\.canonicalPath))
+      var images = libraryData
+      images[executableURL.path] = executableData
+      let executableMetadata = try parseMachO(executableData)
+      var reachable: Set<String> = []
+      var pending = [executableURL.path]
+      while let imagePath = pending.popLast() {
+        guard let data = images[imagePath] else {
           throw unattestedNodeClosureError()
         }
-        if reachable.insert(canonicalPath).inserted {
-          pending.append(canonicalPath)
+        let metadata = try parseMachO(data)
+        for dependency in metadata.dependencies where !systemMachODependency(dependency) {
+          let canonicalPath = try resolveMachODependency(
+            dependency,
+            imagePath: imagePath,
+            imageRPaths: metadata.rpaths,
+            executableURL: executableURL,
+            executableRPaths: executableMetadata.rpaths,
+            expectedPaths: expectedPaths
+          )
+          guard expectedPaths.contains(canonicalPath) else {
+            throw unattestedNodeClosureError()
+          }
+          if reachable.insert(canonicalPath).inserted {
+            pending.append(canonicalPath)
+          }
         }
       }
+      guard reachable == expectedPaths else {
+        throw unattestedNodeClosureError()
+      }
     }
-    guard reachable == expectedPaths else {
+  #else
+    private init() {}
+  #endif
+
+  static func validateReleaseNodeMachO(
+    _ data: Data,
+    architecture: String,
+    dependencies: [String]
+  ) throws {
+    guard architecture == "arm64",
+      data.count >= 32,
+      try readUInt32(data, at: 0) == 0xFEED_FACF,
+      try readUInt32(data, at: 4) == 0x0100_000C
+    else {
+      throw unattestedNodeClosureError()
+    }
+    let metadata = try parseMachO(data)
+    guard metadata.dependencies == dependencies,
+      metadata.dependencies.allSatisfy(systemMachODependency),
+      metadata.rpaths.isEmpty
+    else {
       throw unattestedNodeClosureError()
     }
   }
@@ -621,103 +823,106 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
     path.hasPrefix("/usr/lib/") || path.hasPrefix("/System/Library/")
   }
 
-  private static func resolveMachODependency(
-    _ dependency: String,
-    imagePath: String,
-    imageRPaths: [String],
-    executableURL: URL,
-    executableRPaths: [String],
-    expectedPaths: Set<String>
-  ) throws -> String {
-    if dependency.hasPrefix("/") {
-      let canonical = URL(fileURLWithPath: dependency).resolvingSymlinksInPath()
-        .standardizedFileURL.path
+  #if DEBUG
+    private static func resolveMachODependency(
+      _ dependency: String,
+      imagePath: String,
+      imageRPaths: [String],
+      executableURL: URL,
+      executableRPaths: [String],
+      expectedPaths: Set<String>
+    ) throws -> String {
+      if dependency.hasPrefix("/") {
+        let canonical = URL(fileURLWithPath: dependency).resolvingSymlinksInPath()
+          .standardizedFileURL.path
+        guard expectedPaths.contains(canonical) else { throw unattestedNodeClosureError() }
+        return canonical
+      }
+      if dependency.hasPrefix("@loader_path/") {
+        return try canonicalExpectedPath(
+          replacing: "@loader_path",
+          in: dependency,
+          with: URL(fileURLWithPath: imagePath).deletingLastPathComponent().path,
+          expectedPaths: expectedPaths
+        )
+      }
+      if dependency.hasPrefix("@executable_path/") {
+        return try canonicalExpectedPath(
+          replacing: "@executable_path",
+          in: dependency,
+          with: executableURL.deletingLastPathComponent().path,
+          expectedPaths: expectedPaths
+        )
+      }
+      guard dependency.hasPrefix("@rpath/") else {
+        throw unattestedNodeClosureError()
+      }
+      let suffix = String(dependency.dropFirst("@rpath/".count))
+      guard !suffix.isEmpty, !suffix.contains("/"), !suffix.contains("\u{0}") else {
+        throw unattestedNodeClosureError()
+      }
+      for rpath in imageRPaths + executableRPaths {
+        guard
+          let expanded = expandMachORPath(
+            rpath,
+            imagePath: imagePath,
+            executableURL: executableURL
+          )
+        else { continue }
+        let candidate = URL(fileURLWithPath: expanded, isDirectory: true)
+          .appendingPathComponent(suffix, isDirectory: false)
+        guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
+        let canonical = candidate.resolvingSymlinksInPath().standardizedFileURL.path
+        guard expectedPaths.contains(canonical) else {
+          throw unattestedNodeClosureError()
+        }
+        return canonical
+      }
+      throw unattestedNodeClosureError()
+    }
+
+    private static func canonicalExpectedPath(
+      replacing token: String,
+      in dependency: String,
+      with directory: String,
+      expectedPaths: Set<String>
+    ) throws -> String {
+      let suffix = dependency.dropFirst(token.count)
+      let candidate = URL(fileURLWithPath: directory, isDirectory: true)
+        .appendingPathComponent(String(suffix.dropFirst()), isDirectory: false)
+      guard FileManager.default.fileExists(atPath: candidate.path) else {
+        throw unattestedNodeClosureError()
+      }
+      let canonical = candidate.resolvingSymlinksInPath().standardizedFileURL.path
       guard expectedPaths.contains(canonical) else { throw unattestedNodeClosureError() }
       return canonical
     }
-    if dependency.hasPrefix("@loader_path/") {
-      return try canonicalExpectedPath(
-        replacing: "@loader_path",
-        in: dependency,
-        with: URL(fileURLWithPath: imagePath).deletingLastPathComponent().path,
-        expectedPaths: expectedPaths
-      )
-    }
-    if dependency.hasPrefix("@executable_path/") {
-      return try canonicalExpectedPath(
-        replacing: "@executable_path",
-        in: dependency,
-        with: executableURL.deletingLastPathComponent().path,
-        expectedPaths: expectedPaths
-      )
-    }
-    guard dependency.hasPrefix("@rpath/") else {
-      throw unattestedNodeClosureError()
-    }
-    let suffix = String(dependency.dropFirst("@rpath/".count))
-    guard !suffix.isEmpty, !suffix.contains("/"), !suffix.contains("\u{0}") else {
-      throw unattestedNodeClosureError()
-    }
-    for rpath in imageRPaths + executableRPaths {
-      guard
-        let expanded = expandMachORPath(
-          rpath,
-          imagePath: imagePath,
-          executableURL: executableURL
-        )
-      else { continue }
-      let candidate = URL(fileURLWithPath: expanded, isDirectory: true)
-        .appendingPathComponent(suffix, isDirectory: false)
-      guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
-      let canonical = candidate.resolvingSymlinksInPath().standardizedFileURL.path
-      guard expectedPaths.contains(canonical) else {
-        throw unattestedNodeClosureError()
+
+    private static func expandMachORPath(
+      _ rpath: String,
+      imagePath: String,
+      executableURL: URL
+    ) -> String? {
+      let imageDirectory = URL(fileURLWithPath: imagePath).deletingLastPathComponent().path
+      let executableDirectory = executableURL.deletingLastPathComponent().path
+      let expanded: String
+      if rpath == "@loader_path" {
+        expanded = imageDirectory
+      } else if rpath.hasPrefix("@loader_path/") {
+        expanded = imageDirectory + String(rpath.dropFirst("@loader_path".count))
+      } else if rpath == "@executable_path" {
+        expanded = executableDirectory
+      } else if rpath.hasPrefix("@executable_path/") {
+        expanded = executableDirectory + String(rpath.dropFirst("@executable_path".count))
+      } else if rpath.hasPrefix("/") {
+        expanded = rpath
+      } else {
+        return nil
       }
-      return canonical
+      return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL.path
     }
-    throw unattestedNodeClosureError()
-  }
 
-  private static func canonicalExpectedPath(
-    replacing token: String,
-    in dependency: String,
-    with directory: String,
-    expectedPaths: Set<String>
-  ) throws -> String {
-    let suffix = dependency.dropFirst(token.count)
-    let candidate = URL(fileURLWithPath: directory, isDirectory: true)
-      .appendingPathComponent(String(suffix.dropFirst()), isDirectory: false)
-    guard FileManager.default.fileExists(atPath: candidate.path) else {
-      throw unattestedNodeClosureError()
-    }
-    let canonical = candidate.resolvingSymlinksInPath().standardizedFileURL.path
-    guard expectedPaths.contains(canonical) else { throw unattestedNodeClosureError() }
-    return canonical
-  }
-
-  private static func expandMachORPath(
-    _ rpath: String,
-    imagePath: String,
-    executableURL: URL
-  ) -> String? {
-    let imageDirectory = URL(fileURLWithPath: imagePath).deletingLastPathComponent().path
-    let executableDirectory = executableURL.deletingLastPathComponent().path
-    let expanded: String
-    if rpath == "@loader_path" {
-      expanded = imageDirectory
-    } else if rpath.hasPrefix("@loader_path/") {
-      expanded = imageDirectory + String(rpath.dropFirst("@loader_path".count))
-    } else if rpath == "@executable_path" {
-      expanded = executableDirectory
-    } else if rpath.hasPrefix("@executable_path/") {
-      expanded = executableDirectory + String(rpath.dropFirst("@executable_path".count))
-    } else if rpath.hasPrefix("/") {
-      expanded = rpath
-    } else {
-      return nil
-    }
-    return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL.path
-  }
+  #endif
 
   private static func unattestedNodeClosureError() -> PiRuntimeResolutionError {
     PiRuntimeResolutionError(
@@ -726,42 +931,45 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
     )
   }
 
-  private func readPolicy(_ url: URL) throws -> Data {
-    do {
-      return try Self.readRegularFile(
-        url,
-        maximumBytes: configuration.maximumRuntimeFileBytes
-      )
-    } catch {
-      throw PiRuntimeResolutionError(
-        code: .unsafeCompatibilityPolicy,
-        detail: "compatibility policy is missing or unsafe"
-      )
+  #if DEBUG
+    private func readPolicy(_ url: URL) throws -> Data {
+      do {
+        return try Self.readRegularFile(
+          url,
+          maximumBytes: configuration.maximumRuntimeFileBytes
+        )
+      } catch {
+        throw PiRuntimeResolutionError(
+          code: .unsafeCompatibilityPolicy,
+          detail: "compatibility policy is missing or unsafe"
+        )
+      }
     }
-  }
 
-  private func readRuntimeFile(_ url: URL, failureCode: PiRuntimeIssueCode) throws -> Data {
-    do {
-      return try Self.readRegularFile(
-        url,
-        maximumBytes: configuration.maximumRuntimeFileBytes
-      )
-    } catch {
-      throw PiRuntimeResolutionError(
-        code: failureCode,
-        detail: "runtime file is missing, redirected, or oversized"
-      )
+    private func readRuntimeFile(_ url: URL, failureCode: PiRuntimeIssueCode) throws -> Data {
+      do {
+        return try Self.readRegularFile(
+          url,
+          maximumBytes: configuration.maximumRuntimeFileBytes
+        )
+      } catch {
+        throw PiRuntimeResolutionError(
+          code: failureCode,
+          detail: "runtime file is missing, redirected, or oversized"
+        )
+      }
     }
-  }
 
-  private func uniqueCanonicalCandidates(_ candidates: [URL]) -> [URL] {
-    var seen: Set<String> = []
-    return candidates.filter { candidate in
-      guard candidate.isFileURL, candidate.path.hasPrefix("/") else { return false }
-      let key = candidate.standardizedFileURL.path
-      return seen.insert(key).inserted
+    private func uniqueCanonicalCandidates(_ candidates: [URL]) -> [URL] {
+      var seen: Set<String> = []
+      return candidates.filter { candidate in
+        guard candidate.isFileURL, candidate.path.hasPrefix("/") else { return false }
+        let key = candidate.standardizedFileURL.path
+        return seen.insert(key).inserted
+      }
     }
-  }
+
+  #endif
 
   private static func readRegularFile(
     _ url: URL,
@@ -907,434 +1115,438 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
     return !writable || (allowStickyWrite && value.st_mode & S_ISVTX != 0)
   }
 
-  static func materializePrivateSnapshot(
-    of runtime: PiResolvedRuntime,
-    in parentDirectory: URL
-  ) throws -> PiResolvedRuntime {
-    do {
-      return try materializePrivateSnapshotUnchecked(
-        of: runtime,
-        in: parentDirectory
-      )
-    } catch let error as PiRuntimeResolutionError {
-      throw error
-    } catch {
-      throw PiRuntimeResolutionError(
-        code: .unattestedPiBuild,
-        detail: "private runtime snapshot could not be materialized"
-      )
-    }
-  }
-
-  private static func materializePrivateSnapshotUnchecked(
-    of runtime: PiResolvedRuntime,
-    in parentDirectory: URL
-  ) throws -> PiResolvedRuntime {
-    guard parentDirectory.isFileURL,
-      let canonicalParentPath = canonicalExistingPath(parentDirectory.path),
-      safeRuntimeDirectory(canonicalParentPath, requireSafeAncestors: true),
-      let packageTreeSHA256 = runtime.piRuntimeSHA256["package-tree-v1"]
-    else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    let parent = URL(fileURLWithPath: canonicalParentPath, isDirectory: true)
-    let snapshotIdentity = sha256(
-      Data(
-        ([runtime.nodeSHA256, packageTreeSHA256, runtime.piCLIRelativePath]
-          + runtime.nodeDynamicLibrarySHA256.values.sorted()
-          + runtime.nodeDynamicLibraryLoadPaths.map { "\($0.key)=\($0.value)" }.sorted())
-          .joined(separator: "\u{0}").utf8
-      )
-    )
-    let destination = parent.appendingPathComponent(
-      "runtime-snapshot-\(snapshotIdentity.prefix(24))",
-      isDirectory: true
-    )
-    let expectedMarker = try privateSnapshotMarker(
-      runtime: runtime,
-      packageTreeSHA256: packageTreeSHA256
-    )
-    if FileManager.default.fileExists(atPath: destination.path) {
+  #if DEBUG
+    static func materializePrivateSnapshot(
+      of runtime: PiResolvedRuntime,
+      in parentDirectory: URL
+    ) throws -> PiResolvedRuntime {
       do {
-        return try verifyPrivateSnapshot(
-          at: destination,
-          source: runtime,
-          expectedMarker: expectedMarker,
-          packageTreeSHA256: packageTreeSHA256
+        return try materializePrivateSnapshotUnchecked(
+          of: runtime,
+          in: parentDirectory
         )
+      } catch let error as PiRuntimeResolutionError {
+        throw error
       } catch {
-        try FileManager.default.removeItem(at: destination)
+        throw PiRuntimeResolutionError(
+          code: .unattestedPiBuild,
+          detail: "private runtime snapshot could not be materialized"
+        )
       }
     }
 
-    let staging = parent.appendingPathComponent(
-      ".runtime-snapshot-\(UUID().uuidString.lowercased())",
-      isDirectory: true
-    )
-    try FileManager.default.createDirectory(
-      at: staging,
-      withIntermediateDirectories: false,
-      attributes: [.posixPermissions: 0o700]
-    )
-    var keepStaging = true
-    defer {
-      if keepStaging {
-        try? FileManager.default.removeItem(at: staging)
-      }
-    }
-
-    let nodeDestination = staging.appendingPathComponent("node")
-    try copyRuntimeFile(
-      from: runtime.nodeURL,
-      to: nodeDestination,
-      maximumBytes: 512 * 1_048_576
-    )
-    let libraryDirectory = staging.appendingPathComponent("lib", isDirectory: true)
-    try FileManager.default.createDirectory(
-      at: libraryDirectory,
-      withIntermediateDirectories: false,
-      attributes: [.posixPermissions: 0o700]
-    )
-    var libraryNames = Set<String>()
-    for sourcePath in runtime.nodeDynamicLibrarySHA256.keys.sorted() {
-      let name = URL(fileURLWithPath: sourcePath).lastPathComponent
-      guard !name.isEmpty, libraryNames.insert(name).inserted else {
+    private static func materializePrivateSnapshotUnchecked(
+      of runtime: PiResolvedRuntime,
+      in parentDirectory: URL
+    ) throws -> PiResolvedRuntime {
+      guard parentDirectory.isFileURL,
+        let canonicalParentPath = canonicalExistingPath(parentDirectory.path),
+        safeRuntimeDirectory(canonicalParentPath, requireSafeAncestors: true),
+        let packageTreeSHA256 = runtime.piRuntimeSHA256["package-tree-v1"]
+      else {
         throw CocoaError(.fileReadCorruptFile)
       }
+      let parent = URL(fileURLWithPath: canonicalParentPath, isDirectory: true)
+      let snapshotIdentity = sha256(
+        Data(
+          ([runtime.nodeSHA256, packageTreeSHA256, runtime.piCLIRelativePath]
+            + runtime.nodeDynamicLibrarySHA256.values.sorted()
+            + runtime.nodeDynamicLibraryLoadPaths.map { "\($0.key)=\($0.value)" }.sorted())
+            .joined(separator: "\u{0}").utf8
+        )
+      )
+      let destination = parent.appendingPathComponent(
+        "runtime-snapshot-\(snapshotIdentity.prefix(24))",
+        isDirectory: true
+      )
+      let expectedMarker = try privateSnapshotMarker(
+        runtime: runtime,
+        packageTreeSHA256: packageTreeSHA256
+      )
+      if FileManager.default.fileExists(atPath: destination.path) {
+        do {
+          return try verifyPrivateSnapshot(
+            at: destination,
+            source: runtime,
+            expectedMarker: expectedMarker,
+            packageTreeSHA256: packageTreeSHA256
+          )
+        } catch {
+          try FileManager.default.removeItem(at: destination)
+        }
+      }
+
+      let staging = parent.appendingPathComponent(
+        ".runtime-snapshot-\(UUID().uuidString.lowercased())",
+        isDirectory: true
+      )
+      try FileManager.default.createDirectory(
+        at: staging,
+        withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
+      )
+      var keepStaging = true
+      defer {
+        if keepStaging {
+          try? FileManager.default.removeItem(at: staging)
+        }
+      }
+
+      let nodeDestination = staging.appendingPathComponent("node")
       try copyRuntimeFile(
-        from: URL(fileURLWithPath: sourcePath),
-        to: libraryDirectory.appendingPathComponent(name),
+        from: runtime.nodeURL,
+        to: nodeDestination,
         maximumBytes: 512 * 1_048_576
       )
-    }
-    for (alias, target) in try privateSnapshotLibraryAliases(runtime: runtime) {
-      guard !libraryNames.contains(alias) else { throw CocoaError(.fileReadCorruptFile) }
-      try FileManager.default.createSymbolicLink(
-        atPath: libraryDirectory.appendingPathComponent(alias).path,
-        withDestinationPath: target
-      )
-    }
-    let packageDestination = staging.appendingPathComponent("pi", isDirectory: true)
-    try copyRuntimePackage(
-      from: runtime.piPackageRootURL,
-      to: packageDestination
-    )
-    try writePrivateSnapshotFile(
-      expectedMarker,
-      to: staging.appendingPathComponent("snapshot.json"),
-      permissions: 0o400
-    )
-    guard rename(staging.path, destination.path) == 0 else {
-      throw CocoaError(.fileWriteFileExists)
-    }
-    keepStaging = false
-    return try verifyPrivateSnapshot(
-      at: destination,
-      source: runtime,
-      expectedMarker: expectedMarker,
-      packageTreeSHA256: packageTreeSHA256
-    )
-  }
-
-  private static func privateSnapshotMarker(
-    runtime: PiResolvedRuntime,
-    packageTreeSHA256: String
-  ) throws -> Data {
-    var libraries: [String: String] = [:]
-    for (path, digest) in runtime.nodeDynamicLibrarySHA256 {
-      let name = URL(fileURLWithPath: path).lastPathComponent
-      guard !name.isEmpty, libraries[name] == nil else {
-        throw CocoaError(.fileReadCorruptFile)
-      }
-      libraries[name] = digest
-    }
-    return try JSONSerialization.data(
-      withJSONObject: [
-        "schemaVersion": 1,
-        "nodeVersion": runtime.nodeVersion.description,
-        "nodeSHA256": runtime.nodeSHA256,
-        "piVersion": runtime.piVersion.description,
-        "piCLIRelativePath": runtime.piCLIRelativePath,
-        "piPackageTreeSHA256": packageTreeSHA256,
-        "dynamicLibraries": libraries,
-        "dynamicLibraryAliases": try privateSnapshotLibraryAliases(runtime: runtime),
-      ],
-      options: [.sortedKeys]
-    )
-  }
-
-  private static func privateSnapshotLibraryAliases(
-    runtime: PiResolvedRuntime
-  ) throws -> [String: String] {
-    let canonicalNames = Set(
-      runtime.nodeDynamicLibrarySHA256.keys.map {
-        URL(fileURLWithPath: $0).lastPathComponent
-      }
-    )
-    var aliases: [String: String] = [:]
-    for (loadPath, canonicalPath) in runtime.nodeDynamicLibraryLoadPaths {
-      guard runtime.nodeDynamicLibrarySHA256[canonicalPath] != nil else {
-        throw CocoaError(.fileReadCorruptFile)
-      }
-      let alias = (loadPath as NSString).lastPathComponent
-      let target = URL(fileURLWithPath: canonicalPath).lastPathComponent
-      guard !alias.isEmpty, !target.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
-      if alias == target { continue }
-      guard !canonicalNames.contains(alias), aliases[alias] == nil else {
-        throw CocoaError(.fileReadCorruptFile)
-      }
-      aliases[alias] = target
-    }
-    return aliases
-  }
-
-  private static func copyRuntimePackage(
-    from source: URL,
-    to destination: URL
-  ) throws {
-    guard let canonicalSourcePath = canonicalExistingPath(source.path) else {
-      throw CocoaError(.fileReadNoSuchFile)
-    }
-    let canonicalSource = URL(fileURLWithPath: canonicalSourcePath, isDirectory: true)
-    let entries = try collectPackageEntries(canonicalSource)
-    try FileManager.default.createDirectory(
-      at: destination,
-      withIntermediateDirectories: false,
-      attributes: [.posixPermissions: 0o700]
-    )
-    for entry in entries where entry.kind == .directory {
-      let target = destination.appendingPathComponent(entry.relativePath, isDirectory: true)
+      let libraryDirectory = staging.appendingPathComponent("lib", isDirectory: true)
       try FileManager.default.createDirectory(
-        at: target,
+        at: libraryDirectory,
         withIntermediateDirectories: false,
-        attributes: [.posixPermissions: NSNumber(value: entry.permissions)]
+        attributes: [.posixPermissions: 0o700]
       )
-      guard chmod(target.path, mode_t(entry.permissions)) == 0 else {
-        throw CocoaError(.fileWriteUnknown)
-      }
-    }
-    for entry in entries where entry.kind != .directory {
-      let sourceURL = canonicalSource.appendingPathComponent(entry.relativePath)
-      let target = destination.appendingPathComponent(entry.relativePath)
-      switch entry.kind {
-      case .regularFile:
-        try copyRuntimeFile(
-          from: sourceURL,
-          to: target,
-          maximumBytes: 64 * 1_048_576
-        )
-      case .symbolicLink:
-        guard let linkTarget = entry.symbolicLinkTarget,
-          !linkTarget.hasPrefix("/")
-        else {
+      var libraryNames = Set<String>()
+      for sourcePath in runtime.nodeDynamicLibrarySHA256.keys.sorted() {
+        let name = URL(fileURLWithPath: sourcePath).lastPathComponent
+        guard !name.isEmpty, libraryNames.insert(name).inserted else {
           throw CocoaError(.fileReadCorruptFile)
         }
+        try copyRuntimeFile(
+          from: URL(fileURLWithPath: sourcePath),
+          to: libraryDirectory.appendingPathComponent(name),
+          maximumBytes: 512 * 1_048_576
+        )
+      }
+      for (alias, target) in try privateSnapshotLibraryAliases(runtime: runtime) {
+        guard !libraryNames.contains(alias) else { throw CocoaError(.fileReadCorruptFile) }
         try FileManager.default.createSymbolicLink(
-          atPath: target.path,
-          withDestinationPath: linkTarget
+          atPath: libraryDirectory.appendingPathComponent(alias).path,
+          withDestinationPath: target
         )
-      case .directory:
-        preconditionFailure("directories are copied first")
       }
-    }
-  }
-
-  private static func copyRuntimeFile(
-    from source: URL,
-    to destination: URL,
-    maximumBytes: Int
-  ) throws {
-    var value = stat()
-    guard let canonicalSource = canonicalExistingPath(source.path),
-      lstat(canonicalSource, &value) == 0,
-      value.st_mode & S_IFMT == S_IFREG
-    else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    let data = try readRegularFile(source, maximumBytes: maximumBytes)
-    try writePrivateSnapshotFile(
-      data,
-      to: destination,
-      permissions: Int(value.st_mode & 0o7777)
-    )
-  }
-
-  private static func writePrivateSnapshotFile(
-    _ data: Data,
-    to destination: URL,
-    permissions: Int
-  ) throws {
-    let descriptor = Darwin.open(
-      destination.path,
-      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-      mode_t(permissions)
-    )
-    guard descriptor >= 0, DarwinACLAuthority.hasNoAllowEntries(descriptor) else {
-      if descriptor >= 0 { _ = Darwin.close(descriptor) }
-      throw CocoaError(.fileWriteNoPermission)
-    }
-    var succeeded = false
-    defer {
-      _ = Darwin.close(descriptor)
-      if !succeeded {
-        _ = unlink(destination.path)
+      let packageDestination = staging.appendingPathComponent("pi", isDirectory: true)
+      try copyRuntimePackage(
+        from: runtime.piPackageRootURL,
+        to: packageDestination
+      )
+      try writePrivateSnapshotFile(
+        expectedMarker,
+        to: staging.appendingPathComponent("snapshot.json"),
+        permissions: 0o400
+      )
+      guard rename(staging.path, destination.path) == 0 else {
+        throw CocoaError(.fileWriteFileExists)
       }
+      keepStaging = false
+      return try verifyPrivateSnapshot(
+        at: destination,
+        source: runtime,
+        expectedMarker: expectedMarker,
+        packageTreeSHA256: packageTreeSHA256
+      )
     }
-    try data.withUnsafeBytes { buffer in
-      var offset = 0
-      while offset < buffer.count {
-        let count = Darwin.write(
-          descriptor,
-          buffer.baseAddress!.advanced(by: offset),
-          buffer.count - offset
+
+    private static func privateSnapshotMarker(
+      runtime: PiResolvedRuntime,
+      packageTreeSHA256: String
+    ) throws -> Data {
+      var libraries: [String: String] = [:]
+      for (path, digest) in runtime.nodeDynamicLibrarySHA256 {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        guard !name.isEmpty, libraries[name] == nil else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+        libraries[name] = digest
+      }
+      return try JSONSerialization.data(
+        withJSONObject: [
+          "schemaVersion": 1,
+          "nodeVersion": runtime.nodeVersion.description,
+          "nodeSHA256": runtime.nodeSHA256,
+          "piVersion": runtime.piVersion.description,
+          "piCLIRelativePath": runtime.piCLIRelativePath,
+          "piPackageTreeSHA256": packageTreeSHA256,
+          "dynamicLibraries": libraries,
+          "dynamicLibraryAliases": try privateSnapshotLibraryAliases(runtime: runtime),
+        ],
+        options: [.sortedKeys]
+      )
+    }
+
+    private static func privateSnapshotLibraryAliases(
+      runtime: PiResolvedRuntime
+    ) throws -> [String: String] {
+      let canonicalNames = Set(
+        runtime.nodeDynamicLibrarySHA256.keys.map {
+          URL(fileURLWithPath: $0).lastPathComponent
+        }
+      )
+      var aliases: [String: String] = [:]
+      for (loadPath, canonicalPath) in runtime.nodeDynamicLibraryLoadPaths {
+        guard runtime.nodeDynamicLibrarySHA256[canonicalPath] != nil else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+        let alias = (loadPath as NSString).lastPathComponent
+        let target = URL(fileURLWithPath: canonicalPath).lastPathComponent
+        guard !alias.isEmpty, !target.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        if alias == target { continue }
+        guard !canonicalNames.contains(alias), aliases[alias] == nil else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+        aliases[alias] = target
+      }
+      return aliases
+    }
+
+    private static func copyRuntimePackage(
+      from source: URL,
+      to destination: URL
+    ) throws {
+      guard let canonicalSourcePath = canonicalExistingPath(source.path) else {
+        throw CocoaError(.fileReadNoSuchFile)
+      }
+      let canonicalSource = URL(fileURLWithPath: canonicalSourcePath, isDirectory: true)
+      let entries = try collectPackageEntries(canonicalSource)
+      try FileManager.default.createDirectory(
+        at: destination,
+        withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
+      )
+      for entry in entries where entry.kind == .directory {
+        let target = destination.appendingPathComponent(entry.relativePath, isDirectory: true)
+        try FileManager.default.createDirectory(
+          at: target,
+          withIntermediateDirectories: false,
+          attributes: [.posixPermissions: NSNumber(value: entry.permissions)]
         )
-        if count > 0 {
-          offset += count
-        } else if count == -1, errno == EINTR {
-          continue
-        } else {
+        guard chmod(target.path, mode_t(entry.permissions)) == 0 else {
           throw CocoaError(.fileWriteUnknown)
         }
       }
-    }
-    guard fchmod(descriptor, mode_t(permissions)) == 0 else {
-      throw CocoaError(.fileWriteUnknown)
-    }
-    succeeded = true
-  }
-
-  private static func verifyPrivateSnapshot(
-    at root: URL,
-    source: PiResolvedRuntime,
-    expectedMarker: Data,
-    packageTreeSHA256: String
-  ) throws -> PiResolvedRuntime {
-    guard safeRuntimeDirectory(root.path, requireSafeAncestors: true),
-      try FileManager.default.contentsOfDirectory(atPath: root.path).sorted()
-        == ["lib", "node", "pi", "snapshot.json"]
-    else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    let marker = try readRegularFile(
-      root.appendingPathComponent("snapshot.json"),
-      maximumBytes: 64 * 1_024,
-      requireSafeAncestors: true
-    )
-    guard marker == expectedMarker else { throw CocoaError(.fileReadCorruptFile) }
-    let node = root.appendingPathComponent("node")
-    guard
-      sha256(
-        try readRegularFile(
-          node,
-          maximumBytes: 512 * 1_048_576,
-          requireSafeAncestors: true
-        )
-      ) == source.nodeSHA256
-    else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    let packageRoot = root.appendingPathComponent("pi", isDirectory: true)
-    let packageTree = try attestPackageTree(
-      packageRoot,
-      maximumFileBytes: 64 * 1_048_576,
-      requireSafeAncestors: true
-    )
-    guard packageTree.sha256 == packageTreeSHA256 else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    let libraryDirectory = root.appendingPathComponent("lib", isDirectory: true)
-    guard safeRuntimeDirectory(libraryDirectory.path, requireSafeAncestors: true) else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    var expectedLibraries: [String: String] = [:]
-    for (path, digest) in source.nodeDynamicLibrarySHA256 {
-      let name = URL(fileURLWithPath: path).lastPathComponent
-      guard !name.isEmpty, expectedLibraries[name] == nil else {
-        throw CocoaError(.fileReadCorruptFile)
+      for entry in entries where entry.kind != .directory {
+        let sourceURL = canonicalSource.appendingPathComponent(entry.relativePath)
+        let target = destination.appendingPathComponent(entry.relativePath)
+        switch entry.kind {
+        case .regularFile:
+          try copyRuntimeFile(
+            from: sourceURL,
+            to: target,
+            maximumBytes: 64 * 1_048_576
+          )
+        case .symbolicLink:
+          guard let linkTarget = entry.symbolicLinkTarget,
+            !linkTarget.hasPrefix("/")
+          else {
+            throw CocoaError(.fileReadCorruptFile)
+          }
+          try FileManager.default.createSymbolicLink(
+            atPath: target.path,
+            withDestinationPath: linkTarget
+          )
+        case .directory:
+          preconditionFailure("directories are copied first")
+        }
       }
-      expectedLibraries[name] = digest
     }
-    let aliases = try privateSnapshotLibraryAliases(runtime: source)
-    guard
-      try FileManager.default.contentsOfDirectory(atPath: libraryDirectory.path).sorted()
-        == (Array(expectedLibraries.keys) + Array(aliases.keys)).sorted()
-    else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    for (alias, target) in aliases {
-      let aliasURL = libraryDirectory.appendingPathComponent(alias)
-      var status = stat()
-      guard lstat(aliasURL.path, &status) == 0,
-        status.st_mode & S_IFMT == S_IFLNK,
-        status.st_uid == 0 || status.st_uid == geteuid(),
-        status.st_nlink == 1,
-        try FileManager.default.destinationOfSymbolicLink(atPath: aliasURL.path) == target,
-        let resolvedTarget = canonicalExistingPath(aliasURL.path),
-        safeRuntimeNode(resolvedTarget, requireSafeAncestors: true)
+
+    private static func copyRuntimeFile(
+      from source: URL,
+      to destination: URL,
+      maximumBytes: Int
+    ) throws {
+      var value = stat()
+      guard let canonicalSource = canonicalExistingPath(source.path),
+        lstat(canonicalSource, &value) == 0,
+        value.st_mode & S_IFMT == S_IFREG
       else {
         throw CocoaError(.fileReadCorruptFile)
       }
+      let data = try readRegularFile(source, maximumBytes: maximumBytes)
+      try writePrivateSnapshotFile(
+        data,
+        to: destination,
+        permissions: Int(value.st_mode & 0o7777)
+      )
     }
-    var snapshotLibraries: [String: String] = [:]
-    for (name, digest) in expectedLibraries {
-      let library = libraryDirectory.appendingPathComponent(name)
+
+    private static func writePrivateSnapshotFile(
+      _ data: Data,
+      to destination: URL,
+      permissions: Int
+    ) throws {
+      let descriptor = Darwin.open(
+        destination.path,
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+        mode_t(permissions)
+      )
+      guard descriptor >= 0, DarwinACLAuthority.hasNoAllowEntries(descriptor) else {
+        if descriptor >= 0 { _ = Darwin.close(descriptor) }
+        throw CocoaError(.fileWriteNoPermission)
+      }
+      var succeeded = false
+      defer {
+        _ = Darwin.close(descriptor)
+        if !succeeded {
+          _ = unlink(destination.path)
+        }
+      }
+      try data.withUnsafeBytes { buffer in
+        var offset = 0
+        while offset < buffer.count {
+          let count = Darwin.write(
+            descriptor,
+            buffer.baseAddress!.advanced(by: offset),
+            buffer.count - offset
+          )
+          if count > 0 {
+            offset += count
+          } else if count == -1, errno == EINTR {
+            continue
+          } else {
+            throw CocoaError(.fileWriteUnknown)
+          }
+        }
+      }
+      guard fchmod(descriptor, mode_t(permissions)) == 0 else {
+        throw CocoaError(.fileWriteUnknown)
+      }
+      succeeded = true
+    }
+
+    private static func verifyPrivateSnapshot(
+      at root: URL,
+      source: PiResolvedRuntime,
+      expectedMarker: Data,
+      packageTreeSHA256: String
+    ) throws -> PiResolvedRuntime {
+      guard safeRuntimeDirectory(root.path, requireSafeAncestors: true),
+        try FileManager.default.contentsOfDirectory(atPath: root.path).sorted()
+          == ["lib", "node", "pi", "snapshot.json"]
+      else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      let marker = try readRegularFile(
+        root.appendingPathComponent("snapshot.json"),
+        maximumBytes: 64 * 1_024,
+        requireSafeAncestors: true
+      )
+      guard marker == expectedMarker else { throw CocoaError(.fileReadCorruptFile) }
+      let node = root.appendingPathComponent("node")
       guard
         sha256(
           try readRegularFile(
-            library,
+            node,
             maximumBytes: 512 * 1_048_576,
             requireSafeAncestors: true
           )
-        ) == digest
+        ) == source.nodeSHA256
       else {
         throw CocoaError(.fileReadCorruptFile)
       }
-      snapshotLibraries[library.path] = digest
-    }
-    guard source.piCLIRelativePath == "dist/cli.js",
-      let cliSHA256 = source.piRuntimeSHA256[source.piCLIRelativePath]
-    else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    let cli = packageRoot.appendingPathComponent(source.piCLIRelativePath)
-    guard
-      sha256(
-        try readRegularFile(
-          cli,
-          maximumBytes: 64 * 1_048_576,
-          requireSafeAncestors: true
-        )
-      ) == cliSHA256
-    else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    var snapshotLoadPaths: [String: String] = [:]
-    for (loadPath, sourcePath) in source.nodeDynamicLibraryLoadPaths {
-      let library = libraryDirectory.appendingPathComponent(
-        URL(fileURLWithPath: sourcePath).lastPathComponent
+      let packageRoot = root.appendingPathComponent("pi", isDirectory: true)
+      let packageTree = try attestPackageTree(
+        packageRoot,
+        maximumFileBytes: 64 * 1_048_576,
+        requireSafeAncestors: true
       )
-      guard snapshotLibraries[library.path] != nil else {
+      guard packageTree.sha256 == packageTreeSHA256 else {
         throw CocoaError(.fileReadCorruptFile)
       }
-      snapshotLoadPaths[loadPath] = library.path
+      let libraryDirectory = root.appendingPathComponent("lib", isDirectory: true)
+      guard safeRuntimeDirectory(libraryDirectory.path, requireSafeAncestors: true) else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      var expectedLibraries: [String: String] = [:]
+      for (path, digest) in source.nodeDynamicLibrarySHA256 {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        guard !name.isEmpty, expectedLibraries[name] == nil else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+        expectedLibraries[name] = digest
+      }
+      let aliases = try privateSnapshotLibraryAliases(runtime: source)
+      guard
+        try FileManager.default.contentsOfDirectory(atPath: libraryDirectory.path).sorted()
+          == (Array(expectedLibraries.keys) + Array(aliases.keys)).sorted()
+      else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      for (alias, target) in aliases {
+        let aliasURL = libraryDirectory.appendingPathComponent(alias)
+        var status = stat()
+        guard lstat(aliasURL.path, &status) == 0,
+          status.st_mode & S_IFMT == S_IFLNK,
+          status.st_uid == 0 || status.st_uid == geteuid(),
+          status.st_nlink == 1,
+          try FileManager.default.destinationOfSymbolicLink(atPath: aliasURL.path) == target,
+          let resolvedTarget = canonicalExistingPath(aliasURL.path),
+          safeRuntimeNode(resolvedTarget, requireSafeAncestors: true)
+        else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+      }
+      var snapshotLibraries: [String: String] = [:]
+      for (name, digest) in expectedLibraries {
+        let library = libraryDirectory.appendingPathComponent(name)
+        guard
+          sha256(
+            try readRegularFile(
+              library,
+              maximumBytes: 512 * 1_048_576,
+              requireSafeAncestors: true
+            )
+          ) == digest
+        else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+        snapshotLibraries[library.path] = digest
+      }
+      guard source.piCLIRelativePath == "dist/cli.js",
+        let cliSHA256 = source.piRuntimeSHA256[source.piCLIRelativePath]
+      else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      let cli = packageRoot.appendingPathComponent(source.piCLIRelativePath)
+      guard
+        sha256(
+          try readRegularFile(
+            cli,
+            maximumBytes: 64 * 1_048_576,
+            requireSafeAncestors: true
+          )
+        ) == cliSHA256
+      else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      var snapshotLoadPaths: [String: String] = [:]
+      for (loadPath, sourcePath) in source.nodeDynamicLibraryLoadPaths {
+        let library = libraryDirectory.appendingPathComponent(
+          URL(fileURLWithPath: sourcePath).lastPathComponent
+        )
+        guard snapshotLibraries[library.path] != nil else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+        snapshotLoadPaths[loadPath] = library.path
+      }
+      return PiResolvedRuntime(
+        nodeURL: node,
+        nodeVersion: source.nodeVersion,
+        nodeSHA256: source.nodeSHA256,
+        nodeDynamicLibrarySHA256: snapshotLibraries,
+        nodeDynamicLibraryLoadPaths: snapshotLoadPaths,
+        nodeDynamicLibraryDirectoryURL: libraryDirectory,
+        piCLIURL: cli,
+        piCLIRelativePath: source.piCLIRelativePath,
+        piPackageRootURL: packageRoot,
+        piVersion: source.piVersion,
+        piRuntimeSHA256: source.piRuntimeSHA256,
+        compatibility: source.compatibility,
+        provenance: .legacyPrivateSnapshot
+      )
     }
-    return PiResolvedRuntime(
-      nodeURL: node,
-      nodeVersion: source.nodeVersion,
-      nodeSHA256: source.nodeSHA256,
-      nodeDynamicLibrarySHA256: snapshotLibraries,
-      nodeDynamicLibraryLoadPaths: snapshotLoadPaths,
-      nodeDynamicLibraryDirectoryURL: libraryDirectory,
-      piCLIURL: cli,
-      piCLIRelativePath: source.piCLIRelativePath,
-      piPackageRootURL: packageRoot,
-      piVersion: source.piVersion,
-      piRuntimeSHA256: source.piRuntimeSHA256,
-      compatibility: source.compatibility
-    )
-  }
 
-  public static func attestPackageTree(
+  #endif
+
+  static func attestPackageTree(
     _ packageRoot: URL,
     maximumFileBytes: Int = 16 * 1_048_576,
     requireSafeAncestors: Bool = false
@@ -1519,184 +1731,198 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
     return String(cString: pointer)
   }
 
-  private static func parsePiPolicy(_ data: Data) throws -> PiPolicy {
-    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      Set(object.keys)
-        == Set(["builds", "maximumVersionExclusive", "minimumVersion", "package", "schemaVersion"]),
-      object["schemaVersion"] as? Int == 2,
-      object["package"] as? String == expectedPackageName,
-      let minimumString = object["minimumVersion"] as? String,
-      let maximumString = object["maximumVersionExclusive"] as? String,
-      let rawBuilds = object["builds"] as? [String: Any],
-      !rawBuilds.isEmpty
-    else {
-      throw PiRuntimeResolutionError(
-        code: .malformedCompatibilityPolicy,
-        detail: "Pi compatibility policy shape is invalid"
-      )
-    }
-    let minimum = try PiSemanticVersion(minimumString)
-    let maximum = try PiSemanticVersion(maximumString)
-    guard minimum < maximum else {
-      throw PiRuntimeResolutionError(
-        code: .malformedCompatibilityPolicy,
-        detail: "Pi compatibility range is empty"
-      )
-    }
-    var builds: [String: PiBuild] = [:]
-    for (versionString, rawBuild) in rawBuilds {
-      let version = try PiSemanticVersion(versionString)
-      guard version >= minimum, version < maximum,
-        let buildObject = rawBuild as? [String: Any],
-        Set(buildObject.keys) == Set(["criticalFiles", "packageTree"]),
-        let criticalFiles = buildObject["criticalFiles"] as? [String: String],
-        Set(criticalFiles.keys) == expectedPiRuntimePaths,
-        criticalFiles.values.allSatisfy(GitHubInputValidation.validSHA256),
-        let treeObject = buildObject["packageTree"] as? [String: Any],
-        Set(treeObject.keys) == Set(["entryCount", "sha256"]),
-        let entryCount = treeObject["entryCount"] as? Int,
-        (1...100_000).contains(entryCount),
-        let treeDigest = treeObject["sha256"] as? String,
-        GitHubInputValidation.validSHA256(treeDigest)
+  #if DEBUG
+    private static func parsePiPolicy(_ data: Data) throws -> PiPolicy {
+      guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        Set(object.keys)
+          == Set([
+            "builds", "maximumVersionExclusive", "minimumVersion", "package", "schemaVersion",
+          ]),
+        object["schemaVersion"] as? Int == 2,
+        object["package"] as? String == expectedPackageName,
+        let minimumString = object["minimumVersion"] as? String,
+        let maximumString = object["maximumVersionExclusive"] as? String,
+        let rawBuilds = object["builds"] as? [String: Any],
+        !rawBuilds.isEmpty
       else {
         throw PiRuntimeResolutionError(
           code: .malformedCompatibilityPolicy,
-          detail: "Pi build policy is invalid"
+          detail: "Pi compatibility policy shape is invalid"
         )
       }
-      builds[versionString] = PiBuild(
-        criticalFiles: criticalFiles,
-        packageTree: PiRuntimeTreeAttestation(entryCount: entryCount, sha256: treeDigest)
-      )
-    }
-    return PiPolicy(minimum: minimum, maximum: maximum, builds: builds)
-  }
-
-  private static func parseNodePolicy(_ data: Data) throws -> NodePolicy {
-    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      Set(object.keys) == Set(["builds", "runtime", "schemaVersion"]),
-      object["schemaVersion"] as? Int == 2,
-      object["runtime"] as? String == "node",
-      let rawBuilds = object["builds"] as? [String: Any],
-      !rawBuilds.isEmpty
-    else {
-      throw PiRuntimeResolutionError(
-        code: .malformedCompatibilityPolicy,
-        detail: "Node compatibility policy shape is invalid"
-      )
-    }
-    var builds: [String: NodeBuild] = [:]
-    var executableDigests: Set<String> = []
-    for (versionString, rawBuild) in rawBuilds {
-      guard (try? PiSemanticVersion(versionString)) != nil,
-        let buildObject = rawBuild as? [String: Any],
-        Set(buildObject.keys) == Set(["dynamicLibraries", "executable"]),
-        let executableObject = buildObject["executable"] as? [String: Any],
-        Set(executableObject.keys) == Set(["canonicalPath", "sha256"]),
-        let executablePath = executableObject["canonicalPath"] as? String,
-        validAbsolutePolicyPath(executablePath),
-        let executableDigest = executableObject["sha256"] as? String,
-        GitHubInputValidation.validSHA256(executableDigest),
-        executableDigests.insert(executableDigest).inserted,
-        let rawLibraries = buildObject["dynamicLibraries"] as? [[String: Any]],
-        rawLibraries.count <= 128
-      else {
+      let minimum = try PiSemanticVersion(minimumString)
+      let maximum = try PiSemanticVersion(maximumString)
+      guard minimum < maximum else {
         throw PiRuntimeResolutionError(
           code: .malformedCompatibilityPolicy,
-          detail: "Node build policy is invalid"
+          detail: "Pi compatibility range is empty"
         )
       }
-      var libraries: [NodeDynamicLibrary] = []
-      for rawLibrary in rawLibraries {
-        guard Set(rawLibrary.keys) == Set(["canonicalPath", "loadPath", "sha256"]),
-          let loadPath = rawLibrary["loadPath"] as? String,
-          validNodeLoadPath(loadPath),
-          let canonicalPath = rawLibrary["canonicalPath"] as? String,
-          validAbsolutePolicyPath(canonicalPath),
-          let digest = rawLibrary["sha256"] as? String,
-          GitHubInputValidation.validSHA256(digest)
+      var builds: [String: PiBuild] = [:]
+      for (versionString, rawBuild) in rawBuilds {
+        let version = try PiSemanticVersion(versionString)
+        guard version >= minimum, version < maximum,
+          let buildObject = rawBuild as? [String: Any],
+          Set(buildObject.keys) == Set(["criticalFiles", "packageTree"]),
+          let criticalFiles = buildObject["criticalFiles"] as? [String: String],
+          Set(criticalFiles.keys) == expectedPiRuntimePaths,
+          criticalFiles.values.allSatisfy(GitHubInputValidation.validSHA256),
+          let treeObject = buildObject["packageTree"] as? [String: Any],
+          Set(treeObject.keys) == Set(["entryCount", "sha256"]),
+          let entryCount = treeObject["entryCount"] as? Int,
+          (1...100_000).contains(entryCount),
+          let treeDigest = treeObject["sha256"] as? String,
+          GitHubInputValidation.validSHA256(treeDigest)
         else {
           throw PiRuntimeResolutionError(
             code: .malformedCompatibilityPolicy,
-            detail: "Node dynamic-library policy is invalid"
+            detail: "Pi build policy is invalid"
           )
         }
-        libraries.append(
-          NodeDynamicLibrary(
-            loadPath: loadPath,
-            canonicalPath: canonicalPath,
-            sha256: digest
-          ))
+        builds[versionString] = PiBuild(
+          criticalFiles: criticalFiles,
+          packageTree: PiRuntimeTreeAttestation(entryCount: entryCount, sha256: treeDigest)
+        )
       }
-      guard libraries.map(\.loadPath) == libraries.map(\.loadPath).sorted(),
-        Set(libraries.map(\.loadPath)).count == libraries.count,
-        Set(libraries.map(\.canonicalPath)).count == libraries.count
+      return PiPolicy(minimum: minimum, maximum: maximum, builds: builds)
+    }
+
+    private static func parseNodePolicy(_ data: Data) throws -> NodePolicy {
+      guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        Set(object.keys) == Set(["builds", "runtime", "schemaVersion"]),
+        object["schemaVersion"] as? Int == 2,
+        object["runtime"] as? String == "node",
+        let rawBuilds = object["builds"] as? [String: Any],
+        !rawBuilds.isEmpty
       else {
         throw PiRuntimeResolutionError(
           code: .malformedCompatibilityPolicy,
-          detail: "Node dynamic-library inventory is ambiguous"
+          detail: "Node compatibility policy shape is invalid"
         )
       }
-      builds[versionString] = NodeBuild(
-        executable: NodeExecutable(canonicalPath: executablePath, sha256: executableDigest),
-        dynamicLibraries: libraries
-      )
+      var builds: [String: NodeBuild] = [:]
+      var buildIdentities: Set<String> = []
+      for (versionString, rawBuild) in rawBuilds {
+        guard (try? PiSemanticVersion(versionString)) != nil,
+          let buildObject = rawBuild as? [String: Any],
+          Set(buildObject.keys) == Set(["dynamicLibraries", "executable"]),
+          let executableObject = buildObject["executable"] as? [String: Any],
+          Set(executableObject.keys) == Set(["canonicalPath", "sha256"]),
+          let executablePath = executableObject["canonicalPath"] as? String,
+          validAbsolutePolicyPath(executablePath),
+          let executableDigest = executableObject["sha256"] as? String,
+          GitHubInputValidation.validSHA256(executableDigest),
+          let rawLibraries = buildObject["dynamicLibraries"] as? [[String: Any]],
+          rawLibraries.count <= 128
+        else {
+          throw PiRuntimeResolutionError(
+            code: .malformedCompatibilityPolicy,
+            detail: "Node build policy is invalid"
+          )
+        }
+        var libraries: [NodeDynamicLibrary] = []
+        for rawLibrary in rawLibraries {
+          guard Set(rawLibrary.keys) == Set(["canonicalPath", "loadPath", "sha256"]),
+            let loadPath = rawLibrary["loadPath"] as? String,
+            validNodeLoadPath(loadPath),
+            let canonicalPath = rawLibrary["canonicalPath"] as? String,
+            validAbsolutePolicyPath(canonicalPath),
+            let digest = rawLibrary["sha256"] as? String,
+            GitHubInputValidation.validSHA256(digest)
+          else {
+            throw PiRuntimeResolutionError(
+              code: .malformedCompatibilityPolicy,
+              detail: "Node dynamic-library policy is invalid"
+            )
+          }
+          libraries.append(
+            NodeDynamicLibrary(
+              loadPath: loadPath,
+              canonicalPath: canonicalPath,
+              sha256: digest
+            ))
+        }
+        guard libraries.map(\.loadPath) == libraries.map(\.loadPath).sorted(),
+          Set(libraries.map(\.loadPath)).count == libraries.count,
+          Set(libraries.map(\.canonicalPath)).count == libraries.count
+        else {
+          throw PiRuntimeResolutionError(
+            code: .malformedCompatibilityPolicy,
+            detail: "Node dynamic-library inventory is ambiguous"
+          )
+        }
+        let identity =
+          ([executablePath, executableDigest]
+          + libraries.flatMap { [$0.loadPath, $0.canonicalPath, $0.sha256] })
+          .joined(separator: "\u{0}")
+        guard buildIdentities.insert(identity).inserted else {
+          throw PiRuntimeResolutionError(
+            code: .malformedCompatibilityPolicy,
+            detail: "Node build policy is ambiguous"
+          )
+        }
+        builds[versionString] = NodeBuild(
+          executable: NodeExecutable(canonicalPath: executablePath, sha256: executableDigest),
+          dynamicLibraries: libraries
+        )
+      }
+      return NodePolicy(builds: builds)
     }
-    return NodePolicy(builds: builds)
-  }
 
-  private static func validAbsolutePolicyPath(_ value: String) -> Bool {
-    guard value.hasPrefix("/"), !value.contains("\u{0}") else { return false }
-    return URL(fileURLWithPath: value).standardizedFileURL.path == value
-  }
-
-  private static func validNodeLoadPath(_ value: String) -> Bool {
-    for prefix in ["@rpath/", "@loader_path/"] where value.hasPrefix(prefix) {
-      let name = value.dropFirst(prefix.count)
-      return !name.isEmpty && !name.contains("/") && !name.contains("\u{0}")
+    private static func validAbsolutePolicyPath(_ value: String) -> Bool {
+      guard value.hasPrefix("/"), !value.contains("\u{0}") else { return false }
+      return URL(fileURLWithPath: value).standardizedFileURL.path == value
     }
-    return validAbsolutePolicyPath(value)
-  }
 
-  private static func parseShebang(_ data: Data) throws -> PiShebang {
-    guard let newline = data.firstIndex(of: 0x0A), newline <= 255,
-      let firstLine = String(data: data[..<newline], encoding: .utf8)
-    else {
+    private static func validNodeLoadPath(_ value: String) -> Bool {
+      for prefix in ["@rpath/", "@loader_path/"] where value.hasPrefix(prefix) {
+        let name = value.dropFirst(prefix.count)
+        return !name.isEmpty && !name.contains("/") && !name.contains("\u{0}")
+      }
+      return validAbsolutePolicyPath(value)
+    }
+
+    private static func parseShebang(_ data: Data) throws -> PiShebang {
+      guard let newline = data.firstIndex(of: 0x0A), newline <= 255,
+        let firstLine = String(data: data[..<newline], encoding: .utf8)
+      else {
+        throw PiRuntimeResolutionError(
+          code: .invalidPiShebang,
+          detail: "Pi CLI shebang is absent"
+        )
+      }
+      if firstLine == "#!/usr/bin/env node" { return .environmentNode }
+      if firstLine.hasPrefix("#!/"), !firstLine.contains(" "), !firstLine.contains("\t") {
+        return .absolute(String(firstLine.dropFirst(2)))
+      }
       throw PiRuntimeResolutionError(
         code: .invalidPiShebang,
-        detail: "Pi CLI shebang is absent"
+        detail: "Pi CLI shebang is unsupported"
       )
     }
-    if firstLine == "#!/usr/bin/env node" { return .environmentNode }
-    if firstLine.hasPrefix("#!/"), !firstLine.contains(" "), !firstLine.contains("\t") {
-      return .absolute(String(firstLine.dropFirst(2)))
-    }
-    throw PiRuntimeResolutionError(
-      code: .invalidPiShebang,
-      detail: "Pi CLI shebang is unsupported"
-    )
-  }
 
-  private static func preferredFailure(
-    _ failures: [PiRuntimeResolutionError]
-  ) -> PiRuntimeResolutionError? {
-    let priority: [PiRuntimeIssueCode] = [
-      .unattestedPiBuild,
-      .unsupportedPiVersion,
-      .invalidPiShebang,
-      .invalidPiPackage,
-    ]
-    for code in priority {
-      if let failure = failures.first(where: { $0.code == code }) { return failure }
+    private static func preferredFailure(
+      _ failures: [PiRuntimeResolutionError]
+    ) -> PiRuntimeResolutionError? {
+      let priority: [PiRuntimeIssueCode] = [
+        .unattestedPiBuild,
+        .unsupportedPiVersion,
+        .invalidPiShebang,
+        .invalidPiPackage,
+      ]
+      for code in priority {
+        if let failure = failures.first(where: { $0.code == code }) { return failure }
+      }
+      return failures.first
     }
-    return failures.first
-  }
+
+  #endif
 
   private static func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }
 
-  public static func actionableIssue(
+  static func actionableIssue(
     for error: PiRuntimeResolutionError
   ) -> PiRuntimePreflightIssue {
     switch error.code {
@@ -1742,60 +1968,88 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
         summary: "Jidoka Code's packaged runtime policy is invalid.",
         recovery: "Reinstall or update Jidoka Code before enabling Pi jobs."
       )
+    case .releaseRuntimeMissing:
+      return PiRuntimePreflightIssue(
+        code: error.code,
+        summary: "This Jidoka Code release is missing its owned Pi runtime.",
+        recovery: "Reinstall this Jidoka Code release before enabling Pi jobs."
+      )
+    case .malformedReleaseManifest, .releaseManifestDrift:
+      return PiRuntimePreflightIssue(
+        code: error.code,
+        summary: "This release's Pi runtime manifest is invalid or has changed.",
+        recovery: "Reinstall this exact Jidoka Code release."
+      )
+    case .unsafeReleaseRuntime, .releaseRuntimeDrift:
+      return PiRuntimePreflightIssue(
+        code: error.code,
+        summary: "This release's Pi runtime files failed closed validation.",
+        recovery: "Reinstall this exact Jidoka Code release."
+      )
+    case .releaseSignatureInvalid:
+      return PiRuntimePreflightIssue(
+        code: error.code,
+        summary: "This release's application or Node signature is invalid.",
+        recovery: "Reinstall a correctly signed Jidoka Code release."
+      )
     }
   }
 
-  private struct PiPolicy {
-    let minimum: PiSemanticVersion
-    let maximum: PiSemanticVersion
-    let builds: [String: PiBuild]
-  }
+  #if DEBUG
+    private struct PiPolicy {
+      let minimum: PiSemanticVersion
+      let maximum: PiSemanticVersion
+      let builds: [String: PiBuild]
+    }
 
-  private struct PiBuild {
-    let criticalFiles: [String: String]
-    let packageTree: PiRuntimeTreeAttestation
-  }
+    private struct PiBuild {
+      let criticalFiles: [String: String]
+      let packageTree: PiRuntimeTreeAttestation
+    }
 
-  private struct NodePolicy {
-    let builds: [String: NodeBuild]
-  }
+    private struct NodePolicy {
+      let builds: [String: NodeBuild]
+    }
 
-  private struct NodeBuild {
-    let executable: NodeExecutable
-    let dynamicLibraries: [NodeDynamicLibrary]
-  }
+    private struct NodeBuild {
+      let executable: NodeExecutable
+      let dynamicLibraries: [NodeDynamicLibrary]
+    }
 
-  private struct NodeExecutable {
-    let canonicalPath: String
-    let sha256: String
-  }
+    private struct NodeExecutable {
+      let canonicalPath: String
+      let sha256: String
+    }
 
-  private struct NodeDynamicLibrary {
-    let loadPath: String
-    let canonicalPath: String
-    let sha256: String
-  }
+    private struct NodeDynamicLibrary {
+      let loadPath: String
+      let canonicalPath: String
+      let sha256: String
+    }
+  #endif
 
   private struct MachOMetadata {
     let dependencies: [String]
     let rpaths: [String]
   }
 
-  private struct PiResolution {
-    let cliURL: URL
-    let packageRoot: URL
-    let version: PiSemanticVersion
-    let digests: [String: String]
-    let shebang: PiShebang
-  }
+  #if DEBUG
+    private struct PiResolution {
+      let cliURL: URL
+      let packageRoot: URL
+      let version: PiSemanticVersion
+      let digests: [String: String]
+      let shebang: PiShebang
+    }
 
-  private struct NodeResolution {
-    let url: URL
-    let version: PiSemanticVersion
-    let digest: String
-    let dynamicLibraryDigests: [String: String]
-    let dynamicLibraryLoadPaths: [String: String]
-  }
+    private struct NodeResolution {
+      let url: URL
+      let version: PiSemanticVersion
+      let digest: String
+      let dynamicLibraryDigests: [String: String]
+      let dynamicLibraryLoadPaths: [String: String]
+    }
+  #endif
 
   private enum PackageTreeEntryKind: Equatable {
     case directory
@@ -1810,8 +2064,14 @@ public struct PiRuntimeResolver: PiRuntimeResolving, Sendable {
     let symbolicLinkTarget: String?
   }
 
-  private enum PiShebang {
-    case environmentNode
-    case absolute(String)
-  }
+  #if DEBUG
+    private enum PiShebang {
+      case environmentNode
+      case absolute(String)
+    }
+  #endif
 }
+
+#if DEBUG
+  extension PiRuntimeResolver: PiRuntimeResolving {}
+#endif

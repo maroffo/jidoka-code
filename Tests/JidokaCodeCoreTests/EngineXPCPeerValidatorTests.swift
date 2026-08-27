@@ -12,7 +12,7 @@ struct EngineXPCPeerValidatorTests {
       EngineXPCPeerValidator.expectedClientURL(
         for: URL(
           fileURLWithPath: "/Applications/Jidoka Code.app/Contents/Helpers/JidokaCodeEngineProbe")
-      ).path == "/Applications/Jidoka Code.app/Contents/MacOS/JidokaCodeApp"
+      ).path == "/Applications/Jidoka Code.app/Contents/MacOS/Jidoka Code"
     )
     #expect(
       EngineXPCPeerValidator.expectedClientURL(

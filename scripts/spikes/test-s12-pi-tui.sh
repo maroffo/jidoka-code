@@ -9,13 +9,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 readonly ROOT
-readonly NODE="/opt/homebrew/Cellar/node/26.6.0/bin/node"
-readonly PI_CLI="/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+JIDOKA_RELEASE_RUNTIME_ROOT="${JIDOKA_RELEASE_RUNTIME_ROOT:-$ROOT/build/runtime-input/qualified-runtime}"
+readonly JIDOKA_RELEASE_RUNTIME_ROOT
+export JIDOKA_RELEASE_RUNTIME_ROOT
+NODE="$("$ROOT/scripts/qualified-runtime-node.sh")"
+readonly NODE
+readonly PI_CLI="$JIDOKA_RELEASE_RUNTIME_ROOT/pi/dist/cli.js"
 readonly FIXTURE="$SCRIPT_DIR/herdr-s12-fixture.mjs"
 readonly PROVIDER_FIXTURE="$SCRIPT_DIR/pi-tui-fixture-provider.ts"
 readonly MANIFEST="$ROOT/Resources/Pi/workflow-resources.json"
 readonly TUI_MANIFEST="$ROOT/Resources/Pi/tui-resources.json"
-readonly EXPECTED_MANIFEST_SHA256="4d7be2b7ed582f2195bf19953dc74420be12c9066c2a9565b64f09afc204d566"
+readonly EXPECTED_MANIFEST_SHA256="230c9a45b9dd53443837166c6e8b60adac67d3bfeb32249de8ca5228f1e1357d"
 readonly EXPECTED_TUI_MANIFEST_SHA256="5392fec5eb544dbe0c721692440e8445604d3c05509a39b450f2bb964245f07f"
 readonly RUN_ID="run-s12-triage"
 readonly RUN_NONCE="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -53,8 +57,9 @@ json_value() {
 command -v herdr >/dev/null 2>&1 || fail "Herdr is unavailable"
 [[ "$(herdr --version | /usr/bin/awk '{print $2}')" == "0.8.0" ]] || \
     fail "Herdr 0.8.0 is required"
-[[ "$(${NODE} -p 'require("/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/package.json").version')" == "0.84.1" ]] || \
-    fail "Pi 0.84.1 is required"
+[[ "$(${NODE} -p \
+    'require(process.env.JIDOKA_RELEASE_RUNTIME_ROOT + "/pi/package.json").version')" \
+    =~ ^0\.84\.[0-9]+$ ]] || fail "an attested Pi 0.84.x build is required"
 [[ "$(/usr/bin/shasum -a 256 "$MANIFEST" | /usr/bin/awk '{print $1}')" == \
     "$EXPECTED_MANIFEST_SHA256" ]] || fail "workflow resource manifest drifted"
 [[ "$(/usr/bin/shasum -a 256 "$TUI_MANIFEST" | /usr/bin/awk '{print $1}')" == \

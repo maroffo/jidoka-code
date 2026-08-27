@@ -128,6 +128,34 @@ struct HerdrRuntimeReadinessTests {
     #expect(await neverCalled.calls == 0)
   }
 
+  @Test("readiness binds the connected peer to the attested executable")
+  func readinessPeerBinding() async throws {
+    let attestation = HerdrRuntimeAttestation(
+      version: "0.8.0",
+      protocolVersion: 19,
+      architecture: "arm64",
+      executable: URL(fileURLWithPath: "/opt/homebrew/Cellar/herdr/0.8.0/bin/herdr"),
+      executableSHA256: String(repeating: "e", count: 64),
+      apiSchemaSHA256: String(repeating: "d", count: 64),
+      policySHA256: String(repeating: "c", count: 64)
+    )
+    let handshakers = [
+      HerdrReadinessHandshakerFake(peerExecutablePath: nil),
+      HerdrReadinessHandshakerFake(peerExecutablePath: "/tmp/unattested-herdr"),
+      HerdrReadinessHandshakerFake(
+        peerExecutableSHA256: String(repeating: "f", count: 64)
+      ),
+    ]
+    for handshaker in handshakers {
+      let status = await HerdrRuntimeReadinessChecker(
+        resolver: HerdrReadinessResolverFake(result: .success(attestation)),
+        handshaker: handshaker
+      ).preflight()
+      #expect(status.state == .blocked)
+      #expect(status.issueCode == .unsafeSocket)
+    }
+  }
+
   @Test("socket and compatibility failures become actionable closed states")
   func readinessErrors() async throws {
     let attestation = HerdrRuntimeAttestation(
@@ -157,21 +185,25 @@ struct HerdrRuntimeReadinessTests {
     }
   }
 
-  @Test("the installed external CLI matches the packaged offline policy")
-  func installedRuntime() async throws {
+  @Test("the packaged external-CLI policy is deterministic without an installed runtime")
+  func packagedRuntimePolicy() throws {
     let resources = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
       .appendingPathComponent("Resources/Herdr", isDirectory: true)
-    let attestation = try await HerdrRuntimeResolver(
-      configuration: .standard(resourceRoot: resources)
-    ).resolve()
-    #expect(attestation.version == "0.8.0")
-    #expect(attestation.protocolVersion == 19)
-    #expect(
-      attestation.executableSHA256
-        == "97bdb194a731262d2b70062621a5673b1cd409b9e6870df361bd65799217eaf3"
+    let policyData = try Data(contentsOf: resources.appendingPathComponent("runtime-builds.json"))
+    let schemaData = try Data(
+      contentsOf: resources.appendingPathComponent("api-schema-0.8.0.json")
     )
+    let policy = try #require(
+      JSONSerialization.jsonObject(with: policyData) as? [String: Any]
+    )
+    let builds = try #require(policy["builds"] as? [[String: Any]])
+
+    #expect(policy["schemaVersion"] as? Int == 1)
+    #expect(builds.count == 1)
+    #expect(builds[0]["version"] as? String == "0.8.0")
+    #expect(builds[0]["protocolVersion"] as? Int == 19)
     #expect(
-      attestation.apiSchemaSHA256
+      SHA256.hash(data: schemaData).map { String(format: "%02x", $0) }.joined()
         == "88ff414aa996e390c2db05a37b95d28dbe4e81b98329f6ed7f7a2cc5c6ebf51a"
     )
   }
@@ -303,15 +335,46 @@ private struct HerdrReadinessResolverFake: HerdrRuntimeResolving {
 
 private actor HerdrReadinessHandshakerFake: HerdrRuntimeHandshaking {
   private let error: Error?
+  private let peerExecutablePath: String?
+  private let peerExecutableSHA256: String
   private(set) var calls = 0
 
-  init(error: Error? = nil) {
+  init(
+    error: Error? = nil,
+    peerExecutablePath: String? = "/opt/homebrew/Cellar/herdr/0.8.0/bin/herdr",
+    peerExecutableSHA256: String = String(repeating: "e", count: 64)
+  ) {
     self.error = error
+    self.peerExecutablePath = peerExecutablePath
+    self.peerExecutableSHA256 = peerExecutableSHA256
   }
 
   func handshake() throws -> HerdrHandshake {
     calls += 1
     if let error { throw error }
+    let peerEvidence: HerdrConnectedPeerEvidence?
+    if let peerExecutablePath {
+      peerEvidence = try HerdrConnectedPeerEvidence(
+        processID: 12_345,
+        startSeconds: 100,
+        startMicroseconds: 200,
+        effectiveUserID: UInt32(geteuid()),
+        executable: try HerdrProcessExecutableIdentity(
+          path: peerExecutablePath,
+          device: 3,
+          inode: 4,
+          contentSHA256: peerExecutableSHA256,
+          codeIdentity: try HerdrExecutableCodeIdentity(
+            identifier: "works.earendil.herdr.fixture",
+            teamIdentifier: nil,
+            codeDirectoryHashSHA256: String(repeating: "a", count: 64),
+            designatedRequirement: "identifier works.earendil.herdr.fixture"
+          )
+        )
+      )
+    } else {
+      peerEvidence = nil
+    }
     return HerdrHandshake(
       pong: HerdrPong(
         version: "0.8.0",
@@ -333,7 +396,8 @@ private actor HerdrReadinessHandshakerFake: HerdrRuntimeHandshaking {
         device: 1,
         inode: 2,
         owner: UInt32(geteuid()),
-        permissions: 0o600
+        permissions: 0o600,
+        peerEvidence: peerEvidence
       )
     )
   }

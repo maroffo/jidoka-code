@@ -4,6 +4,8 @@ import Foundation
 public struct ProductionEngineRuntimeConfiguration: Sendable {
   public let applicationSupportRoot: URL
   public let piResourceRoot: URL
+  public let releaseRuntimeRoot: URL
+  public let containingApplicationURL: URL
   public let askPassExecutable: URL
   public let pushGuardExecutable: URL
   public let herdrHostExecutable: URL
@@ -13,6 +15,8 @@ public struct ProductionEngineRuntimeConfiguration: Sendable {
   public init(
     applicationSupportRoot: URL,
     piResourceRoot: URL,
+    releaseRuntimeRoot: URL,
+    containingApplicationURL: URL,
     askPassExecutable: URL,
     pushGuardExecutable: URL,
     herdrHostExecutable: URL,
@@ -23,6 +27,10 @@ public struct ProductionEngineRuntimeConfiguration: Sendable {
       applicationSupportRoot.path.hasPrefix("/"),
       piResourceRoot.isFileURL,
       piResourceRoot.path.hasPrefix("/"),
+      releaseRuntimeRoot.isFileURL,
+      releaseRuntimeRoot.path.hasPrefix("/"),
+      containingApplicationURL.isFileURL,
+      containingApplicationURL.path.hasPrefix("/"),
       askPassExecutable.isFileURL,
       askPassExecutable.path.hasPrefix("/"),
       pushGuardExecutable.isFileURL,
@@ -38,12 +46,38 @@ public struct ProductionEngineRuntimeConfiguration: Sendable {
     }
     self.applicationSupportRoot = applicationSupportRoot.standardizedFileURL
     self.piResourceRoot = piResourceRoot.standardizedFileURL
+    self.releaseRuntimeRoot = releaseRuntimeRoot.standardizedFileURL
+    self.containingApplicationURL = containingApplicationURL.standardizedFileURL
     self.askPassExecutable = askPassExecutable.standardizedFileURL
     self.pushGuardExecutable = pushGuardExecutable.standardizedFileURL
     self.herdrHostExecutable = herdrHostExecutable.standardizedFileURL
     self.herdrSocketURL = herdrSocketURL.standardizedFileURL
     self.contractVersion = contractVersion
   }
+
+  #if DEBUG
+    init(
+      applicationSupportRoot: URL,
+      piResourceRoot: URL,
+      askPassExecutable: URL,
+      pushGuardExecutable: URL,
+      herdrHostExecutable: URL,
+      herdrSocketURL: URL,
+      contractVersion: String
+    ) throws {
+      try self.init(
+        applicationSupportRoot: applicationSupportRoot,
+        piResourceRoot: piResourceRoot,
+        releaseRuntimeRoot: piResourceRoot.appendingPathComponent("PiRuntime", isDirectory: true),
+        containingApplicationURL: piResourceRoot,
+        askPassExecutable: askPassExecutable,
+        pushGuardExecutable: pushGuardExecutable,
+        herdrHostExecutable: herdrHostExecutable,
+        herdrSocketURL: herdrSocketURL,
+        contractVersion: contractVersion
+      )
+    }
+  #endif
 }
 
 private actor EngineDispatchGate {
@@ -58,11 +92,50 @@ private actor EngineDispatchGate {
   }
 }
 
+struct ProductionEngineReloadComposition: Sendable {
+  let setSchedulerPaused: @Sendable (Bool) async -> Void
+  let recoverCoordinatorAtStartup: @Sendable () async throws -> Void
+  let runStartupPass: @Sendable (SchedulerPass) async -> Void
+  let requestStartup: @Sendable () async -> Void
+}
+
+struct ProductionRoleHostReplacementCandidate: Sendable {
+  let report: JobCanaryRoleHostReplacementReport
+  let activate: @Sendable () async throws -> Void
+}
+
+struct ProductionRoleHostReplacementBoundary: Sendable {
+  let terminalReport:
+    @Sendable (JobCanaryRoleHostReplacementRequest, Bool) async throws
+      -> JobCanaryRoleHostReplacementReport?
+  let resourceTreeSHA256: @Sendable () async throws -> String
+  let admitCanary: @Sendable (JobCanaryAuthorization, String) async throws -> JobCanaryApplication
+  let candidate:
+    @Sendable (JobCanaryRoleHostReplacementAuthorization, String) async throws
+      -> ProductionRoleHostReplacementCandidate
+  let beginMarker: @Sendable (UUID) async throws -> Void
+  let endMarker: @Sendable () async -> Void
+  let beginLaunchAdmission: @Sendable (UUID) async -> Void
+  let endLaunchAdmission: @Sendable () async -> Void
+  let runCoordinator: @Sendable (JobCanaryRoleHostReplacementRequest) async throws -> Void
+}
+
 private struct ProductionJobComponents: Sendable {
   let coordinator: JobCoordinator
   let scheduler: DurableScheduler
   let workflows: JobWorkflowRegistry
   let herdrRuntime: HerdrPiWorkflowRuntime
+  let repositories: RepositoryStore
+  let canaryMarkerGate: JobCanaryMarkerAuthorizationGate
+
+  var reloadComposition: ProductionEngineReloadComposition {
+    ProductionEngineReloadComposition(
+      setSchedulerPaused: { paused in await scheduler.setPaused(paused) },
+      recoverCoordinatorAtStartup: { try await coordinator.recoverAtStartup() },
+      runStartupPass: { pass in await coordinator.run(pass: pass) },
+      requestStartup: { await scheduler.request(.startup) }
+    )
+  }
 }
 
 public actor ProductionEngineJobRuntime: EngineJobRuntime {
@@ -78,7 +151,10 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   private let commandRuns: ApprovedCommandRunStore
   private let commandGate = ApprovedCommandExecutionGate()
   private let clock: any SchedulerClock
+  private let logger: any EngineEventLogging
   private let now: @Sendable () -> Date
+  private let reloadComposition: ProductionEngineReloadComposition?
+  private let roleHostReplacementBoundary: ProductionRoleHostReplacementBoundary?
 
   private var components: ProductionJobComponents?
   private var ownershipRuntime: HerdrPiWorkflowRuntime?
@@ -87,6 +163,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   private var paused = false
   private var exclusiveOperations = 0
   private var checkpointing = false
+  private var initialReload = true
 
   public init(
     runtimeConfiguration: ProductionEngineRuntimeConfiguration,
@@ -96,6 +173,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     intents: MutationIntentStore,
     herdrReadiness: any HerdrRuntimeReadinessChecking,
     clock: any SchedulerClock = SystemSchedulerClock(),
+    logger: any EngineEventLogging = NullEngineEventLogger(),
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.runtimeConfiguration = runtimeConfiguration
@@ -106,10 +184,45 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     self.herdrReadiness = herdrReadiness
     commandRuns = ApprovedCommandRunStore(database: database, now: now)
     self.clock = clock
+    self.logger = logger
+    self.now = now
+    reloadComposition = nil
+    roleHostReplacementBoundary = nil
+  }
+
+  init(
+    runtimeConfiguration: ProductionEngineRuntimeConfiguration,
+    database: SQLiteStore,
+    configuration: ConfigurationStore,
+    jobs: DurableJobStore,
+    intents: MutationIntentStore,
+    herdrReadiness: any HerdrRuntimeReadinessChecking,
+    ownershipRuntime: HerdrPiWorkflowRuntime?,
+    reloadComposition: ProductionEngineReloadComposition,
+    roleHostReplacementBoundary: ProductionRoleHostReplacementBoundary? = nil,
+    clock: any SchedulerClock = SystemSchedulerClock(),
+    logger: any EngineEventLogging = NullEngineEventLogger(),
+    now: @escaping @Sendable () -> Date = Date.init
+  ) {
+    self.runtimeConfiguration = runtimeConfiguration
+    self.database = database
+    self.configuration = configuration
+    self.jobs = jobs
+    self.intents = intents
+    self.herdrReadiness = herdrReadiness
+    self.ownershipRuntime = ownershipRuntime
+    self.reloadComposition = reloadComposition
+    self.roleHostReplacementBoundary = roleHostReplacementBoundary
+    commandRuns = ApprovedCommandRunStore(database: database, now: now)
+    self.clock = clock
+    self.logger = logger
     self.now = now
   }
 
   public func reload(dispatchAllowed: Bool) async throws {
+    let recordsStartupPhases = initialReload
+    defer { initialReload = false }
+    await recordInitialReloadPhase(.runtimeQuiesce, enabled: recordsStartupPhases)
     desiredDispatchAllowed = dispatchAllowed
     checkpointing = false
     await dispatchGate.set(false)
@@ -117,6 +230,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     await commandGate.closeAndWait()
     try await waitUntilSchedulerIdle()
     await stopScheduler()
+    await recordInitialReloadPhase(.runtimeSnapshot, enabled: recordsStartupPhases)
     let snapshot = try await configuration.snapshot()
     paused = snapshot.app.paused
     let account = snapshot.app.githubAccount
@@ -129,6 +243,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
         WHERE state IN ('prepared', 'waiting', 'running', 'stopping')
         """
       ) ?? 0
+    await recordInitialReloadPhase(.runtimeOwnership, enabled: recordsStartupPhases)
     guard
       ownershipRuntime != nil || durableOwnershipCount > 0
         || (account != nil && authorID.map({ $0 > 0 }) == true)
@@ -150,47 +265,64 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       )
       ownershipRuntime = herdrRuntime
     }
+    await recordInitialReloadPhase(.runtimeRecovery, enabled: recordsStartupPhases)
     guard readiness.state == .ready else {
       try await herdrRuntime.recoverDurableResults()
       _ = try await commandRuns.recoverAtStartup()
       components = nil
       return
     }
-    try await herdrRuntime.recoverDurableState()
-    _ = try await commandRuns.recoverAtStartup()
-    guard let account, let authorID, authorID > 0 else {
-      components = nil
-      return
+    if reloadComposition == nil {
+      try await herdrRuntime.recoverDurableState()
+    } else {
+      try await herdrRuntime.recoverDurableResults()
     }
-    let built = try Self.build(
-      runtimeConfiguration: runtimeConfiguration,
-      database: database,
-      configuration: configuration,
-      jobs: jobs,
-      intents: intents,
-      account: account,
-      authorID: authorID,
-      profiles: snapshot.profiles,
-      herdrRuntime: herdrRuntime,
-      commandRuns: commandRuns,
-      commandGate: commandGate,
-      dispatchGate: dispatchGate,
-      clock: clock,
-      now: now
-    )
-    components = built
-    await built.scheduler.setPaused(paused)
-    try await built.coordinator.recoverAtStartup()
+    _ = try await commandRuns.recoverAtStartup()
+    await recordInitialReloadPhase(.runtimeComponents, enabled: recordsStartupPhases)
+    let activeReloadComposition: ProductionEngineReloadComposition
+    if let reloadComposition {
+      components = nil
+      activeReloadComposition = reloadComposition
+    } else {
+      guard let account, let authorID, authorID > 0 else {
+        components = nil
+        return
+      }
+      let built = try Self.build(
+        runtimeConfiguration: runtimeConfiguration,
+        database: database,
+        configuration: configuration,
+        jobs: jobs,
+        intents: intents,
+        account: account,
+        authorID: authorID,
+        profiles: snapshot.profiles,
+        herdrRuntime: herdrRuntime,
+        commandRuns: commandRuns,
+        commandGate: commandGate,
+        dispatchGate: dispatchGate,
+        clock: clock,
+        now: now
+      )
+      components = built
+      activeReloadComposition = built.reloadComposition
+    }
+    await activeReloadComposition.setSchedulerPaused(paused)
+    await recordInitialReloadPhase(.runtimeCoordinatorRecovery, enabled: recordsStartupPhases)
+    try await activeReloadComposition.recoverCoordinatorAtStartup()
     let startupExecutionAllowed =
       desiredDispatchAllowed && !paused && exclusiveOperations == 0
-    await built.herdrRuntime.setLaunchAllowed(startupExecutionAllowed)
+    await herdrRuntime.setLaunchAllowed(startupExecutionAllowed)
     if startupExecutionAllowed { await commandGate.open() }
-    await built.coordinator.run(
-      pass: SchedulerPass(reasons: [.startup], startedAt: now())
-    )
+    await recordInitialReloadPhase(.runtimeStartupPass, enabled: recordsStartupPhases)
+    if startupExecutionAllowed {
+      await activeReloadComposition.runStartupPass(
+        SchedulerPass(reasons: [.startup], startedAt: now())
+      )
+    }
     await applyDispatchGate()
-    if !paused {
-      await built.scheduler.request(.startup)
+    if startupExecutionAllowed {
+      await activeReloadComposition.requestStartup()
     }
     if exclusiveOperations == 0, !checkpointing {
       startScheduler()
@@ -258,6 +390,510 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     try await components.workflows.workflow(for: job.identity.kind).run(jobID: jobID)
   }
 
+  public func cleanupRetiredJobs(
+    jobIDs: [UUID],
+    evidenceSHA256: String
+  ) async throws {
+    guard exclusiveOperations == 1,
+      GitHubInputValidation.validSHA256(evidenceSHA256)
+    else {
+      throw EngineClientError(.busy)
+    }
+    let repositories: RepositoryStore
+    if let components {
+      repositories = components.repositories
+    } else {
+      repositories = try maintenanceRepositoryStore()
+    }
+    for jobID in jobIDs {
+      guard let job = try await jobs.job(id: jobID), job.state == .blocked,
+        try await jobs.disposition(for: job.identity)?.state == .superseded
+      else {
+        throw EngineClientError(.staleEvidence)
+      }
+      guard let workspace = try await repositories.workspaceRecord(jobID: jobID) else {
+        continue
+      }
+      if workspace.cleanupState == .retained {
+        guard try await repositories.workspaceIsCleanAtRecordedHead(jobID: jobID) else {
+          throw EngineClientError(.staleEvidence)
+        }
+        try await repositories.authorizeOperatorRetirementCleanup(
+          jobID: jobID,
+          evidenceSHA256: evidenceSHA256,
+          now: now()
+        )
+      }
+      try await repositories.cleanupWorkspace(jobID: jobID, now: now())
+    }
+  }
+
+  public func canaryResourceTreeSHA256() async throws -> String {
+    do {
+      return try PackagedPiResourceSnapshot.inspect(
+        resourceRoot: runtimeConfiguration.piResourceRoot
+      )
+    } catch {
+      throw EngineClientError(.staleEvidence)
+    }
+  }
+
+  public func executeCanary(
+    _ authorization: JobCanaryAuthorization
+  ) async throws -> JobCanaryReport {
+    guard exclusiveOperations == 1, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    let resource = try await canaryResourceTreeSHA256()
+    let application = try await jobs.admitCanary(
+      authorization,
+      resourceTreeSHA256: resource,
+      now: now()
+    )
+    guard application.shouldExecute else {
+      if application.report.status == .recoveryRequired,
+        let job = try await jobs.job(id: authorization.scope.jobID),
+        [.succeeded, .blocked, .waitingHuman, .retryBackoff, .awaitingResolution].contains(
+          job.state)
+      {
+        return try await requireSuccessfulCanary(
+          try await jobs.closeCanary(
+            authorization: authorization,
+            resourceTreeSHA256: resource,
+            now: now()
+          )
+        )
+      }
+      return try await requireSuccessfulCanary(application.report)
+    }
+    try await components.canaryMarkerGate.begin(jobID: authorization.scope.jobID)
+    await components.herdrRuntime.beginCanaryLaunchAdmission(
+      jobID: authorization.scope.jobID
+    )
+    do {
+      try await components.coordinator.runCanary(jobID: authorization.scope.jobID)
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      do {
+        let report = try await jobs.closeCanary(
+          authorization: authorization,
+          resourceTreeSHA256: resource,
+          now: now()
+        )
+        return try await requireSuccessfulCanary(report)
+      } catch DurableJobStoreError.canaryRecoveryRequired {
+        let report = application.report
+        return JobCanaryReport(
+          scope: report.scope,
+          previewEvidenceSHA256: report.previewEvidenceSHA256,
+          authorizationSHA256: report.authorizationSHA256,
+          status: .recoveryRequired,
+          repositoryOwner: report.repositoryOwner,
+          repositoryName: report.repositoryName,
+          objectNumber: report.objectNumber,
+          revisionKey: report.revisionKey,
+          provider: report.provider,
+          model: report.model,
+          thinking: report.thinking,
+          resourceTreeSHA256: report.resourceTreeSHA256,
+          replayed: false
+        )
+      }
+    } catch {
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      throw error
+    }
+  }
+
+  public func previewCanaryRecovery(
+    _ authorization: JobCanaryAuthorization
+  ) async throws -> JobCanaryRecoveryReport {
+    guard exclusiveOperations == 0, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    let resource = try await canaryResourceTreeSHA256()
+    let candidate = try await components.herdrRuntime.canaryRecoveryCandidate(
+      authorization: authorization,
+      resourceTreeSHA256: resource
+    )
+    guard
+      let report = candidate.evidence.report(
+        authorization: nil,
+        status: .preview,
+        replayed: false
+      )
+    else { throw EngineClientError(.staleEvidence) }
+    return report
+  }
+
+  public func executeCanaryRecovery(
+    _ authorization: JobCanaryRecoveryAuthorization
+  ) async throws -> JobCanaryRecoveryExecution {
+    guard exclusiveOperations == 1, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    let resource = try await canaryResourceTreeSHA256()
+    let existing = try await jobs.admitCanary(
+      authorization.canary,
+      resourceTreeSHA256: resource,
+      now: now()
+    )
+    guard !existing.shouldExecute, existing.report.status == .recoveryRequired else {
+      throw EngineClientError(.staleEvidence)
+    }
+    let candidate = try await components.herdrRuntime.canaryRecoveryCandidate(
+      authorization: authorization.canary,
+      resourceTreeSHA256: resource,
+      resumedRecoveryEvidenceSHA256: authorization.recoveryEvidenceSHA256
+    )
+    guard candidate.evidence.evidenceSHA256 == authorization.recoveryEvidenceSHA256 else {
+      throw EngineClientError(.staleEvidence)
+    }
+    let alreadyAuthorized = try await jobs.hasCanaryTopologyRecoveryAuthorization(
+      authorization
+    )
+    let authorizationReplayed: Bool
+    if alreadyAuthorized {
+      authorizationReplayed = true
+    } else {
+      authorizationReplayed = try await jobs.authorizeCanaryTopologyRecovery(
+        authorization,
+        evidence: candidate.evidence,
+        now: now()
+      )
+    }
+    let revalidated = try await components.herdrRuntime.canaryRecoveryCandidate(
+      authorization: authorization.canary,
+      resourceTreeSHA256: resource,
+      resumedRecoveryEvidenceSHA256: authorization.recoveryEvidenceSHA256
+    )
+    guard revalidated.evidence == candidate.evidence else {
+      throw EngineClientError(.staleEvidence)
+    }
+    try await components.canaryMarkerGate.begin(jobID: authorization.canary.scope.jobID)
+    await components.herdrRuntime.beginCanaryLaunchAdmission(
+      jobID: authorization.canary.scope.jobID
+    )
+    do {
+      try await components.herdrRuntime.activateCanaryRecovery(
+        revalidated,
+        authorization: authorization
+      )
+      let resumeReplayed = try await jobs.resumeCanaryAfterTopologyRecovery(
+        authorization,
+        evidence: revalidated.evidence,
+        now: now()
+      )
+      try await components.coordinator.runRecoveredCanary(
+        jobID: authorization.canary.scope.jobID,
+        recoveryEvidenceSHA256: authorization.recoveryEvidenceSHA256
+      )
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      let canary: JobCanaryReport
+      do {
+        canary = try await requireSuccessfulCanary(
+          try await jobs.closeCanary(
+            authorization: authorization.canary,
+            resourceTreeSHA256: resource,
+            now: now()
+          )
+        )
+      } catch DurableJobStoreError.canaryRecoveryRequired {
+        canary = JobCanaryReport(
+          scope: existing.report.scope,
+          previewEvidenceSHA256: existing.report.previewEvidenceSHA256,
+          authorizationSHA256: existing.report.authorizationSHA256,
+          status: .recoveryRequired,
+          repositoryOwner: existing.report.repositoryOwner,
+          repositoryName: existing.report.repositoryName,
+          objectNumber: existing.report.objectNumber,
+          revisionKey: existing.report.revisionKey,
+          provider: existing.report.provider,
+          model: existing.report.model,
+          thinking: existing.report.thinking,
+          resourceTreeSHA256: existing.report.resourceTreeSHA256,
+          replayed: false
+        )
+      }
+      guard
+        let recovery = revalidated.evidence.report(
+          authorization: authorization,
+          status: canary.status == .settled ? .recovered : .recoveryRequired,
+          replayed: authorizationReplayed || resumeReplayed
+        )
+      else { throw EngineClientError(.internalFailure) }
+      return JobCanaryRecoveryExecution(recovery: recovery, canary: canary)
+    } catch {
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      throw error
+    }
+  }
+
+  public func previewCanaryPiRetry(
+    _ authorization: JobCanaryRecoveryAuthorization
+  ) async throws -> JobCanaryPiRetryReport {
+    guard exclusiveOperations == 0, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    let resource = try await canaryResourceTreeSHA256()
+    let candidate = try await components.herdrRuntime.canaryPiFreshRetryCandidate(
+      authorization: authorization,
+      resourceTreeSHA256: resource
+    )
+    guard
+      let report = candidate.evidence.report(
+        authorization: nil,
+        status: .preview,
+        replayed: false
+      )
+    else { throw EngineClientError(.staleEvidence) }
+    return report
+  }
+
+  public func executeCanaryPiRetry(
+    _ authorization: JobCanaryPiRetryAuthorization
+  ) async throws -> JobCanaryPiRetryExecution {
+    guard exclusiveOperations == 1, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    let resource = try await canaryResourceTreeSHA256()
+    let existing = try await jobs.admitCanary(
+      authorization.recovery.canary,
+      resourceTreeSHA256: resource,
+      now: now()
+    )
+    guard !existing.shouldExecute, existing.report.status == .recoveryRequired else {
+      throw EngineClientError(.staleEvidence)
+    }
+    let candidate = try await components.herdrRuntime.canaryPiFreshRetryCandidate(
+      authorization: authorization.recovery,
+      resourceTreeSHA256: resource
+    )
+    guard candidate.evidence.evidenceSHA256 == authorization.retryEvidenceSHA256 else {
+      throw EngineClientError(.staleEvidence)
+    }
+    let authorizationReplayed = try await jobs.authorizeCanaryPiFreshRetry(
+      authorization,
+      evidence: candidate.evidence,
+      now: now()
+    )
+    let revalidated = try await components.herdrRuntime.canaryPiFreshRetryCandidate(
+      authorization: authorization.recovery,
+      resourceTreeSHA256: resource,
+      authorizedRetryEvidenceSHA256: authorization.retryEvidenceSHA256
+    )
+    guard revalidated.evidence == candidate.evidence else {
+      throw EngineClientError(.staleEvidence)
+    }
+    try await components.canaryMarkerGate.begin(
+      jobID: authorization.recovery.canary.scope.jobID
+    )
+    await components.herdrRuntime.beginCanaryLaunchAdmission(
+      jobID: authorization.recovery.canary.scope.jobID
+    )
+    do {
+      try await components.herdrRuntime.activateCanaryPiFreshRetry(
+        revalidated,
+        authorization: authorization
+      )
+      try await components.coordinator.runCanaryPiFreshRetry(
+        jobID: authorization.recovery.canary.scope.jobID,
+        recoveryEvidenceSHA256: authorization.recovery.recoveryEvidenceSHA256,
+        retryEvidenceSHA256: authorization.retryEvidenceSHA256
+      )
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      let canary: JobCanaryReport
+      do {
+        canary = try await requireSuccessfulCanary(
+          try await jobs.closeCanary(
+            authorization: authorization.recovery.canary,
+            resourceTreeSHA256: resource,
+            now: now()
+          )
+        )
+      } catch DurableJobStoreError.canaryRecoveryRequired {
+        canary = JobCanaryReport(
+          scope: existing.report.scope,
+          previewEvidenceSHA256: existing.report.previewEvidenceSHA256,
+          authorizationSHA256: existing.report.authorizationSHA256,
+          status: .recoveryRequired,
+          repositoryOwner: existing.report.repositoryOwner,
+          repositoryName: existing.report.repositoryName,
+          objectNumber: existing.report.objectNumber,
+          revisionKey: existing.report.revisionKey,
+          provider: existing.report.provider,
+          model: existing.report.model,
+          thinking: existing.report.thinking,
+          resourceTreeSHA256: existing.report.resourceTreeSHA256,
+          replayed: false
+        )
+      }
+      guard
+        let retry = revalidated.evidence.report(
+          authorization: authorization,
+          status: canary.status == .settled ? .authorized : .recoveryRequired,
+          replayed: authorizationReplayed
+        )
+      else { throw EngineClientError(.internalFailure) }
+      return JobCanaryPiRetryExecution(retry: retry, canary: canary)
+    } catch {
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      throw error
+    }
+  }
+
+  public func previewCanaryRoleHostReplacement(
+    _ request: JobCanaryRoleHostReplacementRequest
+  ) async throws -> JobCanaryRoleHostReplacementReport {
+    guard exclusiveOperations == 0, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    if let terminal = try await jobs.canaryRoleHostReplacementTerminalReport(
+      request: request,
+      replayed: true
+    ) {
+      return terminal
+    }
+    let candidate = try await components.herdrRuntime.canaryRoleHostReplacementCandidate(
+      request: request,
+      resourceTreeSHA256: try await canaryResourceTreeSHA256()
+    )
+    return candidate.report
+  }
+
+  public func executeCanaryRoleHostReplacement(
+    _ authorization: JobCanaryRoleHostReplacementAuthorization
+  ) async throws -> JobCanaryRoleHostReplacementExecution {
+    try authorization.validate()
+    guard exclusiveOperations == 1, paused else {
+      throw EngineClientError(.busy)
+    }
+    let boundary: ProductionRoleHostReplacementBoundary
+    if let roleHostReplacementBoundary {
+      boundary = roleHostReplacementBoundary
+    } else {
+      guard let components else { throw EngineClientError(.busy) }
+      boundary = productionRoleHostReplacementBoundary(components: components)
+    }
+    guard
+      try await boundary.terminalReport(authorization.request, false) == nil
+    else { throw EngineClientError(.staleEvidence) }
+    let resource = try await boundary.resourceTreeSHA256()
+    let existing = try await boundary.admitCanary(
+      authorization.request.retry.recovery.canary,
+      resource
+    )
+    guard !existing.shouldExecute, existing.report.status == .recoveryRequired else {
+      throw EngineClientError(.staleEvidence)
+    }
+    let candidate = try await boundary.candidate(authorization, resource)
+    guard
+      candidate.report.replacementEvidenceSHA256
+        == authorization.replacementEvidenceSHA256
+    else { throw EngineClientError(.staleEvidence) }
+    let jobID = authorization.request.retry.recovery.canary.scope.jobID
+    try await boundary.beginMarker(jobID)
+    await boundary.beginLaunchAdmission(jobID)
+    do {
+      try await candidate.activate()
+      try await boundary.runCoordinator(authorization.request)
+    } catch {
+      await boundary.endLaunchAdmission()
+      await boundary.endMarker()
+      guard
+        let report = try await boundary.terminalReport(authorization.request, false)
+      else { throw error }
+      return JobCanaryRoleHostReplacementExecution(
+        replacement: report,
+        canary: existing.report
+      )
+    }
+    await boundary.endLaunchAdmission()
+    await boundary.endMarker()
+    guard
+      let report = try await boundary.terminalReport(authorization.request, false),
+      report.status == .q4Settled
+    else { throw EngineClientError(.internalFailure) }
+    return JobCanaryRoleHostReplacementExecution(
+      replacement: report,
+      canary: existing.report
+    )
+  }
+
+  private func productionRoleHostReplacementBoundary(
+    components: ProductionJobComponents
+  ) -> ProductionRoleHostReplacementBoundary {
+    let jobs = jobs
+    let resourceRoot = runtimeConfiguration.piResourceRoot
+    let now = now
+    return ProductionRoleHostReplacementBoundary(
+      terminalReport: { request, replayed in
+        try await jobs.canaryRoleHostReplacementTerminalReport(
+          request: request,
+          replayed: replayed
+        )
+      },
+      resourceTreeSHA256: {
+        do {
+          return try PackagedPiResourceSnapshot.inspect(resourceRoot: resourceRoot)
+        } catch {
+          throw EngineClientError(.staleEvidence)
+        }
+      },
+      admitCanary: { authorization, resourceTreeSHA256 in
+        try await jobs.admitCanary(
+          authorization,
+          resourceTreeSHA256: resourceTreeSHA256,
+          now: now()
+        )
+      },
+      candidate: { authorization, resourceTreeSHA256 in
+        let candidate = try await components.herdrRuntime.canaryRoleHostReplacementCandidate(
+          request: authorization.request,
+          resourceTreeSHA256: resourceTreeSHA256,
+          authorizedReplacementEvidenceSHA256: authorization.replacementEvidenceSHA256,
+          authorizedQ4Binding: authorization.q4Binding
+        )
+        return ProductionRoleHostReplacementCandidate(
+          report: candidate.report,
+          activate: {
+            try await components.herdrRuntime.activateCanaryRoleHostReplacement(
+              candidate,
+              authorization: authorization
+            )
+          }
+        )
+      },
+      beginMarker: { jobID in
+        try await components.canaryMarkerGate.begin(jobID: jobID)
+      },
+      endMarker: { await components.canaryMarkerGate.end() },
+      beginLaunchAdmission: { jobID in
+        await components.herdrRuntime.beginCanaryLaunchAdmission(jobID: jobID)
+      },
+      endLaunchAdmission: { await components.herdrRuntime.closeLaunchAdmission() },
+      runCoordinator: { request in
+        try await components.coordinator.runCanaryRoleHostReplacement(request: request)
+      }
+    )
+  }
+
+  private func requireSuccessfulCanary(
+    _ report: JobCanaryReport
+  ) async throws -> JobCanaryReport {
+    if report.status == .settled {
+      guard try await jobs.job(id: report.scope.jobID)?.state == .succeeded else {
+        throw EngineClientError(.internalFailure)
+      }
+    }
+    return report
+  }
+
   public func waitUntilIdle() async throws {
     let deadline = ProcessInfo.processInfo.systemUptime + Self.idleWaitLimitSeconds
     while true {
@@ -315,6 +951,22 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     }
   }
 
+  private func recordInitialReloadPhase(
+    _ phase: EngineStartupPhase,
+    enabled: Bool
+  ) async {
+    guard enabled else { return }
+    await logger.record(
+      EngineLogRecord(
+        timestamp: now(),
+        event: .startupPhase,
+        phase: phase,
+        command: nil,
+        error: nil
+      )
+    )
+  }
+
   private func waitUntilSchedulerIdle() async throws {
     let deadline = ProcessInfo.processInfo.systemUptime + Self.idleWaitLimitSeconds
     while await components?.scheduler.snapshot().passRunning == true {
@@ -366,18 +1018,38 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     jobs: DurableJobStore,
     now: @escaping @Sendable () -> Date
   ) throws -> HerdrPiWorkflowRuntime {
-    try HerdrPiWorkflowRuntime(
+    let resolver = ReleaseOwnedPiRuntimeResolver(
+      runtimeRoot: runtimeConfiguration.releaseRuntimeRoot,
+      containingApplicationURL: runtimeConfiguration.containingApplicationURL
+    )
+    _ = try ReleaseOwnedPiRuntimeBoundaryAuthority.localEngineStartup(using: resolver)
+    return try HerdrPiWorkflowRuntime(
       applicationSupportRoot: runtimeConfiguration.applicationSupportRoot,
       resourceRoot: runtimeConfiguration.piResourceRoot,
       hostExecutable: runtimeConfiguration.herdrHostExecutable,
       socketURL: runtimeConfiguration.herdrSocketURL,
-      runtimeResolver: PiRuntimeResolver(
-        configuration: .standard(resourceRoot: runtimeConfiguration.piResourceRoot)
-      ),
+      runtimeResolver: resolver,
       database: database,
       jobs: jobs,
       configuration: configuration,
       now: now
+    )
+  }
+
+  private func maintenanceRepositoryStore() throws -> RepositoryStore {
+    try Self.ensurePrivateDirectory(runtimeConfiguration.applicationSupportRoot)
+    let temporary = runtimeConfiguration.applicationSupportRoot.appendingPathComponent(
+      "Temporary", isDirectory: true
+    )
+    try Self.ensurePrivateDirectory(temporary)
+    let git = SystemGitTransport(
+      temporaryDirectory: temporary.path,
+      pushGuardExecutable: runtimeConfiguration.pushGuardExecutable
+    )
+    return try RepositoryStore(
+      rootURL: runtimeConfiguration.applicationSupportRoot,
+      database: database,
+      transport: git
     )
   }
 
@@ -430,10 +1102,12 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     let reviewedRevisions = ReviewedRevisionStore(database: database)
     let schedulerPersistence = SchedulerPersistence(database: database)
     let mutationExecutor = GitHubMutationExecutor(intents: intents, broker: broker)
+    let canaryMarkerGate = JobCanaryMarkerAuthorizationGate(authority: jobs)
     let markerPublisher = GitHubMarkerPublisher(
       executor: mutationExecutor,
       intents: intents,
       reads: broker,
+      canaryAuthorizer: canaryMarkerGate,
       now: now
     )
     let labelBootstrapper = GitHubWorkflowLabelBootstrapper(
@@ -574,7 +1248,9 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       coordinator: coordinator,
       scheduler: scheduler,
       workflows: workflows,
-      herdrRuntime: herdrRuntime
+      herdrRuntime: herdrRuntime,
+      repositories: repositories,
+      canaryMarkerGate: canaryMarkerGate
     )
   }
 

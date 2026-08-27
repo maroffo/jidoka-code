@@ -41,7 +41,7 @@ public enum PiWorkflowResourceError: Error, Equatable, Sendable {
 public struct PiWorkflowResourceCatalog: Equatable, Sendable {
   public static let contractVersion = "1"
   public static let workflowManifestSHA256 =
-    "4d7be2b7ed582f2195bf19953dc74420be12c9066c2a9565b64f09afc204d566"
+    "230c9a45b9dd53443837166c6e8b60adac67d3bfeb32249de8ca5228f1e1357d"
   public static let readOnlyToolNames = [
     "jidoka_code_preflight",
     "jidoka_code_read",

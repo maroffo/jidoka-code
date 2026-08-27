@@ -24,16 +24,57 @@ struct PiRPCProcessTests {
     #expect(await processDisappeared(descendant))
   }
 
-  @Test("a child forked after settlement cannot escape its dedicated process group")
-  func lateProcessGroupChildCleanup() async throws {
-    let fixture = try PiRPCProcessFixture(mode: "late-process-group-child")
+  @Test(
+    "an observed session escape stays identity-owned across exact leader outcome",
+    arguments: ["session-escape-success", "session-escape-error"]
+  )
+  func sessionEscapeIdentityCleanup(mode: String) async throws {
+    let fixture = try PiRPCProcessFixture(mode: mode)
     defer { fixture.remove() }
+    let task = Task {
+      try await PiRPCProcessRunner().run(fixture.request(timeout: 3))
+    }
+    let identity = try await fixture.recordedDescendantIdentity()
+    defer {
+      if SupervisedProcessTracker.matches(identity) {
+        _ = Darwin.kill(identity.processID, SIGKILL)
+      }
+    }
 
-    let result = try await PiRPCProcessRunner().run(fixture.request(timeout: 3))
+    if mode == "session-escape-success" {
+      let result = try await task.value
+      #expect(result.cleanupVerified)
+    } else {
+      do {
+        _ = try await task.value
+        Issue.record("error leader unexpectedly became successful evidence")
+      } catch let error as PiRPCProcessError {
+        #expect(error == .unexpectedExit(37))
+      }
+    }
+    #expect(!SupervisedProcessTracker.matches(identity))
+  }
 
-    #expect(result.cleanupVerified)
-    let descendant = try fixture.recordedDescendantPID()
-    #expect(await processDisappeared(descendant))
+  @Test("timeout directly removes an observed session-escaping identity")
+  func sessionEscapeTimeoutCleanup() async throws {
+    let fixture = try PiRPCProcessFixture(mode: "timeout-session-escape")
+    defer { fixture.remove() }
+    let task = Task {
+      try await PiRPCProcessRunner().run(fixture.request(timeout: 0.75))
+    }
+    let identity = try await fixture.recordedDescendantIdentity()
+    defer {
+      if SupervisedProcessTracker.matches(identity) {
+        _ = Darwin.kill(identity.processID, SIGKILL)
+      }
+    }
+    do {
+      _ = try await task.value
+      Issue.record("escaped timeout fixture unexpectedly settled")
+    } catch let error as PiRPCProcessError {
+      #expect(error == .timeout(abortAcknowledged: true))
+    }
+    #expect(!SupervisedProcessTracker.matches(identity))
   }
 
   @Test("a child that never reads stdin cannot escape the monotonic timeout")
@@ -77,7 +118,7 @@ struct PiRPCProcessTests {
   func settledNonzeroExitFails() async throws {
     for (mode, expected) in [
       ("settle-exit-7", PiRPCProcessError.unexpectedExit(7)),
-      ("settle-abort", PiRPCProcessError.unexpectedExit(nil)),
+      ("settle-signal", PiRPCProcessError.unexpectedExit(nil)),
       ("settle-term-exit-7", PiRPCProcessError.unexpectedExit(7)),
     ] {
       let fixture = try PiRPCProcessFixture(mode: mode)
@@ -106,14 +147,33 @@ struct PiRPCProcessTests {
     #expect(await processDisappeared(descendant))
   }
 
-  @Test("stderr and non-JSONL output cannot become successful evidence")
+  @Test("stderr and non-JSONL output fail with exact protocol outcomes")
   func malformedOutputAndStderr() async throws {
-    for mode in ["stderr", "malformed", "late-event"] {
-      let fixture = try PiRPCProcessFixture(mode: mode)
-      defer { fixture.remove() }
-      await #expect(throws: (any Error).self) {
-        try await PiRPCProcessRunner().run(fixture.request(timeout: 2))
-      }
+    let stderrFixture = try PiRPCProcessFixture(mode: "stderr")
+    defer { stderrFixture.remove() }
+    do {
+      _ = try await PiRPCProcessRunner().run(stderrFixture.request(timeout: 2))
+      Issue.record("stderr unexpectedly became successful evidence")
+    } catch let error as PiRPCProcessError {
+      #expect(error == .stderrNotEmpty)
+    }
+
+    let malformedFixture = try PiRPCProcessFixture(mode: "malformed")
+    defer { malformedFixture.remove() }
+    do {
+      _ = try await PiRPCProcessRunner().run(malformedFixture.request(timeout: 2))
+      Issue.record("malformed JSON unexpectedly became successful evidence")
+    } catch let error as PiRPCProtocolError {
+      #expect(error == .malformedJSON)
+    }
+
+    let lateFixture = try PiRPCProcessFixture(mode: "late-event")
+    defer { lateFixture.remove() }
+    do {
+      _ = try await PiRPCProcessRunner().run(lateFixture.request(timeout: 2))
+      Issue.record("post-settlement event unexpectedly became successful evidence")
+    } catch let error as PiRPCProtocolError {
+      #expect(error == .eventAfterSettled)
     }
   }
 
@@ -180,7 +240,7 @@ struct PiRPCProcessTests {
   }
 }
 
-private final class PiRPCProcessFixture {
+private final class PiRPCProcessFixture: @unchecked Sendable {
   let rootURL: URL
   private let scriptURL: URL
   private let childPIDURL: URL
@@ -188,18 +248,30 @@ private final class PiRPCProcessFixture {
 
   init(mode: String) throws {
     self.mode = mode
+    let sourceRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    scriptURL = sourceRoot.appendingPathComponent(
+      "scripts/tests/fixtures/pi-rpc-process.sh",
+      isDirectory: false
+    )
+    let scriptValues = try scriptURL.resourceValues(forKeys: [
+      .isRegularFileKey, .isSymbolicLinkKey,
+    ])
+    guard scriptValues.isRegularFile == true, scriptValues.isSymbolicLink != true else {
+      throw PiRPCProcessError.invalidRequest
+    }
     rootURL = FileManager.default.temporaryDirectory.appendingPathComponent(
       "jidoka-rpc-process-\(UUID().uuidString)",
       isDirectory: true
     )
-    scriptURL = rootURL.appendingPathComponent("fake-pi.mjs")
     childPIDURL = rootURL.appendingPathComponent("child.pid")
     try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
     try FileManager.default.setAttributes(
       [.posixPermissions: 0o700],
       ofItemAtPath: rootURL.path
     )
-    try Data(Self.script.utf8).write(to: scriptURL)
   }
 
   func request(
@@ -214,7 +286,7 @@ private final class PiRPCProcessFixture {
       origin: "top-level"
     )
     return PiRPCProcessRequest(
-      executable: URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node"),
+      executable: URL(fileURLWithPath: "/bin/sh"),
       arguments: [scriptURL.path],
       workingDirectory: rootURL,
       environment: [
@@ -249,164 +321,22 @@ private final class PiRPCProcessFixture {
     return try #require(pid_t(value))
   }
 
+  func recordedDescendantIdentity() async throws -> SupervisedProcessIdentity {
+    for _ in 0..<300 {
+      if let processID = try? recordedDescendantPID(),
+        let identity = SupervisedProcessTracker.identity(processID)
+      {
+        return identity
+      }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    throw PiRPCProcessError.cleanupFailed
+  }
+
   func remove() {
     try? FileManager.default.removeItem(at: rootURL)
   }
 
-  private static let script = #"""
-    import { spawn } from "node:child_process";
-    import { closeSync, writeFileSync, writeSync } from "node:fs";
-
-    let input = Buffer.alloc(0);
-    let child;
-    if (process.env.FAKE_MODE === "settle-term-exit-7") {
-      process.on("SIGTERM", () => process.exit(7));
-    }
-    function emit(value) {
-      writeSync(1, `${JSON.stringify(value)}\n`);
-    }
-    function response(message, data = undefined) {
-      const value = {
-        command: message.type,
-        id: message.id,
-        success: true,
-        type: "response",
-      };
-      if (data !== undefined) value.data = data;
-      emit(value);
-    }
-    function spawnChild() {
-      if (child !== undefined) return;
-      child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-        stdio: "ignore",
-      });
-      writeFileSync(process.env.FAKE_CHILD_PID_FILE, `${child.pid}\n`, { mode: 0o600 });
-    }
-    if (["no-read-prompt", "close-stdin"].includes(process.env.FAKE_MODE)) {
-      writeFileSync(process.env.FAKE_CHILD_PID_FILE, `${process.pid}\n`, { mode: 0o600 });
-    }
-    if (process.env.FAKE_MODE === "timeout") spawnChild();
-    function handle(message) {
-      if (message.type === "set_auto_retry" || message.type === "set_auto_compaction") {
-        response(message);
-        return;
-      }
-      if (message.type === "get_state") {
-        response(message, {
-          autoCompactionEnabled: false,
-          isStreaming: false,
-          model: { id: "fake-model", provider: "fake-provider" },
-          sessionId: "fake-session-1",
-          thinkingLevel: "off",
-        });
-        return;
-      }
-      if (message.type === "get_commands") {
-        response(message, {
-          commands: [{
-            name: "skill:jidoka-code-plan",
-            source: "skill",
-            sourceInfo: {
-              origin: "top-level",
-              path: "/bundle/skills/jidoka-code-plan/SKILL.md",
-              scope: "temporary",
-            },
-          }],
-        });
-        if (process.env.FAKE_MODE === "no-read-prompt") process.stdin.pause();
-        if (process.env.FAKE_MODE === "close-stdin") closeSync(0);
-        return;
-      }
-      if (message.type === "prompt") {
-        response(message);
-        if (process.env.FAKE_MODE !== "late-process-group-child") spawnChild();
-        if (process.env.FAKE_MODE === "timeout") return;
-        if (process.env.FAKE_MODE === "stderr") {
-          process.stderr.write("unexpected diagnostic\n");
-        }
-        if (process.env.FAKE_MODE === "malformed") {
-          process.stdout.write("not-json\n");
-          return;
-        }
-        emit({ type: "agent_start" });
-        emit({ type: "turn_start" });
-        emit({ message: { role: "user" }, type: "message_start" });
-        emit({ message: { role: "user" }, type: "message_end" });
-        emit({ message: { role: "assistant" }, type: "message_start" });
-        emit({
-          assistantMessageEvent: { contentIndex: 0, delta: "done", type: "text_delta" },
-          type: "message_update",
-        });
-        emit({ message: { role: "assistant" }, type: "message_end" });
-        emit({
-          args: {},
-          toolCallId: "result-1",
-          toolName: "jidoka_code_result",
-          type: "tool_execution_start",
-        });
-        emit({
-          isError: false,
-          result: {
-            details: {
-              approvedCommandIDs: ["check"],
-              artifactSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-              nonce: "nonce-12345678",
-              payload: { verdict: "pass" },
-              resultSequence: 1,
-              role: "writer",
-              schemaVersion: 1,
-              workflow: "planning",
-            },
-          },
-          toolCallId: "result-1",
-          toolName: "jidoka_code_result",
-          type: "tool_execution_end",
-        });
-        const toolResult = {
-          content: [],
-          details: {},
-          isError: false,
-          role: "toolResult",
-          timestamp: 1,
-          toolCallId: "result-1",
-          toolName: "jidoka_code_result",
-        };
-        emit({ message: toolResult, type: "message_start" });
-        emit({ message: toolResult, type: "message_end" });
-        emit({ message: {}, toolResults: [toolResult], type: "turn_end" });
-        emit({ messages: [], type: "agent_end", willRetry: false });
-        emit({ type: "agent_settled" });
-        if (process.env.FAKE_MODE === "late-process-group-child") {
-          spawnChild();
-          process.exit(0);
-        }
-        if (process.env.FAKE_MODE === "late-event") {
-          setTimeout(() => emit({ type: "agent_start" }), 50);
-        }
-        if (process.env.FAKE_MODE === "settle-exit-7") {
-          setTimeout(() => process.exit(7), 10);
-        }
-        if (process.env.FAKE_MODE === "settle-abort") {
-          setTimeout(() => process.kill(process.pid, "SIGABRT"), 10);
-        }
-        return;
-      }
-      if (message.type === "abort") {
-        response(message);
-      }
-    }
-    process.stdin.on("data", (chunk) => {
-      input = Buffer.concat([input, chunk]);
-      while (true) {
-        const newline = input.indexOf(0x0a);
-        if (newline < 0) break;
-        const line = input.subarray(0, newline);
-        input = input.subarray(newline + 1);
-        handle(JSON.parse(line.toString("utf8")));
-      }
-    });
-    setInterval(() => {}, 1000);
-    """#
 }
 
 private final class InvocationBuilderFixture {

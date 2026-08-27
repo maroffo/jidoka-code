@@ -6,6 +6,23 @@ import Testing
 
 @Suite("Exact Pi TUI invocation and structured settlement channel")
 struct PiTUIRuntimeTests {
+  @Test("catalog model identifiers with slashes remain exact Pi arguments")
+  func slashBearingModelIdentity() throws {
+    let identity = try PiTUIModelIdentity(
+      provider: "huggingface",
+      modelID: "deepseek-ai/DeepSeek-V4-Flash",
+      thinkingLevel: "medium"
+    )
+    #expect(identity.argument == "huggingface/deepseek-ai/DeepSeek-V4-Flash:medium")
+    #expect(throws: PiTUIRuntimeError.invalidConfiguration) {
+      _ = try PiTUIModelIdentity(
+        provider: "huggingface",
+        modelID: "/deepseek-ai/DeepSeek-V4-Flash",
+        thinkingLevel: "medium"
+      )
+    }
+  }
+
   @Test("configuration pins private prompt, model, session, and directories")
   func configurationContract() throws {
     let fixture = try PiTUIFixture()
@@ -409,7 +426,7 @@ struct PiTUIRuntimeTests {
     )
   }
 
-  @Test("locked settings bind the exact admitted Pi version")
+  @Test("locked settings admit only the exact Pi-owned persisted theme and version")
   func lockedSettingsVersion() throws {
     for version in ["0.84.0", "0.84.1"] {
       let fixture = try PiTUIFixture()
@@ -420,6 +437,7 @@ struct PiTUIRuntimeTests {
         "enableInstallTelemetry": false,
         "lastChangelogVersion": version,
         "retry": ["enabled": false, "provider": ["maxRetries": 0]],
+        "theme": "dark",
         "transport": "sse",
       ]
       let data =
@@ -437,6 +455,36 @@ struct PiTUIRuntimeTests {
         try !PiTUIInvocationBuilder.validateLockedSettings(
           in: fixture.agent,
           piVersion: PiSemanticVersion(other)
+        )
+      )
+      for invalidTheme in ["light", "../dark", ""] {
+        var invalid = object
+        invalid["theme"] = invalidTheme
+        let invalidData =
+          try JSONSerialization.data(withJSONObject: invalid, options: [.sortedKeys])
+          + Data([0x0A])
+        let settings = fixture.agent.appendingPathComponent("settings.json")
+        try FileManager.default.removeItem(at: settings)
+        try writePrivate(invalidData, to: settings)
+        #expect(
+          try !PiTUIInvocationBuilder.validateLockedSettings(
+            in: fixture.agent,
+            piVersion: PiSemanticVersion(version)
+          )
+        )
+      }
+      var extra = object
+      extra["provider"] = "openai-codex"
+      let extraData =
+        try JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys])
+        + Data([0x0A])
+      let settings = fixture.agent.appendingPathComponent("settings.json")
+      try FileManager.default.removeItem(at: settings)
+      try writePrivate(extraData, to: settings)
+      #expect(
+        try !PiTUIInvocationBuilder.validateLockedSettings(
+          in: fixture.agent,
+          piVersion: PiSemanticVersion(version)
         )
       )
     }

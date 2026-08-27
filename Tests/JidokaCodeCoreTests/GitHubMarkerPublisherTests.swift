@@ -30,6 +30,75 @@ struct GitHubMarkerPublisherTests {
       ])
   }
 
+  @Test("canary authorizes the whole marker batch before part one")
+  func canaryBatchBeforeSend() async throws {
+    let fixture = try await MarkerPublisherFixture()
+    defer { fixture.remove() }
+    let authorizer = MarkerCanaryAuthorizer(maximumParts: 1)
+    let publisher = GitHubMarkerPublisher(
+      executor: GitHubMutationExecutor(intents: fixture.intents, broker: fixture.api),
+      intents: fixture.intents,
+      reads: fixture.api,
+      canaryAuthorizer: authorizer,
+      sleeper: ImmediateMutationSleeper(),
+      now: { Date(timeIntervalSince1970: 80_002) }
+    )
+    let document = String(repeating: "x", count: GitHubMarkerCodec.sliceByteLimit + 500)
+    await #expect(throws: MarkerCanaryError.overLimit) {
+      _ = try await publisher.publish(fixture.request(document: document))
+    }
+    #expect(await authorizer.observedPartCounts == [2])
+    #expect(await fixture.api.sendCount == 0)
+    #expect(try await fixture.intents.intents(jobID: fixture.job.id).isEmpty)
+  }
+
+  @Test("canary marker gate is inert normally and exact while active")
+  func canaryMarkerGateScope() async throws {
+    let authorizer = MarkerCanaryAuthorizer(maximumParts: 2)
+    let gate = JobCanaryMarkerAuthorizationGate(authority: authorizer)
+    let authorizedJobID = UUID()
+    let otherJobID = UUID()
+    let digest = String(repeating: "d", count: 64)
+
+    try await gate.authorizeCanaryMarkerBatch(
+      jobID: otherJobID,
+      operation: .createMarkerComment,
+      documentSHA256: digest,
+      partCount: 1,
+      now: Date(timeIntervalSince1970: 1)
+    )
+    #expect(await authorizer.observedPartCounts.isEmpty)
+
+    try await gate.begin(jobID: authorizedJobID)
+    await #expect(throws: GitHubMarkerPublisherError.canarySuppressed) {
+      try await gate.authorizeCanaryMarkerBatch(
+        jobID: otherJobID,
+        operation: .createMarkerComment,
+        documentSHA256: digest,
+        partCount: 1,
+        now: Date(timeIntervalSince1970: 2)
+      )
+    }
+    try await gate.authorizeCanaryMarkerBatch(
+      jobID: authorizedJobID,
+      operation: .createMarkerComment,
+      documentSHA256: digest,
+      partCount: 2,
+      now: Date(timeIntervalSince1970: 3)
+    )
+    #expect(await authorizer.observedPartCounts == [2])
+    await gate.end()
+
+    try await gate.authorizeCanaryMarkerBatch(
+      jobID: otherJobID,
+      operation: .createMarkerComment,
+      documentSHA256: digest,
+      partCount: 1,
+      now: Date(timeIntervalSince1970: 4)
+    )
+    #expect(await authorizer.observedPartCounts == [2])
+  }
+
   @Test("authorized retry reads the old marker generation before resend")
   func priorGenerationReadBack() async throws {
     let fixture = try await MarkerPublisherFixture(dropFirstCreate: true)
@@ -148,6 +217,30 @@ struct GitHubMarkerPublisherTests {
       (try await fixture.intents.intents(jobID: fixture.job.id)).map(\.state) == [
         .escalated
       ])
+  }
+}
+
+private enum MarkerCanaryError: Error, Equatable {
+  case overLimit
+}
+
+private actor MarkerCanaryAuthorizer: JobCanaryMarkerAuthorizing {
+  let maximumParts: Int
+  private(set) var observedPartCounts: [Int] = []
+
+  init(maximumParts: Int) {
+    self.maximumParts = maximumParts
+  }
+
+  func authorizeCanaryMarkerBatch(
+    jobID: UUID,
+    operation: MutationOperation,
+    documentSHA256: String,
+    partCount: Int,
+    now: Date
+  ) throws {
+    observedPartCounts.append(partCount)
+    guard partCount <= maximumParts else { throw MarkerCanaryError.overLimit }
   }
 }
 

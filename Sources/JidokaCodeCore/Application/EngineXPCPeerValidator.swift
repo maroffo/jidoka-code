@@ -47,7 +47,7 @@ public struct EngineXPCPeerValidator: Sendable {
     let directory = helper.deletingLastPathComponent()
     if directory.lastPathComponent == "Helpers" {
       return directory.deletingLastPathComponent()
-        .appendingPathComponent("MacOS/JidokaCodeApp", isDirectory: false)
+        .appendingPathComponent("MacOS/Jidoka Code", isDirectory: false)
     }
     return directory.appendingPathComponent("JidokaCodeApp", isDirectory: false)
   }

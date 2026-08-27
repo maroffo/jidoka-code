@@ -79,12 +79,62 @@ public enum GitHubMarkerPublisherError: Error, Equatable, Sendable {
   case unsupportedOperation
   case unexpectedIntentState(MutationIntentState)
   case attributionMismatch
+  case canarySuppressed
+}
+
+public protocol JobCanaryMarkerAuthorizing: Sendable {
+  func authorizeCanaryMarkerBatch(
+    jobID: UUID,
+    operation: MutationOperation,
+    documentSHA256: String,
+    partCount: Int,
+    now: Date
+  ) async throws
+}
+
+public actor JobCanaryMarkerAuthorizationGate: JobCanaryMarkerAuthorizing {
+  private let authority: any JobCanaryMarkerAuthorizing
+  private var jobID: UUID?
+
+  public init(authority: any JobCanaryMarkerAuthorizing) {
+    self.authority = authority
+  }
+
+  public func begin(jobID: UUID) throws {
+    guard self.jobID == nil else { throw GitHubMarkerPublisherError.canarySuppressed }
+    self.jobID = jobID
+  }
+
+  public func end() {
+    jobID = nil
+  }
+
+  public func authorizeCanaryMarkerBatch(
+    jobID: UUID,
+    operation: MutationOperation,
+    documentSHA256: String,
+    partCount: Int,
+    now: Date
+  ) async throws {
+    guard let authorizedJobID = self.jobID else { return }
+    guard authorizedJobID == jobID else {
+      throw GitHubMarkerPublisherError.canarySuppressed
+    }
+    try await authority.authorizeCanaryMarkerBatch(
+      jobID: jobID,
+      operation: operation,
+      documentSHA256: documentSHA256,
+      partCount: partCount,
+      now: now
+    )
+  }
 }
 
 public actor GitHubMarkerPublisher {
   private let executor: GitHubMutationExecutor
   private let intents: MutationIntentStore
   private let reads: any GitHubMutationReadAPI
+  private let canaryAuthorizer: (any JobCanaryMarkerAuthorizing)?
   private let sleeper: any MutationReconciliationSleeper
   private let now: @Sendable () -> Date
 
@@ -92,12 +142,14 @@ public actor GitHubMarkerPublisher {
     executor: GitHubMutationExecutor,
     intents: MutationIntentStore,
     reads: any GitHubMutationReadAPI,
+    canaryAuthorizer: (any JobCanaryMarkerAuthorizing)? = nil,
     sleeper: any MutationReconciliationSleeper = SystemMutationReconciliationSleeper(),
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.executor = executor
     self.intents = intents
     self.reads = reads
+    self.canaryAuthorizer = canaryAuthorizer
     self.sleeper = sleeper
     self.now = now
   }
@@ -139,6 +191,13 @@ public actor GitHubMarkerPublisher {
     guard let documentSHA256 = parts.first?.documentSHA256 else {
       throw GitHubMarkerPublisherError.invalidRequest
     }
+    try await canaryAuthorizer?.authorizeCanaryMarkerBatch(
+      jobID: request.jobID,
+      operation: request.operation,
+      documentSHA256: documentSHA256,
+      partCount: parts.count,
+      now: request.now
+    )
     let target =
       "\(request.repository.owner)/\(request.repository.repository)/issues/\(request.number)"
     var entries: [(part: GitHubMarkerPart, key: String, intent: MutationIntentRecord?)] = []

@@ -54,6 +54,7 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
   private let transport: any GitHubHTTPTransport
   private let credentialVault: any EngineCredentialVaulting
   private let runtimeResolver: any PiRuntimeResolving
+  private let modelCatalogDiscovery: (any PiModelCatalogDiscovering)?
   private let herdrReadiness: any HerdrRuntimeReadinessChecking
   private let now: @Sendable () -> Date
 
@@ -61,7 +62,8 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
     configuration: ConfigurationStore,
     transport: any GitHubHTTPTransport = GitHubURLSessionTransport(),
     credentialVault: any EngineCredentialVaulting = SystemEngineCredentialVault(),
-    runtimeResolver: any PiRuntimeResolving,
+    runtimeResolver: ReleaseOwnedPiRuntimeResolver,
+    modelCatalogDiscovery: (any PiModelCatalogDiscovering)? = nil,
     herdrReadiness: any HerdrRuntimeReadinessChecking,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
@@ -69,9 +71,30 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
     self.transport = transport
     self.credentialVault = credentialVault
     self.runtimeResolver = runtimeResolver
+    self.modelCatalogDiscovery = modelCatalogDiscovery
     self.herdrReadiness = herdrReadiness
     self.now = now
   }
+
+  #if DEBUG
+    init(
+      configuration: ConfigurationStore,
+      transport: any GitHubHTTPTransport = GitHubURLSessionTransport(),
+      credentialVault: any EngineCredentialVaulting = SystemEngineCredentialVault(),
+      runtimeResolver: any PiRuntimeResolving,
+      modelCatalogDiscovery: (any PiModelCatalogDiscovering)? = nil,
+      herdrReadiness: any HerdrRuntimeReadinessChecking,
+      now: @escaping @Sendable () -> Date = Date.init
+    ) {
+      self.configuration = configuration
+      self.transport = transport
+      self.credentialVault = credentialVault
+      self.runtimeResolver = runtimeResolver
+      self.modelCatalogDiscovery = modelCatalogDiscovery
+      self.herdrReadiness = herdrReadiness
+      self.now = now
+    }
+  #endif
 
   public func credentialStatus() async -> EngineCredentialStatus {
     do {
@@ -200,10 +223,23 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
     await herdrReadiness.preflight()
   }
 
+  public func discoverModelCatalog() async throws -> PiModelCatalog {
+    guard let modelCatalogDiscovery else {
+      throw EngineClientError(.piBlocked)
+    }
+    do {
+      return try await modelCatalogDiscovery.discover()
+    } catch {
+      throw EngineClientError(.piBlocked)
+    }
+  }
+
   public func preflightPi() async -> EnginePiStatus {
     do {
       let resolved = try await Task.detached { [runtimeResolver] in
-        try runtimeResolver.resolve()
+        try ReleaseOwnedPiRuntimeBoundaryAuthority.applicationStartup(
+          using: runtimeResolver
+        )
       }.value
       return EnginePiStatus(
         state: .ready,

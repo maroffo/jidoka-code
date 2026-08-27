@@ -13,6 +13,7 @@ public protocol EngineExternalServicing: Sendable {
   ) async throws -> RepositoryConfiguration
   func preflightPi() async -> EnginePiStatus
   func preflightHerdr() async -> EngineHerdrStatus
+  func discoverModelCatalog() async throws -> PiModelCatalog
 }
 
 public protocol EngineJobRuntime: Sendable {
@@ -26,6 +27,27 @@ public protocol EngineJobRuntime: Sendable {
   func beginExclusiveOperation() async throws
   func endExclusiveOperation() async
   func recheckAmbiguousMutation(jobID: UUID) async throws
+  func cleanupRetiredJobs(jobIDs: [UUID], evidenceSHA256: String) async throws
+  func canaryResourceTreeSHA256() async throws -> String
+  func executeCanary(_ authorization: JobCanaryAuthorization) async throws -> JobCanaryReport
+  func previewCanaryRecovery(
+    _ authorization: JobCanaryAuthorization
+  ) async throws -> JobCanaryRecoveryReport
+  func executeCanaryRecovery(
+    _ authorization: JobCanaryRecoveryAuthorization
+  ) async throws -> JobCanaryRecoveryExecution
+  func previewCanaryPiRetry(
+    _ authorization: JobCanaryRecoveryAuthorization
+  ) async throws -> JobCanaryPiRetryReport
+  func executeCanaryPiRetry(
+    _ authorization: JobCanaryPiRetryAuthorization
+  ) async throws -> JobCanaryPiRetryExecution
+  func previewCanaryRoleHostReplacement(
+    _ request: JobCanaryRoleHostReplacementRequest
+  ) async throws -> JobCanaryRoleHostReplacementReport
+  func executeCanaryRoleHostReplacement(
+    _ authorization: JobCanaryRoleHostReplacementAuthorization
+  ) async throws -> JobCanaryRoleHostReplacementExecution
   func waitUntilIdle() async throws
   func timingSnapshot() async -> SchedulerTimingSnapshot?
   func coordinatorSnapshot() async -> JobCoordinatorSnapshot?
@@ -36,6 +58,44 @@ public protocol EngineJobRuntime: Sendable {
 extension EngineJobRuntime {
   public func prepareForPause() async {}
   public func waitForPauseDrain() async {}
+  public func canaryResourceTreeSHA256() async throws -> String {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanary(_ authorization: JobCanaryAuthorization) async throws
+    -> JobCanaryReport
+  {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryRecovery(
+    _ authorization: JobCanaryAuthorization
+  ) async throws -> JobCanaryRecoveryReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryRecovery(
+    _ authorization: JobCanaryRecoveryAuthorization
+  ) async throws -> JobCanaryRecoveryExecution {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryPiRetry(
+    _ authorization: JobCanaryRecoveryAuthorization
+  ) async throws -> JobCanaryPiRetryReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryPiRetry(
+    _ authorization: JobCanaryPiRetryAuthorization
+  ) async throws -> JobCanaryPiRetryExecution {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryRoleHostReplacement(
+    _ request: JobCanaryRoleHostReplacementRequest
+  ) async throws -> JobCanaryRoleHostReplacementReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryRoleHostReplacement(
+    _ authorization: JobCanaryRoleHostReplacementAuthorization
+  ) async throws -> JobCanaryRoleHostReplacementExecution {
+    throw EngineClientError(.unavailable)
+  }
 }
 
 public actor InactiveEngineJobRuntime: EngineJobRuntime {
@@ -49,6 +109,43 @@ public actor InactiveEngineJobRuntime: EngineJobRuntime {
   public func beginExclusiveOperation() {}
   public func endExclusiveOperation() {}
   public func recheckAmbiguousMutation(jobID: UUID) {}
+  public func cleanupRetiredJobs(jobIDs: [UUID], evidenceSHA256: String) {}
+  public func canaryResourceTreeSHA256() throws -> String {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanary(_ authorization: JobCanaryAuthorization) throws -> JobCanaryReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryRecovery(
+    _ authorization: JobCanaryAuthorization
+  ) throws -> JobCanaryRecoveryReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryRecovery(
+    _ authorization: JobCanaryRecoveryAuthorization
+  ) throws -> JobCanaryRecoveryExecution {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryPiRetry(
+    _ authorization: JobCanaryRecoveryAuthorization
+  ) throws -> JobCanaryPiRetryReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryPiRetry(
+    _ authorization: JobCanaryPiRetryAuthorization
+  ) throws -> JobCanaryPiRetryExecution {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryRoleHostReplacement(
+    _ request: JobCanaryRoleHostReplacementRequest
+  ) throws -> JobCanaryRoleHostReplacementReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryRoleHostReplacement(
+    _ authorization: JobCanaryRoleHostReplacementAuthorization
+  ) throws -> JobCanaryRoleHostReplacementExecution {
+    throw EngineClientError(.unavailable)
+  }
   public func waitUntilIdle() {}
   public func timingSnapshot() -> SchedulerTimingSnapshot? { nil }
   public func coordinatorSnapshot() -> JobCoordinatorSnapshot? { nil }
@@ -70,6 +167,7 @@ public actor EngineService: EngineClient {
   private var credentialStatus = EngineCredentialStatus.missing
   private var piStatus = EnginePiStatus.unchecked
   private var herdrStatus = EngineHerdrStatus.unchecked
+  private var modelCatalog = PiModelCatalog.unavailable
   private var initialized = false
   private var quitting = false
   private var commandInProgress = false
@@ -99,20 +197,67 @@ public actor EngineService: EngineClient {
 
   public func initialize() async throws {
     guard !initialized else { return }
-    credentialStatus = await external.credentialStatus()
-    piStatus = await external.preflightPi()
-    herdrStatus = await external.preflightHerdr()
-    let dispatchAllowed = try await dispatchAllowed()
-    try await runtime.reload(dispatchAllowed: dispatchAllowed)
-    let app = try await configuration.appConfiguration()
-    await runtime.setPaused(app.paused)
-    initialized = true
+    var phase = EngineStartupPhase.credentialStatus
+    do {
+      await recordStartupPhase(phase)
+      credentialStatus = await external.credentialStatus()
+      phase = .piPreflight
+      await recordStartupPhase(phase)
+      piStatus = await external.preflightPi()
+      phase = .herdrPreflight
+      await recordStartupPhase(phase)
+      herdrStatus = await external.preflightHerdr()
+      phase = .dispatchGate
+      await recordStartupPhase(phase)
+      let dispatchAllowed = try await dispatchAllowed()
+      phase = .runtimeReload
+      await recordStartupPhase(phase)
+      try await runtime.reload(dispatchAllowed: dispatchAllowed)
+      phase = .pausedState
+      await recordStartupPhase(phase)
+      let app = try await configuration.appConfiguration()
+      await runtime.setPaused(app.paused)
+      initialized = true
+      await logger.record(
+        EngineLogRecord(
+          timestamp: now(),
+          event: .initialized,
+          command: nil,
+          error: nil
+        )
+      )
+    } catch let error as EngineClientError {
+      await recordStartupFailure(phase: phase, error: error.code)
+      throw error
+    } catch {
+      await recordStartupFailure(phase: phase, error: .internalFailure)
+      throw error
+    }
+  }
+
+  private func recordStartupPhase(_ phase: EngineStartupPhase) async {
     await logger.record(
       EngineLogRecord(
         timestamp: now(),
-        event: .initialized,
+        event: .startupPhase,
+        phase: phase,
         command: nil,
         error: nil
+      )
+    )
+  }
+
+  private func recordStartupFailure(
+    phase: EngineStartupPhase,
+    error: EngineClientErrorCode
+  ) async {
+    await logger.record(
+      EngineLogRecord(
+        timestamp: now(),
+        event: .startupFailed,
+        phase: phase,
+        command: nil,
+        error: error
       )
     )
   }
@@ -186,9 +331,24 @@ public actor EngineService: EngineClient {
 
   private func perform(_ command: EngineCommand) async throws -> EngineCommandResponse {
     let checkpoint: EngineCheckpointReceipt?
+    var jobMaintenance: JobMaintenanceReport? = nil
+    var jobCanary: JobCanaryReport? = nil
+    var jobCanaryRecovery: JobCanaryRecoveryReport? = nil
+    var jobCanaryPiRetry: JobCanaryPiRetryReport? = nil
+    var jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport? = nil
     switch command {
     case .snapshot:
       checkpoint = nil
+    case .refreshModelCatalog:
+      modelCatalog = .unavailable
+      do {
+        modelCatalog = try await external.discoverModelCatalog()
+      } catch {
+        didMutate()
+        throw error
+      }
+      checkpoint = nil
+      didMutate()
     case .acknowledgeExternalAutomation(let acknowledged):
       try await configuration.setExternalAutomationAcknowledged(acknowledged, now: now())
       await runtime.setDispatchAllowed(try await dispatchAllowed())
@@ -272,6 +432,7 @@ public actor EngineService: EngineClient {
         throw EngineClientError(.repositoryRejected)
       }
       try await configuration.upsertRepository(repository, now: now())
+      await runtime.setDispatchAllowed(try await dispatchAllowed())
       checkpoint = nil
       didMutate()
     case .removeRepository(let id):
@@ -359,6 +520,145 @@ public actor EngineService: EngineClient {
       }
       checkpoint = nil
       didMutate()
+    case .previewJobMaintenance(let scope):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
+      jobMaintenance = try await jobs.previewMaintenance(scope: scope)
+      checkpoint = nil
+    case .applyJobMaintenance(let authorization):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
+      try await runtime.beginExclusiveOperation()
+      do {
+        let application = try await jobs.applyMaintenance(authorization, now: now())
+        if authorization.scope.operation == .retireBefore {
+          try await runtime.cleanupRetiredJobs(
+            jobIDs: application.jobIDs,
+            evidenceSHA256: authorization.evidenceSHA256
+          )
+        }
+        _ = try await database.checkpoint()
+        checkpoint = try await checkpointReceipt()
+        jobMaintenance = application.report
+        await runtime.endExclusiveOperation()
+      } catch {
+        await runtime.endExclusiveOperation()
+        throw error
+      }
+      didMutate()
+    case .previewJobCanary(let scope):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready,
+        herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      jobCanary = try await jobs.previewCanary(
+        scope: scope,
+        resourceTreeSHA256: try await runtime.canaryResourceTreeSHA256()
+      )
+      checkpoint = nil
+    case .executeJobCanary(let authorization):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready,
+        herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      try await runtime.beginExclusiveOperation()
+      do {
+        jobCanary = try await runtime.executeCanary(authorization)
+        _ = try await database.checkpoint()
+        checkpoint = try await checkpointReceipt()
+        await runtime.endExclusiveOperation()
+      } catch {
+        await runtime.endExclusiveOperation()
+        throw error
+      }
+      didMutate()
+    case .previewJobCanaryRecovery(let authorization):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready,
+        herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      jobCanaryRecovery = try await runtime.previewCanaryRecovery(authorization)
+      checkpoint = nil
+    case .executeJobCanaryRecovery(let authorization):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready,
+        herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      try await runtime.beginExclusiveOperation()
+      do {
+        let execution = try await runtime.executeCanaryRecovery(authorization)
+        jobCanaryRecovery = execution.recovery
+        jobCanary = execution.canary
+        _ = try await database.checkpoint()
+        checkpoint = try await checkpointReceipt()
+        await runtime.endExclusiveOperation()
+      } catch {
+        await runtime.endExclusiveOperation()
+        throw error
+      }
+      didMutate()
+    case .previewJobCanaryPiRetry(let authorization):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready,
+        herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      jobCanaryPiRetry = try await runtime.previewCanaryPiRetry(authorization)
+      checkpoint = nil
+    case .executeJobCanaryPiRetry(let authorization):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready,
+        herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      try await runtime.beginExclusiveOperation()
+      do {
+        let execution = try await runtime.executeCanaryPiRetry(authorization)
+        jobCanaryPiRetry = execution.retry
+        jobCanary = execution.canary
+        _ = try await database.checkpoint()
+        checkpoint = try await checkpointReceipt()
+        await runtime.endExclusiveOperation()
+      } catch {
+        await runtime.endExclusiveOperation()
+        throw error
+      }
+      didMutate()
+    case .previewJobCanaryRoleHostReplacement(let request):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready,
+        herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      jobCanaryRoleHostReplacement = try await runtime.previewCanaryRoleHostReplacement(
+        request
+      )
+      checkpoint = nil
+    case .executeJobCanaryRoleHostReplacement(let authorization):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready,
+        herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      try await runtime.beginExclusiveOperation()
+      do {
+        let execution = try await runtime.executeCanaryRoleHostReplacement(authorization)
+        jobCanaryRoleHostReplacement = execution.replacement
+        jobCanary = execution.canary
+        _ = try await database.checkpoint()
+        checkpoint = try await checkpointReceipt()
+        await runtime.endExclusiveOperation()
+      } catch {
+        await runtime.endExclusiveOperation()
+        throw error
+      }
+      didMutate()
     case .setLoginEnabled(let selected):
       let current = try await configuration.appConfiguration()
       try await configuration.setLoginItem(
@@ -414,7 +714,12 @@ public actor EngineService: EngineClient {
     return EngineCommandResponse(
       command: command.kind,
       state: try await makeState(),
-      checkpoint: checkpoint
+      checkpoint: checkpoint,
+      jobMaintenance: jobMaintenance,
+      jobCanary: jobCanary,
+      jobCanaryRecovery: jobCanaryRecovery,
+      jobCanaryPiRetry: jobCanaryPiRetry,
+      jobCanaryRoleHostReplacement: jobCanaryRoleHostReplacement
     )
   }
 
@@ -429,7 +734,7 @@ public actor EngineService: EngineClient {
       && credentialStatus.state == .valid
       && piStatus.state == .ready
       && herdrStatus.state == .ready
-      && !snapshot.repositories.isEmpty
+      && snapshot.repositories.contains(where: { $0.enabled })
       && Set(snapshot.profiles.map(\.role)) == Set(ModelProfileRole.allCases)
   }
 
@@ -496,7 +801,8 @@ public actor EngineService: EngineClient {
         loginItemSelected: configuration.app.loginItemSelected,
         loginItemStatus: configuration.app.loginItemStatus,
         credential: credentialStatus,
-        herdr: herdrStatus
+        herdr: herdrStatus,
+        modelCatalog: modelCatalog
       ),
       diagnostics: EngineDiagnostics(
         schemaVersion: try await database.schemaVersion(),
@@ -601,7 +907,6 @@ public actor EngineService: EngineClient {
       && snapshot.pi.state == .ready
       && snapshot.herdr.state == .ready
       && snapshot.credential.state == .valid
-      && snapshot.repositoryCount > 0
       && Set(snapshot.configuredProfileRoles) == Set(ModelProfileRole.allCases)
       && snapshot.loginItemSelected
       && [.enabled, .requiresApproval].contains(snapshot.loginItemStatus)
@@ -664,11 +969,17 @@ public actor EngineService: EngineClient {
     case .runPiPreflight: .piBlocked
     case .runHerdrPreflight, .focusInHerdr: .herdrBlocked
     case .setLoginEnabled, .synchronizeLoginStatus: .loginItemFailed
-    case .authorizeRetry, .recheckAmbiguousMutation: .staleEvidence
+    case .authorizeRetry, .recheckAmbiguousMutation, .previewJobMaintenance,
+      .applyJobMaintenance, .previewJobCanary, .executeJobCanary,
+      .previewJobCanaryRecovery, .executeJobCanaryRecovery,
+      .previewJobCanaryPiRetry, .executeJobCanaryPiRetry,
+      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement:
+      .staleEvidence
     case .completeOnboarding: .onboardingIncomplete
     case .prepareForHandoff, .prepareForQuit: .checkpointFailed
-    case .snapshot, .acknowledgeExternalAutomation, .acknowledgeProviderDisclosure,
-      .setProfile, .setMaxConcurrency, .setPaused, .pollNow, .rollbackOnboarding:
+    case .snapshot, .refreshModelCatalog, .acknowledgeExternalAutomation,
+      .acknowledgeProviderDisclosure, .setProfile, .setMaxConcurrency, .setPaused, .pollNow,
+      .rollbackOnboarding:
       .internalFailure
     }
   }

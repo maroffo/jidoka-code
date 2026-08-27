@@ -106,8 +106,10 @@ public struct KeychainProbeStore: Sendable {
     let sentinel = try makeSentinel()
     var query = baseQuery
     query[kSecValueData as String] = sentinel
-    query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     query[kSecAttrLabel as String] = "Jidoka Code synthetic S3 sentinel"
+    query[kSecAttrAccess as String] = try GitHubTokenKeychainAccessPolicy().makeAccess(
+      descriptor: "Jidoka Code synthetic S3 sentinel"
+    )
     let status = SecItemAdd(query as CFDictionary, nil)
     switch KeychainProbeOSStatus.classify(status) {
     case .success:
@@ -152,7 +154,12 @@ public struct KeychainProbeStore: Sendable {
   public func replace() throws -> KeychainProbeResult {
     guard try status().exists else { throw KeychainProbeError.missingItem }
     let sentinel = try makeSentinel()
-    let attributes = [kSecValueData as String: sentinel]
+    let attributes: [String: Any] = [
+      kSecValueData as String: sentinel,
+      kSecAttrAccess as String: try GitHubTokenKeychainAccessPolicy().makeAccess(
+        descriptor: "Jidoka Code synthetic S3 sentinel"
+      ),
+    ]
     let status = SecItemUpdate(baseQuery as CFDictionary, attributes as CFDictionary)
     switch KeychainProbeOSStatus.classify(status) {
     case .success:
@@ -188,7 +195,6 @@ public struct KeychainProbeStore: Sendable {
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: KeychainProbeConstants.service,
       kSecAttrAccount as String: KeychainProbeConstants.account,
-      kSecAttrSynchronizable as String: false,
     ]
   }
 

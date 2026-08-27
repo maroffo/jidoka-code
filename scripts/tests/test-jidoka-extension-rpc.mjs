@@ -23,8 +23,10 @@ const root = realpathSync(fileURLToPath(new URL("../..", import.meta.url)));
 const resourceRoot = realpathSync(
   process.env.JIDOKA_PI_RESOURCE_ROOT ?? resolve(root, "Resources/Pi"),
 );
-const nodePath = "/opt/homebrew/Cellar/node/26.6.0/bin/node";
-const piPath = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
+const releaseRuntimeRoot = realpathSync(process.env.JIDOKA_RELEASE_RUNTIME_ROOT ?? "");
+const nodePath = realpathSync(process.execPath);
+const piPath = resolve(releaseRuntimeRoot, "pi/dist/cli.js");
+assert.equal(nodePath, resolve(releaseRuntimeRoot, "node/bin/node"));
 const temporaryRaw = mkdtempSync(`${tmpdir()}/jidoka-extension-rpc-`);
 const temporary = realpathSync(temporaryRaw);
 chmodSync(temporary, 0o700);
@@ -54,7 +56,7 @@ const manifestPath = resolve(resourceRoot, "workflow-resources.json");
 const manifestSHA256 = createHash("sha256").update(readFileSync(manifestPath)).digest("hex");
 assert.equal(
   manifestSHA256,
-  "4d7be2b7ed582f2195bf19953dc74420be12c9066c2a9565b64f09afc204d566",
+  "230c9a45b9dd53443837166c6e8b60adac67d3bfeb32249de8ca5228f1e1357d",
 );
 const configurationPath = resolve(temporary, "workflow.json");
 writeFileSync(
@@ -112,7 +114,7 @@ const child = spawn(
   ],
   {
     cwd: workspace,
-    detached: true,
+    detached: false,
     env: {
       GIT_ASKPASS: "/usr/bin/false",
       GIT_CONFIG_GLOBAL: "/dev/null",
@@ -121,6 +123,7 @@ const child = spawn(
       GIT_TERMINAL_PROMPT: "0",
       HOME: home,
       JIDOKA_CODE_CONFIG: configurationPath,
+      JIDOKA_RELEASE_RUNTIME_ROOT: releaseRuntimeRoot,
       LANG: "en_US.UTF-8",
       LC_ALL: "en_US.UTF-8",
       PATH: "/usr/bin:/bin",
@@ -321,7 +324,7 @@ try {
 } finally {
   if (!closed) {
     try {
-      process.kill(-child.pid, "SIGKILL");
+      process.kill(child.pid, "SIGKILL");
     } catch (error) {
       if (error?.code !== "ESRCH") throw error;
     }

@@ -343,8 +343,15 @@ public actor ConfigurationStore {
 
   public func setOnboardingComplete(_ complete: Bool, now: Date) async throws {
     try await database.execute(
-      "UPDATE app_settings SET onboarding_complete = ?, updated_at = ? WHERE singleton = 1",
+      """
+      UPDATE app_settings
+      SET onboarding_complete = ?,
+          paused = CASE WHEN ? = 1 THEN 0 ELSE paused END,
+          updated_at = ?
+      WHERE singleton = 1
+      """,
       bindings: [
+        .integer(complete ? 1 : 0),
         .integer(complete ? 1 : 0),
         .real(now.timeIntervalSince1970),
       ]

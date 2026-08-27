@@ -17,6 +17,7 @@ let package = Package(
     .executable(name: "JidokaCodePushGuard", targets: ["JidokaCodePushGuard"]),
     .executable(name: "JidokaCodeHerdrHost", targets: ["JidokaCodeHerdrHost"]),
     .executable(name: "JidokaCodeHerdrFixture", targets: ["JidokaCodeHerdrFixture"]),
+    .executable(name: "JidokaCodeBoundedCommand", targets: ["JidokaCodeBoundedCommand"]),
   ],
   targets: [
     .target(
@@ -53,6 +54,10 @@ let package = Package(
     ),
     .executableTarget(
       name: "JidokaCodeHerdrFixture",
+      dependencies: ["JidokaCodeCore"]
+    ),
+    .executableTarget(
+      name: "JidokaCodeBoundedCommand",
       dependencies: ["JidokaCodeCore"]
     ),
     .testTarget(

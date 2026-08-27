@@ -82,7 +82,9 @@ struct PiRPCWorkflowExecutor: PiWorkflowExecuting, Sendable {
 
   func execute(_ request: PiWorkflowExecutionRequest) async throws -> PiWorkflowExecution {
     let preparation = try await preparer.prepare(request)
-    let runtime = try runtimeResolver.resolve()
+    let runtime = try ReleaseOwnedPiRuntimeBoundaryAuthority.rpcProcess(
+      using: runtimeResolver
+    )
     let resources = try PiWorkflowResourceCatalog.inspect(resourceRoot: resourceRoot)
     let processRequest = try makeProcessRequest(
       request: request,

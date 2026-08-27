@@ -1,6 +1,10 @@
 import Foundation
 
 public enum EngineProtocolVersion {
+  public static let current = 9
+}
+
+public enum LifecycleProbeProtocolVersion {
   public static let current = 2
 }
 
@@ -276,6 +280,7 @@ public struct EngineSettingsSnapshot: Codable, Equatable, Sendable {
   public let loginItemStatus: LifecycleServiceStatus
   public let credential: EngineCredentialStatus
   public let herdr: EngineHerdrStatus
+  public let modelCatalog: PiModelCatalog
 
   public init(
     repositories: [RepositoryConfiguration],
@@ -284,7 +289,8 @@ public struct EngineSettingsSnapshot: Codable, Equatable, Sendable {
     loginItemSelected: Bool,
     loginItemStatus: LifecycleServiceStatus,
     credential: EngineCredentialStatus,
-    herdr: EngineHerdrStatus
+    herdr: EngineHerdrStatus,
+    modelCatalog: PiModelCatalog = .unavailable
   ) {
     self.repositories = repositories
     self.profiles = profiles
@@ -293,6 +299,7 @@ public struct EngineSettingsSnapshot: Codable, Equatable, Sendable {
     self.loginItemStatus = loginItemStatus
     self.credential = credential
     self.herdr = herdr
+    self.modelCatalog = modelCatalog
   }
 }
 
@@ -359,6 +366,7 @@ public struct EngineAmbiguousMutationEvidence: Codable, Equatable, Sendable {
 
 public enum EngineCommandKind: String, CaseIterable, Codable, Hashable, Sendable {
   case snapshot
+  case refreshModelCatalog
   case acknowledgeExternalAutomation
   case acknowledgeProviderDisclosure
   case runPiPreflight
@@ -375,6 +383,16 @@ public enum EngineCommandKind: String, CaseIterable, Codable, Hashable, Sendable
   case pollNow
   case recheckAmbiguousMutation
   case authorizeRetry
+  case previewJobMaintenance
+  case applyJobMaintenance
+  case previewJobCanary
+  case executeJobCanary
+  case previewJobCanaryRecovery
+  case executeJobCanaryRecovery
+  case previewJobCanaryPiRetry
+  case executeJobCanaryPiRetry
+  case previewJobCanaryRoleHostReplacement
+  case executeJobCanaryRoleHostReplacement
   case setLoginEnabled
   case synchronizeLoginStatus
   case completeOnboarding
@@ -383,8 +401,46 @@ public enum EngineCommandKind: String, CaseIterable, Codable, Hashable, Sendable
   case prepareForQuit
 }
 
+extension EngineCommandKind {
+  public static let productionHelperAllowedCommands: Set<Self> = [
+    .snapshot,
+    .refreshModelCatalog,
+    .acknowledgeExternalAutomation,
+    .acknowledgeProviderDisclosure,
+    .runPiPreflight,
+    .runHerdrPreflight,
+    .focusInHerdr,
+    .replaceCredential,
+    .deleteCredential,
+    .addRepository,
+    .updateRepository,
+    .removeRepository,
+    .setProfile,
+    .setMaxConcurrency,
+    .setPaused,
+    .pollNow,
+    .recheckAmbiguousMutation,
+    .authorizeRetry,
+    .previewJobMaintenance,
+    .applyJobMaintenance,
+    .previewJobCanary,
+    .executeJobCanary,
+    .previewJobCanaryRecovery,
+    .executeJobCanaryRecovery,
+    .previewJobCanaryPiRetry,
+    .executeJobCanaryPiRetry,
+    .previewJobCanaryRoleHostReplacement,
+    .executeJobCanaryRoleHostReplacement,
+    .synchronizeLoginStatus,
+    .completeOnboarding,
+    .rollbackOnboarding,
+    .prepareForQuit,
+  ]
+}
+
 public enum EngineCommand: Codable, Equatable, Sendable {
   case snapshot
+  case refreshModelCatalog
   case acknowledgeExternalAutomation(Bool)
   case acknowledgeProviderDisclosure(Bool)
   case runPiPreflight
@@ -401,6 +457,16 @@ public enum EngineCommand: Codable, Equatable, Sendable {
   case pollNow
   case recheckAmbiguousMutation(EngineAmbiguousMutationEvidence)
   case authorizeRetry(EngineAmbiguousMutationEvidence)
+  case previewJobMaintenance(JobMaintenanceScope)
+  case applyJobMaintenance(JobMaintenanceAuthorization)
+  case previewJobCanary(JobCanaryScope)
+  case executeJobCanary(JobCanaryAuthorization)
+  case previewJobCanaryRecovery(JobCanaryAuthorization)
+  case executeJobCanaryRecovery(JobCanaryRecoveryAuthorization)
+  case previewJobCanaryPiRetry(JobCanaryRecoveryAuthorization)
+  case executeJobCanaryPiRetry(JobCanaryPiRetryAuthorization)
+  case previewJobCanaryRoleHostReplacement(JobCanaryRoleHostReplacementRequest)
+  case executeJobCanaryRoleHostReplacement(JobCanaryRoleHostReplacementAuthorization)
   case setLoginEnabled(Bool)
   case synchronizeLoginStatus(selected: Bool, status: LifecycleServiceStatus)
   case completeOnboarding
@@ -411,6 +477,7 @@ public enum EngineCommand: Codable, Equatable, Sendable {
   public var kind: EngineCommandKind {
     switch self {
     case .snapshot: .snapshot
+    case .refreshModelCatalog: .refreshModelCatalog
     case .acknowledgeExternalAutomation: .acknowledgeExternalAutomation
     case .acknowledgeProviderDisclosure: .acknowledgeProviderDisclosure
     case .runPiPreflight: .runPiPreflight
@@ -427,6 +494,16 @@ public enum EngineCommand: Codable, Equatable, Sendable {
     case .pollNow: .pollNow
     case .recheckAmbiguousMutation: .recheckAmbiguousMutation
     case .authorizeRetry: .authorizeRetry
+    case .previewJobMaintenance: .previewJobMaintenance
+    case .applyJobMaintenance: .applyJobMaintenance
+    case .previewJobCanary: .previewJobCanary
+    case .executeJobCanary: .executeJobCanary
+    case .previewJobCanaryRecovery: .previewJobCanaryRecovery
+    case .executeJobCanaryRecovery: .executeJobCanaryRecovery
+    case .previewJobCanaryPiRetry: .previewJobCanaryPiRetry
+    case .executeJobCanaryPiRetry: .executeJobCanaryPiRetry
+    case .previewJobCanaryRoleHostReplacement: .previewJobCanaryRoleHostReplacement
+    case .executeJobCanaryRoleHostReplacement: .executeJobCanaryRoleHostReplacement
     case .setLoginEnabled: .setLoginEnabled
     case .synchronizeLoginStatus: .synchronizeLoginStatus
     case .completeOnboarding: .completeOnboarding
@@ -474,7 +551,26 @@ public enum EngineCommand: Codable, Equatable, Sendable {
       else {
         throw EngineClientError(.invalidCommand)
       }
-    case .snapshot, .acknowledgeExternalAutomation, .acknowledgeProviderDisclosure,
+    case .previewJobMaintenance(let scope):
+      try scope.validate()
+    case .applyJobMaintenance(let authorization):
+      try authorization.validate()
+    case .previewJobCanary(let scope):
+      try scope.validate()
+    case .executeJobCanary(let authorization),
+      .previewJobCanaryRecovery(let authorization):
+      try authorization.validate()
+    case .executeJobCanaryRecovery(let authorization),
+      .previewJobCanaryPiRetry(let authorization):
+      try authorization.validate()
+    case .executeJobCanaryPiRetry(let authorization):
+      try authorization.validate()
+    case .previewJobCanaryRoleHostReplacement(let request):
+      try request.validate()
+    case .executeJobCanaryRoleHostReplacement(let authorization):
+      try authorization.validate()
+    case .snapshot, .refreshModelCatalog, .acknowledgeExternalAutomation,
+      .acknowledgeProviderDisclosure,
       .runPiPreflight, .runHerdrPreflight, .focusInHerdr, .deleteCredential,
       .removeRepository, .setPaused, .pollNow,
       .setLoginEnabled, .synchronizeLoginStatus, .completeOnboarding, .rollbackOnboarding,
@@ -510,15 +606,30 @@ public struct EngineCommandResponse: Codable, Equatable, Sendable {
   public let command: EngineCommandKind
   public let state: EngineUIState
   public let checkpoint: EngineCheckpointReceipt?
+  public let jobMaintenance: JobMaintenanceReport?
+  public let jobCanary: JobCanaryReport?
+  public let jobCanaryRecovery: JobCanaryRecoveryReport?
+  public let jobCanaryPiRetry: JobCanaryPiRetryReport?
+  public let jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport?
 
   public init(
     command: EngineCommandKind,
     state: EngineUIState,
-    checkpoint: EngineCheckpointReceipt? = nil
+    checkpoint: EngineCheckpointReceipt? = nil,
+    jobMaintenance: JobMaintenanceReport? = nil,
+    jobCanary: JobCanaryReport? = nil,
+    jobCanaryRecovery: JobCanaryRecoveryReport? = nil,
+    jobCanaryPiRetry: JobCanaryPiRetryReport? = nil,
+    jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport? = nil
   ) {
     self.command = command
     self.state = state
     self.checkpoint = checkpoint
+    self.jobMaintenance = jobMaintenance
+    self.jobCanary = jobCanary
+    self.jobCanaryRecovery = jobCanaryRecovery
+    self.jobCanaryPiRetry = jobCanaryPiRetry
+    self.jobCanaryRoleHostReplacement = jobCanaryRoleHostReplacement
   }
 }
 
@@ -625,7 +736,322 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
       throw EngineClientError(.invalidResponse)
     }
     try Self.validate(result.state.settings.herdr)
+    try Self.validate(result.state.settings.modelCatalog)
+    try Self.validateMaintenance(result, for: request.command)
+    try Self.validateCanary(result, for: request.command)
+    try Self.validateCanaryRecovery(result, for: request.command)
+    try Self.validateCanaryPiRetry(result, for: request.command)
+    try Self.validateCanaryRoleHostReplacement(result, for: request.command)
     return result
+  }
+
+  private static func validateMaintenance(
+    _ result: EngineCommandResponse,
+    for command: EngineCommand
+  ) throws {
+    switch command {
+    case .previewJobMaintenance(let scope):
+      guard result.state.paused,
+        let report = result.jobMaintenance,
+        report.scope == scope,
+        report.candidateCount >= 0,
+        report.appliedCount == 0,
+        !report.replayed,
+        GitHubInputValidation.validSHA256(report.evidenceSHA256),
+        result.checkpoint == nil
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .applyJobMaintenance(let authorization):
+      guard result.state.paused,
+        let report = result.jobMaintenance,
+        report.scope == authorization.scope,
+        report.candidateCount == authorization.expectedCount,
+        report.evidenceSHA256 == authorization.evidenceSHA256,
+        report.appliedCount == authorization.expectedCount,
+        result.checkpoint?.databaseCheckpointed == true
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    default:
+      guard result.jobMaintenance == nil else {
+        throw EngineClientError(.invalidResponse)
+      }
+    }
+  }
+
+  private static func validateCanary(
+    _ result: EngineCommandResponse,
+    for command: EngineCommand
+  ) throws {
+    switch command {
+    case .previewJobCanary(let scope):
+      guard result.state.paused,
+        let report = result.jobCanary,
+        report.scope == scope,
+        report.status == .preview,
+        report.authorizationSHA256 == nil,
+        !report.replayed,
+        Self.validCanaryReport(report),
+        result.checkpoint == nil
+      else { throw EngineClientError(.invalidResponse) }
+    case .executeJobCanary(let authorization):
+      guard result.state.paused,
+        let report = result.jobCanary,
+        report.scope == authorization.scope,
+        report.previewEvidenceSHA256 == authorization.previewEvidenceSHA256,
+        report.authorizationSHA256 == authorization.authorizationSHA256,
+        report.status == .settled || report.status == .recoveryRequired,
+        Self.validCanaryReport(report),
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+    case .executeJobCanaryRecovery(let authorization):
+      guard result.state.paused,
+        let report = result.jobCanary,
+        report.scope == authorization.canary.scope,
+        report.previewEvidenceSHA256 == authorization.canary.previewEvidenceSHA256,
+        report.authorizationSHA256 == authorization.canary.authorizationSHA256,
+        report.status == .settled || report.status == .recoveryRequired,
+        Self.validCanaryReport(report),
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+    case .executeJobCanaryPiRetry(let authorization):
+      guard result.state.paused,
+        let report = result.jobCanary,
+        report.scope == authorization.recovery.canary.scope,
+        report.previewEvidenceSHA256 == authorization.recovery.canary.previewEvidenceSHA256,
+        report.authorizationSHA256 == authorization.recovery.canary.authorizationSHA256,
+        report.status == .settled || report.status == .recoveryRequired,
+        Self.validCanaryReport(report),
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+    case .executeJobCanaryRoleHostReplacement(let authorization):
+      guard result.state.paused,
+        let report = result.jobCanary,
+        report.scope == authorization.request.retry.recovery.canary.scope,
+        report.previewEvidenceSHA256
+          == authorization.request.retry.recovery.canary.previewEvidenceSHA256,
+        report.authorizationSHA256
+          == authorization.request.retry.recovery.canary.authorizationSHA256,
+        report.status == .settled || report.status == .recoveryRequired,
+        Self.validCanaryReport(report),
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+    default:
+      guard result.jobCanary == nil else { throw EngineClientError(.invalidResponse) }
+    }
+  }
+
+  private static func validateCanaryRecovery(
+    _ result: EngineCommandResponse,
+    for command: EngineCommand
+  ) throws {
+    switch command {
+    case .previewJobCanaryRecovery(let canary):
+      guard result.state.paused,
+        let report = result.jobCanaryRecovery,
+        report.jobID == canary.scope.jobID,
+        report.canaryAuthorizationSHA256 == canary.authorizationSHA256,
+        report.recoveryAuthorizationSHA256 == nil,
+        report.status == .preview,
+        !report.replayed,
+        validCanaryRecoveryReport(report),
+        result.checkpoint == nil
+      else { throw EngineClientError(.invalidResponse) }
+    case .executeJobCanaryRecovery(let authorization):
+      guard result.state.paused,
+        let report = result.jobCanaryRecovery,
+        report.jobID == authorization.canary.scope.jobID,
+        report.canaryAuthorizationSHA256 == authorization.canary.authorizationSHA256,
+        report.recoveryEvidenceSHA256 == authorization.recoveryEvidenceSHA256,
+        report.recoveryAuthorizationSHA256 == authorization.authorizationSHA256,
+        report.status == .recovered || report.status == .recoveryRequired,
+        validCanaryRecoveryReport(report),
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+    default:
+      guard result.jobCanaryRecovery == nil else {
+        throw EngineClientError(.invalidResponse)
+      }
+    }
+  }
+
+  private static func validateCanaryPiRetry(
+    _ result: EngineCommandResponse,
+    for command: EngineCommand
+  ) throws {
+    switch command {
+    case .previewJobCanaryPiRetry(let recovery):
+      guard result.state.paused,
+        let report = result.jobCanaryPiRetry,
+        report.jobID == recovery.canary.scope.jobID,
+        report.canaryAuthorizationSHA256 == recovery.canary.authorizationSHA256,
+        report.recoveryEvidenceSHA256 == recovery.recoveryEvidenceSHA256,
+        report.retryAuthorizationSHA256 == nil,
+        report.status == .preview,
+        !report.replayed,
+        validCanaryPiRetryReport(report),
+        result.checkpoint == nil
+      else { throw EngineClientError(.invalidResponse) }
+    case .executeJobCanaryPiRetry(let authorization):
+      guard result.state.paused,
+        let report = result.jobCanaryPiRetry,
+        report.jobID == authorization.recovery.canary.scope.jobID,
+        report.canaryAuthorizationSHA256 == authorization.recovery.canary.authorizationSHA256,
+        report.recoveryEvidenceSHA256 == authorization.recovery.recoveryEvidenceSHA256,
+        report.retryEvidenceSHA256 == authorization.retryEvidenceSHA256,
+        report.retryAuthorizationSHA256 == authorization.authorizationSHA256,
+        report.status == .authorized || report.status == .recoveryRequired,
+        validCanaryPiRetryReport(report),
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+    default:
+      guard result.jobCanaryPiRetry == nil else {
+        throw EngineClientError(.invalidResponse)
+      }
+    }
+  }
+
+  private static func validateCanaryRoleHostReplacement(
+    _ result: EngineCommandResponse,
+    for command: EngineCommand
+  ) throws {
+    switch command {
+    case .previewJobCanaryRoleHostReplacement(let request):
+      guard result.state.paused,
+        let report = result.jobCanaryRoleHostReplacement,
+        report.jobID == request.retry.recovery.canary.scope.jobID,
+        report.replacementRoleHostID == request.plannedReplacementRoleHostID,
+        report.plannedLaunchAttemptID == request.plannedLaunchAttemptID,
+        report.incidentAuditSHA256 == request.incidentAuditSHA256,
+        GitHubInputValidation.validSHA256(report.replacementEvidenceSHA256),
+        result.checkpoint == nil
+      else { throw EngineClientError(.invalidResponse) }
+      do {
+        try report.validate()
+      } catch {
+        throw EngineClientError(.invalidResponse)
+      }
+      switch report.outcome {
+      case .preview:
+        guard report.replacementAuthorizationSHA256 == nil, !report.replayed else {
+          throw EngineClientError(.invalidResponse)
+        }
+      default:
+        let durableAuthorization = JobCanaryRoleHostReplacementAuthorization(
+          request: request,
+          replacementEvidenceSHA256: report.replacementEvidenceSHA256,
+          q4Binding: report.q4Binding
+        )
+        guard report.outcome.isTerminal, report.replayed,
+          report.replacementAuthorizationSHA256
+            == durableAuthorization.authorizationSHA256
+        else { throw EngineClientError(.invalidResponse) }
+      }
+    case .executeJobCanaryRoleHostReplacement(let authorization):
+      guard result.state.paused,
+        let report = result.jobCanaryRoleHostReplacement,
+        report.jobID == authorization.request.retry.recovery.canary.scope.jobID,
+        report.replacementRoleHostID
+          == authorization.request.plannedReplacementRoleHostID,
+        report.plannedLaunchAttemptID == authorization.request.plannedLaunchAttemptID,
+        report.incidentAuditSHA256 == authorization.request.incidentAuditSHA256,
+        report.replacementEvidenceSHA256 == authorization.replacementEvidenceSHA256,
+        report.replacementAuthorizationSHA256 == authorization.authorizationSHA256,
+        report.q4Binding == authorization.q4Binding,
+        report.outcome.isTerminal,
+        !report.replayed,
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+      do {
+        try report.validate()
+      } catch {
+        throw EngineClientError(.invalidResponse)
+      }
+    default:
+      guard result.jobCanaryRoleHostReplacement == nil else {
+        throw EngineClientError(.invalidResponse)
+      }
+    }
+  }
+
+  private static func validCanaryPiRetryReport(_ report: JobCanaryPiRetryReport) -> Bool {
+    let authorityEvidenceValid: Bool
+    switch report.agentAuthorityProtocol {
+    case nil:
+      authorityEvidenceValid =
+        report.failedPrimeIntentID == nil
+        && report.failedPrimeIntentSHA256 == nil
+        && report.failedPrimePayloadSHA256 == nil
+        && report.stalePaneRevision == nil
+        && report.stalePaneHadTokens == nil
+        && report.stalePaneTokensSHA256 == nil
+    case JobCanaryPiRetryEvidence.legacyAgentPrimeProtocolV1:
+      authorityEvidenceValid =
+        report.failedPrimeIntentID == nil
+        && report.failedPrimeIntentSHA256 == nil
+        && report.failedPrimePayloadSHA256 == nil
+        && report.stalePaneRevision == nil
+        && report.stalePaneHadTokens == nil
+        && report.stalePaneTokensSHA256 == nil
+    case JobCanaryPiRetryEvidence.agentAuthorityResetProtocolV1:
+      authorityEvidenceValid =
+        report.failedPrimeIntentID?.wholeMatch(of: /^prime-[0-9a-f-]{36}$/) != nil
+        && report.failedPrimeIntentSHA256.map(GitHubInputValidation.validSHA256) == true
+        && report.failedPrimePayloadSHA256.map(GitHubInputValidation.validSHA256) == true
+        && report.stalePaneRevision.map({ $0 > 0 }) == true
+        && report.stalePaneHadTokens != nil
+        && report.stalePaneTokensSHA256.map(GitHubInputValidation.validSHA256) == true
+    default:
+      authorityEvidenceValid = false
+    }
+    return authorityEvidenceValid
+      && GitHubInputValidation.validSHA256(report.canaryAuthorizationSHA256)
+      && GitHubInputValidation.validSHA256(report.recoveryEvidenceSHA256)
+      && GitHubInputValidation.validSHA256(report.retryEvidenceSHA256)
+      && (report.retryAuthorizationSHA256.map(GitHubInputValidation.validSHA256) ?? true)
+      && report.runID.wholeMatch(of: /^run-[0-9a-f-]{36}$/) != nil
+      && report.failedLaunchAttemptID.wholeMatch(of: /^launch-[0-9a-f-]{36}$/) != nil
+      && report.provider.wholeMatch(of: /^[a-z0-9][a-z0-9._-]{0,63}$/) != nil
+      && !report.model.isEmpty && report.model.utf8.count <= 256
+      && ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        .contains(report.thinking)
+      && report.credentialType == "oauth"
+      && report.credentialExpiresAtMilliseconds > 0
+  }
+
+  private static func validCanaryRecoveryReport(_ report: JobCanaryRecoveryReport) -> Bool {
+    report.roles == [.architecture, .security, .test, .synthesis]
+      && GitHubInputValidation.validOwner(report.repositoryOwner)
+      && GitHubInputValidation.validRepository(report.repositoryName)
+      && report.objectNumber > 0
+      && !report.revisionKey.isEmpty && report.revisionKey.utf8.count <= 1_024
+      && !report.provider.isEmpty && report.provider.utf8.count <= 128
+      && !report.model.isEmpty && report.model.utf8.count <= 256
+      && !report.thinking.isEmpty && report.thinking.utf8.count <= 64
+      && GitHubInputValidation.validSHA256(report.resourceTreeSHA256)
+      && GitHubInputValidation.validSHA256(report.canaryAuthorizationSHA256)
+      && GitHubInputValidation.validSHA256(report.recoveryEvidenceSHA256)
+      && (report.recoveryAuthorizationSHA256.map(GitHubInputValidation.validSHA256) ?? true)
+      && GitHubInputValidation.validSHA256(report.unknownIntentSHA256)
+      && GitHubInputValidation.validSHA256(report.unknownPayloadSHA256)
+      && GitHubInputValidation.validSHA256(report.layoutSHA256)
+      && GitHubInputValidation.validSHA256(report.hostExecutableSHA256)
+      && report.unknownIntentID.wholeMatch(of: /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/) != nil
+  }
+
+  private static func validCanaryReport(_ report: JobCanaryReport) -> Bool {
+    report.piRoles == [.architecture, .security, .test, .synthesis]
+      && GitHubInputValidation.validSHA256(report.previewEvidenceSHA256)
+      && GitHubInputValidation.validSHA256(report.resourceTreeSHA256)
+      && (report.authorizationSHA256.map(GitHubInputValidation.validSHA256) ?? true)
+      && GitHubInputValidation.validOwner(report.repositoryOwner)
+      && GitHubInputValidation.validRepository(report.repositoryName)
+      && report.objectNumber > 0
+      && !report.revisionKey.isEmpty && report.revisionKey.utf8.count <= 1_024
+      && !report.provider.isEmpty && report.provider.utf8.count <= 128
+      && !report.model.isEmpty && report.model.utf8.count <= 256
+      && !report.thinking.isEmpty && report.thinking.utf8.count <= 64
   }
 
   private static func validate(_ status: EngineHerdrStatus) throws {
@@ -659,6 +1085,19 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
       else {
         throw EngineClientError(.invalidResponse)
       }
+    }
+  }
+
+  private static func validate(_ catalog: PiModelCatalog) throws {
+    do {
+      let data = try JSONEncoder().encode(catalog)
+      guard try PiModelCatalogDecoder.decode(data) == catalog else {
+        throw EngineClientError(.invalidResponse)
+      }
+    } catch let error as EngineClientError {
+      throw error
+    } catch {
+      throw EngineClientError(.invalidResponse)
     }
   }
 

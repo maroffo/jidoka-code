@@ -1,12 +1,10 @@
 import CryptoKit
-import Darwin
 import Foundation
 import JidokaCodeCore
 
 private enum LocalSpikeCLIConstants {
-  static let nodeURL = URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node")
   static let runnerRelativePath = "Spikes/jidoka-local-spikes.mjs"
-  static let runnerSHA256 = "59a4b657195d443c49f9211d25978dcdb29e64da0baea7e172c59ff5605b32e7"
+  static let runnerSHA256 = "c16e11605ecb8b818bd51abbdbe824414d9c2d19a1d010d3265c48c99cf05ecf"
   static let maximumOutputBytes = 1_048_576
 }
 
@@ -23,12 +21,18 @@ enum LocalSpikeCLI {
   static func run(arguments: [String]) throws -> Data {
     let command = try LocalSpikeCommand.parse(arguments)
     let runnerURL = try packagedRunner()
+    let runtime = try packagedRuntime()
     let workspaceURL = try createTemporaryWorkspace()
     defer {
       try? removeTemporaryWorkspace(workspaceURL)
     }
+    let finalRuntime = try packagedRuntime()
+    guard finalRuntime.releaseIdentity == runtime.releaseIdentity else {
+      throw LocalSpikeCLIError.invalidNodeRuntime
+    }
     return try executeRunner(
       runnerURL: runnerURL,
+      runtime: finalRuntime,
       workspaceURL: workspaceURL,
       command: command
     )
@@ -73,6 +77,29 @@ enum LocalSpikeCLI {
     return runner
   }
 
+  private static func packagedRuntime() throws -> PiResolvedRuntime {
+    guard let resources = Bundle.main.resourceURL else {
+      throw LocalSpikeCLIError.invalidPackagedRunner
+    }
+    let runtimeRoot = resources.appendingPathComponent(
+      ReleaseOwnedPiRuntimeResolver.runtimeDirectoryName,
+      isDirectory: true
+    )
+    #if DEBUG || JIDOKA_ADHOC_RUNTIME_TESTING
+      return try ReleaseOwnedPiRuntimeVerifier.verifyAdHocBundle(
+        runtimeRoot: runtimeRoot,
+        containingApplicationURL: Bundle.main.bundleURL
+      )
+    #else
+      return try ReleaseOwnedPiRuntimeBoundaryAuthority.rpcProcess(
+        using: ReleaseOwnedPiRuntimeResolver(
+          runtimeRoot: runtimeRoot,
+          containingApplicationURL: Bundle.main.bundleURL
+        )
+      )
+    #endif
+  }
+
   private static func createTemporaryWorkspace() throws -> URL {
     let workspace = FileManager.default.temporaryDirectory.appendingPathComponent(
       "jidoka-code-local-workspace-\(UUID().uuidString.lowercased())",
@@ -100,10 +127,15 @@ enum LocalSpikeCLI {
 
   private static func executeRunner(
     runnerURL: URL,
+    runtime: PiResolvedRuntime,
     workspaceURL: URL,
     command: LocalSpikeCommand
   ) throws -> Data {
-    let nodeValues = try LocalSpikeCLIConstants.nodeURL.resourceValues(forKeys: [
+    let nodeURL = runtime.nodeURL
+    guard let releaseIdentity = runtime.releaseIdentity else {
+      throw LocalSpikeCLIError.invalidNodeRuntime
+    }
+    let nodeValues = try nodeURL.resourceValues(forKeys: [
       .isExecutableKey,
       .isRegularFileKey,
       .isSymbolicLinkKey,
@@ -121,39 +153,32 @@ enum LocalSpikeCLI {
     else {
       throw LocalSpikeCLIError.invalidNodeRuntime
     }
-    let process = Process()
-    let standardOutput = Pipe()
-    let standardError = Pipe()
-    let termination = DispatchSemaphore(value: 0)
-    process.executableURL = LocalSpikeCLIConstants.nodeURL
-    process.arguments = [runnerURL.path, command.rawValue, workspaceURL.path]
-    process.currentDirectoryURL = URL(fileURLWithPath: "/", isDirectory: true)
-    process.environment = [
-      "DEVELOPER_DIR": developerDirectory,
-      "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
-      "PATH": "\(developerDirectory)/usr/bin:/usr/bin:/bin",
-      "TMPDIR": FileManager.default.temporaryDirectory.path,
-    ]
-    process.standardOutput = standardOutput
-    process.standardError = standardError
-    process.terminationHandler = { _ in termination.signal() }
-    try process.run()
-
-    let timeout: DispatchTimeInterval = command == .gitTransport ? .seconds(240) : .seconds(60)
-    guard termination.wait(timeout: .now() + timeout) == .success else {
-      process.terminate()
-      if termination.wait(timeout: .now() + .seconds(8)) != .success {
-        kill(process.processIdentifier, SIGKILL)
-        _ = termination.wait(timeout: .now() + .seconds(2))
-      }
-      throw LocalSpikeCLIError.timeout
+    let result = try BoundedProcessRunner().runSynchronously(
+      GitProcessRequest(
+        executable: nodeURL,
+        arguments: [runnerURL.path, command.rawValue, workspaceURL.path],
+        workingDirectory: URL(fileURLWithPath: "/", isDirectory: true),
+        environment: [
+          "DEVELOPER_DIR": developerDirectory,
+          "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+          "JIDOKA_RELEASE_MANIFEST_SHA256": releaseIdentity.manifestSHA256,
+          "JIDOKA_RELEASE_RUNTIME_ROOT": releaseIdentity.canonicalRoot,
+          "PATH": "\(developerDirectory)/usr/bin:/usr/bin:/bin",
+          "TMPDIR": FileManager.default.temporaryDirectory.path,
+        ],
+        timeoutSeconds: command == .gitTransport ? 240 : 60,
+        maximumOutputBytes: LocalSpikeCLIConstants.maximumOutputBytes
+      )
+    )
+    guard !result.timedOut else { throw LocalSpikeCLIError.timeout }
+    guard !result.outputLimitExceeded else { throw LocalSpikeCLIError.invalidOutput }
+    guard result.exitCode == 0, result.terminationSignal == nil else {
+      throw LocalSpikeCLIError.runnerFailed(
+        result.exitCode ?? 128 + (result.terminationSignal ?? 0)
+      )
     }
-
-    let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-    let errorOutput = standardError.fileHandleForReading.readDataToEndOfFile()
-    guard process.terminationStatus == 0 else {
-      throw LocalSpikeCLIError.runnerFailed(process.terminationStatus)
-    }
+    let output = result.stdout
+    let errorOutput = result.stderr
     guard
       errorOutput.isEmpty,
       !output.isEmpty,

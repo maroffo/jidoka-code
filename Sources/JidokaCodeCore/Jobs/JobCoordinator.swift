@@ -2,6 +2,38 @@ import Foundation
 
 public protocol JobWorkflowRunning: Sendable {
   func run(jobID: UUID) async throws
+  func runRecoveredCanary(jobID: UUID, recoveryEvidenceSHA256: String) async throws
+  func runCanaryPiFreshRetry(
+    jobID: UUID,
+    recoveryEvidenceSHA256: String,
+    retryEvidenceSHA256: String
+  ) async throws
+  func runCanaryRoleHostReplacement(
+    request: JobCanaryRoleHostReplacementRequest
+  ) async throws
+}
+
+extension JobWorkflowRunning {
+  public func runRecoveredCanary(
+    jobID _: UUID,
+    recoveryEvidenceSHA256 _: String
+  ) async throws {
+    throw JobCoordinatorInternalError.invalidCanary
+  }
+
+  public func runCanaryPiFreshRetry(
+    jobID _: UUID,
+    recoveryEvidenceSHA256 _: String,
+    retryEvidenceSHA256 _: String
+  ) async throws {
+    throw JobCoordinatorInternalError.invalidCanary
+  }
+
+  public func runCanaryRoleHostReplacement(
+    request _: JobCanaryRoleHostReplacementRequest
+  ) async throws {
+    throw JobCoordinatorInternalError.invalidCanary
+  }
 }
 
 public protocol IssueImplementationApprovalEvaluating: Sendable {
@@ -199,6 +231,101 @@ public actor JobCoordinator: SchedulerPassRunner {
     JobCoordinatorSnapshot(lastPass: lastPass, failures: failures)
   }
 
+  public func runCanary(jobID: UUID) async throws {
+    guard let leased = try await jobs.job(id: jobID),
+      leased.identity.kind == .prReview,
+      leased.state == .leased
+    else {
+      throw JobCoordinatorInternalError.invalidCanary
+    }
+    do {
+      let preparing = try await jobs.transition(
+        jobID: leased.id,
+        eventKey: eventKey(job: leased, suffix: "canary-inputs"),
+        event: .inputsValidated,
+        context: JobTransitionContext(
+          now: now(),
+          reason: "exact paused canary inputs selected"
+        )
+      )
+      try await workflows.workflow(for: .prReview).run(
+        jobID: Self.job(from: preparing).id
+      )
+    } catch {
+      await failJob(leased, error: error, stage: "canary")
+    }
+  }
+
+  public func runRecoveredCanary(
+    jobID: UUID,
+    recoveryEvidenceSHA256: String
+  ) async throws {
+    guard GitHubInputValidation.validSHA256(recoveryEvidenceSHA256) else {
+      throw JobCoordinatorInternalError.invalidCanary
+    }
+    let recovered = try await jobs.resumedCanaryTopologyRecoveryJob(
+      jobID: jobID,
+      recoveryEvidenceSHA256: recoveryEvidenceSHA256
+    )
+    guard recovered.identity.kind == .prReview,
+      [.preparing, .runningPi].contains(recovered.state),
+      recovered.currentStep == 0,
+      recovered.currentStepKind == .review
+    else {
+      throw JobCoordinatorInternalError.invalidCanary
+    }
+    do {
+      try await workflows.workflow(for: .prReview).runRecoveredCanary(
+        jobID: recovered.id,
+        recoveryEvidenceSHA256: recoveryEvidenceSHA256
+      )
+    } catch {
+      await failJob(recovered, error: error, stage: "canary-recovery")
+    }
+  }
+
+  public func runCanaryPiFreshRetry(
+    jobID: UUID,
+    recoveryEvidenceSHA256: String,
+    retryEvidenceSHA256: String
+  ) async throws {
+    guard GitHubInputValidation.validSHA256(recoveryEvidenceSHA256),
+      GitHubInputValidation.validSHA256(retryEvidenceSHA256)
+    else {
+      throw JobCoordinatorInternalError.invalidCanary
+    }
+    let state = try await jobs.canaryPiFreshRetryState(
+      jobID: jobID,
+      recoveryEvidenceSHA256: recoveryEvidenceSHA256,
+      authorizedRetryEvidenceSHA256: retryEvidenceSHA256
+    )
+    guard state.job.identity.kind == .prReview else {
+      throw JobCoordinatorInternalError.invalidCanary
+    }
+    do {
+      try await workflows.workflow(for: .prReview).runCanaryPiFreshRetry(
+        jobID: jobID,
+        recoveryEvidenceSHA256: recoveryEvidenceSHA256,
+        retryEvidenceSHA256: retryEvidenceSHA256
+      )
+    } catch {
+      await record(job: state.job, stage: "canary-pi-fresh-retry", error: error)
+    }
+  }
+
+  public func runCanaryRoleHostReplacement(
+    request: JobCanaryRoleHostReplacementRequest
+  ) async throws {
+    try request.validate()
+    let state = try await jobs.canaryRoleHostReplacementState(request: request)
+    guard state.retry.job.identity.kind == .prReview else {
+      throw JobCoordinatorInternalError.invalidCanary
+    }
+    try await workflows.workflow(for: .prReview).runCanaryRoleHostReplacement(
+      request: request
+    )
+  }
+
   private func dispatchCleanupRecovery() async throws {
     let recoverable = try await jobs.jobs().filter {
       [.succeeded, .blocked, .waitingHuman].contains($0.state)
@@ -219,6 +346,9 @@ public actor JobCoordinator: SchedulerPassRunner {
   }
 
   private func dispatchRecovery() async throws {
+    // An admitted canary without its append-only close record is human recovery
+    // authority, never permission for startup to launch or substitute work.
+    guard try await jobs.unresolvedCanaryJobID() == nil else { return }
     let current = try await jobs.jobs(nonTerminalOnly: true)
     let recovery = current.filter { $0.state == .reconciliationQueued }.sorted(by: Self.precedes)
     for job in recovery {
@@ -560,4 +690,5 @@ public actor JobCoordinator: SchedulerPassRunner {
 private enum JobCoordinatorInternalError: Error {
   case approvalWithoutWaitingJob
   case approvalEvaluatorMissing
+  case invalidCanary
 }

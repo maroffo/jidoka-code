@@ -132,6 +132,25 @@ private final class EngineLifecycleMonitor {
   }
 }
 
+private func currentEngineExecutableURL() throws -> URL {
+  var buffer = [CChar](repeating: 0, count: 4_096)
+  let length = proc_pidpath(getpid(), &buffer, UInt32(buffer.count))
+  guard length > 0 else { throw EngineClientError(.internalFailure) }
+  let end = buffer.firstIndex(of: 0) ?? Int(length)
+  let path = String(decoding: buffer[..<end].map(UInt8.init(bitPattern:)), as: UTF8.self)
+  let executable = URL(fileURLWithPath: path, isDirectory: false).standardizedFileURL
+  let canonical = executable.resolvingSymlinksInPath()
+  var metadata = stat()
+  guard executable.path.hasPrefix("/"),
+    executable.path == canonical.path,
+    lstat(executable.path, &metadata) == 0,
+    metadata.st_mode & S_IFMT == S_IFREG
+  else {
+    throw EngineClientError(.internalFailure)
+  }
+  return executable
+}
+
 private final class EngineServiceContainer: @unchecked Sendable {
   let application: EngineService
   let database: SQLiteStore
@@ -139,6 +158,26 @@ private final class EngineServiceContainer: @unchecked Sendable {
   init(application: EngineService, database: SQLiteStore) {
     self.application = application
     self.database = database
+  }
+}
+
+private actor EngineStartupRecorder {
+  private let logger: any EngineEventLogging
+
+  init(logger: any EngineEventLogging) {
+    self.logger = logger
+  }
+
+  func begin(_ phase: EngineStartupPhase) async {
+    await logger.record(
+      EngineLogRecord(
+        timestamp: Date(),
+        event: .startupPhase,
+        phase: phase,
+        command: nil,
+        error: nil
+      )
+    )
   }
 }
 
@@ -164,29 +203,7 @@ private final class EngineProbeService: NSObject, EngineProbeXPCProtocol, @unche
     self.application = application
     messageHandler = EngineXPCMessageHandler(
       client: application.application,
-      allowedCommands: [
-        .snapshot,
-        .acknowledgeExternalAutomation,
-        .acknowledgeProviderDisclosure,
-        .runPiPreflight,
-        .runHerdrPreflight,
-        .focusInHerdr,
-        .replaceCredential,
-        .deleteCredential,
-        .addRepository,
-        .updateRepository,
-        .removeRepository,
-        .setProfile,
-        .setMaxConcurrency,
-        .setPaused,
-        .pollNow,
-        .recheckAmbiguousMutation,
-        .authorizeRetry,
-        .synchronizeLoginStatus,
-        .completeOnboarding,
-        .rollbackOnboarding,
-        .prepareForQuit,
-      ]
+      allowedCommands: EngineCommandKind.productionHelperAllowedCommands
     )
   }
 
@@ -303,10 +320,10 @@ private final class EngineProbeListenerDelegate: NSObject, NSXPCListenerDelegate
   private let service: EngineProbeService
   private let peerValidator: EngineXPCPeerValidator
 
-  init(service: EngineProbeService) {
+  init(service: EngineProbeService) throws {
     self.service = service
     peerValidator = EngineXPCPeerValidator(
-      helperExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0])
+      helperExecutableURL: try currentEngineExecutableURL()
     )
   }
 
@@ -331,8 +348,39 @@ private final class EngineProbeListenerDelegate: NSObject, NSXPCListenerDelegate
 }
 
 private enum EngineServiceFactory {
-  static func make() async throws -> EngineServiceContainer {
-    let paths = try enginePaths()
+  static func validatePathLayout() throws {
+    _ = try enginePaths(executable: currentEngineExecutableURL())
+  }
+
+  static func validatePaths() throws {
+    let paths = try enginePaths(executable: currentEngineExecutableURL())
+    #if DEBUG || JIDOKA_ADHOC_RUNTIME_TESTING
+      _ = try ReleaseOwnedPiRuntimeVerifier.verifyAdHocBundle(
+        runtimeRoot: paths.releaseRuntime,
+        containingApplicationURL: paths.containingApplication
+      )
+    #else
+      _ = try ReleaseOwnedPiRuntimeBoundaryAuthority.engineHelperStartup(
+        using: ReleaseOwnedPiRuntimeResolver(
+          runtimeRoot: paths.releaseRuntime,
+          containingApplicationURL: paths.containingApplication
+        )
+      )
+    #endif
+  }
+
+  static func make(
+    logger: any EngineEventLogging,
+    startup: EngineStartupRecorder
+  ) async throws -> EngineServiceContainer {
+    await startup.begin(.paths)
+    let paths = try enginePaths(executable: currentEngineExecutableURL())
+    await startup.begin(.resourceSnapshot)
+    let privatePiResources = try PackagedPiResourceSnapshot.prepare(
+      sourceRoot: paths.piResources,
+      applicationSupportRoot: paths.applicationSupport
+    )
+    await startup.begin(.database)
     let database = try SQLiteStore(
       databaseURL: paths.applicationSupport.appendingPathComponent(
         "jidoka-code.sqlite3", isDirectory: false)
@@ -343,9 +391,12 @@ private enum EngineServiceFactory {
       enforceApplicationDispatchGate: true
     )
     let intents = MutationIntentStore(database: database)
-    let resolver = PiRuntimeResolver(
-      configuration: .standard(resourceRoot: paths.piResources)
+    let resolver = ReleaseOwnedPiRuntimeResolver(
+      runtimeRoot: paths.releaseRuntime,
+      containingApplicationURL: paths.containingApplication
     )
+    _ = try ReleaseOwnedPiRuntimeBoundaryAuthority.engineHelperStartup(using: resolver)
+    await startup.begin(.herdrReadiness)
     let herdrReadiness = try HerdrRuntimeReadinessChecker(
       resourceRoot: paths.herdrResources,
       socketURL: paths.herdrSocket
@@ -353,14 +404,33 @@ private enum EngineServiceFactory {
     let external = ProductionEngineExternalServices(
       configuration: configuration,
       runtimeResolver: resolver,
+      modelCatalogDiscovery: PiModelCatalogDiscovery(
+        runtimeResolver: resolver,
+        scriptURL: paths.modelCatalogScript,
+        expectedScriptSHA256: "6057a1a9be5bef7fc029504b1599fcdae4079c3b3eb5829bfa1580c319fb95ba",
+        piAgentDirectory: FileManager.default.homeDirectoryForCurrentUser
+          .appendingPathComponent(".pi/agent", isDirectory: true),
+        applicationSupportRoot: paths.applicationSupport,
+        privateRuntimeRoot: paths.applicationSupport.appendingPathComponent(
+          "ModelCatalog/Runtime", isDirectory: true
+        )
+      ),
       herdrReadiness: herdrReadiness
     )
+    await startup.begin(.hostSnapshot)
+    let herdrHost = try PackagedExecutableSnapshot.prepareHerdrHost(
+      sourceURL: paths.herdrHost,
+      applicationSupportRoot: paths.applicationSupport
+    )
+    await startup.begin(.runtimeConfiguration)
     let runtimeConfiguration = try ProductionEngineRuntimeConfiguration(
       applicationSupportRoot: paths.applicationSupport,
-      piResourceRoot: paths.piResources,
+      piResourceRoot: privatePiResources,
+      releaseRuntimeRoot: paths.releaseRuntime,
+      containingApplicationURL: paths.containingApplication,
       askPassExecutable: paths.askPass,
       pushGuardExecutable: paths.pushGuard,
-      herdrHostExecutable: paths.herdrHost,
+      herdrHostExecutable: herdrHost,
       herdrSocketURL: paths.herdrSocket,
       contractVersion: "jidoka-code-v1"
     )
@@ -370,8 +440,10 @@ private enum EngineServiceFactory {
       configuration: configuration,
       jobs: jobs,
       intents: intents,
-      herdrReadiness: herdrReadiness
+      herdrReadiness: herdrReadiness,
+      logger: logger
     )
+    await startup.begin(.serviceConstruction)
     let service = EngineService(
       configuration: configuration,
       jobs: jobs,
@@ -379,10 +451,7 @@ private enum EngineServiceFactory {
       database: database,
       external: external,
       runtime: runtime,
-      logger: try EngineRedactedLogger(
-        rootURL: paths.applicationSupport.appendingPathComponent("Logs", isDirectory: true),
-        filename: "engine.jsonl"
-      ),
+      logger: logger,
       duplicateInstanceCheckPassed: true
     )
     try await service.initialize()
@@ -392,6 +461,9 @@ private enum EngineServiceFactory {
   private struct Paths {
     let applicationSupport: URL
     let piResources: URL
+    let releaseRuntime: URL
+    let containingApplication: URL
+    let modelCatalogScript: URL
     let herdrResources: URL
     let askPass: URL
     let pushGuard: URL
@@ -399,17 +471,32 @@ private enum EngineServiceFactory {
     let herdrSocket: URL
   }
 
-  private static func enginePaths() throws -> Paths {
-    let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+  private static func enginePaths(executable: URL) throws -> Paths {
     let helperDirectory = executable.deletingLastPathComponent()
     let contents = helperDirectory.deletingLastPathComponent()
     let packagedResources = contents.appendingPathComponent("Resources/Pi", isDirectory: true)
-    let sourceResources = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-      .appendingPathComponent("Resources/Pi", isDirectory: true)
-    let piResources =
-      FileManager.default.fileExists(atPath: packagedResources.path)
-      ? packagedResources : sourceResources
+    #if DEBUG
+      let developmentResources = URL(
+        fileURLWithPath: FileManager.default.currentDirectoryPath
+      ).appendingPathComponent("Resources/Pi", isDirectory: true)
+      let piResources =
+        FileManager.default.fileExists(atPath: packagedResources.path)
+        ? packagedResources : developmentResources
+    #else
+      let piResources = packagedResources
+    #endif
     guard FileManager.default.fileExists(atPath: piResources.path) else {
+      throw EngineClientError(.piBlocked)
+    }
+    let releaseRuntime = contents.appendingPathComponent(
+      "Resources/\(ReleaseOwnedPiRuntimeResolver.runtimeDirectoryName)",
+      isDirectory: true
+    )
+    guard FileManager.default.fileExists(atPath: releaseRuntime.path) else {
+      throw EngineClientError(.piBlocked)
+    }
+    let containingApplication = contents.deletingLastPathComponent()
+    guard containingApplication.pathExtension == "app" else {
       throw EngineClientError(.piBlocked)
     }
     let packagedHerdrResources = contents.appendingPathComponent(
@@ -427,6 +514,11 @@ private enum EngineServiceFactory {
       applicationSupport: FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/JidokaCode", isDirectory: true),
       piResources: piResources,
+      releaseRuntime: releaseRuntime,
+      containingApplication: containingApplication,
+      modelCatalogScript: piResources.appendingPathComponent(
+        "runtime/jidoka-model-catalog.mjs", isDirectory: false
+      ),
       herdrResources: herdrResources,
       askPass: helperDirectory.appendingPathComponent("JidokaCodeAskPass", isDirectory: false),
       pushGuard: FileManager.default.fileExists(atPath: packagedPushGuard.path)
@@ -440,7 +532,12 @@ private enum EngineServiceFactory {
   }
 }
 
-private func runOneShotProbe() throws -> Never {
+private func runOneShotProbe(validateRuntime: Bool = true) throws -> Never {
+  if validateRuntime {
+    try EngineServiceFactory.validatePaths()
+  } else {
+    try EngineServiceFactory.validatePathLayout()
+  }
   let report = EngineProbeReport(
     identifier: LifecycleProbeConstants.helperIdentifier,
     status: "ok",
@@ -458,6 +555,13 @@ private func runService(arguments: [String]) async throws -> Never {
   let applicationSupport = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/JidokaCode", isDirectory: true)
   try PrivateDirectoryBoundary.ensure(applicationSupport)
+  let logger = try EngineRedactedLogger(
+    rootURL: applicationSupport.appendingPathComponent("Logs", isDirectory: true),
+    filename: "engine.jsonl"
+  )
+  let startup = EngineStartupRecorder(logger: logger)
+  await startup.begin(.privateDirectory)
+  await startup.begin(.instanceLock)
   let engineLock = try SingleInstanceLock(
     directoryURL: applicationSupport.appendingPathComponent("IPC", isDirectory: true),
     filename: "engine-instance.lock"
@@ -465,26 +569,31 @@ private func runService(arguments: [String]) async throws -> Never {
   guard engineLock.ownsLock else {
     throw EngineClientError(.busy)
   }
+  await startup.begin(.lifecycleRecorder)
   let recorder = try LifecycleEventRecorder()
-  let application = try await EngineServiceFactory.make()
+  let application = try await EngineServiceFactory.make(logger: logger, startup: startup)
   let service = EngineProbeService(
     generation: configuration.generation,
     recorder: recorder,
     application: application
   )
+  await startup.begin(.reconciliation)
   try service.reconcileBeforeListening()
   let lifecycleMonitor = await MainActor.run {
     let monitor = EngineLifecycleMonitor(application: application.application)
     monitor.start()
     return monitor
   }
-  let delegate = EngineProbeListenerDelegate(service: service)
+  await startup.begin(.listener)
+  let delegate = try EngineProbeListenerDelegate(service: service)
   let listener = NSXPCListener(machServiceName: LifecycleProbeConstants.helperIdentifier)
   listener.delegate = delegate
   listener.resume()
-  withExtendedLifetime((delegate, listener, engineLock, lifecycleMonitor)) {
-    dispatchMain()
-  }
+  let lifetime = EngineServiceLifetime(
+    retaining: [delegate, listener, engineLock, lifecycleMonitor]
+  )
+  await lifetime.wait()
+  throw EngineClientError(.internalFailure)
 }
 
 @main
@@ -495,6 +604,11 @@ private struct JidokaCodeEngineMain {
       if arguments == ["--probe"] {
         try runOneShotProbe()
       }
+      #if DEBUG
+        if arguments == ["--path-probe"] {
+          try runOneShotProbe(validateRuntime: false)
+        }
+      #endif
       if arguments.first == "--service" {
         try await runService(arguments: arguments)
       }

@@ -13,19 +13,31 @@ readonly APP_EXECUTABLE="$APP/Contents/MacOS/Jidoka Code"
 readonly RESOURCE_ROOT="$APP/Contents/Resources/Pi"
 readonly SOURCE_RUNNER="$ROOT/scripts/spikes/pi-rpc-profile-probe.mjs"
 readonly PACKAGED_RUNNER="$RESOURCE_ROOT/runtime/pi-rpc-profile-probe.mjs"
-readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
-readonly PI_CLI="/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
-readonly PI_SDK="/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.js"
-readonly CODEX_RUNTIME="/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js"
+JIDOKA_RELEASE_RUNTIME_ROOT="${JIDOKA_RELEASE_RUNTIME_ROOT:-$ROOT/build/runtime-input/qualified-runtime}"
+readonly JIDOKA_RELEASE_RUNTIME_ROOT
+export JIDOKA_RELEASE_RUNTIME_ROOT
+NODE_BIN="$("$ROOT/scripts/qualified-runtime-node.sh")"
+readonly NODE_BIN
+readonly PI_CLI="$JIDOKA_RELEASE_RUNTIME_ROOT/pi/dist/cli.js"
+readonly PI_SDK="$JIDOKA_RELEASE_RUNTIME_ROOT/pi/dist/core/sdk.js"
+readonly CODEX_RUNTIME="$JIDOKA_RELEASE_RUNTIME_ROOT/pi/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js"
 readonly MODEL="openai-codex/gpt-5.6-sol:max"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 readonly SHARED_LEDGER="$HOME/Library/Application Support/JidokaCode/Consent/provider-call-ledger.json"
-readonly EXPECTED_RUNNER_SHA256="83d081f9337bc1531e8c516e4248c324de26e325a4f8ef3895eb3df3417d45e9"
+readonly EXPECTED_RUNNER_SHA256="085fc4f44e77e051c05e2e68c4f755748ebfca227eb3b6782c1e0e3cce727b9d"
 readonly EXPECTED_SETTINGS_SHA256="e7ec0ba10fa91967345d69c328a9fefbc65a7a89a7aa98a522cd1a9697e96da4"
-readonly EXPECTED_PI_VERSION="0.84.1"
-readonly EXPECTED_PI_POLICY_SHA256="324d6a1738c08fd7dfbc1ca8fb324ed64d8fc3ac5bd1e2c293062cf4d4238248"
-readonly EXPECTED_PI_SDK_SHA256="f6e72f33f44c708249c8d74931d816c36fe27175f7fa1639cba0a3d988592821"
-readonly EXPECTED_CODEX_RUNTIME_SHA256="f0699749b06045244fd6ced26aee4f2627e7218199fd2955b0003fe08592aead"
+EXPECTED_PI_VERSION="$("$NODE_BIN" -p \
+    'require(process.env.JIDOKA_RELEASE_RUNTIME_ROOT + "/pi/package.json").version')"
+readonly EXPECTED_PI_VERSION
+readonly EXPECTED_NODE_VERSION="26.7.0"
+readonly EXPECTED_RELEASE_MANIFEST_SHA256="fe15573a58a4604a3695b092ba8b07ae2432da7b7f07743a8d54a4421ab3aa83"
+readonly EXPECTED_PI_MINIMUM_VERSION="0.84.2"
+readonly EXPECTED_PI_MAXIMUM_VERSION_EXCLUSIVE="0.84.3"
+readonly EXPECTED_PI_CLI_SHA256="840d1e8e689ed9e4937bcb00b9a810e02a8567d9afb10a47097f11ca93ea1521"
+readonly EXPECTED_PI_SDK_SHA256="225053853f1a0bee80419001e24cb6676b43cb5cc8f111d60770641bff4370be"
+readonly EXPECTED_CODEX_RUNTIME_SHA256="cf537f03ee3da7a7edbe28e447642a50d34e6a32a4f8aef599b5a496394e3999"
+readonly EXPECTED_PI_PACKAGE_SHA256="820f4adc6d61f2cefbc29ce17e9dfd9aa482248d54be5d0dfa2a868ca000c7b0"
+readonly EXPECTED_PI_PACKAGE_TREE_SHA256="534e4aa6ca73afbf31c48fc0c666978e3ab0114e7c1952f08ddae5139a9e9e37"
 MODE="live"
 TEMP_ROOT=""
 EVIDENCE_DIR=""
@@ -46,6 +58,36 @@ readonly MODE
 
 json_value() {
     /usr/bin/plutil -extract "$2" raw "$1"
+}
+
+validate_release_runtime_report() {
+    # The JavaScript template literals are intentionally protected from Bash expansion.
+    # shellcheck disable=SC2016
+    "$NODE_BIN" -e '
+      const fs = require("node:fs");
+      const report = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const root = process.argv[2];
+      const expected = {
+        [`${root}/runtime-manifest.json`]: process.argv[3],
+        [`${root}/pi/dist/cli.js`]: process.argv[4],
+        [`${root}/pi/dist/core/sdk.js`]: process.argv[5],
+        [`${root}/pi/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js`]:
+          process.argv[6],
+        [`${root}/pi/package.json`]: process.argv[7],
+        [`${root}/pi/#package-tree-v1`]: process.argv[8],
+      };
+      const observed = report.systemRuntimeSHA256;
+      if (
+        observed === null || typeof observed !== "object" || Array.isArray(observed) ||
+        JSON.stringify(Object.keys(observed).sort()) !==
+          JSON.stringify(Object.keys(expected).sort()) ||
+        Object.entries(expected).some(([path, digest]) => observed[path] !== digest)
+      ) process.exit(2);
+    ' \
+        "$1" "$APP/Contents/Resources/PiRuntime" \
+        "$EXPECTED_RELEASE_MANIFEST_SHA256" "$EXPECTED_PI_CLI_SHA256" \
+        "$EXPECTED_PI_SDK_SHA256" "$EXPECTED_CODEX_RUNTIME_SHA256" \
+        "$EXPECTED_PI_PACKAGE_SHA256" "$EXPECTED_PI_PACKAGE_TREE_SHA256"
 }
 
 workspace_inventory() {
@@ -72,7 +114,7 @@ run_probe() {
         cd /
         /usr/bin/env -i \
             HOME="${PROBE_HOME:-$HOME}" \
-            PATH="/opt/homebrew/bin:/usr/bin:/bin" \
+            PATH="/usr/bin:/bin" \
             TMPDIR="${TMPDIR:-/tmp}" \
             "$APP_EXECUTABLE" --pi-probe "$@"
     ) >"$output" 2>"$stderr"; then
@@ -95,7 +137,7 @@ assert_closed_app_command() {
         cd /
         /usr/bin/env -i \
             HOME="$HOME" \
-            PATH="/opt/homebrew/bin:/usr/bin:/bin" \
+            PATH="/usr/bin:/bin" \
             TMPDIR="${TMPDIR:-/tmp}" \
             "$APP_EXECUTABLE" --pi-probe profile review extra
     ) >"$stdout_path" 2>"$stderr_path"; then
@@ -139,7 +181,11 @@ EVIDENCE_DIR="$ROOT/build/evidence/$(/usr/bin/basename "$TEMP_ROOT")"
 readonly EVIDENCE_DIR
 trap cleanup EXIT
 
-"$ROOT/scripts/package-app.sh"
+if [[ "$MODE" == "preflight" ]]; then
+    ALLOW_ADHOC_SIGNING=1 "$ROOT/scripts/package-app.sh"
+else
+    "$ROOT/scripts/package-app.sh"
+fi
 /usr/bin/codesign --verify --strict --deep "$APP"
 [[ -x "$NODE_BIN" && -f "$PI_CLI" && ! -L "$NODE_BIN" && ! -L "$PI_CLI" ]] || \
     fail "exact Node/Pi runtime is unavailable"
@@ -150,7 +196,7 @@ done
     "$EXPECTED_PI_SDK_SHA256" ]] || fail "Pi SDK implementation drift"
 [[ "$(/usr/bin/shasum -a 256 "$CODEX_RUNTIME" | /usr/bin/awk '{print $1}')" == \
     "$EXPECTED_CODEX_RUNTIME_SHA256" ]] || fail "Codex transport implementation drift"
-[[ "$($NODE_BIN --version)" == "v26.6.0" ]] || fail "Node version drift"
+[[ "$($NODE_BIN --version)" == "v$EXPECTED_NODE_VERSION" ]] || fail "Node version drift"
 [[ "$($NODE_BIN "$PI_CLI" --version)" == "$EXPECTED_PI_VERSION" ]] || fail "Pi version drift"
 "$NODE_BIN" --check "$SOURCE_RUNNER"
 "$NODE_BIN" --check "$ROOT/scripts/spikes/pi-provider-gate-probe.mjs"
@@ -193,10 +239,13 @@ PROBE_HOME="$PREFLIGHT_HOME" run_probe "$preflight" "$TEMP_ROOT/preflight.stderr
 [[ "$(json_value "$preflight" providerCalls)" == "0" ]]
 [[ "$(json_value "$preflight" isolatedSettingsSHA256)" == "$EXPECTED_SETTINGS_SHA256" ]]
 [[ "$(json_value "$preflight" piVersion)" == "$EXPECTED_PI_VERSION" ]]
-[[ "$(json_value "$preflight" piCompatibility.minimumVersion)" == "0.84.0" ]]
-[[ "$(json_value "$preflight" piCompatibility.maximumVersionExclusive)" == "0.90.0" ]]
+[[ "$(json_value "$preflight" piCompatibility.minimumVersion)" == \
+    "$EXPECTED_PI_MINIMUM_VERSION" ]]
+[[ "$(json_value "$preflight" piCompatibility.maximumVersionExclusive)" == \
+    "$EXPECTED_PI_MAXIMUM_VERSION_EXCLUSIVE" ]]
 [[ "$(json_value "$preflight" piCompatibility.policySHA256)" == \
-    "$EXPECTED_PI_POLICY_SHA256" ]]
+    "$EXPECTED_RELEASE_MANIFEST_SHA256" ]]
+validate_release_runtime_report "$preflight"
 [[ "$(json_value "$preflight" providerTransport)" == "sse" ]]
 /usr/bin/install -m 0600 "$preflight" "$EVIDENCE_DIR/preflight.json"
 

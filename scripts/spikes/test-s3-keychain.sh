@@ -22,9 +22,15 @@ readonly SPIKE_PARENT="$HOME/Library/Application Support/JidokaCode/Spike"
 readonly EVENT_DIR="$SPIKE_PARENT/S2"
 readonly S2_LOCK="$SPIKE_PARENT/S2.lock"
 readonly LOCK_DIR="$SPIKE_PARENT/S3.lock"
-readonly NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
-readonly PI_CLI="/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
-readonly EXPECTED_PI_VERSION="0.84.1"
+JIDOKA_RELEASE_RUNTIME_ROOT="${JIDOKA_RELEASE_RUNTIME_ROOT:-$ROOT/build/runtime-input/qualified-runtime}"
+readonly JIDOKA_RELEASE_RUNTIME_ROOT
+export JIDOKA_RELEASE_RUNTIME_ROOT
+NODE_BIN="$("$ROOT/scripts/qualified-runtime-node.sh")"
+readonly NODE_BIN
+readonly PI_CLI="$JIDOKA_RELEASE_RUNTIME_ROOT/pi/dist/cli.js"
+EXPECTED_PI_VERSION="$("$NODE_BIN" -p \
+    'require(process.env.JIDOKA_RELEASE_RUNTIME_ROOT + "/pi/package.json").version')"
+readonly EXPECTED_PI_VERSION
 USER_DOMAIN="gui/$(/usr/bin/id -u)"
 readonly USER_DOMAIN
 MODE="live"
@@ -216,70 +222,13 @@ system_keychain_item_absent() {
 
 seed_keychain_item() {
     local output="$1"
-    local stdin_file="$TEMP_ROOT/keychain-seed.stdin"
-    local stdout_file="$TEMP_ROOT/keychain-seed.stdout"
-    local stderr_file="$TEMP_ROOT/keychain-seed.stderr"
-    local sentinel
-    local digest
-    local pid
-    local deadline
-    local state
-    local status=0
 
-    sentinel="$(/usr/bin/openssl rand -hex 32 | /usr/bin/cut -c 1-32)"
-    [[ "$sentinel" =~ ^[0-9a-f]{32}$ ]] || fail "invalid synthetic seed"
-    digest="$(printf '%s' "$sentinel" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1}')"
-    assert_digest "$digest"
-    printf '%s\n%s\n' "$sentinel" "$sentinel" >"$stdin_file"
-    /bin/chmod 0600 "$stdin_file"
-
-    /usr/bin/security add-generic-password \
-        -a "$KEYCHAIN_ACCOUNT" \
-        -s "$KEYCHAIN_SERVICE" \
-        -l "Jidoka Code synthetic S3 sentinel" \
-        -T "" \
-        -T "$TARGET_APP" \
-        -T "$TARGET_HELPER" \
-        -w <"$stdin_file" >"$stdout_file" 2>"$stderr_file" &
-    pid=$!
-    deadline=$((SECONDS + 30))
-    while (( SECONDS < deadline )); do
-        if state="$(/bin/ps -p "$pid" -o state= 2>/dev/null)"; then
-            case "$state" in
-                *Z*) break ;;
-            esac
-        else
-            break
-        fi
-        /bin/sleep 1
-    done
-    if (( SECONDS >= deadline )); then
-        /bin/kill -TERM "$pid" 2>/dev/null || true
-        /bin/sleep 1
-        /bin/kill -KILL "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-        /bin/rm -f -- "$stdin_file"
-        unset sentinel
-        fail "Keychain seed timed out"
-    fi
-    if wait "$pid" 2>/dev/null; then
-        status=0
-    else
-        status=$?
-    fi
-    /bin/rm -f -- "$stdin_file"
-    if /usr/bin/grep -Fq -- "$sentinel" "$stdout_file" "$stderr_file"; then
-        unset sentinel
-        fail "Keychain seed command exposed the synthetic value"
-    fi
-    unset sentinel
-    [[ "$status" == "0" ]] || fail "Keychain seed command failed"
-    if /usr/bin/grep -Fq "passwords don't match" "$stderr_file"; then
-        fail "Keychain seed confirmation did not match"
-    fi
-    [[ ! -s "$stdout_file" ]] || fail "Keychain seed command wrote unexpected stdout"
-    printf '{"action":"keychain.seed","exists":true,"sentinelSHA256":"%s"}\n' \
-        "$digest" >"$output"
+    run_app_success "$output" --keychain create
+    [[ "$(json_value "$output" action)" == "keychain.create" ]] || \
+        fail "Keychain seed action is invalid"
+    [[ "$(json_value "$output" exists)" == "true" ]] || \
+        fail "Keychain seed is absent"
+    assert_digest "$(json_value "$output" sentinelSHA256)"
 }
 
 prepare_lock() {
@@ -416,7 +365,7 @@ else
 fi
 /usr/bin/codesign --verify --strict --deep "$SOURCE_APP"
 [[ -x "$NODE_BIN" && -f "$PI_CLI" && ! -L "$NODE_BIN" && ! -L "$PI_CLI" ]]
-[[ "$($NODE_BIN --version)" == "v26.6.0" ]]
+[[ "$($NODE_BIN --version)" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 [[ "$($NODE_BIN "$PI_CLI" --version)" == "$EXPECTED_PI_VERSION" ]]
 "$NODE_BIN" --check "$ROOT/scripts/spikes/pi-keychain-denial-probe.mjs"
 "$NODE_BIN" --check "$ROOT/Resources/Pi/extensions/jidoka-deny-user-bash.js"

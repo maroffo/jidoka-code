@@ -2,25 +2,58 @@ import Darwin
 import Foundation
 
 public enum EngineLogEventCode: String, Codable, Sendable {
+  case startupPhase
+  case startupFailed
   case initialized
   case commandSucceeded
   case commandRejected
 }
 
+public enum EngineStartupPhase: String, Codable, Sendable {
+  case privateDirectory
+  case instanceLock
+  case lifecycleRecorder
+  case paths
+  case resourceSnapshot
+  case database
+  case herdrReadiness
+  case hostSnapshot
+  case runtimeConfiguration
+  case serviceConstruction
+  case credentialStatus
+  case piPreflight
+  case herdrPreflight
+  case dispatchGate
+  case runtimeReload
+  case runtimeQuiesce
+  case runtimeSnapshot
+  case runtimeOwnership
+  case runtimeRecovery
+  case runtimeComponents
+  case runtimeCoordinatorRecovery
+  case runtimeStartupPass
+  case pausedState
+  case reconciliation
+  case listener
+}
+
 public struct EngineLogRecord: Codable, Equatable, Sendable {
   public let timestamp: Date
   public let event: EngineLogEventCode
+  public let phase: EngineStartupPhase?
   public let command: EngineCommandKind?
   public let error: EngineClientErrorCode?
 
   public init(
     timestamp: Date,
     event: EngineLogEventCode,
+    phase: EngineStartupPhase? = nil,
     command: EngineCommandKind?,
     error: EngineClientErrorCode?
   ) {
     self.timestamp = timestamp
     self.event = event
+    self.phase = phase
     self.command = command
     self.error = error
   }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum JobKind: String, CaseIterable, Codable, Sendable {
@@ -138,10 +139,17 @@ public enum DurableJobStoreError: Error, Equatable, Sendable {
   case activeClaimExists(String)
   case claimNotFound(issueNodeID: String, generation: Int)
   case staleApprovalRequiresAttribution
+  case maintenanceEvidenceMismatch
+  case maintenanceCandidateUnsafe(UUID)
+  case maintenanceBatchCollision
+  case canaryEvidenceMismatch
+  case canaryUnsafe(UUID)
+  case canaryEffectDenied
+  case canaryRecoveryRequired
 }
 
 public actor DurableJobStore {
-  private let database: SQLiteStore
+  let database: SQLiteStore
   private let enforceApplicationDispatchGate: Bool
 
   public init(
@@ -444,19 +452,53 @@ public actor DurableJobStore {
   public func recoverAtStartup(now: Date) async throws -> [StartupRecoveryRecord] {
     let startupID = UUID().uuidString.lowercased()
     return try await database.transaction { database in
-      _ = try database.execute(
-        "UPDATE repository_leases SET active = 0 WHERE active = 1"
+      let preservedCanaryJobID = try Self.resumedCanaryRecoveryJobIDForStartup(
+        database: database
       )
-      let rows = try database.query(
-        """
-        SELECT * FROM jobs
-        WHERE state NOT IN ('succeeded', 'blocked')
-        ORDER BY priority, created_at, id
-        """
-      )
+      let rows: [SQLiteRow]
+      if let preservedCanaryJobID {
+        rows = try database.query(
+          "SELECT * FROM jobs WHERE id = ?",
+          bindings: [.text(preservedCanaryJobID.uuidString.lowercased())]
+        )
+      } else {
+        _ = try database.execute(
+          "UPDATE repository_leases SET active = 0 WHERE active = 1"
+        )
+        rows = try database.query(
+          """
+          SELECT * FROM jobs
+          WHERE state NOT IN ('succeeded', 'blocked')
+          ORDER BY priority, created_at, id
+          """
+        )
+      }
       var recovered: [StartupRecoveryRecord] = []
       for row in rows {
         let job = try Self.decodeJob(row)
+        if job.id == preservedCanaryJobID {
+          _ = try database.execute(
+            """
+            INSERT INTO reconciliation_events(
+              job_id, probe, observation, classification, reason, created_at
+            ) VALUES (?, 'startup', ?, ?, 'exact canary topology recovery preserved', ?)
+            """,
+            bindings: [
+              .text(job.id.uuidString.lowercased()),
+              .text(job.state.rawValue),
+              .text(job.state.rawValue),
+              .real(now.timeIntervalSince1970),
+            ]
+          )
+          recovered.append(
+            StartupRecoveryRecord(
+              persistedState: job.state,
+              job: job,
+              scheduleLateChecks: false
+            )
+          )
+          continue
+        }
         let recovery = JobRecovery.recover(
           JobRuntimeSnapshot(
             state: job.state,
@@ -691,6 +733,515 @@ public actor DurableJobStore {
     }
   }
 
+  public func previewMaintenance(
+    scope: JobMaintenanceScope
+  ) async throws -> JobMaintenanceReport {
+    try scope.validate()
+    return try await database.transaction { database in
+      let candidates = try Self.maintenanceCandidates(scope: scope, database: database)
+      try Self.validateMaintenanceCandidates(
+        candidates,
+        operation: scope.operation,
+        database: database
+      )
+      let evidence = try Self.maintenanceEvidence(
+        scope: scope,
+        candidates: candidates,
+        database: database
+      )
+      return JobMaintenanceReport(
+        scope: scope,
+        candidateCount: candidates.count,
+        evidenceSHA256: evidence,
+        appliedCount: 0,
+        replayed: false
+      )
+    }
+  }
+
+  public func applyMaintenance(
+    _ authorization: JobMaintenanceAuthorization,
+    now: Date
+  ) async throws -> JobMaintenanceApplication {
+    try authorization.validate()
+    return try await database.transaction { database in
+      guard
+        let settings = try database.query(
+          "SELECT paused FROM app_settings WHERE singleton = 1"
+        ).first,
+        try Self.integer(settings, "paused") == 1
+      else {
+        throw DurableJobStoreError.dispatchSuppressed
+      }
+      if let replay = try Self.replayedMaintenance(
+        authorization: authorization,
+        database: database
+      ) {
+        return replay
+      }
+      let candidates = try Self.maintenanceCandidates(
+        scope: authorization.scope,
+        database: database
+      )
+      try Self.validateMaintenanceCandidates(
+        candidates,
+        operation: authorization.scope.operation,
+        database: database
+      )
+      let evidence = try Self.maintenanceEvidence(
+        scope: authorization.scope,
+        candidates: candidates,
+        database: database
+      )
+      guard candidates.count == authorization.expectedCount,
+        evidence == authorization.evidenceSHA256
+      else {
+        throw DurableJobStoreError.maintenanceEvidenceMismatch
+      }
+      let reason =
+        switch authorization.scope.operation {
+        case .retireBefore:
+          "operator retired exact pre-activation job cohort"
+        case .retryResourceFailuresAfter:
+          "operator authorized retry after Pi workflow resource repair"
+        }
+      let event: JobEvent =
+        authorization.scope.operation == .retireBefore
+        ? .operatorRetire : .operatorRetryConfigurationRepair
+      for candidate in candidates {
+        let context = JobTransitionContext(
+          now: now,
+          reason: reason,
+          acceptanceEvidenceDigest: authorization.evidenceSHA256
+        )
+        let effect = try JobStateMachine.transition(
+          from: candidate.state,
+          event: event,
+          context: context
+        )
+        guard effect.lease == .none else {
+          throw DurableJobStoreError.maintenanceCandidateUnsafe(candidate.id)
+        }
+        let eventKey = Self.maintenanceEventKey(
+          operation: authorization.scope.operation,
+          boundaryEpochSeconds: authorization.scope.boundaryEpochSeconds,
+          evidence: authorization.evidenceSHA256,
+          jobID: candidate.id
+        )
+        guard Self.validEventKey(eventKey) else {
+          throw DurableJobStoreError.invalidEventKey
+        }
+        _ = try Self.apply(
+          effect,
+          to: candidate,
+          eventKey: eventKey,
+          context: context,
+          database: database
+        )
+      }
+      return JobMaintenanceApplication(
+        report: JobMaintenanceReport(
+          scope: authorization.scope,
+          candidateCount: candidates.count,
+          evidenceSHA256: authorization.evidenceSHA256,
+          appliedCount: candidates.count,
+          replayed: false
+        ),
+        jobIDs: candidates.map(\.id)
+      )
+    }
+  }
+
+  private struct MaintenanceEvidenceEnvelope: Codable {
+    let operation: String
+    let boundaryEpochSeconds: Int64
+    let candidates: [MaintenanceCandidateEvidence]
+  }
+
+  private struct MaintenanceCandidateEvidence: Codable {
+    let id: String
+    let repositoryID: String
+    let kind: String
+    let objectNodeID: String
+    let objectNumber: Int?
+    let revisionKey: String
+    let contractVersionUsed: String
+    let priority: Int
+    let state: String
+    let attempt: Int
+    let currentStep: Int
+    let currentStepKind: String?
+    let notBeforeBits: String?
+    let createdAtBits: String
+    let updatedAtBits: String
+    let terminalReason: String?
+    let disposition: MaintenanceDispositionEvidence
+    let mutationIntents: [MaintenanceMutationEvidence]
+    let jobSteps: [MaintenanceJobStepEvidence]
+    let issueClaims: [MaintenanceIssueClaimEvidence]
+    let workspace: MaintenanceWorkspaceEvidence?
+  }
+
+  private struct MaintenanceDispositionEvidence: Codable {
+    let state: String
+    let contractVersionUsed: String
+    let lastJobID: String?
+    let lastMutationID: String?
+    let evidenceDigest: String?
+    let mutationGeneration: Int
+    let updatedAtBits: String
+  }
+
+  private struct MaintenanceMutationEvidence: Codable {
+    let id: String
+    let idempotencyKey: String
+    let operation: String
+    let target: String
+    let expectedStateDigest: String
+    let requestDigest: String
+    let state: String
+    let sendEpoch: Int64
+    let readBackEvidence: String?
+    let createdAtBits: String
+    let updatedAtBits: String
+  }
+
+  private struct MaintenanceJobStepEvidence: Codable {
+    let ordinal: Int64
+    let kind: String
+    let state: String
+    let inputDigest: String?
+    let outputDigest: String?
+    let mutationID: String?
+    let acceptanceEvidence: String?
+    let completedAtBits: String
+  }
+
+  private struct MaintenanceIssueClaimEvidence: Codable {
+    let issueNodeID: String
+    let generation: Int64
+    let marker: String
+    let expectedLabels: String
+    let desiredLabels: String
+    let planDigest: String?
+    let priorGeneration: Int64?
+    let state: String
+    let createdAtBits: String
+    let updatedAtBits: String
+  }
+
+  private struct MaintenanceWorkspaceEvidence: Codable {
+    let relativePath: String
+    let baseBranch: String
+    let baseSHA: String
+    let localHeadSHA: String
+    let cleanupState: String
+    let updatedAtBits: String
+  }
+
+  private static let resourceFailureTerminalReason =
+    "job coordinator blocked after JidokaCodeCore.PiWorkflowResourceError"
+
+  private static func maintenanceCandidates(
+    scope: JobMaintenanceScope,
+    database: isolated SQLiteStore
+  ) throws -> [JobRecord] {
+    let comparison: String
+    let predicate: String
+    switch scope.operation {
+    case .retireBefore:
+      comparison = "jobs.created_at < ?"
+      predicate =
+        """
+        jobs.state IN ('queued', 'blocked')
+        AND NOT EXISTS (
+          SELECT 1 FROM object_dispositions
+          WHERE object_dispositions.repository_id = jobs.repository_id
+            AND object_dispositions.kind = jobs.kind
+            AND object_dispositions.object_node_id = jobs.object_node_id
+            AND object_dispositions.revision_key = jobs.revision_key
+            AND object_dispositions.state = 'superseded'
+        )
+        """
+    case .retryResourceFailuresAfter:
+      comparison = "created_at >= ?"
+      predicate = "state = 'blocked' AND terminal_reason = ?"
+    }
+    var bindings: [SQLiteValue] = [.real(Double(scope.boundaryEpochSeconds))]
+    if scope.operation == .retryResourceFailuresAfter {
+      bindings.append(.text(resourceFailureTerminalReason))
+    }
+    return try database.query(
+      """
+      SELECT jobs.* FROM jobs
+      WHERE \(comparison) AND \(predicate)
+      ORDER BY jobs.created_at, jobs.id
+      LIMIT 1025
+      """,
+      bindings: bindings
+    ).map(decodeJob)
+  }
+
+  private static func validateMaintenanceCandidates(
+    _ candidates: [JobRecord],
+    operation: JobMaintenanceOperation,
+    database: isolated SQLiteStore
+  ) throws {
+    guard candidates.count <= 1_024 else {
+      throw DurableJobStoreError.maintenanceEvidenceMismatch
+    }
+    for candidate in candidates {
+      let validState =
+        switch operation {
+        case .retireBefore:
+          candidate.state == .queued || candidate.state == .blocked
+        case .retryResourceFailuresAfter:
+          candidate.state == .blocked
+            && candidate.terminalReason == resourceFailureTerminalReason
+        }
+      guard validState,
+        try loadDisposition(candidate.identity, database: database) != nil,
+        try database.scalarInt(
+          "SELECT COUNT(*) FROM repository_leases WHERE job_id = ? AND active = 1",
+          bindings: [.text(candidate.id.uuidString.lowercased())]
+        ) == 0,
+        try database.scalarInt(
+          "SELECT COUNT(*) FROM pi_runs WHERE job_id = ?",
+          bindings: [.text(candidate.id.uuidString.lowercased())]
+        ) == 0,
+        try database.scalarInt(
+          "SELECT COUNT(*) FROM approved_command_runs WHERE job_id = ?",
+          bindings: [.text(candidate.id.uuidString.lowercased())]
+        ) == 0
+      else {
+        throw DurableJobStoreError.maintenanceCandidateUnsafe(candidate.id)
+      }
+      let mutationStates = try database.query(
+        "SELECT state FROM mutation_intents WHERE job_id = ? ORDER BY id",
+        bindings: [.text(candidate.id.uuidString.lowercased())]
+      ).map { try text($0, "state") }
+      switch operation {
+      case .retireBefore:
+        guard mutationStates.allSatisfy({ $0 == "attributed" }) else {
+          throw DurableJobStoreError.maintenanceCandidateUnsafe(candidate.id)
+        }
+      case .retryResourceFailuresAfter:
+        guard mutationStates.isEmpty,
+          try database.scalarInt(
+            "SELECT COUNT(*) FROM job_steps WHERE job_id = ?",
+            bindings: [.text(candidate.id.uuidString.lowercased())]
+          ) == 0
+        else {
+          throw DurableJobStoreError.maintenanceCandidateUnsafe(candidate.id)
+        }
+      }
+    }
+  }
+
+  private static func bits(_ value: Double) -> String {
+    String(value.bitPattern, radix: 16)
+  }
+
+  private static func maintenanceEvidence(
+    scope: JobMaintenanceScope,
+    candidates: [JobRecord],
+    database: isolated SQLiteStore
+  ) throws -> String {
+    let evidenceCandidates = try candidates.map { candidate in
+      let jobID = candidate.id.uuidString.lowercased()
+      guard let disposition = try loadDisposition(candidate.identity, database: database) else {
+        throw DurableJobStoreError.maintenanceCandidateUnsafe(candidate.id)
+      }
+      let mutations = try database.query(
+        "SELECT * FROM mutation_intents WHERE job_id = ? ORDER BY id",
+        bindings: [.text(jobID)]
+      ).map { row in
+        MaintenanceMutationEvidence(
+          id: try text(row, "id"),
+          idempotencyKey: try text(row, "idempotency_key"),
+          operation: try text(row, "operation"),
+          target: try text(row, "target"),
+          expectedStateDigest: try text(row, "expected_state_digest"),
+          requestDigest: try text(row, "request_digest"),
+          state: try text(row, "state"),
+          sendEpoch: try integer(row, "send_epoch"),
+          readBackEvidence: try optionalText(row, "read_back_evidence"),
+          createdAtBits: bits(try real(row, "created_at")),
+          updatedAtBits: bits(try real(row, "updated_at"))
+        )
+      }
+      let steps = try database.query(
+        "SELECT * FROM job_steps WHERE job_id = ? ORDER BY ordinal",
+        bindings: [.text(jobID)]
+      ).map { row in
+        MaintenanceJobStepEvidence(
+          ordinal: try integer(row, "ordinal"),
+          kind: try text(row, "kind"),
+          state: try text(row, "state"),
+          inputDigest: try optionalText(row, "input_digest"),
+          outputDigest: try optionalText(row, "output_digest"),
+          mutationID: try optionalText(row, "mutation_id"),
+          acceptanceEvidence: try optionalText(row, "acceptance_evidence"),
+          completedAtBits: bits(try real(row, "completed_at"))
+        )
+      }
+      let claims = try database.query(
+        "SELECT * FROM issue_claims WHERE job_id = ? ORDER BY issue_node_id, generation",
+        bindings: [.text(jobID)]
+      ).map { row in
+        MaintenanceIssueClaimEvidence(
+          issueNodeID: try text(row, "issue_node_id"),
+          generation: try integer(row, "generation"),
+          marker: try text(row, "marker"),
+          expectedLabels: try text(row, "expected_labels"),
+          desiredLabels: try text(row, "desired_labels"),
+          planDigest: try optionalText(row, "plan_digest"),
+          priorGeneration: try optionalInteger(row, "prior_generation"),
+          state: try text(row, "state"),
+          createdAtBits: bits(try real(row, "created_at")),
+          updatedAtBits: bits(try real(row, "updated_at"))
+        )
+      }
+      let workspace = try database.query(
+        "SELECT * FROM workspaces WHERE job_id = ?",
+        bindings: [.text(jobID)]
+      ).first.map { row in
+        MaintenanceWorkspaceEvidence(
+          relativePath: try text(row, "relative_path"),
+          baseBranch: try text(row, "base_branch"),
+          baseSHA: try text(row, "base_sha"),
+          localHeadSHA: try text(row, "local_head_sha"),
+          cleanupState: try text(row, "cleanup_state"),
+          updatedAtBits: bits(try real(row, "updated_at"))
+        )
+      }
+      return MaintenanceCandidateEvidence(
+        id: jobID,
+        repositoryID: candidate.identity.repositoryID.uuidString.lowercased(),
+        kind: candidate.identity.kind.rawValue,
+        objectNodeID: candidate.identity.objectNodeID,
+        objectNumber: candidate.objectNumber,
+        revisionKey: candidate.identity.revisionKey,
+        contractVersionUsed: candidate.contractVersionUsed,
+        priority: candidate.priority.rawValue,
+        state: candidate.state.rawValue,
+        attempt: candidate.attempt,
+        currentStep: candidate.currentStep,
+        currentStepKind: candidate.currentStepKind?.rawValue,
+        notBeforeBits: candidate.notBefore.map { bits($0.timeIntervalSince1970) },
+        createdAtBits: bits(candidate.createdAt.timeIntervalSince1970),
+        updatedAtBits: bits(candidate.updatedAt.timeIntervalSince1970),
+        terminalReason: candidate.terminalReason,
+        disposition: MaintenanceDispositionEvidence(
+          state: disposition.state.rawValue,
+          contractVersionUsed: disposition.contractVersionUsed,
+          lastJobID: disposition.lastJobID?.uuidString.lowercased(),
+          lastMutationID: disposition.lastMutationID,
+          evidenceDigest: disposition.evidenceDigest,
+          mutationGeneration: disposition.mutationGeneration,
+          updatedAtBits: bits(disposition.updatedAt.timeIntervalSince1970)
+        ),
+        mutationIntents: mutations,
+        jobSteps: steps,
+        issueClaims: claims,
+        workspace: workspace
+      )
+    }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    let data = try encoder.encode(
+      MaintenanceEvidenceEnvelope(
+        operation: scope.operation.rawValue,
+        boundaryEpochSeconds: scope.boundaryEpochSeconds,
+        candidates: evidenceCandidates
+      )
+    )
+    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+  }
+
+  private static func replayedMaintenance(
+    authorization: JobMaintenanceAuthorization,
+    database: isolated SQLiteStore
+  ) throws -> JobMaintenanceApplication? {
+    let prefix = maintenanceEventPrefix(
+      operation: authorization.scope.operation,
+      boundaryEpochSeconds: authorization.scope.boundaryEpochSeconds,
+      evidence: authorization.evidenceSHA256
+    )
+    let rows = try database.query(
+      """
+      SELECT job_id FROM job_transitions
+      WHERE event_key GLOB ?
+      ORDER BY job_id
+      LIMIT 1025
+      """,
+      bindings: [.text(prefix + "*")]
+    )
+    guard !rows.isEmpty else { return nil }
+    guard rows.count == authorization.expectedCount else {
+      throw DurableJobStoreError.maintenanceBatchCollision
+    }
+    let jobIDs = try rows.map { row -> UUID in
+      guard let id = UUID(uuidString: try text(row, "job_id")) else {
+        throw DurableJobStoreError.maintenanceBatchCollision
+      }
+      return id
+    }
+    guard Set(jobIDs).count == authorization.expectedCount else {
+      throw DurableJobStoreError.maintenanceBatchCollision
+    }
+    for jobID in jobIDs {
+      let job = try loadJob(jobID, database: database)
+      let disposition = try loadDisposition(job.identity, database: database)
+      let insideScope =
+        authorization.scope.operation == .retireBefore
+        ? job.createdAt.timeIntervalSince1970 < Double(authorization.scope.boundaryEpochSeconds)
+        : job.createdAt.timeIntervalSince1970 >= Double(authorization.scope.boundaryEpochSeconds)
+      let settled =
+        switch authorization.scope.operation {
+        case .retireBefore:
+          job.state == .blocked && disposition?.state == .superseded
+        case .retryResourceFailuresAfter:
+          job.state == .queued && job.terminalReason == nil
+            && disposition?.state == .humanRetryAuthorized
+        }
+      guard insideScope, settled else {
+        throw DurableJobStoreError.maintenanceBatchCollision
+      }
+    }
+    return JobMaintenanceApplication(
+      report: JobMaintenanceReport(
+        scope: authorization.scope,
+        candidateCount: authorization.expectedCount,
+        evidenceSHA256: authorization.evidenceSHA256,
+        appliedCount: authorization.expectedCount,
+        replayed: true
+      ),
+      jobIDs: jobIDs
+    )
+  }
+
+  private static func maintenanceEventKey(
+    operation: JobMaintenanceOperation,
+    boundaryEpochSeconds: Int64,
+    evidence: String,
+    jobID: UUID
+  ) -> String {
+    maintenanceEventPrefix(
+      operation: operation,
+      boundaryEpochSeconds: boundaryEpochSeconds,
+      evidence: evidence
+    ) + jobID.uuidString.lowercased()
+  }
+
+  private static func maintenanceEventPrefix(
+    operation: JobMaintenanceOperation,
+    boundaryEpochSeconds: Int64,
+    evidence: String
+  ) -> String {
+    "maintenance:\(operation.rawValue):\(boundaryEpochSeconds):\(evidence):"
+  }
+
   private static func enforceStepInvariants(
     current: JobRecord,
     event: JobEvent,
@@ -713,7 +1264,8 @@ public actor DurableJobStore {
       nextStep: .replan,
       disposition: effect.disposition,
       mutationGenerationDelta: effect.mutationGenerationDelta,
-      terminalReason: effect.terminalReason
+      terminalReason: effect.terminalReason,
+      clearsTerminalReason: effect.clearsTerminalReason
     )
   }
 
@@ -733,7 +1285,9 @@ public actor DurableJobStore {
       case .set(let date): date
       }
     let nextStepKind = effect.nextStep ?? current.currentStepKind
-    let terminalReason = effect.terminalReason ?? current.terminalReason
+    let terminalReason =
+      effect.clearsTerminalReason
+      ? nil : effect.terminalReason ?? current.terminalReason
 
     _ = try database.execute(
       """

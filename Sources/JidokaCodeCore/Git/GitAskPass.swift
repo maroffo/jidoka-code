@@ -95,7 +95,10 @@ enum OneShotGitCredentialServer {
     remoteURL: URL,
     socketDirectory: URL,
     timeoutSeconds: TimeInterval,
-    now: Date
+    now: Date,
+    socketIDGenerator: @escaping @Sendable () -> String = {
+      UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+    }
   ) throws -> OneShotGitCredentialSession {
     guard validRemote(remoteURL) else { throw GitAskPassError.invalidRemote }
     guard timeoutSeconds.isFinite, (1...60).contains(timeoutSeconds) else {
@@ -103,10 +106,10 @@ enum OneShotGitCredentialServer {
     }
     try validateDirectory(socketDirectory)
     let nonce = UUID().uuidString.lowercased()
-    let socketURL = socketDirectory.appendingPathComponent(
-      "askpass-\(UUID().uuidString.lowercased()).sock"
+    let (socketURL, listener) = try makeListener(
+      in: socketDirectory,
+      socketIDGenerator: socketIDGenerator
     )
-    let listener = try makeListener(at: socketURL)
     let expiresAt = now.addingTimeInterval(timeoutSeconds)
     let credential = MutableCredential(token)
     let task = Task.detached(priority: .userInitiated) {
@@ -170,10 +173,12 @@ enum OneShotGitCredentialServer {
       } catch {
         throw GitAskPassError.invalidRequest
       }
+      let socketName = socketURL.lastPathComponent
       guard request.nonce == nonce,
         request.remote == remoteURL.absoluteString,
         validPrompt(request.prompt, remoteURL: remoteURL),
-        socketURL.path.hasSuffix(".sock")
+        socketName.hasPrefix("a-"), socketName.hasSuffix(".s"),
+        socketName.utf8.count == "a-".utf8.count + 32 + ".s".utf8.count
       else {
         throw GitAskPassError.credentialRejected
       }
@@ -228,6 +233,29 @@ enum OneShotGitCredentialServer {
     }
   }
 
+  private static func makeListener(
+    in socketDirectory: URL,
+    socketIDGenerator: @escaping @Sendable () -> String
+  ) throws -> (URL, Int32) {
+    for _ in 0..<4 {
+      let socketID = socketIDGenerator()
+      guard socketID.utf8.count == 32,
+        socketID.utf8.allSatisfy({
+          (0x30...0x39).contains($0) || (0x61...0x66).contains($0)
+        })
+      else {
+        throw GitAskPassError.invalidNonce
+      }
+      let socketURL = socketDirectory.appendingPathComponent("a-\(socketID).s")
+      do {
+        return (socketURL, try makeListener(at: socketURL))
+      } catch GitAskPassError.socketFailure(let code) where code == EADDRINUSE {
+        continue
+      }
+    }
+    throw GitAskPassError.socketFailure(EADDRINUSE)
+  }
+
   private static func makeListener(at socketURL: URL) throws -> Int32 {
     let pathBytes = Array(socketURL.path.utf8)
     var address = sockaddr_un()
@@ -239,12 +267,13 @@ enum OneShotGitCredentialServer {
     withUnsafeMutableBytes(of: &address.sun_path) { bytes in
       bytes.copyBytes(from: pathBytes)
     }
-    _ = Darwin.unlink(socketURL.path)
     let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
     guard descriptor >= 0 else { throw GitAskPassError.socketFailure(errno) }
     var ownsDescriptor = true
+    var ownsSocketPath = false
     defer {
       if ownsDescriptor { Darwin.close(descriptor) }
+      if ownsSocketPath { _ = Darwin.unlink(socketURL.path) }
     }
     let bindStatus = withUnsafePointer(to: &address) { pointer in
       pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -252,6 +281,7 @@ enum OneShotGitCredentialServer {
       }
     }
     guard bindStatus == 0 else { throw GitAskPassError.socketFailure(errno) }
+    ownsSocketPath = true
     guard Darwin.chmod(socketURL.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
       throw GitAskPassError.socketFailure(errno)
     }
@@ -260,6 +290,7 @@ enum OneShotGitCredentialServer {
     }
     _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC)
     ownsDescriptor = false
+    ownsSocketPath = false
     return descriptor
   }
 

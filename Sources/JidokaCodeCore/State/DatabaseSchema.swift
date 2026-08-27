@@ -1416,7 +1416,2223 @@ public enum DatabaseSchema {
         appendOnlyTrigger(table: "approved_command_events", operation: "DELETE"),
       ]
     ),
+    SQLiteMigration(
+      version: 5,
+      name: "authorized-pre-session-pi-retry",
+      requiresBackup: true,
+      statements: [
+        "DROP TRIGGER pi_run_launch_insert_authority",
+        """
+        CREATE TRIGGER pi_run_launch_insert_authority
+        BEFORE INSERT ON pi_run_launches
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM pi_runs AS run
+          JOIN herdr_role_hosts AS host ON host.id = NEW.role_host_id
+          WHERE run.id = NEW.run_id
+            AND run.runtime_kind = 'herdr'
+            AND run.settled = 0
+            AND host.job_id = run.job_id
+            AND host.generation = run.topology_generation
+            AND host.role = run.role
+            AND host.state IN ('waiting', 'running')
+            AND (
+              (
+                NOT EXISTS (
+                  SELECT 1 FROM pi_run_launches AS prior_launch
+                  WHERE prior_launch.run_id = run.id
+                )
+                AND (
+                  (
+                    run.resumes_run_id IS NULL
+                    AND NEW.launch_mode = 'fresh'
+                    AND NEW.expected_session_id IS NULL
+                    AND NEW.resume_boundary_sha256 IS NULL
+                  )
+                  OR (
+                    run.resumes_run_id IS NOT NULL
+                    AND NEW.launch_mode = 'crossRunResume'
+                    AND EXISTS (
+                      SELECT 1 FROM pi_runs AS origin
+                      WHERE origin.id = run.resumes_run_id
+                        AND origin.accepted = 1
+                        AND origin.settled = 1
+                        AND origin.session_id = NEW.expected_session_id
+                        AND origin.session_boundary_sha256 = NEW.resume_boundary_sha256
+                    )
+                  )
+                )
+              )
+              OR (
+                EXISTS (
+                  SELECT 1 FROM pi_run_launches AS prior_launch
+                  WHERE prior_launch.run_id = run.id
+                )
+                AND NEW.launch_mode = 'sameRunResume'
+                AND EXISTS (
+                  SELECT 1 FROM pi_run_session_origins AS session_origin
+                  WHERE session_origin.run_id = run.id
+                    AND session_origin.session_id = NEW.expected_session_id
+                    AND session_origin.origin_resume_boundary_sha256
+                      IS NEW.resume_boundary_sha256
+                )
+                AND (
+                  SELECT last_launch.state
+                  FROM pi_run_launches AS last_launch
+                  WHERE last_launch.run_id = run.id
+                  ORDER BY last_launch.queue_sequence DESC, last_launch.launch_attempt_id DESC
+                  LIMIT 1
+                ) IN ('failed', 'interruptedUnknown')
+              )
+              OR (
+                NEW.launch_mode = 'fresh'
+                AND NEW.expected_session_id IS NULL
+                AND NEW.resume_boundary_sha256 IS NULL
+                AND (
+                  SELECT COUNT(*) FROM pi_run_launches AS prior_launch
+                  WHERE prior_launch.run_id = run.id
+                ) = 1
+                AND EXISTS (
+                  SELECT 1 FROM pi_run_launches AS prior_launch
+                  WHERE prior_launch.run_id = run.id
+                    AND prior_launch.launch_mode = 'fresh'
+                    AND prior_launch.queue_sequence = 1
+                    AND prior_launch.state = 'failed'
+                    AND prior_launch.failure_code = 'RUNTIME_TIMEOUT'
+                    AND prior_launch.child_pid IS NOT NULL
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM pi_run_session_origins AS session_origin
+                  WHERE session_origin.run_id = run.id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM pi_run_results AS result
+                  WHERE result.run_id = run.id
+                )
+                AND (
+                  SELECT COUNT(*) FROM job_transitions AS authorization
+                  WHERE authorization.job_id = run.job_id
+                    AND authorization.from_state = 'runningPi'
+                    AND authorization.to_state = 'runningPi'
+                    AND authorization.event_key GLOB (
+                      'canary:*:pi-fresh-retry:' || run.id || ':' ||
+                      (
+                        SELECT prior_launch.launch_attempt_id
+                        FROM pi_run_launches AS prior_launch
+                        WHERE prior_launch.run_id = run.id
+                        LIMIT 1
+                      ) || ':*'
+                    )
+                ) = 1
+              )
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'Pi launch lacks exact causal authority');
+        END
+        """,
+      ]
+    ),
+    SQLiteMigration(
+      version: 6,
+      name: "authorized-pre-child-herdr-transaction-retry",
+      requiresBackup: true,
+      statements: [
+        "DROP TRIGGER pi_run_launch_insert_authority",
+        piRunLaunchInsertAuthorityV6,
+      ]
+    ),
+    SQLiteMigration(
+      version: 7,
+      name: "authorized-legacy-agent-prime-retry",
+      requiresBackup: true,
+      statements: [
+        "DROP TRIGGER herdr_topology_intent_identity_immutable",
+        "DROP INDEX herdr_topology_intents_logical_idx",
+        "ALTER TABLE herdr_topology_intents RENAME TO herdr_topology_intents_v6",
+        herdrTopologyIntentsTableV7,
+        """
+        INSERT INTO herdr_topology_intents
+        SELECT * FROM herdr_topology_intents_v6
+        """,
+        "DROP TABLE herdr_topology_intents_v6",
+        herdrTopologyIntentsLogicalIndex,
+        herdrTopologyIntentIdentityImmutable,
+        herdrTopologyIntentStateTransitionV7,
+        herdrPrimeIntentDeleteDeniedV7,
+        herdrPrimeRetryCandidatesViewV7,
+        herdrPrimeIntentInsertAuthorityV7,
+        herdrPrimeIntentSendAuthorityV7,
+        "DROP TRIGGER pi_run_launch_insert_authority",
+        piRunLaunchInsertAuthorityV7,
+      ]
+    ),
+    SQLiteMigration(
+      version: 8,
+      name: "authorized-pane-agent-authority-reset",
+      requiresBackup: true,
+      statements: [
+        "DROP TRIGGER herdr_topology_intent_identity_immutable",
+        "DROP TRIGGER herdr_topology_intent_state_transition",
+        "DROP TRIGGER herdr_prime_intent_delete_denied",
+        "DROP TRIGGER herdr_prime_intent_insert_authority",
+        "DROP TRIGGER herdr_prime_intent_send_authority",
+        "DROP TRIGGER pi_run_launch_insert_authority",
+        "DROP VIEW herdr_prime_retry_candidates",
+        "DROP INDEX herdr_topology_intents_logical_idx",
+        "ALTER TABLE herdr_topology_intents RENAME TO herdr_topology_intents_v7",
+        herdrTopologyIntentsTableV8,
+        """
+        INSERT INTO herdr_topology_intents
+        SELECT * FROM herdr_topology_intents_v7
+        """,
+        "DROP TABLE herdr_topology_intents_v7",
+        herdrTopologyIntentsLogicalIndex,
+        herdrTopologyIntentIdentityImmutable,
+        herdrTopologyIntentStateTransitionV7,
+        herdrPrimeIntentDeleteDeniedV8,
+        herdrPrimeRetryCandidatesViewV7,
+        herdrAgentResetCandidatesViewV8,
+        herdrQ4AuthorityCandidatesViewV8,
+        herdrPrimeIntentInsertAuthorityV8,
+        herdrPrimeIntentSendAuthorityV8,
+        herdrResetIntentInsertAuthorityV8,
+        herdrResetIntentSendAuthorityV8,
+        piRunLaunchInsertAuthorityV8,
+      ]
+    ),
+    SQLiteMigration(
+      version: 9,
+      name: "authorized-architecture-role-host-replacement",
+      requiresBackup: true,
+      statements: [
+        "DROP TRIGGER herdr_topology_intent_identity_immutable",
+        "DROP TRIGGER herdr_topology_intent_state_transition",
+        "DROP TRIGGER herdr_prime_intent_delete_denied",
+        "DROP TRIGGER herdr_prime_intent_insert_authority",
+        "DROP TRIGGER herdr_prime_intent_send_authority",
+        "DROP TRIGGER herdr_reset_intent_insert_authority",
+        "DROP TRIGGER herdr_reset_intent_send_authority",
+        "DROP TRIGGER pi_run_launch_insert_authority",
+        "DROP TRIGGER pi_run_launch_identity_immutable",
+        "DROP VIEW herdr_q4_authority_candidates",
+        "DROP VIEW herdr_agent_reset_candidates",
+        "DROP VIEW herdr_prime_retry_candidates",
+        "DROP INDEX herdr_topology_intents_logical_idx",
+        "ALTER TABLE herdr_topology_intents RENAME TO herdr_topology_intents_v8",
+        herdrTopologyIntentsTableV9,
+        """
+        INSERT INTO herdr_topology_intents(
+          id, kind, repository_id, job_id, generation, intent_sha256, payload_sha256,
+          socket_device, socket_inode, socket_owner, socket_permissions,
+          state, attribution_json, created_at, updated_at
+        )
+        SELECT id, kind, repository_id, job_id, generation, intent_sha256, payload_sha256,
+          socket_device, socket_inode, socket_owner, socket_permissions,
+          state, attribution_json, created_at, updated_at
+        FROM herdr_topology_intents_v8
+        """,
+        "DROP TABLE herdr_topology_intents_v8",
+        herdrTopologyIntentsLogicalIndex,
+        herdrTopologyIntentIdentityImmutableV9,
+        herdrTopologyIntentStateTransitionV9,
+        herdrPrimeIntentDeleteDeniedV9,
+        herdrPrimeRetryCandidatesViewV7,
+        herdrAgentResetCandidatesViewV8,
+        herdrQ4AuthorityCandidatesViewV8,
+        herdrRoleHostReplacementCandidatesViewV9,
+        herdrRoleHostReplacementAuthorizationsTableV9,
+        herdrRoleHostReplacementAuthorizationInsertAuthorityV9,
+        herdrRoleHostReplacementAuthorizationUpdateDeniedV9,
+        herdrRoleHostReplacementAuthorizationDeleteDeniedV9,
+        herdrPrimeIntentInsertAuthorityV8,
+        herdrPrimeIntentSendAuthorityV8,
+        herdrResetIntentInsertAuthorityV8,
+        herdrResetIntentSendAuthorityV8,
+        herdrReplacementIntentInsertAuthorityV9,
+        herdrReplacementIntentSendAuthorityV9,
+        herdrReplacementIntentAttributionAuthorityV9,
+        herdrReplacementRoleHostsTableV9,
+        herdrReplacementRoleHostsActiveTerminalIndexV9,
+        herdrReplacementRoleHostsActivePaneIndexV9,
+        herdrReplacementRoleHostsActiveProcessIndexV9,
+        herdrOrdinaryRoleHostReplacementInsertCollisionDeniedV9,
+        herdrOrdinaryRoleHostReplacementPhysicalCollisionDeniedV9,
+        herdrReplacementRoleHostInsertAuthorityV9,
+        herdrReplacementRoleHostIdentityImmutableV9,
+        herdrReplacementRoleHostStateTransitionV9,
+        herdrReplacementRoleHostDeleteDeniedV9,
+        herdrReplacedPredecessorImmutableV9,
+        "ALTER TABLE pi_run_launches ADD COLUMN execution_role_host_id TEXT REFERENCES herdr_replacement_role_hosts(id) ON DELETE RESTRICT",
+        """
+        CREATE UNIQUE INDEX pi_run_launches_one_active_execution_host_idx
+        ON pi_run_launches(execution_role_host_id)
+        WHERE execution_role_host_id IS NOT NULL
+          AND state IN ('prepared', 'enqueued', 'running', 'resultPrepared')
+        """,
+        piRunLaunchIdentityImmutableV9,
+        piRunLaunchInsertAuthorityV9,
+      ]
+    ),
   ]
+
+  private static let herdrTopologyIntentsTableV7 = """
+    CREATE TABLE herdr_topology_intents (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN (
+        'createWorkspace', 'applyLayout', 'primeAgentAuthority'
+      )),
+      repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      intent_sha256 TEXT NOT NULL CHECK (
+        length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      payload_sha256 TEXT NOT NULL CHECK (
+        length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      socket_device INTEGER NOT NULL CHECK (socket_device >= 0),
+      socket_inode INTEGER NOT NULL CHECK (socket_inode > 0),
+      socket_owner INTEGER NOT NULL CHECK (socket_owner >= 0),
+      socket_permissions INTEGER NOT NULL CHECK (socket_permissions BETWEEN 0 AND 511),
+      state TEXT NOT NULL CHECK (state IN (
+        'prepared', 'sendStarted', 'attributed', 'unknown'
+      )),
+      attribution_json TEXT,
+      created_at REAL NOT NULL,
+      updated_at REAL NOT NULL
+    ) STRICT
+    """
+
+  private static let herdrTopologyIntentsTableV8 = """
+    CREATE TABLE herdr_topology_intents (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN (
+        'createWorkspace', 'applyLayout', 'primeAgentAuthority', 'resetAgentAuthority'
+      )),
+      repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      intent_sha256 TEXT NOT NULL CHECK (
+        length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      payload_sha256 TEXT NOT NULL CHECK (
+        length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      socket_device INTEGER NOT NULL CHECK (socket_device >= 0),
+      socket_inode INTEGER NOT NULL CHECK (socket_inode > 0),
+      socket_owner INTEGER NOT NULL CHECK (socket_owner >= 0),
+      socket_permissions INTEGER NOT NULL CHECK (socket_permissions BETWEEN 0 AND 511),
+      state TEXT NOT NULL CHECK (state IN (
+        'prepared', 'sendStarted', 'attributed', 'unknown'
+      )),
+      attribution_json TEXT,
+      created_at REAL NOT NULL,
+      updated_at REAL NOT NULL
+    ) STRICT
+    """
+
+  private static let herdrTopologyIntentsTableV9 = """
+    CREATE TABLE herdr_topology_intents (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN (
+        'createWorkspace', 'applyLayout', 'primeAgentAuthority', 'resetAgentAuthority',
+        'replaceRoleHost'
+      )),
+      repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      intent_sha256 TEXT NOT NULL CHECK (
+        length(intent_sha256) = 64 AND intent_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      payload_sha256 TEXT NOT NULL CHECK (
+        length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      socket_device INTEGER NOT NULL CHECK (socket_device >= 0),
+      socket_inode INTEGER NOT NULL CHECK (socket_inode > 0),
+      socket_owner INTEGER NOT NULL CHECK (socket_owner >= 0),
+      socket_permissions INTEGER NOT NULL CHECK (socket_permissions BETWEEN 0 AND 511),
+      state TEXT NOT NULL CHECK (state IN (
+        'prepared', 'sendStarted', 'attributed', 'unknown', 'failedNoRemoteEffect'
+      )),
+      attribution_json TEXT,
+      failure_code TEXT CHECK (
+        failure_code IS NULL OR (
+          length(failure_code) BETWEEN 3 AND 64
+          AND failure_code GLOB '[A-Z]*'
+          AND failure_code NOT GLOB '*[^A-Z0-9_]*'
+        )
+      ),
+      created_at REAL NOT NULL,
+      updated_at REAL NOT NULL,
+      CHECK ((state = 'failedNoRemoteEffect') = (failure_code IS NOT NULL))
+    ) STRICT
+    """
+
+  private static let herdrTopologyIntentsLogicalIndex = """
+    CREATE UNIQUE INDEX herdr_topology_intents_logical_idx
+    ON herdr_topology_intents(
+      kind, repository_id, job_id, generation, payload_sha256,
+      socket_device, socket_inode, socket_owner, socket_permissions
+    )
+    """
+
+  private static let herdrTopologyIntentIdentityImmutable = """
+    CREATE TRIGGER herdr_topology_intent_identity_immutable
+    BEFORE UPDATE ON herdr_topology_intents
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.kind IS NOT OLD.kind
+      OR NEW.repository_id IS NOT OLD.repository_id
+      OR NEW.job_id IS NOT OLD.job_id
+      OR NEW.generation IS NOT OLD.generation
+      OR NEW.intent_sha256 IS NOT OLD.intent_sha256
+      OR NEW.payload_sha256 IS NOT OLD.payload_sha256
+      OR NEW.socket_device IS NOT OLD.socket_device
+      OR NEW.socket_inode IS NOT OLD.socket_inode
+      OR NEW.socket_owner IS NOT OLD.socket_owner
+      OR NEW.socket_permissions IS NOT OLD.socket_permissions
+      OR NEW.created_at IS NOT OLD.created_at
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr topology intent identity is immutable');
+    END
+    """
+
+  private static let herdrTopologyIntentStateTransitionV7 = """
+    CREATE TRIGGER herdr_topology_intent_state_transition
+    BEFORE UPDATE OF state, attribution_json ON herdr_topology_intents
+    WHEN NOT (
+      OLD.state = 'prepared' AND NEW.state = 'sendStarted'
+        AND OLD.attribution_json IS NULL AND NEW.attribution_json IS NULL
+      OR OLD.state = 'sendStarted' AND NEW.state = 'attributed'
+        AND OLD.attribution_json IS NULL AND NEW.attribution_json IS NOT NULL
+      OR OLD.state = 'sendStarted' AND NEW.state = 'unknown'
+        AND OLD.attribution_json IS NULL AND NEW.attribution_json IS NULL
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid Herdr topology intent transition');
+    END
+    """
+
+  private static let herdrTopologyIntentIdentityImmutableV9 = """
+    CREATE TRIGGER herdr_topology_intent_identity_immutable
+    BEFORE UPDATE ON herdr_topology_intents
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.kind IS NOT OLD.kind
+      OR NEW.repository_id IS NOT OLD.repository_id
+      OR NEW.job_id IS NOT OLD.job_id
+      OR NEW.generation IS NOT OLD.generation
+      OR NEW.intent_sha256 IS NOT OLD.intent_sha256
+      OR NEW.payload_sha256 IS NOT OLD.payload_sha256
+      OR NEW.socket_device IS NOT OLD.socket_device
+      OR NEW.socket_inode IS NOT OLD.socket_inode
+      OR NEW.socket_owner IS NOT OLD.socket_owner
+      OR NEW.socket_permissions IS NOT OLD.socket_permissions
+      OR NEW.created_at IS NOT OLD.created_at
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr topology intent identity is immutable');
+    END
+    """
+
+  private static let herdrTopologyIntentStateTransitionV9 = """
+    CREATE TRIGGER herdr_topology_intent_state_transition
+    BEFORE UPDATE ON herdr_topology_intents
+    WHEN NOT (
+      OLD.state = 'prepared' AND NEW.state = 'sendStarted'
+        AND OLD.attribution_json IS NULL AND NEW.attribution_json IS NULL
+        AND OLD.failure_code IS NULL AND NEW.failure_code IS NULL
+        AND NEW.updated_at >= OLD.updated_at
+      OR OLD.kind = 'replaceRoleHost'
+        AND OLD.state = 'prepared' AND NEW.state = 'failedNoRemoteEffect'
+        AND OLD.attribution_json IS NULL AND NEW.attribution_json IS NULL
+        AND OLD.failure_code IS NULL AND NEW.failure_code IS NOT NULL
+        AND NEW.updated_at >= OLD.updated_at
+      OR OLD.state = 'sendStarted' AND NEW.state = 'attributed'
+        AND OLD.attribution_json IS NULL AND NEW.attribution_json IS NOT NULL
+        AND OLD.failure_code IS NULL AND NEW.failure_code IS NULL
+        AND NEW.updated_at >= OLD.updated_at
+      OR OLD.state = 'sendStarted' AND NEW.state = 'unknown'
+        AND OLD.attribution_json IS NULL AND NEW.attribution_json IS NULL
+        AND OLD.failure_code IS NULL AND NEW.failure_code IS NULL
+        AND NEW.updated_at >= OLD.updated_at
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid Herdr topology intent transition');
+    END
+    """
+
+  private static let piRunLaunchInsertAuthorityV6 = """
+    CREATE TRIGGER pi_run_launch_insert_authority
+    BEFORE INSERT ON pi_run_launches
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM pi_runs AS run
+      JOIN herdr_role_hosts AS host ON host.id = NEW.role_host_id
+      WHERE run.id = NEW.run_id
+        AND run.runtime_kind = 'herdr'
+        AND run.settled = 0
+        AND host.job_id = run.job_id
+        AND host.generation = run.topology_generation
+        AND host.role = run.role
+        AND host.state IN ('waiting', 'running')
+        AND (
+          (
+            NOT EXISTS (
+              SELECT 1 FROM pi_run_launches AS prior_launch
+              WHERE prior_launch.run_id = run.id
+            )
+            AND (
+              (
+                run.resumes_run_id IS NULL
+                AND NEW.launch_mode = 'fresh'
+                AND NEW.expected_session_id IS NULL
+                AND NEW.resume_boundary_sha256 IS NULL
+              )
+              OR (
+                run.resumes_run_id IS NOT NULL
+                AND NEW.launch_mode = 'crossRunResume'
+                AND EXISTS (
+                  SELECT 1 FROM pi_runs AS origin
+                  WHERE origin.id = run.resumes_run_id
+                    AND origin.accepted = 1
+                    AND origin.settled = 1
+                    AND origin.session_id = NEW.expected_session_id
+                    AND origin.session_boundary_sha256 = NEW.resume_boundary_sha256
+                )
+              )
+            )
+          )
+          OR (
+            EXISTS (
+              SELECT 1 FROM pi_run_launches AS prior_launch
+              WHERE prior_launch.run_id = run.id
+            )
+            AND NEW.launch_mode = 'sameRunResume'
+            AND EXISTS (
+              SELECT 1 FROM pi_run_session_origins AS session_origin
+              WHERE session_origin.run_id = run.id
+                AND session_origin.session_id = NEW.expected_session_id
+                AND session_origin.origin_resume_boundary_sha256
+                  IS NEW.resume_boundary_sha256
+            )
+            AND (
+              SELECT last_launch.state
+              FROM pi_run_launches AS last_launch
+              WHERE last_launch.run_id = run.id
+              ORDER BY last_launch.queue_sequence DESC, last_launch.launch_attempt_id DESC
+              LIMIT 1
+            ) IN ('failed', 'interruptedUnknown')
+          )
+          OR (
+            NEW.launch_mode = 'fresh'
+            AND NEW.expected_session_id IS NULL
+            AND NEW.resume_boundary_sha256 IS NULL
+            AND (
+              SELECT COUNT(*) FROM pi_run_launches AS prior_launch
+              WHERE prior_launch.run_id = run.id
+            ) = 1
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches AS prior_launch
+              WHERE prior_launch.run_id = run.id
+                AND prior_launch.launch_mode = 'fresh'
+                AND prior_launch.queue_sequence = 1
+                AND prior_launch.state = 'failed'
+                AND prior_launch.failure_code = 'RUNTIME_TIMEOUT'
+                AND prior_launch.child_pid IS NOT NULL
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM pi_run_session_origins AS session_origin
+              WHERE session_origin.run_id = run.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM pi_run_results AS result
+              WHERE result.run_id = run.id
+            )
+            AND (
+              SELECT COUNT(*) FROM job_transitions AS authorization
+              WHERE authorization.job_id = run.job_id
+                AND authorization.from_state = 'runningPi'
+                AND authorization.to_state = 'runningPi'
+                AND authorization.event_key GLOB (
+                  'canary:*:pi-fresh-retry:' || run.id || ':' ||
+                  (
+                    SELECT prior_launch.launch_attempt_id
+                    FROM pi_run_launches AS prior_launch
+                    WHERE prior_launch.run_id = run.id
+                    LIMIT 1
+                  ) || ':*'
+                )
+            ) = 1
+          )
+          OR (
+            NEW.launch_mode = 'fresh'
+            AND NEW.expected_session_id IS NULL
+            AND NEW.resume_boundary_sha256 IS NULL
+            AND (
+              SELECT COUNT(*) FROM pi_run_launches AS prior_launch
+              WHERE prior_launch.run_id = run.id
+            ) = 2
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches AS initial_launch
+              WHERE initial_launch.run_id = run.id
+                AND initial_launch.launch_mode = 'fresh'
+                AND initial_launch.queue_sequence = 1
+                AND initial_launch.state = 'failed'
+                AND initial_launch.failure_code = 'RUNTIME_TIMEOUT'
+                AND initial_launch.child_pid IS NOT NULL
+            )
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches AS failed_retry
+              WHERE failed_retry.run_id = run.id
+                AND failed_retry.launch_mode = 'fresh'
+                AND failed_retry.queue_sequence = 2
+                AND failed_retry.state = 'failed'
+                AND failed_retry.failure_code = 'HERDR_TRANSACTION_FAILED'
+                AND failed_retry.child_pid IS NULL
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM pi_run_session_origins AS session_origin
+              WHERE session_origin.run_id = run.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM pi_run_results AS result
+              WHERE result.run_id = run.id
+            )
+            AND (
+              SELECT COUNT(*) FROM job_transitions AS authorization
+              WHERE authorization.job_id = run.job_id
+                AND authorization.from_state = 'runningPi'
+                AND authorization.to_state = 'runningPi'
+                AND authorization.event_key GLOB (
+                  'canary:*:pi-fresh-retry:' || run.id || ':' ||
+                  (
+                    SELECT initial_launch.launch_attempt_id
+                    FROM pi_run_launches AS initial_launch
+                    WHERE initial_launch.run_id = run.id
+                      AND initial_launch.queue_sequence = 1
+                  ) || ':*'
+                )
+            ) = 1
+            AND (
+              SELECT COUNT(*) FROM job_transitions AS authorization
+              WHERE authorization.job_id = run.job_id
+                AND authorization.from_state = 'runningPi'
+                AND authorization.to_state = 'runningPi'
+                AND authorization.event_key GLOB (
+                  'canary:*:pi-fresh-retry:' || run.id || ':' ||
+                  (
+                    SELECT failed_retry.launch_attempt_id
+                    FROM pi_run_launches AS failed_retry
+                    WHERE failed_retry.run_id = run.id
+                      AND failed_retry.queue_sequence = 2
+                  ) || ':*'
+                )
+            ) = 1
+          )
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Pi launch lacks exact causal authority');
+    END
+    """
+
+  private static let herdrPrimeRetryCandidatesViewV7 = """
+    CREATE VIEW herdr_prime_retry_candidates AS
+    SELECT
+      run.id AS run_id,
+      run.job_id AS job_id,
+      job.repository_id AS repository_id,
+      run.topology_generation AS generation,
+      host.id AS role_host_id,
+      host.workspace_id AS workspace_id,
+      host.tab_id AS tab_id,
+      host.pane_id AS pane_id,
+      host.terminal_id AS terminal_id,
+      binding.socket_device AS socket_device,
+      binding.socket_inode AS socket_inode,
+      binding.socket_owner AS socket_owner,
+      binding.socket_permissions AS socket_permissions,
+      third_launch.launch_attempt_id AS failed_launch_attempt_id
+    FROM pi_runs AS run
+    JOIN jobs AS job ON job.id = run.job_id
+    JOIN herdr_role_hosts AS host
+      ON host.job_id = run.job_id
+      AND host.generation = run.topology_generation
+      AND host.role = run.role
+    JOIN herdr_repository_bindings AS binding
+      ON binding.repository_id = job.repository_id
+      AND binding.workspace_id = host.workspace_id
+      AND binding.state = 'active'
+    JOIN pi_run_launches AS initial_launch
+      ON initial_launch.run_id = run.id AND initial_launch.queue_sequence = 1
+    JOIN pi_run_launches AS second_launch
+      ON second_launch.run_id = run.id AND second_launch.queue_sequence = 2
+    JOIN pi_run_launches AS third_launch
+      ON third_launch.run_id = run.id AND third_launch.queue_sequence = 3
+    WHERE (SELECT paused FROM app_settings WHERE singleton = 1) = 1
+      AND run.runtime_kind = 'herdr'
+      AND run.role = 'architecture'
+      AND run.settled = 0
+      AND run.outcome = 'running'
+      AND job.kind = 'prReview'
+      AND job.state = 'runningPi'
+      AND host.state IN ('waiting', 'running')
+      AND host.last_queue_sequence IN (3, 4)
+      AND host.host_pid IS NOT NULL
+      AND host.host_start_seconds IS NOT NULL
+      AND host.host_start_microseconds IS NOT NULL
+      AND host.pane_id IS NOT NULL
+      AND host.tab_id IS NOT NULL
+      AND host.terminal_id IS NOT NULL
+      AND initial_launch.launch_mode = 'fresh'
+      AND initial_launch.state = 'failed'
+      AND initial_launch.failure_code = 'RUNTIME_TIMEOUT'
+      AND initial_launch.child_pid IS NOT NULL
+      AND second_launch.launch_mode = 'fresh'
+      AND second_launch.state = 'failed'
+      AND second_launch.failure_code = 'HERDR_TRANSACTION_FAILED'
+      AND second_launch.child_pid IS NULL
+      AND third_launch.launch_mode = 'fresh'
+      AND third_launch.state = 'failed'
+      AND third_launch.failure_code = 'HERDR_TRANSACTION_FAILED'
+      AND third_launch.child_pid IS NULL
+      AND (SELECT COUNT(*) FROM pi_run_launches WHERE run_id = run.id) = 3
+      AND (SELECT COUNT(*) FROM pi_run_results WHERE run_id = run.id) = 0
+      AND (SELECT COUNT(*) FROM pi_run_session_origins WHERE run_id = run.id) = 0
+      AND (SELECT COUNT(*) FROM artifacts WHERE job_id = run.job_id AND kind = 'review') = 0
+      AND (SELECT COUNT(*) FROM job_steps WHERE job_id = run.job_id) = 0
+      AND (SELECT COUNT(*) FROM approved_command_runs WHERE job_id = run.job_id) = 0
+      AND (SELECT COUNT(*) FROM mutation_intents WHERE job_id = run.job_id) = 0
+      AND (SELECT COUNT(*) FROM repository_leases WHERE active = 1) = 1
+      AND (
+        SELECT COUNT(*) FROM repository_leases
+        WHERE active = 1 AND job_id = run.job_id AND repository_id = job.repository_id
+      ) = 1
+      AND (
+        SELECT COUNT(*) FROM herdr_role_hosts
+        WHERE job_id = run.job_id AND generation = run.topology_generation
+          AND state = 'waiting' AND role IN ('architecture', 'security', 'test', 'synthesis')
+      ) = 4
+      AND (
+        SELECT COUNT(*) FROM job_transitions AS authorization
+        WHERE authorization.job_id = run.job_id
+          AND authorization.from_state = 'runningPi'
+          AND authorization.to_state = 'runningPi'
+          AND authorization.event_key GLOB (
+            'canary:*:pi-fresh-retry:' || run.id || ':' ||
+            initial_launch.launch_attempt_id || ':*'
+          )
+      ) = 1
+      AND (
+        SELECT COUNT(*) FROM job_transitions AS authorization
+        WHERE authorization.job_id = run.job_id
+          AND authorization.from_state = 'runningPi'
+          AND authorization.to_state = 'runningPi'
+          AND authorization.event_key GLOB (
+            'canary:*:pi-fresh-retry:' || run.id || ':' ||
+            second_launch.launch_attempt_id || ':*'
+          )
+      ) = 1
+      AND (
+        SELECT COUNT(*) FROM job_transitions AS authorization
+        WHERE authorization.job_id = run.job_id
+          AND authorization.from_state = 'runningPi'
+          AND authorization.to_state = 'runningPi'
+          AND authorization.event_key GLOB (
+            'canary:*:pi-fresh-retry:' || run.id || ':' ||
+            third_launch.launch_attempt_id || ':*'
+          )
+      ) = 1
+      AND (
+        SELECT COUNT(*) FROM job_transitions AS authorization
+        WHERE authorization.job_id = run.job_id
+          AND authorization.from_state = 'runningPi'
+          AND authorization.to_state = 'runningPi'
+          AND authorization.event_key GLOB ('canary:*:pi-fresh-retry:' || run.id || ':*')
+      ) = 3
+    """
+
+  private static let herdrAgentResetCandidatesViewV8 = """
+    CREATE VIEW herdr_agent_reset_candidates AS
+    SELECT
+      run.id AS run_id,
+      run.job_id AS job_id,
+      job.repository_id AS repository_id,
+      run.topology_generation AS generation,
+      host.id AS role_host_id,
+      host.workspace_id AS workspace_id,
+      host.tab_id AS tab_id,
+      host.pane_id AS pane_id,
+      host.terminal_id AS terminal_id,
+      binding.socket_device AS socket_device,
+      binding.socket_inode AS socket_inode,
+      binding.socket_owner AS socket_owner,
+      binding.socket_permissions AS socket_permissions,
+      third_launch.launch_attempt_id AS failed_launch_attempt_id,
+      failed_prime.id AS failed_prime_intent_id,
+      failed_prime.intent_sha256 AS failed_prime_intent_sha256,
+      failed_prime.payload_sha256 AS failed_prime_payload_sha256
+    FROM pi_runs AS run
+    JOIN jobs AS job ON job.id = run.job_id
+    JOIN herdr_role_hosts AS host
+      ON host.job_id = run.job_id
+      AND host.generation = run.topology_generation
+      AND host.role = run.role
+    JOIN herdr_repository_bindings AS binding
+      ON binding.repository_id = job.repository_id
+      AND binding.workspace_id = host.workspace_id
+      AND binding.state = 'active'
+    JOIN pi_run_launches AS initial_launch
+      ON initial_launch.run_id = run.id AND initial_launch.queue_sequence = 1
+    JOIN pi_run_launches AS second_launch
+      ON second_launch.run_id = run.id AND second_launch.queue_sequence = 2
+    JOIN pi_run_launches AS third_launch
+      ON third_launch.run_id = run.id AND third_launch.queue_sequence = 3
+    JOIN herdr_topology_intents AS failed_prime
+      ON failed_prime.kind = 'primeAgentAuthority'
+      AND failed_prime.repository_id = job.repository_id
+      AND failed_prime.job_id = run.job_id
+      AND failed_prime.generation = run.topology_generation
+      AND failed_prime.socket_device = binding.socket_device
+      AND failed_prime.socket_inode = binding.socket_inode
+      AND failed_prime.socket_owner = binding.socket_owner
+      AND failed_prime.socket_permissions = binding.socket_permissions
+      AND failed_prime.state = 'unknown'
+      AND failed_prime.attribution_json IS NULL
+    WHERE (SELECT paused FROM app_settings WHERE singleton = 1) = 1
+      AND run.runtime_kind = 'herdr'
+      AND run.role = 'architecture'
+      AND run.settled = 0
+      AND run.outcome = 'running'
+      AND job.kind = 'prReview'
+      AND job.state = 'runningPi'
+      AND host.state IN ('waiting', 'running')
+      AND host.last_queue_sequence IN (3, 4)
+      AND host.host_pid IS NOT NULL
+      AND host.host_start_seconds IS NOT NULL
+      AND host.host_start_microseconds IS NOT NULL
+      AND host.pane_id IS NOT NULL
+      AND host.tab_id IS NOT NULL
+      AND host.terminal_id IS NOT NULL
+      AND initial_launch.launch_mode = 'fresh'
+      AND initial_launch.state = 'failed'
+      AND initial_launch.failure_code = 'RUNTIME_TIMEOUT'
+      AND initial_launch.child_pid IS NOT NULL
+      AND second_launch.launch_mode = 'fresh'
+      AND second_launch.state = 'failed'
+      AND second_launch.failure_code = 'HERDR_TRANSACTION_FAILED'
+      AND second_launch.child_pid IS NULL
+      AND third_launch.launch_mode = 'fresh'
+      AND third_launch.state = 'failed'
+      AND third_launch.failure_code = 'HERDR_TRANSACTION_FAILED'
+      AND third_launch.child_pid IS NULL
+      AND (SELECT COUNT(*) FROM pi_run_launches WHERE run_id = run.id) = 3
+      AND (SELECT COUNT(*) FROM pi_run_results WHERE run_id = run.id) = 0
+      AND (SELECT COUNT(*) FROM pi_run_session_origins WHERE run_id = run.id) = 0
+      AND (SELECT COUNT(*) FROM artifacts WHERE job_id = run.job_id AND kind = 'review') = 0
+      AND (SELECT COUNT(*) FROM job_steps WHERE job_id = run.job_id) = 0
+      AND (SELECT COUNT(*) FROM approved_command_runs WHERE job_id = run.job_id) = 0
+      AND (SELECT COUNT(*) FROM mutation_intents WHERE job_id = run.job_id) = 0
+      AND (SELECT COUNT(*) FROM repository_leases WHERE active = 1) = 1
+      AND (
+        SELECT COUNT(*) FROM repository_leases
+        WHERE active = 1 AND job_id = run.job_id AND repository_id = job.repository_id
+      ) = 1
+      AND (
+        SELECT COUNT(*) FROM herdr_role_hosts
+        WHERE job_id = run.job_id AND generation = run.topology_generation
+          AND state = 'waiting' AND role IN ('architecture', 'security', 'test', 'synthesis')
+      ) = 4
+      AND (
+        SELECT COUNT(*) FROM herdr_topology_intents
+        WHERE job_id = run.job_id AND kind = 'primeAgentAuthority'
+      ) = 1
+      AND (
+        SELECT COUNT(*) FROM herdr_topology_intents
+        WHERE job_id = run.job_id AND kind = 'resetAgentAuthority'
+      ) IN (0, 1)
+      AND (
+        SELECT COUNT(*) FROM job_transitions AS authorization
+        WHERE authorization.job_id = run.job_id
+          AND authorization.from_state = 'runningPi'
+          AND authorization.to_state = 'runningPi'
+          AND authorization.event_key GLOB (
+            'canary:*:pi-fresh-retry:' || run.id || ':' ||
+            initial_launch.launch_attempt_id || ':*'
+          )
+      ) = 1
+      AND (
+        SELECT COUNT(*) FROM job_transitions AS authorization
+        WHERE authorization.job_id = run.job_id
+          AND authorization.from_state = 'runningPi'
+          AND authorization.to_state = 'runningPi'
+          AND authorization.event_key GLOB (
+            'canary:*:pi-fresh-retry:' || run.id || ':' ||
+            second_launch.launch_attempt_id || ':*'
+          )
+      ) = 1
+      AND (
+        SELECT COUNT(*) FROM job_transitions AS authorization
+        WHERE authorization.job_id = run.job_id
+          AND authorization.from_state = 'runningPi'
+          AND authorization.to_state = 'runningPi'
+          AND authorization.event_key GLOB (
+            'canary:*:pi-fresh-retry:' || run.id || ':' ||
+            third_launch.launch_attempt_id || ':*'
+          )
+      ) = 2
+      AND (
+        SELECT COUNT(*) FROM job_transitions AS authorization
+        WHERE authorization.job_id = run.job_id
+          AND authorization.from_state = 'runningPi'
+          AND authorization.to_state = 'runningPi'
+          AND authorization.event_key GLOB ('canary:*:pi-fresh-retry:' || run.id || ':*')
+      ) = 4
+    """
+
+  private static let herdrQ4AuthorityCandidatesViewV8 = """
+    CREATE VIEW herdr_q4_authority_candidates AS
+    SELECT run_id, job_id, repository_id, generation, role_host_id, workspace_id,
+      tab_id, pane_id, terminal_id, socket_device, socket_inode, socket_owner,
+      socket_permissions, failed_launch_attempt_id,
+      'primeAgentAuthority' AS intent_kind, 'pi-agent-prime' AS event_kind
+    FROM herdr_prime_retry_candidates
+    UNION ALL
+    SELECT run_id, job_id, repository_id, generation, role_host_id, workspace_id,
+      tab_id, pane_id, terminal_id, socket_device, socket_inode, socket_owner,
+      socket_permissions, failed_launch_attempt_id,
+      'resetAgentAuthority' AS intent_kind,
+      'pi-agent-authority-reset' AS event_kind
+    FROM herdr_agent_reset_candidates
+    """
+
+  private static let herdrRoleHostReplacementCandidatesViewV9 = """
+    CREATE VIEW herdr_role_host_replacement_candidates AS
+    SELECT
+      candidate.run_id,
+      candidate.job_id,
+      candidate.repository_id,
+      candidate.generation,
+      candidate.role_host_id AS predecessor_role_host_id,
+      candidate.workspace_id,
+      candidate.tab_id,
+      candidate.pane_id AS predecessor_pane_id,
+      candidate.terminal_id AS predecessor_terminal_id,
+      candidate.socket_device,
+      candidate.socket_inode,
+      candidate.socket_owner,
+      candidate.socket_permissions,
+      candidate.failed_launch_attempt_id,
+      candidate.failed_prime_intent_id,
+      candidate.failed_prime_intent_sha256,
+      candidate.failed_prime_payload_sha256,
+      failed_reset.id AS failed_reset_intent_id,
+      failed_reset.intent_sha256 AS failed_reset_intent_sha256,
+      failed_reset.payload_sha256 AS failed_reset_payload_sha256,
+      anchor.id AS anchor_role_host_id,
+      anchor.pane_id AS anchor_pane_id,
+      anchor.terminal_id AS anchor_terminal_id
+    FROM herdr_agent_reset_candidates AS candidate
+    JOIN herdr_topology_intents AS failed_reset
+      ON failed_reset.kind = 'resetAgentAuthority'
+      AND failed_reset.repository_id = candidate.repository_id
+      AND failed_reset.job_id = candidate.job_id
+      AND failed_reset.generation = candidate.generation
+      AND failed_reset.socket_device = candidate.socket_device
+      AND failed_reset.socket_inode = candidate.socket_inode
+      AND failed_reset.socket_owner = candidate.socket_owner
+      AND failed_reset.socket_permissions = candidate.socket_permissions
+      AND failed_reset.state = 'unknown'
+      AND failed_reset.attribution_json IS NULL
+    JOIN herdr_role_hosts AS anchor
+      ON anchor.job_id = candidate.job_id
+      AND anchor.generation = candidate.generation
+      AND anchor.role = 'security'
+      AND anchor.workspace_id = candidate.workspace_id
+      AND anchor.tab_id = candidate.tab_id
+      AND anchor.state = 'waiting'
+      AND anchor.pane_id IS NOT NULL
+      AND anchor.terminal_id IS NOT NULL
+      AND anchor.host_pid IS NOT NULL
+    """
+
+  private static let herdrRoleHostReplacementAuthorizationsTableV9 = """
+    CREATE TABLE herdr_role_host_replacement_authorizations (
+      replacement_authorization_sha256 TEXT PRIMARY KEY CHECK (
+        length(replacement_authorization_sha256) = 64
+        AND replacement_authorization_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      replacement_evidence_sha256 TEXT NOT NULL CHECK (
+        length(replacement_evidence_sha256) = 64
+        AND replacement_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      incident_audit_sha256 TEXT NOT NULL CHECK (
+        length(incident_audit_sha256) = 64
+        AND incident_audit_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      canary_authorization_sha256 TEXT NOT NULL CHECK (
+        length(canary_authorization_sha256) = 64
+        AND canary_authorization_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      recovery_evidence_sha256 TEXT NOT NULL CHECK (
+        length(recovery_evidence_sha256) = 64
+        AND recovery_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      retry_evidence_sha256 TEXT NOT NULL CHECK (
+        length(retry_evidence_sha256) = 64
+        AND retry_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      run_id TEXT NOT NULL UNIQUE REFERENCES pi_runs(id) ON DELETE RESTRICT,
+      failed_launch_attempt_id TEXT NOT NULL UNIQUE
+        REFERENCES pi_run_launches(launch_attempt_id) ON DELETE RESTRICT,
+      predecessor_role_host_id TEXT NOT NULL UNIQUE
+        REFERENCES herdr_role_hosts(id) ON DELETE RESTRICT,
+      planned_replacement_role_host_id TEXT NOT NULL UNIQUE CHECK (
+        planned_replacement_role_host_id GLOB 'rolehost-????????-????-????-????-????????????'
+        AND length(planned_replacement_role_host_id) = 45
+        AND planned_replacement_role_host_id NOT GLOB '*[^a-z0-9-]*'
+        AND substr(planned_replacement_role_host_id, 10) NOT GLOB '*[^0-9a-f-]*'
+        AND planned_replacement_role_host_id != predecessor_role_host_id
+      ),
+      planned_launch_attempt_id TEXT NOT NULL UNIQUE CHECK (
+        planned_launch_attempt_id GLOB 'launch-????????-????-????-????-????????????'
+        AND length(planned_launch_attempt_id) = 43
+        AND planned_launch_attempt_id NOT GLOB '*[^a-z0-9-]*'
+        AND substr(planned_launch_attempt_id, 8) NOT GLOB '*[^0-9a-f-]*'
+      ),
+      stale_pane_revision INTEGER NOT NULL CHECK (stale_pane_revision > 0),
+      stale_pane_had_tokens INTEGER NOT NULL CHECK (stale_pane_had_tokens IN (0, 1)),
+      stale_pane_tokens_sha256 TEXT NOT NULL CHECK (
+        length(stale_pane_tokens_sha256) = 64
+        AND stale_pane_tokens_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q4_descriptor_sha256) = 64
+        AND q4_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_configuration_sha256) = 64
+        AND q4_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prompt_sha256 TEXT NOT NULL CHECK (
+        length(q4_prompt_sha256) = 64
+        AND q4_prompt_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_workflow_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_workflow_configuration_sha256) = 64
+        AND q4_workflow_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prior_launch_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q4_prior_launch_descriptor_sha256) = 64
+        AND q4_prior_launch_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prior_launch_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_prior_launch_configuration_sha256) = 64
+        AND q4_prior_launch_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_resource_tree_sha256 TEXT NOT NULL CHECK (
+        length(q4_resource_tree_sha256) = 64
+        AND q4_resource_tree_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      replacement_bootstrap_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(replacement_bootstrap_descriptor_sha256) = 64
+        AND replacement_bootstrap_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      host_executable_sha256 TEXT NOT NULL CHECK (
+        length(host_executable_sha256) = 64
+        AND host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      credential_evidence_sha256 TEXT NOT NULL CHECK (
+        length(credential_evidence_sha256) = 64
+        AND credential_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      created_at REAL NOT NULL,
+      UNIQUE(repository_id, job_id, generation, run_id)
+    ) STRICT
+    """
+
+  private static let herdrRoleHostReplacementAuthorizationInsertAuthorityV9 = """
+    CREATE TRIGGER herdr_role_host_replacement_authorization_insert_authority
+    BEFORE INSERT ON herdr_role_host_replacement_authorizations
+    WHEN NEW.incident_audit_sha256
+        != 'f855da9097441503472e85c912f881f157475381fdf6666057927f0651c5e1d7'
+      OR NEW.stale_pane_revision != 3
+      OR NEW.stale_pane_had_tokens != 1
+      OR NEW.stale_pane_tokens_sha256
+        != '9a0952938abe3db94e9d949cb36c66a891ba7777a009edb1f443b3f465c6cc01'
+      OR EXISTS (
+        SELECT 1 FROM herdr_role_hosts AS existing_host
+        WHERE existing_host.id = NEW.planned_replacement_role_host_id
+      )
+      OR EXISTS (
+        SELECT 1 FROM pi_run_launches AS existing_launch
+        WHERE existing_launch.launch_attempt_id = NEW.planned_launch_attempt_id
+      )
+      OR EXISTS (
+        SELECT 1 FROM herdr_topology_intents AS intent
+        WHERE intent.job_id = NEW.job_id AND intent.kind = 'replaceRoleHost'
+      )
+      OR EXISTS (
+        SELECT 1 FROM herdr_replacement_role_hosts AS replacement
+        WHERE replacement.job_id = NEW.job_id
+      )
+      OR NOT EXISTS (
+        SELECT 1
+        FROM herdr_role_host_replacement_candidates AS candidate
+        WHERE candidate.repository_id = NEW.repository_id
+          AND candidate.job_id = NEW.job_id
+          AND candidate.generation = NEW.generation
+          AND candidate.run_id = NEW.run_id
+          AND candidate.failed_launch_attempt_id = NEW.failed_launch_attempt_id
+          AND candidate.predecessor_role_host_id = NEW.predecessor_role_host_id
+          AND (
+            SELECT COUNT(*) FROM job_transitions AS admit
+            WHERE admit.job_id = NEW.job_id
+              AND admit.event_key = (
+                'canary:' || NEW.canary_authorization_sha256 || ':m8:admit:' || NEW.job_id
+              )
+              AND admit.id = (
+                SELECT MAX(latest.id) FROM job_transitions AS latest
+                WHERE latest.event_key GLOB 'canary:*:m*:admit:*'
+              )
+          ) = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM job_transitions AS close
+            WHERE close.job_id = NEW.job_id
+              AND close.event_key = (
+                'canary:' || NEW.canary_authorization_sha256 || ':m8:close:' || NEW.job_id
+              )
+          )
+          AND (
+            SELECT COUNT(*) FROM job_transitions AS recovery
+            WHERE recovery.job_id = NEW.job_id
+              AND recovery.event_key = (
+                'canary:' || NEW.canary_authorization_sha256 ||
+                ':m8:topology-recovery:' || NEW.recovery_evidence_sha256
+              )
+          ) = 1
+          AND (
+            SELECT COUNT(*) FROM job_transitions AS retry
+            WHERE retry.job_id = NEW.job_id
+              AND retry.from_state = 'runningPi'
+              AND retry.to_state = 'runningPi'
+              AND retry.event_key = (
+                'canary:' || NEW.canary_authorization_sha256 || ':m8:pi-fresh-retry:' ||
+                NEW.run_id || ':' || NEW.failed_launch_attempt_id || ':' ||
+                NEW.retry_evidence_sha256
+              )
+          ) = 1
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'replacement authorization lacks exact paused canary authority');
+    END
+    """
+
+  private static let herdrRoleHostReplacementAuthorizationUpdateDeniedV9 = """
+    CREATE TRIGGER herdr_role_host_replacement_authorization_update_denied
+    BEFORE UPDATE ON herdr_role_host_replacement_authorizations
+    BEGIN
+      SELECT RAISE(ABORT, 'replacement authorization is immutable');
+    END
+    """
+
+  private static let herdrRoleHostReplacementAuthorizationDeleteDeniedV9 = """
+    CREATE TRIGGER herdr_role_host_replacement_authorization_delete_denied
+    BEFORE DELETE ON herdr_role_host_replacement_authorizations
+    BEGIN
+      SELECT RAISE(ABORT, 'replacement authorization is append-only');
+    END
+    """
+
+  private static let herdrReplacementIntentInsertAuthorityV9 = """
+    CREATE TRIGGER herdr_replacement_intent_insert_authority
+    BEFORE INSERT ON herdr_topology_intents
+    WHEN NEW.kind = 'replaceRoleHost' AND (
+      NEW.state != 'prepared'
+      OR NEW.attribution_json IS NOT NULL
+      OR EXISTS (
+        SELECT 1 FROM herdr_topology_intents AS existing
+        WHERE existing.job_id = NEW.job_id AND existing.kind = 'replaceRoleHost'
+      )
+      OR NOT EXISTS (
+        SELECT 1
+        FROM herdr_role_host_replacement_candidates AS candidate
+        JOIN herdr_role_host_replacement_authorizations AS authorization
+          ON authorization.repository_id = candidate.repository_id
+          AND authorization.job_id = candidate.job_id
+          AND authorization.generation = candidate.generation
+          AND authorization.run_id = candidate.run_id
+          AND authorization.failed_launch_attempt_id = candidate.failed_launch_attempt_id
+          AND authorization.predecessor_role_host_id = candidate.predecessor_role_host_id
+          AND authorization.payload_sha256 = NEW.payload_sha256
+        WHERE candidate.job_id = NEW.job_id
+          AND candidate.repository_id = NEW.repository_id
+          AND candidate.generation = NEW.generation
+          AND candidate.socket_device = NEW.socket_device
+          AND candidate.socket_inode = NEW.socket_inode
+          AND candidate.socket_owner = NEW.socket_owner
+          AND candidate.socket_permissions = NEW.socket_permissions
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr role-host replacement lacks exact causal authority');
+    END
+    """
+
+  private static let herdrReplacementIntentSendAuthorityV9 = """
+    CREATE TRIGGER herdr_replacement_intent_send_authority
+    BEFORE UPDATE OF state ON herdr_topology_intents
+    WHEN OLD.kind = 'replaceRoleHost' AND NEW.state = 'sendStarted' AND (
+      (SELECT COUNT(*) FROM herdr_topology_intents AS existing
+        WHERE existing.job_id = OLD.job_id AND existing.kind = 'replaceRoleHost') != 1
+      OR NOT EXISTS (
+        SELECT 1
+        FROM herdr_role_host_replacement_candidates AS candidate
+        JOIN herdr_role_host_replacement_authorizations AS authorization
+          ON authorization.repository_id = candidate.repository_id
+          AND authorization.job_id = candidate.job_id
+          AND authorization.generation = candidate.generation
+          AND authorization.run_id = candidate.run_id
+          AND authorization.failed_launch_attempt_id = candidate.failed_launch_attempt_id
+          AND authorization.predecessor_role_host_id = candidate.predecessor_role_host_id
+          AND authorization.payload_sha256 = OLD.payload_sha256
+        WHERE candidate.job_id = OLD.job_id
+          AND candidate.repository_id = OLD.repository_id
+          AND candidate.generation = OLD.generation
+          AND candidate.socket_device = OLD.socket_device
+          AND candidate.socket_inode = OLD.socket_inode
+          AND candidate.socket_owner = OLD.socket_owner
+          AND candidate.socket_permissions = OLD.socket_permissions
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr role-host replacement send lacks current authority');
+    END
+    """
+
+  private static let herdrReplacementIntentAttributionAuthorityV9 = """
+    CREATE TRIGGER herdr_replacement_intent_attribution_authority
+    BEFORE UPDATE OF state, attribution_json ON herdr_topology_intents
+    WHEN OLD.kind = 'replaceRoleHost' AND NEW.state = 'attributed' AND NOT EXISTS (
+      SELECT 1
+      FROM herdr_role_host_replacement_authorizations AS authorization
+      JOIN herdr_replacement_role_hosts AS replacement
+        ON replacement.id = authorization.planned_replacement_role_host_id
+        AND replacement.predecessor_role_host_id = authorization.predecessor_role_host_id
+        AND replacement.replacement_intent_id = OLD.id
+        AND replacement.job_id = authorization.job_id
+        AND replacement.generation = authorization.generation
+        AND replacement.bootstrap_descriptor_sha256
+          = authorization.replacement_bootstrap_descriptor_sha256
+        AND replacement.host_executable_sha256 = authorization.host_executable_sha256
+        AND replacement.q4_descriptor_sha256 = authorization.q4_descriptor_sha256
+        AND replacement.q4_configuration_sha256 = authorization.q4_configuration_sha256
+        AND replacement.q4_prompt_sha256 = authorization.q4_prompt_sha256
+        AND replacement.q4_workflow_configuration_sha256
+          = authorization.q4_workflow_configuration_sha256
+        AND replacement.q4_prior_launch_descriptor_sha256
+          = authorization.q4_prior_launch_descriptor_sha256
+        AND replacement.q4_prior_launch_configuration_sha256
+          = authorization.q4_prior_launch_configuration_sha256
+        AND replacement.q4_resource_tree_sha256 = authorization.q4_resource_tree_sha256
+      WHERE authorization.payload_sha256 = OLD.payload_sha256
+        AND authorization.repository_id = OLD.repository_id
+        AND authorization.job_id = OLD.job_id
+        AND authorization.generation = OLD.generation
+        AND json_extract(NEW.attribution_json, '$.predecessorRoleHostID')
+          = authorization.predecessor_role_host_id
+        AND json_extract(NEW.attribution_json, '$.replacementRoleHostID')
+          = authorization.planned_replacement_role_host_id
+        AND json_extract(NEW.attribution_json, '$.replacementEvidenceSHA256')
+          = authorization.replacement_evidence_sha256
+        AND json_extract(NEW.attribution_json, '$.replacementAuthorizationSHA256')
+          = authorization.replacement_authorization_sha256
+        AND json_extract(NEW.attribution_json, '$.incidentAuditSHA256')
+          = authorization.incident_audit_sha256
+        AND json_extract(NEW.attribution_json, '$.credentialEvidenceSHA256')
+          = authorization.credential_evidence_sha256
+        AND json_extract(NEW.attribution_json, '$.q4Binding.descriptorSHA256')
+          = authorization.q4_descriptor_sha256
+        AND json_extract(NEW.attribution_json, '$.q4Binding.configurationSHA256')
+          = authorization.q4_configuration_sha256
+        AND json_extract(NEW.attribution_json, '$.q4Binding.promptSHA256')
+          = authorization.q4_prompt_sha256
+        AND json_extract(
+          NEW.attribution_json,
+          '$.q4Binding.workflowConfigurationSHA256'
+        ) = authorization.q4_workflow_configuration_sha256
+        AND json_extract(
+          NEW.attribution_json,
+          '$.q4Binding.priorLaunchDescriptorSHA256'
+        ) = authorization.q4_prior_launch_descriptor_sha256
+        AND json_extract(
+          NEW.attribution_json,
+          '$.q4Binding.priorLaunchConfigurationSHA256'
+        ) = authorization.q4_prior_launch_configuration_sha256
+        AND json_extract(NEW.attribution_json, '$.q4Binding.resourceTreeSHA256')
+          = authorization.q4_resource_tree_sha256
+        AND json_extract(NEW.attribution_json, '$.hostExecutableSHA256')
+          = authorization.host_executable_sha256
+        AND json_extract(NEW.attribution_json, '$.workspaceID') = replacement.workspace_id
+        AND json_extract(NEW.attribution_json, '$.tabID') = replacement.tab_id
+        AND json_extract(NEW.attribution_json, '$.paneID') = replacement.pane_id
+        AND json_extract(NEW.attribution_json, '$.terminalID') = replacement.terminal_id
+        AND json_extract(NEW.attribution_json, '$.processID') = replacement.host_pid
+        AND json_extract(NEW.attribution_json, '$.startSeconds')
+          = replacement.host_start_seconds
+        AND json_extract(NEW.attribution_json, '$.startMicroseconds')
+          = replacement.host_start_microseconds
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'replacement attribution lacks exact authorization');
+    END
+    """
+
+  private static let herdrReplacementRoleHostsTableV9 = """
+    CREATE TABLE herdr_replacement_role_hosts (
+      id TEXT PRIMARY KEY CHECK (
+        id GLOB 'rolehost-*' AND length(id) BETWEEN 16 AND 64
+        AND id NOT GLOB '*[^a-z0-9-]*'
+      ),
+      predecessor_role_host_id TEXT NOT NULL UNIQUE
+        REFERENCES herdr_role_hosts(id) ON DELETE RESTRICT,
+      replacement_intent_id TEXT NOT NULL UNIQUE CHECK (
+        replacement_intent_id GLOB 'replace-*'
+        AND length(replacement_intent_id) BETWEEN 16 AND 64
+        AND replacement_intent_id NOT GLOB '*[^a-z0-9-]*'
+      ) REFERENCES herdr_topology_intents(id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL REFERENCES herdr_job_bindings(job_id) ON DELETE RESTRICT,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      role TEXT NOT NULL CHECK (role = 'architecture'),
+      workspace_id TEXT NOT NULL,
+      tab_id TEXT NOT NULL,
+      pane_id TEXT NOT NULL,
+      terminal_id TEXT NOT NULL,
+      bootstrap_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(bootstrap_descriptor_sha256) = 64
+        AND bootstrap_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      host_executable_sha256 TEXT NOT NULL CHECK (
+        length(host_executable_sha256) = 64
+        AND host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q4_descriptor_sha256) = 64
+        AND q4_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_configuration_sha256) = 64
+        AND q4_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prompt_sha256 TEXT NOT NULL CHECK (
+        length(q4_prompt_sha256) = 64
+        AND q4_prompt_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_workflow_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_workflow_configuration_sha256) = 64
+        AND q4_workflow_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prior_launch_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q4_prior_launch_descriptor_sha256) = 64
+        AND q4_prior_launch_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prior_launch_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_prior_launch_configuration_sha256) = 64
+        AND q4_prior_launch_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_resource_tree_sha256 TEXT NOT NULL CHECK (
+        length(q4_resource_tree_sha256) = 64
+        AND q4_resource_tree_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      host_pid INTEGER NOT NULL CHECK (host_pid > 0),
+      host_start_seconds INTEGER NOT NULL CHECK (host_start_seconds >= 0),
+      host_start_microseconds INTEGER NOT NULL CHECK (
+        host_start_microseconds BETWEEN 0 AND 999999
+      ),
+      last_queue_sequence INTEGER NOT NULL CHECK (last_queue_sequence = 4),
+      lifecycle_sequence INTEGER NOT NULL CHECK (lifecycle_sequence >= 1),
+      state TEXT NOT NULL CHECK (state IN (
+        'waiting', 'running', 'stopping', 'stopped', 'lost'
+      )),
+      created_at REAL NOT NULL,
+      updated_at REAL NOT NULL,
+      UNIQUE(job_id, generation, role)
+    ) STRICT
+    """
+
+  private static let herdrReplacementRoleHostsActiveTerminalIndexV9 = """
+    CREATE UNIQUE INDEX herdr_replacement_role_hosts_active_terminal_idx
+    ON herdr_replacement_role_hosts(terminal_id)
+    WHERE state IN ('waiting', 'running', 'stopping')
+    """
+
+  private static let herdrReplacementRoleHostsActivePaneIndexV9 = """
+    CREATE UNIQUE INDEX herdr_replacement_role_hosts_active_pane_idx
+    ON herdr_replacement_role_hosts(pane_id)
+    WHERE state IN ('waiting', 'running', 'stopping')
+    """
+
+  private static let herdrReplacementRoleHostsActiveProcessIndexV9 = """
+    CREATE UNIQUE INDEX herdr_replacement_role_hosts_active_process_idx
+    ON herdr_replacement_role_hosts(
+      host_pid, host_start_seconds, host_start_microseconds
+    )
+    WHERE state IN ('waiting', 'running', 'stopping')
+    """
+
+  private static let herdrOrdinaryRoleHostReplacementInsertCollisionDeniedV9 = """
+    CREATE TRIGGER herdr_ordinary_role_host_replacement_insert_collision_denied
+    BEFORE INSERT ON herdr_role_hosts
+    WHEN EXISTS (
+      SELECT 1 FROM herdr_replacement_role_hosts AS replacement
+      WHERE replacement.id = NEW.id
+        OR replacement.pane_id = NEW.pane_id
+        OR replacement.terminal_id = NEW.terminal_id
+        OR (
+          replacement.host_pid = NEW.host_pid
+          AND replacement.host_start_seconds = NEW.host_start_seconds
+          AND replacement.host_start_microseconds = NEW.host_start_microseconds
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'ordinary and replacement role-host identities cannot alias');
+    END
+    """
+
+  private static let herdrOrdinaryRoleHostReplacementPhysicalCollisionDeniedV9 = """
+    CREATE TRIGGER herdr_ordinary_role_host_replacement_physical_collision_denied
+    BEFORE UPDATE OF id, pane_id, terminal_id, host_pid, host_start_seconds,
+      host_start_microseconds ON herdr_role_hosts
+    WHEN EXISTS (
+      SELECT 1 FROM herdr_replacement_role_hosts AS replacement
+      WHERE replacement.id = NEW.id
+        OR replacement.pane_id = NEW.pane_id
+        OR replacement.terminal_id = NEW.terminal_id
+        OR (
+          replacement.host_pid = NEW.host_pid
+          AND replacement.host_start_seconds = NEW.host_start_seconds
+          AND replacement.host_start_microseconds = NEW.host_start_microseconds
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'ordinary and replacement role-host identities cannot alias');
+    END
+    """
+
+  private static let herdrReplacementRoleHostInsertAuthorityV9 = """
+    CREATE TRIGGER herdr_replacement_role_host_insert_authority
+    BEFORE INSERT ON herdr_replacement_role_hosts
+    WHEN NEW.role != 'architecture'
+      OR NEW.state != 'waiting'
+      OR NEW.last_queue_sequence != 4
+      OR NEW.lifecycle_sequence != 1
+      OR NEW.updated_at != NEW.created_at
+      OR EXISTS (
+        SELECT 1 FROM herdr_role_hosts AS ordinary
+        WHERE ordinary.id = NEW.id
+      )
+      OR EXISTS (
+        SELECT 1 FROM herdr_role_hosts AS ordinary
+        WHERE ordinary.pane_id = NEW.pane_id
+          OR ordinary.terminal_id = NEW.terminal_id
+          OR (
+            ordinary.host_pid = NEW.host_pid
+            AND ordinary.host_start_seconds = NEW.host_start_seconds
+            AND ordinary.host_start_microseconds = NEW.host_start_microseconds
+          )
+      )
+      OR NOT EXISTS (
+        SELECT 1
+        FROM herdr_role_host_replacement_candidates AS candidate
+        JOIN herdr_topology_intents AS intent
+          ON intent.id = NEW.replacement_intent_id
+          AND intent.kind = 'replaceRoleHost'
+          AND intent.repository_id = candidate.repository_id
+          AND intent.job_id = candidate.job_id
+          AND intent.generation = candidate.generation
+          AND intent.socket_device = candidate.socket_device
+          AND intent.socket_inode = candidate.socket_inode
+          AND intent.socket_owner = candidate.socket_owner
+          AND intent.socket_permissions = candidate.socket_permissions
+          AND intent.state = 'sendStarted'
+          AND intent.attribution_json IS NULL
+        JOIN herdr_role_host_replacement_authorizations AS authorization
+          ON authorization.payload_sha256 = intent.payload_sha256
+          AND authorization.repository_id = candidate.repository_id
+          AND authorization.job_id = candidate.job_id
+          AND authorization.generation = candidate.generation
+          AND authorization.run_id = candidate.run_id
+          AND authorization.failed_launch_attempt_id = candidate.failed_launch_attempt_id
+          AND authorization.predecessor_role_host_id = candidate.predecessor_role_host_id
+        WHERE candidate.job_id = NEW.job_id
+          AND candidate.generation = NEW.generation
+          AND candidate.predecessor_role_host_id = NEW.predecessor_role_host_id
+          AND candidate.workspace_id = NEW.workspace_id
+          AND candidate.tab_id = NEW.tab_id
+          AND authorization.planned_replacement_role_host_id = NEW.id
+          AND authorization.replacement_bootstrap_descriptor_sha256
+            = NEW.bootstrap_descriptor_sha256
+          AND authorization.host_executable_sha256 = NEW.host_executable_sha256
+          AND authorization.q4_descriptor_sha256 = NEW.q4_descriptor_sha256
+          AND authorization.q4_configuration_sha256 = NEW.q4_configuration_sha256
+          AND authorization.q4_prompt_sha256 = NEW.q4_prompt_sha256
+          AND authorization.q4_workflow_configuration_sha256
+            = NEW.q4_workflow_configuration_sha256
+          AND authorization.q4_prior_launch_descriptor_sha256
+            = NEW.q4_prior_launch_descriptor_sha256
+          AND authorization.q4_prior_launch_configuration_sha256
+            = NEW.q4_prior_launch_configuration_sha256
+          AND authorization.q4_resource_tree_sha256 = NEW.q4_resource_tree_sha256
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'replacement role host lacks exact causal authority');
+    END
+    """
+
+  private static let herdrReplacementRoleHostIdentityImmutableV9 = """
+    CREATE TRIGGER herdr_replacement_role_host_identity_immutable
+    BEFORE UPDATE ON herdr_replacement_role_hosts
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.predecessor_role_host_id IS NOT OLD.predecessor_role_host_id
+      OR NEW.replacement_intent_id IS NOT OLD.replacement_intent_id
+      OR NEW.job_id IS NOT OLD.job_id
+      OR NEW.generation IS NOT OLD.generation
+      OR NEW.role IS NOT OLD.role
+      OR NEW.workspace_id IS NOT OLD.workspace_id
+      OR NEW.tab_id IS NOT OLD.tab_id
+      OR NEW.pane_id IS NOT OLD.pane_id
+      OR NEW.terminal_id IS NOT OLD.terminal_id
+      OR NEW.bootstrap_descriptor_sha256 IS NOT OLD.bootstrap_descriptor_sha256
+      OR NEW.host_executable_sha256 IS NOT OLD.host_executable_sha256
+      OR NEW.q4_descriptor_sha256 IS NOT OLD.q4_descriptor_sha256
+      OR NEW.q4_configuration_sha256 IS NOT OLD.q4_configuration_sha256
+      OR NEW.q4_prompt_sha256 IS NOT OLD.q4_prompt_sha256
+      OR NEW.q4_workflow_configuration_sha256 IS NOT OLD.q4_workflow_configuration_sha256
+      OR NEW.q4_prior_launch_descriptor_sha256 IS NOT OLD.q4_prior_launch_descriptor_sha256
+      OR NEW.q4_prior_launch_configuration_sha256
+        IS NOT OLD.q4_prior_launch_configuration_sha256
+      OR NEW.q4_resource_tree_sha256 IS NOT OLD.q4_resource_tree_sha256
+      OR NEW.host_pid IS NOT OLD.host_pid
+      OR NEW.host_start_seconds IS NOT OLD.host_start_seconds
+      OR NEW.host_start_microseconds IS NOT OLD.host_start_microseconds
+      OR NEW.last_queue_sequence IS NOT OLD.last_queue_sequence
+      OR NEW.created_at IS NOT OLD.created_at
+    BEGIN
+      SELECT RAISE(ABORT, 'replacement role-host identity is immutable');
+    END
+    """
+
+  private static let herdrReplacementRoleHostStateTransitionV9 = """
+    CREATE TRIGGER herdr_replacement_role_host_state_transition
+    BEFORE UPDATE ON herdr_replacement_role_hosts
+    WHEN (
+      NEW.state IS OLD.state
+      AND (
+        NEW.lifecycle_sequence IS NOT OLD.lifecycle_sequence
+        OR NEW.updated_at IS NOT OLD.updated_at
+      )
+    ) OR (
+      NEW.state IS NOT OLD.state
+      AND NOT (
+        (
+          OLD.state = 'waiting' AND NEW.state IN ('running', 'stopping', 'lost')
+          OR OLD.state = 'running' AND NEW.state IN ('waiting', 'stopping', 'lost')
+          OR OLD.state = 'stopping' AND NEW.state IN ('stopped', 'lost')
+        )
+        AND NEW.lifecycle_sequence = OLD.lifecycle_sequence + 1
+        AND NEW.updated_at >= OLD.updated_at
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid replacement role-host transition');
+    END
+    """
+
+  private static let herdrReplacementRoleHostDeleteDeniedV9 = """
+    CREATE TRIGGER herdr_replacement_role_host_delete_denied
+    BEFORE DELETE ON herdr_replacement_role_hosts
+    BEGIN
+      SELECT RAISE(ABORT, 'replacement role host is append-only');
+    END
+    """
+
+  private static let herdrReplacedPredecessorImmutableV9 = """
+    CREATE TRIGGER herdr_replaced_predecessor_immutable
+    BEFORE UPDATE ON herdr_role_hosts
+    WHEN EXISTS (
+      SELECT 1 FROM herdr_replacement_role_hosts AS replacement
+      WHERE replacement.predecessor_role_host_id = OLD.id
+    ) AND NOT (
+      OLD.state = 'waiting' AND NEW.state = 'stopped'
+      AND NEW.id IS OLD.id
+      AND NEW.job_id IS OLD.job_id
+      AND NEW.generation IS OLD.generation
+      AND NEW.role IS OLD.role
+      AND NEW.workspace_id IS OLD.workspace_id
+      AND NEW.tab_id IS OLD.tab_id
+      AND NEW.pane_id IS OLD.pane_id
+      AND NEW.terminal_id IS OLD.terminal_id
+      AND NEW.bootstrap_descriptor_sha256 IS OLD.bootstrap_descriptor_sha256
+      AND NEW.host_executable_sha256 IS OLD.host_executable_sha256
+      AND NEW.host_pid IS OLD.host_pid
+      AND NEW.host_start_seconds IS OLD.host_start_seconds
+      AND NEW.host_start_microseconds IS OLD.host_start_microseconds
+      AND NEW.last_queue_sequence IS OLD.last_queue_sequence
+      AND NEW.lifecycle_sequence = OLD.lifecycle_sequence + 1
+      AND NEW.created_at IS OLD.created_at
+      AND NEW.updated_at >= OLD.updated_at
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'replaced predecessor role host is immutable');
+    END
+    """
+
+  private static let herdrPrimeIntentDeleteDeniedV7 = """
+    CREATE TRIGGER herdr_prime_intent_delete_denied
+    BEFORE DELETE ON herdr_topology_intents
+    WHEN OLD.kind = 'primeAgentAuthority'
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr agent prime intent is append-only');
+    END
+    """
+
+  private static let herdrPrimeIntentInsertAuthorityV7 = """
+    CREATE TRIGGER herdr_prime_intent_insert_authority
+    BEFORE INSERT ON herdr_topology_intents
+    WHEN NEW.kind = 'primeAgentAuthority' AND (
+      NEW.state != 'prepared'
+      OR NEW.attribution_json IS NOT NULL
+      OR NOT EXISTS (
+        SELECT 1 FROM herdr_prime_retry_candidates AS candidate
+        WHERE candidate.job_id = NEW.job_id
+          AND candidate.repository_id = NEW.repository_id
+          AND candidate.generation = NEW.generation
+          AND candidate.socket_device = NEW.socket_device
+          AND candidate.socket_inode = NEW.socket_inode
+          AND candidate.socket_owner = NEW.socket_owner
+          AND candidate.socket_permissions = NEW.socket_permissions
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr agent prime lacks exact causal authority');
+    END
+    """
+
+  private static let herdrPrimeIntentSendAuthorityV7 = """
+    CREATE TRIGGER herdr_prime_intent_send_authority
+    BEFORE UPDATE OF state ON herdr_topology_intents
+    WHEN OLD.kind = 'primeAgentAuthority' AND NEW.state = 'sendStarted' AND NOT EXISTS (
+      SELECT 1 FROM herdr_prime_retry_candidates AS candidate
+      WHERE candidate.job_id = OLD.job_id
+        AND candidate.repository_id = OLD.repository_id
+        AND candidate.generation = OLD.generation
+        AND candidate.socket_device = OLD.socket_device
+        AND candidate.socket_inode = OLD.socket_inode
+        AND candidate.socket_owner = OLD.socket_owner
+        AND candidate.socket_permissions = OLD.socket_permissions
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr agent prime send lacks current authority');
+    END
+    """
+
+  private static let herdrPrimeIntentDeleteDeniedV8 = """
+    CREATE TRIGGER herdr_prime_intent_delete_denied
+    BEFORE DELETE ON herdr_topology_intents
+    WHEN OLD.kind IN ('primeAgentAuthority', 'resetAgentAuthority')
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr agent authority intent is append-only');
+    END
+    """
+
+  private static let herdrPrimeIntentDeleteDeniedV9 = """
+    CREATE TRIGGER herdr_prime_intent_delete_denied
+    BEFORE DELETE ON herdr_topology_intents
+    WHEN OLD.kind IN (
+      'primeAgentAuthority', 'resetAgentAuthority', 'replaceRoleHost'
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr canary recovery intent is append-only');
+    END
+    """
+
+  private static let herdrPrimeIntentInsertAuthorityV8 = """
+    CREATE TRIGGER herdr_prime_intent_insert_authority
+    BEFORE INSERT ON herdr_topology_intents
+    WHEN NEW.kind = 'primeAgentAuthority' AND (
+      NEW.state != 'prepared'
+      OR NEW.attribution_json IS NOT NULL
+      OR EXISTS (
+        SELECT 1 FROM herdr_topology_intents AS existing
+        WHERE existing.job_id = NEW.job_id
+          AND existing.kind IN ('primeAgentAuthority', 'resetAgentAuthority')
+      )
+      OR NOT EXISTS (
+        SELECT 1 FROM herdr_prime_retry_candidates AS candidate
+        WHERE candidate.job_id = NEW.job_id
+          AND candidate.repository_id = NEW.repository_id
+          AND candidate.generation = NEW.generation
+          AND candidate.socket_device = NEW.socket_device
+          AND candidate.socket_inode = NEW.socket_inode
+          AND candidate.socket_owner = NEW.socket_owner
+          AND candidate.socket_permissions = NEW.socket_permissions
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr agent prime lacks exact causal authority');
+    END
+    """
+
+  private static let herdrPrimeIntentSendAuthorityV8 = """
+    CREATE TRIGGER herdr_prime_intent_send_authority
+    BEFORE UPDATE OF state ON herdr_topology_intents
+    WHEN OLD.kind = 'primeAgentAuthority' AND NEW.state = 'sendStarted' AND (
+      (SELECT COUNT(*) FROM herdr_topology_intents AS existing
+        WHERE existing.job_id = OLD.job_id
+          AND existing.kind = 'primeAgentAuthority') != 1
+      OR EXISTS (
+        SELECT 1 FROM herdr_topology_intents AS existing
+        WHERE existing.job_id = OLD.job_id AND existing.kind = 'resetAgentAuthority'
+      )
+      OR NOT EXISTS (
+        SELECT 1 FROM herdr_prime_retry_candidates AS candidate
+        WHERE candidate.job_id = OLD.job_id
+          AND candidate.repository_id = OLD.repository_id
+          AND candidate.generation = OLD.generation
+          AND candidate.socket_device = OLD.socket_device
+          AND candidate.socket_inode = OLD.socket_inode
+          AND candidate.socket_owner = OLD.socket_owner
+          AND candidate.socket_permissions = OLD.socket_permissions
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr agent prime send lacks current authority');
+    END
+    """
+
+  private static let herdrResetIntentInsertAuthorityV8 = """
+    CREATE TRIGGER herdr_reset_intent_insert_authority
+    BEFORE INSERT ON herdr_topology_intents
+    WHEN NEW.kind = 'resetAgentAuthority' AND (
+      NEW.state != 'prepared'
+      OR NEW.attribution_json IS NOT NULL
+      OR EXISTS (
+        SELECT 1 FROM herdr_topology_intents AS existing
+        WHERE existing.job_id = NEW.job_id AND existing.kind = 'resetAgentAuthority'
+      )
+      OR NOT EXISTS (
+        SELECT 1 FROM herdr_agent_reset_candidates AS candidate
+        WHERE candidate.job_id = NEW.job_id
+          AND candidate.repository_id = NEW.repository_id
+          AND candidate.generation = NEW.generation
+          AND candidate.socket_device = NEW.socket_device
+          AND candidate.socket_inode = NEW.socket_inode
+          AND candidate.socket_owner = NEW.socket_owner
+          AND candidate.socket_permissions = NEW.socket_permissions
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr agent authority reset lacks exact causal authority');
+    END
+    """
+
+  private static let herdrResetIntentSendAuthorityV8 = """
+    CREATE TRIGGER herdr_reset_intent_send_authority
+    BEFORE UPDATE OF state ON herdr_topology_intents
+    WHEN OLD.kind = 'resetAgentAuthority' AND NEW.state = 'sendStarted' AND (
+      (SELECT COUNT(*) FROM herdr_topology_intents AS existing
+        WHERE existing.job_id = OLD.job_id
+          AND existing.kind = 'resetAgentAuthority') != 1
+      OR NOT EXISTS (
+        SELECT 1 FROM herdr_agent_reset_candidates AS candidate
+        WHERE candidate.job_id = OLD.job_id
+          AND candidate.repository_id = OLD.repository_id
+          AND candidate.generation = OLD.generation
+          AND candidate.socket_device = OLD.socket_device
+          AND candidate.socket_inode = OLD.socket_inode
+          AND candidate.socket_owner = OLD.socket_owner
+          AND candidate.socket_permissions = OLD.socket_permissions
+          AND candidate.failed_prime_intent_id = (
+            SELECT failed_prime.id FROM herdr_topology_intents AS failed_prime
+            WHERE failed_prime.job_id = OLD.job_id
+              AND failed_prime.kind = 'primeAgentAuthority'
+              AND failed_prime.state = 'unknown'
+          )
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Herdr agent authority reset send lacks current authority');
+    END
+    """
+
+  private static let piRunLaunchInsertAuthorityV7 = """
+    CREATE TRIGGER pi_run_launch_insert_authority
+    BEFORE INSERT ON pi_run_launches
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM pi_runs AS run
+      JOIN herdr_role_hosts AS host ON host.id = NEW.role_host_id
+      WHERE run.id = NEW.run_id
+        AND run.runtime_kind = 'herdr'
+        AND run.settled = 0
+        AND host.job_id = run.job_id
+        AND host.generation = run.topology_generation
+        AND host.role = run.role
+        AND host.state IN ('waiting', 'running')
+        AND (
+          (
+            NOT EXISTS (
+              SELECT 1 FROM pi_run_launches AS prior_launch
+              WHERE prior_launch.run_id = run.id
+            )
+            AND (
+              (
+                run.resumes_run_id IS NULL
+                AND NEW.launch_mode = 'fresh'
+                AND NEW.expected_session_id IS NULL
+                AND NEW.resume_boundary_sha256 IS NULL
+              )
+              OR (
+                run.resumes_run_id IS NOT NULL
+                AND NEW.launch_mode = 'crossRunResume'
+                AND EXISTS (
+                  SELECT 1 FROM pi_runs AS origin
+                  WHERE origin.id = run.resumes_run_id
+                    AND origin.accepted = 1
+                    AND origin.settled = 1
+                    AND origin.session_id = NEW.expected_session_id
+                    AND origin.session_boundary_sha256 = NEW.resume_boundary_sha256
+                )
+              )
+            )
+          )
+          OR (
+            EXISTS (
+              SELECT 1 FROM pi_run_launches AS prior_launch
+              WHERE prior_launch.run_id = run.id
+            )
+            AND NEW.launch_mode = 'sameRunResume'
+            AND EXISTS (
+              SELECT 1 FROM pi_run_session_origins AS session_origin
+              WHERE session_origin.run_id = run.id
+                AND session_origin.session_id = NEW.expected_session_id
+                AND session_origin.origin_resume_boundary_sha256 IS NEW.resume_boundary_sha256
+            )
+            AND (
+              SELECT last_launch.state
+              FROM pi_run_launches AS last_launch
+              WHERE last_launch.run_id = run.id
+              ORDER BY last_launch.queue_sequence DESC, last_launch.launch_attempt_id DESC
+              LIMIT 1
+            ) IN ('failed', 'interruptedUnknown')
+          )
+          OR (
+            NEW.launch_mode = 'fresh'
+            AND NEW.expected_session_id IS NULL
+            AND NEW.resume_boundary_sha256 IS NULL
+            AND (SELECT COUNT(*) FROM pi_run_launches WHERE run_id = run.id) = 1
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches AS prior_launch
+              WHERE prior_launch.run_id = run.id
+                AND prior_launch.queue_sequence = 1
+                AND prior_launch.launch_mode = 'fresh'
+                AND prior_launch.state = 'failed'
+                AND prior_launch.failure_code = 'RUNTIME_TIMEOUT'
+                AND prior_launch.child_pid IS NOT NULL
+            )
+            AND NOT EXISTS (SELECT 1 FROM pi_run_session_origins WHERE run_id = run.id)
+            AND NOT EXISTS (SELECT 1 FROM pi_run_results WHERE run_id = run.id)
+            AND (
+              SELECT COUNT(*) FROM job_transitions AS authorization
+              WHERE authorization.job_id = run.job_id
+                AND authorization.from_state = 'runningPi'
+                AND authorization.to_state = 'runningPi'
+                AND authorization.event_key GLOB (
+                  'canary:*:pi-fresh-retry:' || run.id || ':' ||
+                  (SELECT launch_attempt_id FROM pi_run_launches WHERE run_id = run.id) || ':*'
+                )
+            ) = 1
+          )
+          OR (
+            NEW.launch_mode = 'fresh'
+            AND NEW.expected_session_id IS NULL
+            AND NEW.resume_boundary_sha256 IS NULL
+            AND (SELECT COUNT(*) FROM pi_run_launches WHERE run_id = run.id) = 2
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches
+              WHERE run_id = run.id AND queue_sequence = 1 AND launch_mode = 'fresh'
+                AND state = 'failed' AND failure_code = 'RUNTIME_TIMEOUT'
+                AND child_pid IS NOT NULL
+            )
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches
+              WHERE run_id = run.id AND queue_sequence = 2 AND launch_mode = 'fresh'
+                AND state = 'failed' AND failure_code = 'HERDR_TRANSACTION_FAILED'
+                AND child_pid IS NULL
+            )
+            AND NOT EXISTS (SELECT 1 FROM pi_run_session_origins WHERE run_id = run.id)
+            AND NOT EXISTS (SELECT 1 FROM pi_run_results WHERE run_id = run.id)
+            AND (
+              SELECT COUNT(*) FROM job_transitions AS authorization
+              WHERE authorization.job_id = run.job_id
+                AND authorization.from_state = 'runningPi'
+                AND authorization.to_state = 'runningPi'
+                AND authorization.event_key GLOB (
+                  'canary:*:pi-fresh-retry:' || run.id || ':' ||
+                  (SELECT launch_attempt_id FROM pi_run_launches
+                    WHERE run_id = run.id AND queue_sequence = 1) || ':*'
+                )
+            ) = 1
+            AND (
+              SELECT COUNT(*) FROM job_transitions AS authorization
+              WHERE authorization.job_id = run.job_id
+                AND authorization.from_state = 'runningPi'
+                AND authorization.to_state = 'runningPi'
+                AND authorization.event_key GLOB (
+                  'canary:*:pi-fresh-retry:' || run.id || ':' ||
+                  (SELECT launch_attempt_id FROM pi_run_launches
+                    WHERE run_id = run.id AND queue_sequence = 2) || ':*'
+                )
+            ) = 1
+            AND (
+              SELECT COUNT(*) FROM job_transitions AS authorization
+              WHERE authorization.job_id = run.job_id
+                AND authorization.from_state = 'runningPi'
+                AND authorization.to_state = 'runningPi'
+                AND authorization.event_key GLOB ('canary:*:pi-fresh-retry:' || run.id || ':*')
+            ) = 2
+          )
+          OR (
+            NEW.launch_mode = 'fresh'
+            AND NEW.expected_session_id IS NULL
+            AND NEW.resume_boundary_sha256 IS NULL
+            AND NEW.queue_sequence = 4
+            AND EXISTS (
+              SELECT 1
+              FROM herdr_prime_retry_candidates AS candidate
+              JOIN herdr_topology_intents AS intent
+                ON intent.kind = 'primeAgentAuthority'
+                AND intent.repository_id = candidate.repository_id
+                AND intent.job_id = candidate.job_id
+                AND intent.generation = candidate.generation
+                AND intent.socket_device = candidate.socket_device
+                AND intent.socket_inode = candidate.socket_inode
+                AND intent.socket_owner = candidate.socket_owner
+                AND intent.socket_permissions = candidate.socket_permissions
+                AND intent.state = 'attributed'
+              WHERE candidate.run_id = run.id
+                AND candidate.role_host_id = host.id
+                AND json_extract(intent.attribution_json, '$.workspaceID') = candidate.workspace_id
+                AND json_extract(intent.attribution_json, '$.tabID') = candidate.tab_id
+                AND json_array_length(json_extract(intent.attribution_json, '$.paneIDs')) = 1
+                AND json_extract(intent.attribution_json, '$.paneIDs[0]') = candidate.pane_id
+                AND json_extract(intent.attribution_json, '$.terminalID') = candidate.terminal_id
+                AND json_extract(intent.attribution_json, '$.agent') = 'pi'
+                AND json_extract(intent.attribution_json, '$.agentSessionAbsent') = 1
+                AND length(json_extract(intent.attribution_json, '$.alias')) BETWEEN 1 AND 32
+                AND length(json_extract(intent.attribution_json, '$.tokensSHA256')) = 64
+                AND EXISTS (
+                  SELECT 1 FROM job_transitions AS prime_event
+                  WHERE prime_event.job_id = run.job_id
+                    AND prime_event.from_state = 'runningPi'
+                    AND prime_event.to_state = 'runningPi'
+                    AND prime_event.event_key GLOB (
+                      'canary:*:pi-agent-prime:' || run.id || ':' ||
+                      candidate.failed_launch_attempt_id || ':' || NEW.launch_attempt_id || ':' ||
+                      host.id || ':' || intent.payload_sha256
+                    )
+                )
+            )
+          )
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'Pi launch lacks exact causal authority');
+    END
+    """
+
+  private static let piRunLaunchInsertAuthorityV8: String = {
+    let candidateNeedle = "FROM herdr_prime_retry_candidates AS candidate"
+    let kindNeedle = "intent.kind = 'primeAgentAuthority'"
+    let eventNeedle = "'canary:*:pi-agent-prime:' || run.id || ':' ||"
+    precondition(piRunLaunchInsertAuthorityV7.contains(candidateNeedle))
+    precondition(piRunLaunchInsertAuthorityV7.contains(kindNeedle))
+    precondition(piRunLaunchInsertAuthorityV7.contains(eventNeedle))
+    return
+      piRunLaunchInsertAuthorityV7
+      .replacingOccurrences(
+        of: candidateNeedle,
+        with: "FROM herdr_q4_authority_candidates AS candidate"
+      )
+      .replacingOccurrences(
+        of: kindNeedle,
+        with: "intent.kind = candidate.intent_kind"
+      )
+      .replacingOccurrences(
+        of: eventNeedle,
+        with: "'canary:*:' || candidate.event_kind || ':' || run.id || ':' ||"
+      )
+  }()
+
+  private static let piRunLaunchIdentityImmutableV9 = """
+    CREATE TRIGGER pi_run_launch_identity_immutable
+    BEFORE UPDATE ON pi_run_launches
+    WHEN NEW.launch_attempt_id IS NOT OLD.launch_attempt_id
+      OR NEW.run_id IS NOT OLD.run_id
+      OR NEW.role_host_id IS NOT OLD.role_host_id
+      OR NEW.execution_role_host_id IS NOT OLD.execution_role_host_id
+      OR NEW.queue_sequence IS NOT OLD.queue_sequence
+      OR NEW.launch_mode IS NOT OLD.launch_mode
+      OR NEW.descriptor_sha256 IS NOT OLD.descriptor_sha256
+      OR NEW.expected_session_id IS NOT OLD.expected_session_id
+      OR NEW.resume_boundary_sha256 IS NOT OLD.resume_boundary_sha256
+      OR NEW.created_at IS NOT OLD.created_at
+      OR (OLD.child_pid IS NOT NULL AND (
+        NEW.child_pid IS NOT OLD.child_pid
+        OR NEW.child_process_group_id IS NOT OLD.child_process_group_id
+        OR NEW.child_start_seconds IS NOT OLD.child_start_seconds
+        OR NEW.child_start_microseconds IS NOT OLD.child_start_microseconds
+      ))
+    BEGIN
+      SELECT RAISE(ABORT, 'Pi launch identity is immutable');
+    END
+    """
+
+  private static let piRunLaunchInsertAuthorityV9: String = {
+    let prefix = "WHEN NOT EXISTS ("
+    let suffix = "\n)\nBEGIN"
+    guard let prefixRange = piRunLaunchInsertAuthorityV8.range(of: prefix),
+      piRunLaunchInsertAuthorityV8.range(
+        of: suffix,
+        options: .backwards
+      ) != nil
+    else { preconditionFailure("schema-8 launch authority shape changed") }
+    var value = piRunLaunchInsertAuthorityV8
+    value.replaceSubrange(
+      prefixRange,
+      with: "WHEN NOT (\n      (NEW.execution_role_host_id IS NULL AND EXISTS ("
+    )
+    guard let adjustedSuffixRange = value.range(of: suffix, options: .backwards) else {
+      preconditionFailure("schema-8 launch authority suffix changed")
+    }
+    value.replaceSubrange(
+      adjustedSuffixRange,
+      with: """
+
+            )
+          )
+          OR (
+            NEW.execution_role_host_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM pi_runs AS replacement_run
+              JOIN herdr_role_hosts AS predecessor
+                ON predecessor.id = NEW.role_host_id
+              JOIN herdr_replacement_role_hosts AS replacement
+                ON replacement.id = NEW.execution_role_host_id
+              JOIN herdr_topology_intents AS replacement_intent
+                ON replacement_intent.id = replacement.replacement_intent_id
+              JOIN herdr_role_host_replacement_authorizations AS replacement_authorization
+                ON replacement_authorization.payload_sha256
+                  = replacement_intent.payload_sha256
+                AND replacement_authorization.repository_id
+                  = replacement_intent.repository_id
+                AND replacement_authorization.job_id = replacement_intent.job_id
+                AND replacement_authorization.generation = replacement_intent.generation
+                AND replacement_authorization.run_id = replacement_run.id
+                AND replacement_authorization.predecessor_role_host_id = predecessor.id
+                AND replacement_authorization.planned_replacement_role_host_id
+                  = replacement.id
+                AND replacement_authorization.q4_descriptor_sha256
+                  = NEW.descriptor_sha256
+              WHERE replacement_run.id = NEW.run_id
+                AND replacement_run.runtime_kind = 'herdr'
+                AND replacement_run.settled = 0
+                AND replacement_run.outcome = 'running'
+                AND replacement_run.role = 'architecture'
+                AND predecessor.job_id = replacement_run.job_id
+                AND predecessor.generation = replacement_run.topology_generation
+                AND predecessor.role = replacement_run.role
+                AND predecessor.state = 'stopped'
+                AND predecessor.last_queue_sequence = 3
+                AND replacement.predecessor_role_host_id = predecessor.id
+                AND replacement.job_id = replacement_run.job_id
+                AND replacement.generation = replacement_run.topology_generation
+                AND replacement.role = replacement_run.role
+                AND replacement.state IN ('waiting', 'running')
+                AND replacement.last_queue_sequence = 4
+                AND replacement.q4_descriptor_sha256
+                  = replacement_authorization.q4_descriptor_sha256
+                AND replacement.q4_configuration_sha256
+                  = replacement_authorization.q4_configuration_sha256
+                AND replacement.q4_prompt_sha256
+                  = replacement_authorization.q4_prompt_sha256
+                AND replacement.q4_workflow_configuration_sha256
+                  = replacement_authorization.q4_workflow_configuration_sha256
+                AND replacement.q4_prior_launch_descriptor_sha256
+                  = replacement_authorization.q4_prior_launch_descriptor_sha256
+                AND replacement.q4_prior_launch_configuration_sha256
+                  = replacement_authorization.q4_prior_launch_configuration_sha256
+                AND replacement.q4_resource_tree_sha256
+                  = replacement_authorization.q4_resource_tree_sha256
+                AND replacement_intent.kind = 'replaceRoleHost'
+                AND replacement_intent.job_id = replacement_run.job_id
+                AND replacement_intent.generation = replacement_run.topology_generation
+                AND replacement_intent.state = 'attributed'
+                AND replacement_authorization.failed_launch_attempt_id = (
+                  SELECT launch_attempt_id FROM pi_run_launches
+                  WHERE run_id = replacement_run.id AND queue_sequence = 3
+                )
+                AND replacement_authorization.planned_launch_attempt_id
+                  = NEW.launch_attempt_id
+                AND replacement_authorization.planned_replacement_role_host_id
+                  = NEW.execution_role_host_id
+                AND NEW.queue_sequence = 4
+                AND NEW.launch_mode = 'fresh'
+                AND NEW.expected_session_id IS NULL
+                AND NEW.resume_boundary_sha256 IS NULL
+                AND (SELECT COUNT(*) FROM pi_run_launches
+                  WHERE run_id = replacement_run.id) = 3
+                AND EXISTS (
+                  SELECT 1 FROM pi_run_launches
+                  WHERE run_id = replacement_run.id AND queue_sequence = 1
+                    AND launch_mode = 'fresh' AND state = 'failed'
+                    AND failure_code = 'RUNTIME_TIMEOUT' AND child_pid IS NOT NULL
+                    AND execution_role_host_id IS NULL
+                )
+                AND EXISTS (
+                  SELECT 1 FROM pi_run_launches
+                  WHERE run_id = replacement_run.id AND queue_sequence = 2
+                    AND launch_mode = 'fresh' AND state = 'failed'
+                    AND failure_code = 'HERDR_TRANSACTION_FAILED' AND child_pid IS NULL
+                    AND execution_role_host_id IS NULL
+                )
+                AND EXISTS (
+                  SELECT 1 FROM pi_run_launches
+                  WHERE run_id = replacement_run.id AND queue_sequence = 3
+                    AND launch_mode = 'fresh' AND state = 'failed'
+                    AND failure_code = 'HERDR_TRANSACTION_FAILED' AND child_pid IS NULL
+                    AND execution_role_host_id IS NULL
+                )
+                AND NOT EXISTS (SELECT 1 FROM pi_run_results
+                  WHERE run_id = replacement_run.id)
+                AND NOT EXISTS (SELECT 1 FROM pi_run_session_origins
+                  WHERE run_id = replacement_run.id)
+                AND (
+                  SELECT COUNT(*) FROM job_transitions AS authorization
+                  WHERE authorization.job_id = replacement_run.job_id
+                    AND authorization.from_state = 'runningPi'
+                    AND authorization.to_state = 'runningPi'
+                    AND authorization.event_key GLOB (
+                      'canary:*:pi-fresh-retry:' || replacement_run.id || ':*'
+                    )
+                ) = 4
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.predecessorRoleHostID'
+                ) = predecessor.id
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.replacementRoleHostID'
+                ) = replacement.id
+                AND json_extract(replacement_intent.attribution_json, '$.workspaceID')
+                  = replacement.workspace_id
+                AND json_extract(replacement_intent.attribution_json, '$.tabID')
+                  = replacement.tab_id
+                AND json_extract(replacement_intent.attribution_json, '$.paneID')
+                  = replacement.pane_id
+                AND json_extract(replacement_intent.attribution_json, '$.terminalID')
+                  = replacement.terminal_id
+                AND json_extract(replacement_intent.attribution_json, '$.processID')
+                  = replacement.host_pid
+                AND json_extract(replacement_intent.attribution_json, '$.startSeconds')
+                  = replacement.host_start_seconds
+                AND json_extract(replacement_intent.attribution_json, '$.startMicroseconds')
+                  = replacement.host_start_microseconds
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.hostExecutableSHA256'
+                ) = replacement.host_executable_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.replacementAuthorizationSHA256'
+                ) = replacement_authorization.replacement_authorization_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.replacementEvidenceSHA256'
+                ) = replacement_authorization.replacement_evidence_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.incidentAuditSHA256'
+                ) = replacement_authorization.incident_audit_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.credentialEvidenceSHA256'
+                ) = replacement_authorization.credential_evidence_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.descriptorSHA256'
+                ) = replacement_authorization.q4_descriptor_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.configurationSHA256'
+                ) = replacement_authorization.q4_configuration_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.promptSHA256'
+                ) = replacement_authorization.q4_prompt_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.workflowConfigurationSHA256'
+                ) = replacement_authorization.q4_workflow_configuration_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.priorLaunchDescriptorSHA256'
+                ) = replacement_authorization.q4_prior_launch_descriptor_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.priorLaunchConfigurationSHA256'
+                ) = replacement_authorization.q4_prior_launch_configuration_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.resourceTreeSHA256'
+                ) = replacement_authorization.q4_resource_tree_sha256
+                AND json_extract(replacement_intent.attribution_json, '$.agent') = 'pi'
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.agentSessionAbsent'
+                ) = 1
+                AND length(json_extract(
+                  replacement_intent.attribution_json,
+                  '$.tokensSHA256'
+                )) = 64
+                AND EXISTS (
+                  SELECT 1 FROM job_transitions AS replacement_event
+                  WHERE replacement_event.job_id = replacement_run.job_id
+                    AND replacement_event.from_state = 'runningPi'
+                    AND replacement_event.to_state = 'runningPi'
+                    AND replacement_event.event_key = (
+                      'canary:' || replacement_authorization.canary_authorization_sha256 ||
+                      ':m8:pi-role-host-replacement:' || replacement_run.id || ':' ||
+                      (SELECT launch_attempt_id FROM pi_run_launches
+                        WHERE run_id = replacement_run.id AND queue_sequence = 3) || ':' ||
+                      NEW.launch_attempt_id || ':' || predecessor.id || ':' || replacement.id || ':' ||
+                      replacement_intent.payload_sha256
+                    )
+                )
+            )
+          )
+        )
+        BEGIN
+        """
+    )
+    return value
+  }()
 
   private static func appendOnlyTrigger(table: String, operation: String) -> String {
     """

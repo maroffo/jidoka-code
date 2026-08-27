@@ -21,6 +21,7 @@ public enum HerdrHostError: Error, Equatable, Sendable {
   case processGroupCleanupFailed
   case terminalControlFailed
   case tuiRuntimeFailed(String)
+  case credentialCleanupFailed
   case settlementMissing
   case roleHostRestartNotAuthorized
   case queueSequenceGap
@@ -46,6 +47,7 @@ public enum HerdrHostError: Error, Equatable, Sendable {
     case .processGroupCleanupFailed: "PROCESS_GROUP_CLEANUP_FAILED"
     case .terminalControlFailed: "TERMINAL_CONTROL_FAILED"
     case .tuiRuntimeFailed: "TUI_RUNTIME_FAILED"
+    case .credentialCleanupFailed: "CREDENTIAL_CLEANUP_FAILED"
     case .settlementMissing: "SETTLEMENT_MISSING"
     case .roleHostRestartNotAuthorized: "ROLE_HOST_RESTART_NOT_AUTHORIZED"
     case .queueSequenceGap: "QUEUE_SEQUENCE_GAP"
@@ -299,7 +301,7 @@ public struct HerdrHostDescriptor: Codable, Equatable, Sendable {
     else {
       throw HerdrHostError.invalidDescriptor
     }
-    self.schemaVersion = 3
+    self.schemaVersion = 4
     self.launchAttemptID = launchAttemptID
     self.runID = runID
     self.runNonce = runNonce
@@ -353,7 +355,7 @@ public struct HerdrHostDescriptor: Codable, Equatable, Sendable {
         executionTimeoutMilliseconds: executionTimeoutMilliseconds,
         abortGraceMilliseconds: abortGraceMilliseconds
       )
-    case 3:
+    case 4:
       guard let settlement, let piTUIInvocation else {
         throw HerdrHostError.invalidDescriptor
       }
@@ -445,6 +447,12 @@ public struct HerdrHostFailureRecord: Codable, Equatable, Sendable {
       childStatus = nil
     }
   }
+}
+
+enum HerdrRecordedChildProcessIdentityState: Equatable, Sendable {
+  case matching
+  case absent
+  case mismatched
 }
 
 public struct HerdrChildProcessRecord: Codable, Equatable, Sendable {
@@ -887,29 +895,87 @@ public enum HerdrHostRuntime {
   }
 
   static func childProcessIsAbsent(_ record: HerdrChildProcessRecord) -> Bool {
-    guard record.processIdentity != nil else { return false }
-    return !processGroupExists(record.processGroupID)
+    childProcessIsAbsent(
+      record,
+      identityLookup: { try? HerdrRoleHostRuntime.processIdentity($0) },
+      processGroupExists: processGroupExists
+    )
+  }
+
+  static func childProcessIsAbsent(
+    _ record: HerdrChildProcessRecord,
+    identityLookup: (pid_t) -> HerdrHostProcessIdentity?,
+    processGroupExists: (pid_t) -> Bool
+  ) -> Bool {
+    switch childProcessIdentityState(record, identityLookup: identityLookup) {
+    case .matching: return false
+    case .mismatched: return true
+    case .absent: return !processGroupExists(record.processGroupID)
+    }
+  }
+
+  static func childProcessIdentityState(
+    _ record: HerdrChildProcessRecord,
+    identityLookup: (pid_t) -> HerdrHostProcessIdentity?
+  ) -> HerdrRecordedChildProcessIdentityState {
+    guard let identity = record.processIdentity else { return .mismatched }
+    guard let current = identityLookup(identity.processID) else { return .absent }
+    return current == identity ? .matching : .mismatched
   }
 
   static func terminateChildProcess(
     _ record: HerdrChildProcessRecord,
     graceMilliseconds: Int = 1_000
   ) async throws {
+    try await terminateChildProcess(
+      record,
+      graceMilliseconds: graceMilliseconds,
+      identityLookup: { try? HerdrRoleHostRuntime.processIdentity($0) },
+      processGroupExists: processGroupExists,
+      terminateMatchingIdentity: { identity, processGroup, graceMilliseconds in
+        guard let tracker = SupervisedProcessTracker(rootProcessID: identity.processID),
+          tracker.root
+            == SupervisedProcessIdentity(
+              processID: identity.processID,
+              startSeconds: identity.startSeconds,
+              startMicroseconds: identity.startMicroseconds
+            )
+        else {
+          throw HerdrHostError.processGroupCleanupFailed
+        }
+        _ = tracker.observeDescendants()
+        try await terminateTrackedProcesses(
+          tracker,
+          originalProcessGroup: processGroup,
+          graceMilliseconds: graceMilliseconds
+        )
+      }
+    )
+  }
+
+  static func terminateChildProcess(
+    _ record: HerdrChildProcessRecord,
+    graceMilliseconds: Int,
+    identityLookup: @Sendable (pid_t) -> HerdrHostProcessIdentity?,
+    processGroupExists: @Sendable (pid_t) -> Bool,
+    terminateMatchingIdentity:
+      @Sendable (
+        HerdrHostProcessIdentity, pid_t, Int
+      ) async throws -> Void
+  ) async throws {
     guard graceMilliseconds > 0, let identity = record.processIdentity,
       record.processGroupID == record.processID
     else {
       throw HerdrHostError.invalidDescriptor
     }
-    guard processGroupExists(record.processGroupID) else { return }
-    if let current = try? HerdrRoleHostRuntime.processIdentity(identity.processID) {
-      guard current == identity, getpgid(record.processID) == record.processGroupID else {
+    switch childProcessIdentityState(record, identityLookup: identityLookup) {
+    case .matching:
+      try await terminateMatchingIdentity(identity, record.processGroupID, graceMilliseconds)
+    case .absent, .mismatched:
+      guard !processGroupExists(record.processGroupID) else {
         throw HerdrHostError.processGroupCleanupFailed
       }
     }
-    try await terminateProcessGroup(
-      record.processGroupID,
-      graceMilliseconds: graceMilliseconds
-    )
   }
 
   public static func run(
@@ -981,6 +1047,12 @@ public enum HerdrHostRuntime {
     else {
       throw HerdrHostError.invalidEnvironment
     }
+    let reuseRoleHostAlias: Bool
+    switch environment["JIDOKA_CODE_HERDR_REUSE_ALIAS"] {
+    case nil: reuseRoleHostAlias = false
+    case "1" where sequenceBase > 1: reuseRoleHostAlias = true
+    default: throw HerdrHostError.invalidEnvironment
+    }
     let root = URL(fileURLWithPath: rootValue, isDirectory: true)
     let descriptor = try descriptorLoader(launchAttemptID, root)
     let herdrCapabilities = [socketValue, paneID, workspaceID, tabID]
@@ -1000,12 +1072,22 @@ public enum HerdrHostRuntime {
         tabID: tabID,
         expectedTerminalID: expectedTerminalID,
         responseTimeoutSeconds: responseTimeoutSeconds,
-        sequenceBase: sequenceBase
+        sequenceBase: sequenceBase,
+        renameAlias: !reuseRoleHostAlias
       )
     } catch {
       throw HerdrHostError.invalidEnvironment
     }
-    try await reporter.start(descriptor: descriptor)
+    do {
+      try await reporter.start(descriptor: descriptor)
+    } catch {
+      do {
+        try removeProviderCredential(descriptor)
+      } catch {
+        throw HerdrHostError.credentialCleanupFailed
+      }
+      throw error
+    }
 
     let settlementChannel: PiTUIResultChannel?
     do {
@@ -1013,11 +1095,15 @@ public enum HerdrHostRuntime {
       if let channel = settlementChannel, try channel.preparedResult() != nil {
         try await waitForAcceptance(channel: channel)
         await waitForRelease(channel: channel)
+        try removeProviderCredential(descriptor)
         await Task.detached {
           try? await reporter.finish(descriptor: descriptor, status: 0)
         }.value
         return 0
       }
+    } catch let error as HerdrHostError {
+      try? await reporter.finish(descriptor: descriptor, status: -1)
+      throw error
     } catch {
       try? await reporter.finish(descriptor: descriptor, status: -1)
       throw HerdrHostError.settlementMissing
@@ -1031,6 +1117,12 @@ public enum HerdrHostRuntime {
     } catch {
       launchResult = .failure(.launchFailed)
     }
+    do {
+      try removeProviderCredential(descriptor)
+    } catch {
+      try? await reporter.finish(descriptor: descriptor, status: -1)
+      throw HerdrHostError.credentialCleanupFailed
+    }
 
     if let channel = settlementChannel {
       let accepted: Bool
@@ -1041,6 +1133,12 @@ public enum HerdrHostRuntime {
         throw HerdrHostError.settlementMissing
       }
       if accepted {
+        if case .failure(.processGroupCleanupFailed) = launchResult {
+          await Task.detached {
+            try? await reporter.finish(descriptor: descriptor, status: -1)
+          }.value
+          throw HerdrHostError.processGroupCleanupFailed
+        }
         await waitForRelease(channel: channel)
         await Task.detached {
           try? await reporter.finish(descriptor: descriptor, status: 0)
@@ -1078,6 +1176,17 @@ public enum HerdrHostRuntime {
     }
   }
 
+  private static func removeProviderCredential(_ descriptor: HerdrHostDescriptor) throws {
+    guard let invocation = descriptor.piTUIInvocation else { return }
+    do {
+      try PiProviderCredentialSnapshotter.remove(
+        from: URL(fileURLWithPath: invocation.agentDirectory, isDirectory: true)
+      )
+    } catch {
+      throw HerdrHostError.credentialCleanupFailed
+    }
+  }
+
   private static func waitForAcceptance(channel: PiTUIResultChannel) async throws {
     while true {
       if try channel.acceptedResult() != nil { return }
@@ -1091,6 +1200,12 @@ public enum HerdrHostRuntime {
       await noncancellableDelay(milliseconds: 50)
     }
   }
+
+  #if DEBUG
+    static func launchForTesting(_ descriptor: HerdrHostDescriptor) async throws -> Int32 {
+      try await launch(descriptor)
+    }
+  #endif
 
   private static func launch(_ descriptor: HerdrHostDescriptor) async throws -> Int32 {
     let timeout = descriptor.executionTimeoutMilliseconds
@@ -1116,8 +1231,13 @@ public enum HerdrHostRuntime {
         throw HerdrHostError.terminalControlFailed
       }
     }
-    guard Darwin.kill(-pid, SIGCONT) == 0 else {
+    guard let processTracker = SupervisedProcessTracker(rootProcessID: pid) else {
       _ = Darwin.kill(-pid, SIGKILL)
+      _ = waitForChild(pid)
+      throw HerdrHostError.launchFailed
+    }
+    guard Darwin.kill(-pid, SIGCONT) == 0 else {
+      processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: pid)
       _ = waitForChild(pid)
       throw HerdrHostError.launchFailed
     }
@@ -1125,6 +1245,7 @@ public enum HerdrHostRuntime {
     do {
       let status = try await awaitChild(
         pid: pid,
+        processTracker: processTracker,
         timeoutMilliseconds: timeout,
         abortGraceMilliseconds: grace
       )
@@ -1197,10 +1318,19 @@ public enum HerdrHostRuntime {
 
   private static func awaitChild(
     pid: pid_t,
+    processTracker: SupervisedProcessTracker,
     timeoutMilliseconds: Int,
     abortGraceMilliseconds: Int
   ) async throws -> Int32 {
-    try await withTaskCancellationHandler {
+    let monitor = Task.detached {
+      while !Task.isCancelled {
+        _ = processTracker.observeDescendants()
+        try? await Task.sleep(for: .milliseconds(5))
+      }
+    }
+    defer { monitor.cancel() }
+
+    return try await withTaskCancellationHandler {
       try await withThrowingTaskGroup(of: ChildRace.self, returning: Int32.self) { group in
         group.addTask { .exited(waitForChild(pid)) }
         group.addTask {
@@ -1215,18 +1345,28 @@ public enum HerdrHostRuntime {
         switch first {
         case .exited(let status):
           group.cancelAll()
+          _ = processTracker.observeDescendants()
           if Task.isCancelled {
-            try await terminateProcessGroup(pid, graceMilliseconds: abortGraceMilliseconds)
+            try await terminateTrackedProcesses(
+              processTracker,
+              originalProcessGroup: pid,
+              graceMilliseconds: abortGraceMilliseconds
+            )
             throw HerdrHostError.cancelled
           }
-          try await terminateRemainingDescendants(
-            pid,
+          try await terminateTrackedProcesses(
+            processTracker,
+            originalProcessGroup: pid,
             graceMilliseconds: abortGraceMilliseconds
           )
           return status
         case .timedOut, .cancelled:
           group.cancelAll()
-          try await terminateProcessGroup(pid, graceMilliseconds: abortGraceMilliseconds)
+          try await terminateTrackedProcesses(
+            processTracker,
+            originalProcessGroup: pid,
+            graceMilliseconds: abortGraceMilliseconds
+          )
           while let event = try await group.next() {
             if case .exited = event { break }
           }
@@ -1237,37 +1377,24 @@ public enum HerdrHostRuntime {
         }
       }
     } onCancel: {
-      _ = Darwin.kill(-pid, SIGTERM)
+      processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: pid)
     }
   }
 
-  private static func terminateRemainingDescendants(
-    _ processGroup: pid_t,
+  private static func terminateTrackedProcesses(
+    _ tracker: SupervisedProcessTracker,
+    originalProcessGroup: pid_t,
     graceMilliseconds: Int
   ) async throws {
-    guard processGroupExists(processGroup) else { return }
-    _ = Darwin.kill(-processGroup, SIGTERM)
+    _ = tracker.observeDescendants()
+    guard !tracker.cleanupVerified(originalProcessGroup: originalProcessGroup) else { return }
+    tracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: originalProcessGroup)
     await noncancellableDelay(milliseconds: graceMilliseconds)
-    if processGroupExists(processGroup) {
-      _ = Darwin.kill(-processGroup, SIGKILL)
+    if !tracker.cleanupVerified(originalProcessGroup: originalProcessGroup) {
+      tracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: originalProcessGroup)
       await noncancellableDelay(milliseconds: 1_000)
     }
-    guard !processGroupExists(processGroup) else {
-      throw HerdrHostError.processGroupCleanupFailed
-    }
-  }
-
-  private static func terminateProcessGroup(
-    _ processGroup: pid_t,
-    graceMilliseconds: Int
-  ) async throws {
-    _ = Darwin.kill(-processGroup, SIGTERM)
-    await noncancellableDelay(milliseconds: graceMilliseconds)
-    if processGroupExists(processGroup) {
-      _ = Darwin.kill(-processGroup, SIGKILL)
-      await noncancellableDelay(milliseconds: 1_000)
-    }
-    guard !processGroupExists(processGroup) else {
+    guard tracker.cleanupVerified(originalProcessGroup: originalProcessGroup) else {
       throw HerdrHostError.processGroupCleanupFailed
     }
   }
@@ -1389,6 +1516,7 @@ private actor HerdrHostPaneReporter {
   private let tabID: String
   private let expectedTerminalID: String?
   private let sequenceBase: UInt64
+  private let renameAlias: Bool
   private var terminalID: String?
 
   init(
@@ -1398,7 +1526,8 @@ private actor HerdrHostPaneReporter {
     tabID: String,
     expectedTerminalID: String?,
     responseTimeoutSeconds: TimeInterval,
-    sequenceBase: UInt64
+    sequenceBase: UInt64,
+    renameAlias: Bool
   ) throws {
     guard Self.validID(paneID), Self.validID(workspaceID), Self.validID(tabID) else {
       throw HerdrHostError.invalidEnvironment
@@ -1414,6 +1543,7 @@ private actor HerdrHostPaneReporter {
     self.tabID = tabID
     self.expectedTerminalID = expectedTerminalID
     self.sequenceBase = sequenceBase
+    self.renameAlias = renameAlias
   }
 
   func start(descriptor: HerdrHostDescriptor) async throws {
@@ -1437,7 +1567,7 @@ private actor HerdrHostPaneReporter {
           summary: "running",
           sequence: sequenceBase
         ),
-        alias: descriptor.agentAlias
+        alias: renameAlias ? descriptor.agentAlias : nil
       )
     } catch {
       throw HerdrHostError.herdrTransactionFailed

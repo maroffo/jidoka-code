@@ -23,13 +23,13 @@ struct ViewModelFlowTests {
     await model.validateAndImportCredential()
     #expect(model.token.isEmpty)
     await model.acknowledgeProviderDisclosure(true)
-    model.repositoryOwner = "owner"
-    model.repositoryName = "repo"
-    await model.validateAndAddRepository()
+    #expect(model.state?.settings.repositories.isEmpty == true)
     #expect(model.canComplete)
     #expect(await model.complete())
     #expect(model.state?.lifecycle == .ready)
     #expect(app.state?.lifecycle == .ready)
+    #expect(!app.canPoll)
+    #expect(app.pollingUnavailableReason == "Add and enable a repository in Settings to poll.")
     #expect(await fake.tokenWasReceived)
 
     let encoded = try JSONEncoder().encode(try #require(model.state))
@@ -42,11 +42,17 @@ struct ViewModelFlowTests {
         .runHerdrPreflight,
         .replaceCredential,
         .acknowledgeProviderDisclosure,
-        .addRepository,
         .setLoginEnabled,
         .completeOnboarding,
       ]
     )
+
+    let settings = SettingsViewModel(client: fake) { state in app.apply(state) }
+    await settings.refresh()
+    settings.repositoryReference = "owner/repo"
+    await settings.addRepository()
+    #expect(app.canPoll)
+    #expect(app.pollingUnavailableReason == nil)
   }
 
   @Test("invalid credential error is actionable and redacted")
@@ -92,6 +98,62 @@ struct ViewModelFlowTests {
     #expect(await failedCheckpointModel.prepareForQuit()?.databaseCheckpointed == true)
   }
 
+  @Test("polling reports one deterministic blocker for every dispatch gate")
+  func pollingBlockers() async throws {
+    let fake = AppSupportEngineFake(onboardingComplete: true)
+    let model = AppViewModel(client: fake)
+    await model.refresh()
+    let ready = try #require(model.state)
+    #expect(model.canPoll)
+
+    let cases: [(EngineUIState, String)] = [
+      (
+        pollingState(ready, lifecycle: .onboarding),
+        "Finish setup to enable polling."
+      ),
+      (
+        pollingState(ready, paused: true, repositories: []),
+        "Resume automation to poll."
+      ),
+      (
+        pollingState(ready, credential: .missing),
+        "Connect GitHub in Settings to poll."
+      ),
+      (
+        pollingState(ready, pi: .unchecked),
+        "Restore the attested Pi runtime, then restart Jidoka Code."
+      ),
+      (
+        pollingState(ready, herdr: .unchecked),
+        "Restore Herdr readiness before polling."
+      ),
+      (
+        pollingState(ready, repositories: []),
+        "Add and enable a repository in Settings to poll."
+      ),
+      (
+        pollingState(ready, loginSelected: false, loginStatus: .notRegistered),
+        "Enable the login item before polling."
+      ),
+      (
+        pollingState(ready, profiles: Array(ready.settings.profiles.dropLast())),
+        "Configure every model profile before polling."
+      ),
+    ]
+
+    for (state, reason) in cases {
+      model.apply(state)
+      #expect(!model.canPoll)
+      #expect(model.pollingUnavailableReason == reason)
+      await model.pollNow()
+    }
+    #expect(await fake.pollCount == 0)
+
+    model.apply(ready)
+    await model.pollNow()
+    #expect(await fake.pollCount == 1)
+  }
+
   @Test("ambiguous UI emits only late recheck or exact authorization")
   func ambiguousControls() async throws {
     let fake = AppSupportEngineFake(onboardingComplete: true, ambiguous: true)
@@ -110,7 +172,103 @@ struct ViewModelFlowTests {
     #expect(!commandKinds.contains(where: { $0.rawValue.lowercased().contains("abort") }))
   }
 
-  @Test("settings updates repositories, four profiles, concurrency, login, and credential")
+  @Test("repository parser accepts GitHub URL and owner/repository only")
+  func repositoryParser() {
+    #expect(
+      RepositoryReferenceParser.parse("https://github.com/second-owner/second-repo.git")
+        == RepositoryCoordinates(owner: "second-owner", name: "second-repo")
+    )
+    #expect(
+      RepositoryReferenceParser.parse(" second-owner/second-repo ")
+        == RepositoryCoordinates(owner: "second-owner", name: "second-repo")
+    )
+    #expect(
+      RepositoryReferenceParser.parse("https://github.com/second-owner/second-repo/")
+        == RepositoryCoordinates(owner: "second-owner", name: "second-repo")
+    )
+    for invalid in [
+      "http://github.com/owner/repo",
+      "https://github.example/owner/repo",
+      "https://user@github.com/owner/repo",
+      "https://github.com/owner/repo/issues",
+      "git@github.com:owner/repo.git",
+      "owner",
+      "owner//repo",
+      "owner/repo/extra",
+      "-owner/repo",
+    ] {
+      #expect(RepositoryReferenceParser.parse(invalid) == nil)
+    }
+  }
+
+  @Test("settings lazily refreshes once and preserves Custom drafts across catalog changes")
+  func modelCatalogDrafts() async throws {
+    let fake = AppSupportEngineFake(onboardingComplete: true)
+    let model = SettingsViewModel(client: fake)
+
+    await model.refresh()
+    #expect(await fake.commandKinds == [.snapshot, .refreshModelCatalog])
+    await model.refresh()
+    #expect(await fake.commandKinds == [.snapshot, .refreshModelCatalog, .snapshot])
+
+    model.setProfileSource(.custom, role: .review)
+    model.setProfileProvider(" unsaved-provider ", role: .review)
+    model.setProfileModel(" unsaved/model ", role: .review)
+    model.setProfileThinking(.xhigh, role: .review)
+    model.selectCatalogModel("anthropic/claude-sonnet-4-6", role: .review)
+    #expect(model.profileDrafts[.review]?.thinking == .medium)
+    model.setProfileSource(.custom, role: .review)
+    #expect(model.profileDrafts[.review]?.provider == " unsaved-provider ")
+    #expect(model.profileDrafts[.review]?.model == " unsaved/model ")
+    #expect(model.profileDrafts[.review]?.thinking == .xhigh)
+
+    await model.refreshModelCatalog()
+    #expect(model.profileDrafts[.review]?.provider == " unsaved-provider ")
+    #expect(model.profileDrafts[.review]?.model == " unsaved/model ")
+    await model.saveProfile(role: .review)
+    #expect(model.profileDrafts[.review]?.provider == "unsaved-provider")
+    #expect(model.profileDrafts[.review]?.model == "unsaved/model")
+    #expect(!model.profileIsDirty(.review))
+
+    let reopened = SettingsViewModel(client: fake)
+    await reopened.refresh()
+    #expect(reopened.profileDrafts[.review]?.source == .custom)
+    #expect(reopened.profileDrafts[.review]?.provider == "unsaved-provider")
+    #expect(reopened.profileDrafts[.review]?.model == "unsaved/model")
+
+    await fake.fail(.refreshModelCatalog, with: .internalFailure)
+    await reopened.refreshModelCatalog()
+    #expect(reopened.modelCatalog.isEmpty)
+    #expect(reopened.message?.title == "Pi model catalog unavailable")
+    #expect(reopened.modelCatalogNotice == reopened.message?.detail)
+
+    let automaticFailure = AppSupportEngineFake(onboardingComplete: true)
+    await automaticFailure.fail(.refreshModelCatalog, with: .piBlocked)
+    let automatic = SettingsViewModel(client: automaticFailure)
+    await automatic.refresh()
+    #expect(automatic.modelCatalog.isEmpty)
+    #expect(automatic.message == nil)
+    #expect(automatic.modelCatalogNotice?.contains("offline model catalog") == true)
+    #expect(
+      await automaticFailure.commandKinds == [
+        .snapshot, .refreshModelCatalog, .snapshot,
+      ])
+    await automatic.refresh()
+    #expect(
+      await automaticFailure.commandKinds == [
+        .snapshot, .refreshModelCatalog, .snapshot, .snapshot,
+      ])
+    await automatic.refreshModelCatalog()
+    #expect(automatic.message?.title == "Pi model catalog unavailable")
+    #expect(automatic.modelCatalogNotice == automatic.message?.detail)
+    #expect(
+      await automaticFailure.commandKinds == [
+        .snapshot, .refreshModelCatalog, .snapshot, .snapshot,
+        .refreshModelCatalog, .snapshot,
+      ])
+  }
+
+  @Test("settings updates repositories, Pi catalog profiles, concurrency, login, and credential")
   func settings() async throws {
     let fake = AppSupportEngineFake(onboardingComplete: true)
     let model = SettingsViewModel(client: fake)
@@ -127,28 +285,36 @@ struct ViewModelFlowTests {
     #expect(!toggled.triageEnabled)
     #expect(!toggled.implementationEnabled)
 
-    model.repositoryOwner = "second-owner"
-    model.repositoryName = "second-repo"
+    model.repositoryReference = "https://github.com/second-owner/second-repo.git"
+    #expect(model.canAddRepository)
     await model.addRepository()
     #expect(model.repositories.count == 2)
-    #expect(model.repositoryOwner.isEmpty)
-    #expect(model.repositoryName.isEmpty)
+    #expect(model.repositoryReference.isEmpty)
     let added = try #require(model.repositories.first(where: { $0.owner == "second-owner" }))
     await model.removeRepository(added)
     #expect(model.repositories.count == 1)
 
     for role in ModelProfileRole.allCases {
-      model.setProfileProvider("configured-\(role.rawValue)", role: role)
-      model.setProfileModel("configured/\(role.rawValue)", role: role)
+      #expect(model.profileDrafts[role]?.source == .catalog)
+      model.selectCatalogModel("anthropic/claude-sonnet-4-6", role: role)
+      #expect(model.availableThinkingLevels(role: role) == [.off, .low, .medium, .high])
       model.setProfileThinking(.high, role: role)
       await model.saveProfile(role: role)
       let profile = try #require(
         model.state?.settings.profiles.first(where: { $0.role == role })
       )
-      #expect(profile.provider == "configured-\(role.rawValue)")
-      #expect(profile.model == "configured/\(role.rawValue)")
+      #expect(profile.provider == "anthropic")
+      #expect(profile.model == "claude-sonnet-4-6")
       #expect(profile.thinking == .high)
     }
+    model.setProfileSource(.custom, role: .review)
+    #expect(model.profileDrafts[.review]?.provider == "openai-codex")
+    #expect(model.profileDrafts[.review]?.model == "gpt-5.6-sol")
+    model.setProfileProvider("configured-review", role: .review)
+    model.setProfileModel("configured/review", role: .review)
+    model.setProfileThinking(.xhigh, role: .review)
+    await model.saveProfile(role: .review)
+    #expect(model.profileDrafts[.review]?.source == .custom)
     model.maxConcurrency = 8
     await model.saveMaxConcurrency()
     await model.runHerdrPreflight()
@@ -165,12 +331,68 @@ struct ViewModelFlowTests {
     #expect(model.credentialStatus.state == .valid)
     await model.deleteCredential()
     #expect(model.credentialStatus.state == .missing)
+    #expect(model.replacementToken.isEmpty)
     #expect(!model.diagnostics.joined().contains(sentinel))
     #expect(Set(model.state?.settings.profiles.map(\.role) ?? []) == Set(ModelProfileRole.allCases))
     let commandKinds = await fake.commandKinds
     #expect(commandKinds.filter { $0 == .updateRepository }.count == 4)
     #expect(commandKinds.contains(.addRepository))
     #expect(commandKinds.contains(.removeRepository))
+  }
+
+  private func pollingState(
+    _ base: EngineUIState,
+    lifecycle: EngineLifecycleState? = nil,
+    paused: Bool? = nil,
+    credential: EngineCredentialStatus? = nil,
+    pi: EnginePiStatus? = nil,
+    herdr: EngineHerdrStatus? = nil,
+    repositories: [RepositoryConfiguration]? = nil,
+    loginSelected: Bool? = nil,
+    loginStatus: LifecycleServiceStatus? = nil,
+    profiles: [ModelProfileConfiguration]? = nil
+  ) -> EngineUIState {
+    let lifecycle = lifecycle ?? base.lifecycle
+    let credential = credential ?? base.settings.credential
+    let pi = pi ?? base.onboarding.pi
+    let herdr = herdr ?? base.settings.herdr
+    let repositories = repositories ?? base.settings.repositories
+    let loginSelected = loginSelected ?? base.settings.loginItemSelected
+    let loginStatus = loginStatus ?? base.settings.loginItemStatus
+    let profiles = profiles ?? base.settings.profiles
+    return EngineUIState(
+      revision: base.revision,
+      lifecycle: lifecycle,
+      operationalStatus: base.operationalStatus,
+      paused: paused ?? base.paused,
+      passRunning: base.passRunning,
+      activities: base.activities,
+      ambiguousMutations: base.ambiguousMutations,
+      onboarding: EngineOnboardingSnapshot(
+        duplicateInstanceCheckPassed: base.onboarding.duplicateInstanceCheckPassed,
+        externalAutomationAcknowledged: base.onboarding.externalAutomationAcknowledged,
+        providerDisclosureAcknowledged: base.onboarding.providerDisclosureAcknowledged,
+        pi: pi,
+        herdr: herdr,
+        credential: credential,
+        repositoryCount: repositories.count,
+        configuredProfileRoles: profiles.map(\.role),
+        loginItemSelected: loginSelected,
+        loginItemStatus: loginStatus,
+        complete: lifecycle == .ready
+      ),
+      settings: EngineSettingsSnapshot(
+        repositories: repositories,
+        profiles: profiles,
+        maxConcurrency: base.settings.maxConcurrency,
+        loginItemSelected: loginSelected,
+        loginItemStatus: loginStatus,
+        credential: credential,
+        herdr: herdr,
+        modelCatalog: base.settings.modelCatalog
+      ),
+      diagnostics: base.diagnostics
+    )
   }
 
   @Test("accessibility identifiers and user-facing errors are stable and secret-free")
@@ -190,14 +412,22 @@ struct ViewModelFlowTests {
       JidokaAccessibilityID.tokenField,
       JidokaAccessibilityID.tokenImport,
       JidokaAccessibilityID.providerDisclosure,
-      JidokaAccessibilityID.repositoryOwner,
-      JidokaAccessibilityID.repositoryName,
-      JidokaAccessibilityID.repositoryAdd,
+      "\(JidokaAccessibilityID.providerDisclosureProfile).orchestration",
+      "\(JidokaAccessibilityID.providerDisclosureProfile).planning",
+      "\(JidokaAccessibilityID.providerDisclosureProfile).review",
+      "\(JidokaAccessibilityID.providerDisclosureProfile).triage",
       JidokaAccessibilityID.loginItem,
       JidokaAccessibilityID.onboardingComplete,
       JidokaAccessibilityID.settingsWindow,
       JidokaAccessibilityID.settingsHerdrPreflight,
       JidokaAccessibilityID.settingsFocusInHerdr,
+      JidokaAccessibilityID.settingsRepositoryReference,
+      JidokaAccessibilityID.settingsRepositoryAdd,
+      JidokaAccessibilityID.settingsModelCatalogRefresh,
+      JidokaAccessibilityID.settingsModelCatalogNotice,
+      JidokaAccessibilityID.settingsModelSelector,
+      JidokaAccessibilityID.settingsCustomModel,
+      JidokaAccessibilityID.credentialConnect,
       JidokaAccessibilityID.credentialReplacement,
       JidokaAccessibilityID.credentialDeletion,
       JidokaAccessibilityID.ambiguousRecheck,
@@ -205,6 +435,10 @@ struct ViewModelFlowTests {
     ]
     #expect(Set(identifiers).count == identifiers.count)
     let sentinel = "github_pat_accessibility_secret"
+    let catalogMessage = PresentationCopy.modelCatalogUnavailable()
+    #expect(!catalogMessage.title.contains(sentinel))
+    #expect(!catalogMessage.detail.contains(sentinel))
+    #expect(catalogMessage.title != "Pi preflight blocked")
     for code in EngineClientErrorCode.allCases {
       let message = PresentationCopy.message(for: EngineClientError(code))
       #expect(!message.title.isEmpty)
@@ -223,6 +457,7 @@ private actor AppSupportEngineFake: EngineClient {
   private var credential = EngineCredentialStatus.missing
   private var repositories: [RepositoryConfiguration]
   private var profiles: [ModelProfileConfiguration]
+  private var modelCatalog: PiModelCatalog
   private var maxConcurrency = 2
   private var loginSelected: Bool
   private var loginStatus: LifecycleServiceStatus
@@ -267,11 +502,13 @@ private actor AppSupportEngineFake: EngineClient {
         thinking: .max
       )
     }
+    modelCatalog = .unavailable
     ambiguousMutations = ambiguous ? [Self.ambiguousMutation()] : []
   }
 
   func fail(_ command: EngineCommandKind, with code: EngineClientErrorCode) {
     failures[command] = code
+    if command == .refreshModelCatalog { modelCatalog = .unavailable }
   }
 
   func setCheckpointDatabaseSucceeded(_ value: Bool) {
@@ -287,6 +524,8 @@ private actor AppSupportEngineFake: EngineClient {
     switch command {
     case .snapshot:
       break
+    case .refreshModelCatalog:
+      modelCatalog = Self.catalog()
     case .acknowledgeExternalAutomation(let value):
       externalAcknowledged = value
     case .acknowledgeProviderDisclosure(let value):
@@ -345,6 +584,12 @@ private actor AppSupportEngineFake: EngineClient {
     case .authorizeRetry(let evidence):
       authorizationEvidence = evidence
       ambiguousMutations.removeAll { $0.jobID == evidence.jobID }
+    case .previewJobMaintenance, .applyJobMaintenance,
+      .previewJobCanary, .executeJobCanary,
+      .previewJobCanaryRecovery, .executeJobCanaryRecovery,
+      .previewJobCanaryPiRetry, .executeJobCanaryPiRetry,
+      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement:
+      throw EngineClientError(.invalidCommand)
     case .setLoginEnabled(let value):
       loginSelected = value
       loginStatus = value ? .enabled : .notRegistered
@@ -353,7 +598,7 @@ private actor AppSupportEngineFake: EngineClient {
       loginStatus = status
     case .completeOnboarding:
       guard externalAcknowledged, providerAcknowledged, pi.state == .ready,
-        herdr.state == .ready, credential.state == .valid, !repositories.isEmpty, loginSelected,
+        herdr.state == .ready, credential.state == .valid, loginSelected,
         loginStatus == .enabled
       else {
         throw EngineClientError(.onboardingIncomplete)
@@ -407,7 +652,8 @@ private actor AppSupportEngineFake: EngineClient {
         loginItemSelected: loginSelected,
         loginItemStatus: loginStatus,
         credential: credential,
-        herdr: herdr
+        herdr: herdr,
+        modelCatalog: modelCatalog
       ),
       diagnostics: EngineDiagnostics(
         schemaVersion: 2,
@@ -439,6 +685,32 @@ private actor AppSupportEngineFake: EngineClient {
       schemaSHA256: String(repeating: "d", count: 64),
       policySHA256: String(repeating: "c", count: 64)
     )
+  }
+
+  private static func catalog() -> PiModelCatalog {
+    PiModelCatalog(
+      models: [
+        PiModelCatalogEntry(
+          provider: "openai-codex",
+          id: "gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          reasoning: true,
+          input: [.text, .image],
+          contextWindow: 200_000,
+          maxTokens: 64_000,
+          thinkingLevels: ModelThinkingLevel.allCases
+        ),
+        PiModelCatalogEntry(
+          provider: "anthropic",
+          id: "claude-sonnet-4-6",
+          name: "Claude Sonnet 4.6",
+          reasoning: true,
+          input: [.text, .image],
+          contextWindow: 200_000,
+          maxTokens: 64_000,
+          thinkingLevels: [.off, .low, .medium, .high]
+        ),
+      ])
   }
 
   private static func repository() -> RepositoryConfiguration {

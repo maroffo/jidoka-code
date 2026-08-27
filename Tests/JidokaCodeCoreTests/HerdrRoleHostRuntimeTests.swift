@@ -20,9 +20,11 @@ struct HerdrRoleHostRuntimeTests {
       terminalID: "terminal-1"
     )
     let probe = RoleHostProbe()
+    var environment = fixture.environment
+    environment["JIDOKA_CODE_HERDR_REUSE_ALIAS"] = "1"
     let status = try await HerdrRoleHostRuntime.run(
       arguments: ["--role-host-id", fixture.roleHostID],
-      environment: fixture.environment,
+      environment: environment,
       pollNanoseconds: 1_000_000,
       identity: fixture.identity,
       validateCommand: { _, _, _ in },
@@ -35,6 +37,7 @@ struct HerdrRoleHostRuntimeTests {
             environment["HERDR_TAB_ID"] ?? "missing",
             environment["HERDR_PANE_ID"] ?? "missing",
             environment["JIDOKA_CODE_HERDR_EXPECTED_TERMINAL_ID"] ?? "missing",
+            environment["JIDOKA_CODE_HERDR_REUSE_ALIAS"] ?? "missing",
           ].joined(separator: "@")
         )
         if command.launchAttemptID == "launch-00000002" {
@@ -49,8 +52,8 @@ struct HerdrRoleHostRuntimeTests {
     #expect(status == 0)
     #expect(
       await probe.values() == [
-        "launch-00000001@1@workspace-1@tab-1@pane-1@terminal-1",
-        "launch-00000002@3@workspace-moved@tab-moved@pane-moved@terminal-1",
+        "launch-00000001@1@workspace-1@tab-1@pane-1@terminal-1@missing",
+        "launch-00000002@3@workspace-moved@tab-moved@pane-moved@terminal-1@1",
       ]
     )
     #expect(
@@ -167,6 +170,107 @@ struct HerdrRoleHostRuntimeTests {
         from: fixture.root
       )?.status == "released"
     )
+  }
+
+  @Test("replacement descriptor starts at q4 and rejects every predecessor sequence")
+  func replacementStartsAtFourthSequence() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "replacement-role-host-\(UUID().uuidString.lowercased())",
+      isDirectory: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(
+      at: root,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    let executable = try PiTUIFileProtocol.canonicalExistingURL(
+      URL(fileURLWithPath: "/usr/bin/true")
+    )
+    let executableSHA256 = SHA256.hash(
+      data: try Data(contentsOf: executable, options: [.mappedIfSafe])
+    ).map { String(format: "%02x", $0) }.joined()
+    let roleHostID = "replacement-role-host-0001"
+    let descriptor = try HerdrRoleHostBootstrapDescriptor(
+      replacementRoleHostID: roleHostID,
+      predecessorRoleHostID: "predecessor-role-host-01",
+      replacementEvidenceSHA256: String(repeating: "a", count: 64),
+      incidentAuditSHA256: String(repeating: "b", count: 64),
+      repositoryID: "repository-00000001",
+      jobID: "job-00000001",
+      generation: 1,
+      allowedWorkflows: [.pullRequestReview],
+      expectedWorkspaceID: "workspace-1",
+      workingDirectory: root,
+      agentAlias: "jidoka_architecture_q4",
+      title: "Jidoka architecture",
+      displayAgent: "Jidoka | architecture",
+      hostExecutable: executable
+    )
+    _ = try HerdrRoleHostDescriptorStore.prepare(descriptor, in: root)
+    for sequence in 1...3 {
+      #expect(throws: HerdrHostError.queueCommandMismatch) {
+        try HerdrRoleHostDescriptorStore.enqueue(
+          HerdrRoleHostCommand(
+            roleHostID: roleHostID,
+            sequence: sequence,
+            launchAttemptID: "launch-predecessor-000\(sequence)",
+            descriptorSHA256: String(repeating: Character(String(sequence)), count: 64),
+            expectedWorkspaceID: "workspace-1",
+            expectedTabID: "tab-1",
+            expectedPaneID: "pane-1",
+            expectedTerminalID: "terminal-1"
+          ),
+          in: root
+        )
+      }
+    }
+    try HerdrRoleHostDescriptorStore.enqueue(
+      HerdrRoleHostCommand(
+        roleHostID: roleHostID,
+        sequence: 4,
+        launchAttemptID: "launch-replacement-0004",
+        descriptorSHA256: String(repeating: "4", count: 64),
+        expectedWorkspaceID: "workspace-1",
+        expectedTabID: "tab-1",
+        expectedPaneID: "pane-1",
+        expectedTerminalID: "terminal-1"
+      ),
+      in: root
+    )
+    let identity = HerdrRoleHostRuntimeIdentity(
+      process: try HerdrHostProcessIdentity(
+        processID: 43,
+        startSeconds: 101,
+        startMicroseconds: 201
+      ),
+      executable: executable,
+      executableSHA256: executableSHA256
+    )
+    let observed = RoleHostProbe()
+    let status = try await HerdrRoleHostRuntime.run(
+      arguments: ["--role-host-id", roleHostID],
+      environment: [
+        "HERDR_PANE_ID": "pane-1",
+        "HERDR_SOCKET_PATH": "/private/fake-herdr.sock",
+        "HERDR_TAB_ID": "tab-1",
+        "HERDR_WORKSPACE_ID": "workspace-1",
+        "JIDOKA_CODE_HERDR_RUN_ROOT": root.path,
+      ],
+      pollNanoseconds: 1_000_000,
+      identity: identity,
+      validateCommand: { _, _, _ in },
+      execute: { command, descriptorRoot, _ in
+        await observed.record(String(command.sequence))
+        try HerdrRoleHostDescriptorStore.requestShutdown(
+          roleHostID: roleHostID,
+          in: descriptorRoot
+        )
+        return 0
+      }
+    )
+    #expect(status == 0)
+    #expect(await observed.values() == ["4"])
   }
 
   @Test("bootstrap and queue records reject mutation and wrong host identity")

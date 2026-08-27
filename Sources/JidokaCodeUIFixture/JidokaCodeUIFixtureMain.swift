@@ -31,9 +31,10 @@ private struct UIFixtureAccessibilityContract {
           JidokaAccessibilityID.tokenField,
           JidokaAccessibilityID.tokenImport,
           JidokaAccessibilityID.providerDisclosure,
-          JidokaAccessibilityID.repositoryOwner,
-          JidokaAccessibilityID.repositoryName,
-          JidokaAccessibilityID.repositoryAdd,
+          "\(JidokaAccessibilityID.providerDisclosureProfile).orchestration",
+          "\(JidokaAccessibilityID.providerDisclosureProfile).planning",
+          "\(JidokaAccessibilityID.providerDisclosureProfile).review",
+          "\(JidokaAccessibilityID.providerDisclosureProfile).triage",
           JidokaAccessibilityID.loginItem,
           JidokaAccessibilityID.onboardingComplete,
         ],
@@ -43,7 +44,10 @@ private struct UIFixtureAccessibilityContract {
           "GitHub token",
           "Validate and Import",
           "Provider and source disclosure",
-          "Validate and Add Repository",
+          "Orchestration: openai-codex/gpt-5.6-sol, thinking max",
+          "Planning: openai-codex/gpt-5.6-sol, thinking max",
+          "Review: openai-codex/gpt-5.6-sol, thinking max",
+          "Triage: openai-codex/gpt-5.6-sol, thinking max",
           "Start Jidoka Code at login",
           "Finish Setup",
         ]
@@ -52,17 +56,40 @@ private struct UIFixtureAccessibilityContract {
       UIFixtureAccessibilityContract(
         identifiers: [
           JidokaAccessibilityID.settingsWindow,
+          JidokaAccessibilityID.settingsRepositoryReference,
+          JidokaAccessibilityID.settingsRepositoryAdd,
+          JidokaAccessibilityID.settingsModelCatalogRefresh,
+          "\(JidokaAccessibilityID.settingsModelSelector).review",
+          "\(JidokaAccessibilityID.settingsCustomModel).review",
+          JidokaAccessibilityID.credentialConnect,
           JidokaAccessibilityID.credentialReplacement,
           JidokaAccessibilityID.credentialDeletion,
         ],
         labels: [
           "Repositories",
-          "Model profiles",
+          "GitHub repository URL or owner and repository",
+          "Validate and Add",
+          "Model Profiles",
+          "Refresh Pi Models",
           "Maximum concurrent jobs",
-          "Start at login",
+          "Start Jidoka Code at login",
           "Validate and Replace",
           "Delete Credential",
           "Redacted diagnostics",
+        ]
+      )
+    case "settings-catalog-unavailable.png":
+      UIFixtureAccessibilityContract(
+        identifiers: [
+          JidokaAccessibilityID.settingsWindow,
+          JidokaAccessibilityID.settingsModelCatalogRefresh,
+          JidokaAccessibilityID.settingsModelCatalogNotice,
+          "\(JidokaAccessibilityID.settingsCustomModel).review",
+        ],
+        labels: [
+          "Model Profiles",
+          "Refresh Pi Models",
+          "Pi's offline model catalog",
         ]
       )
     case "menu-warning.png":
@@ -101,6 +128,9 @@ private struct UIFixtureReport: Codable {
   let invalidCredentialRejected: Bool
   let invalidRepositoryRejected: Bool
   let tokenFieldCleared: Bool
+  let catalogFailureInline: Bool
+  let catalogFailureModalSuppressed: Bool
+  let catalogFailureRefreshCount: Int
   let pausePreservedInFlight: Bool
   let ambiguousLateRecheckCount: Int
   let ambiguousAuthorizationCount: Int
@@ -134,6 +164,30 @@ private actor UIFixtureEngine: EngineClient {
       thinking: .max
     )
   }
+  private var modelCatalog = PiModelCatalog.unavailable
+  private let availableModelCatalog = PiModelCatalog(
+    models: [
+      PiModelCatalogEntry(
+        provider: "openai-codex",
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        reasoning: true,
+        input: [.text, .image],
+        contextWindow: 200_000,
+        maxTokens: 64_000,
+        thinkingLevels: ModelThinkingLevel.allCases
+      ),
+      PiModelCatalogEntry(
+        provider: "anthropic",
+        id: "claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        reasoning: true,
+        input: [.text, .image],
+        contextWindow: 200_000,
+        maxTokens: 64_000,
+        thinkingLevels: [.off, .low, .medium, .high]
+      ),
+    ])
   private var loginSelected = false
   private var loginStatus = LifecycleServiceStatus.notRegistered
   private var maxConcurrency = 2
@@ -141,6 +195,7 @@ private actor UIFixtureEngine: EngineClient {
   private var revision = 0
   private var rejectCredentialOnce = true
   private var rejectRepositoryOnce = true
+  private var rejectModelCatalog = false
 
   private(set) var commandKinds: [EngineCommandKind] = []
   private(set) var lateRecheckCount = 0
@@ -152,6 +207,9 @@ private actor UIFixtureEngine: EngineClient {
     switch command {
     case .snapshot:
       break
+    case .refreshModelCatalog:
+      guard !rejectModelCatalog else { throw EngineClientError(.piBlocked) }
+      modelCatalog = availableModelCatalog
     case .acknowledgeExternalAutomation(let value):
       externalAcknowledged = value
     case .acknowledgeProviderDisclosure(let value):
@@ -226,6 +284,12 @@ private actor UIFixtureEngine: EngineClient {
       }
       ambiguous.removeAll { $0.jobID == evidence.jobID }
       authorizationCount += 1
+    case .previewJobMaintenance, .applyJobMaintenance,
+      .previewJobCanary, .executeJobCanary,
+      .previewJobCanaryRecovery, .executeJobCanaryRecovery,
+      .previewJobCanaryPiRetry, .executeJobCanaryPiRetry,
+      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement:
+      throw EngineClientError(.invalidCommand)
     case .setLoginEnabled(let value):
       loginSelected = value
       loginStatus = value ? .enabled : .notRegistered
@@ -234,7 +298,7 @@ private actor UIFixtureEngine: EngineClient {
       loginStatus = status
     case .completeOnboarding:
       guard externalAcknowledged, providerAcknowledged, pi.state == .ready,
-        herdr.state == .ready, credential.state == .valid, !repositories.isEmpty, loginSelected,
+        herdr.state == .ready, credential.state == .valid, loginSelected,
         loginStatus == .enabled
       else {
         throw EngineClientError(.onboardingIncomplete)
@@ -260,6 +324,11 @@ private actor UIFixtureEngine: EngineClient {
 
   func setPassRunning(_ value: Bool) {
     passRunning = value
+  }
+
+  func setModelCatalogUnavailable(_ value: Bool) {
+    rejectModelCatalog = value
+    if value { modelCatalog = .unavailable }
   }
 
   func injectAmbiguousMutation() {
@@ -319,7 +388,8 @@ private actor UIFixtureEngine: EngineClient {
         loginItemSelected: loginSelected,
         loginItemStatus: loginStatus,
         credential: credential,
-        herdr: herdr
+        herdr: herdr,
+        modelCatalog: modelCatalog
       ),
       diagnostics: EngineDiagnostics(
         schemaVersion: 2,
@@ -378,19 +448,18 @@ private enum UIFixtureRunner {
     onboarding.token = sentinel
     await onboarding.validateAndImportCredential()
     await onboarding.acknowledgeProviderDisclosure(true)
-    onboarding.repositoryOwner = "owner"
-    onboarding.repositoryName = "repo"
-    await onboarding.validateAndAddRepository()
-    let invalidRepositoryRejected = onboarding.message?.title == "Repository not accepted"
-    onboarding.repositoryOwner = "owner"
-    onboarding.repositoryName = "repo"
-    await onboarding.validateAndAddRepository()
     guard await onboarding.complete() else {
       throw EngineClientError(.onboardingIncomplete)
     }
     let tokenFieldCleared = onboarding.token.isEmpty
 
     await settings.refresh()
+    settings.repositoryReference = "owner/repo"
+    await settings.addRepository()
+    let invalidRepositoryRejected = settings.message?.title == "Repository not accepted"
+    settings.repositoryReference = "owner/repo"
+    await settings.addRepository()
+    settings.setProfileSource(.custom, role: .review)
     screenshots.append(
       try render(
         AnyView(
@@ -399,6 +468,25 @@ private enum UIFixtureRunner {
         ),
         size: NSSize(width: 900, height: 1_800),
         filename: "settings-accessibility-type.png",
+        outputDirectory: outputDirectory
+      )
+    )
+
+    let unavailableEngine = UIFixtureEngine()
+    await unavailableEngine.setModelCatalogUnavailable(true)
+    let unavailableSettings = SettingsViewModel(client: unavailableEngine)
+    await unavailableSettings.refresh()
+    let catalogFailureInline =
+      unavailableSettings.modelCatalogNotice?.contains("offline model catalog") == true
+    let catalogFailureModalSuppressed = unavailableSettings.message == nil
+    let catalogFailureRefreshCount = await unavailableEngine.commandKinds.filter {
+      $0 == .refreshModelCatalog
+    }.count
+    screenshots.append(
+      try render(
+        AnyView(SettingsView(model: unavailableSettings)),
+        size: NSSize(width: 900, height: 1_800),
+        filename: "settings-catalog-unavailable.png",
         outputDirectory: outputDirectory
       )
     )
@@ -453,6 +541,9 @@ private enum UIFixtureRunner {
       invalidCredentialRejected: invalidCredentialRejected,
       invalidRepositoryRejected: invalidRepositoryRejected,
       tokenFieldCleared: tokenFieldCleared,
+      catalogFailureInline: catalogFailureInline,
+      catalogFailureModalSuppressed: catalogFailureModalSuppressed,
+      catalogFailureRefreshCount: catalogFailureRefreshCount,
       pausePreservedInFlight: pausePreservedInFlight,
       ambiguousLateRecheckCount: await engine.lateRecheckCount,
       ambiguousAuthorizationCount: await engine.authorizationCount,
