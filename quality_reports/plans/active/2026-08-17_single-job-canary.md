@@ -218,3 +218,10 @@ Recovery budget: three fix rounds, one parent writer, focused test-first impleme
 - Architecture and security closure reported no Critical/Major findings. Test, database, and performance reviewers’ three Major root causes were fixed and independently closed.
 - No production database mutation, provider/GitHub call, Resume, package, notarization, installation, helper restart, commit, push, PR, promotion, or release occurred.
 - Residual risk: a complete fake production PR-review canary spanning all four Herdr roles through multipart publication is represented by component and existing workflow tests rather than one new monolithic composition test. The next delivery boundary is packaging protocol-v5 app/helper together, not live execution.
+
+## Supersession record, 2026-09-03
+
+- This plan is immutable historical evidence, not current execution authority. Its exact paused PR-review objective was ultimately satisfied by the ninth-candidate sandbox job `7584cb7e-ba4b-4083-940f-1c48c7998360`: four accepted/settled roles, one attributed marker, and zero unrelated effects are preserved in `/Users/maroffo/JidokaCode-live-canary-evidence/20260902-pr1-ninth-terminal-theme`, inventory SHA-256 `21ed3ff062481dfc16d8b7b4e6137c18e6ea3f488cbb640a375bcf4e06595644`.
+- The delivered source, including the later recovery, host-replacement, privacy, runtime, theme, and narrative-binding fixes, merged through PR `#16` at `b6cb62ba7d53d5de740d6e2983656f911db7bd1c` on 2026-09-03.
+- Do not reuse this fixed-epoch `JobCanaryScope`, its incident predicates, or its historical authorization events for triage, implementation, or future rollout. Do not recover or rewrite its blocked predecessor jobs or late results.
+- Current operational planning is `quality_reports/plans/active/2026-09-03_progressive-production-automation.md`. It requires a separate schema-10 rollout authority and fresh approval for every source, release, installation, provider, GitHub, and promotion boundary. Unchecked historical addendum items above grant no remaining action.

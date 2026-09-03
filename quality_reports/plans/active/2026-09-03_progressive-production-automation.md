@@ -1,0 +1,462 @@
+# Progressive Production Automation Rollout
+
+**Status:** draft
+**Origin:** in-session request from Max after selecting option 3 on 2026-09-03
+**Base:** `origin/main` at merge commit `b6cb62ba7d53d5de740d6e2983656f911db7bd1c`; the inspected planning checkout is `docs/jidoka-code-operationalization-plan` at `c67943130e535da65274b77601e36241ce781454`, and both commits have tree `02933b9f0e91f23d7694185784bbc70beb09e41d`
+**Goal:** Deliver a Developer ID signed, notarized, stapled, Gatekeeper-accepted, installable Jidoka Code release that progressively qualifies pull-request review, issue triage, and issue implementation on explicitly authorized real GitHub repositories. Replace unscoped global Resume with durable, previewable, finite rollout authority that covers discovery, queued and recovery dispatch, provider and command execution, Git/GitHub effects, reconciliation, stopping, and promotion.
+
+## Analysis (verified 2026-09-03, do not re-derive without new evidence)
+
+### Current behavior
+
+- PR `#16` merged the complete source tree into `main` at `b6cb62ba7d53d5de740d6e2983656f911db7bd1c`. The branch tip `c67943130e535da65274b77601e36241ce781454` has the same tree, so source citations in this plan describe the merged tree rather than an unmerged variant.
+- The ninth candidate proved the release-owned Node `26.7.0`, Pi `0.84.2`, Herdr `0.8.2` protocol 20, protocol-11 helper, Keychain handoff, durable quit, mode-`0600` Pi sessions, commit-narrative binding, and all four PR-review roles. The accepted evidence is preserved at `/Users/maroffo/JidokaCode-live-canary-evidence/20260902-pr1-ninth-terminal-theme`, inventory SHA-256 `21ed3ff062481dfc16d8b7b4e6137c18e6ea3f488cbb640a375bcf4e06595644`.
+- That installed candidate is deliberately not a production distribution artifact. Gatekeeper rejects it as `source=Unnotarized Developer ID`, and it was built before the source merge. A production claim therefore requires a fresh package from the exact later merged implementation commit, notarization, stapling, Gatekeeper validation, installation, and installed-path verification.
+- Repository configuration has one global `enabled` bit and per-workflow `reviewEnabled`, `triageEnabled`, and `implementationEnabled` bits (`Sources/JidokaCodeCore/Configuration/ConfigurationStore.swift:3-31`). New-repository UI defaults currently turn all three workflow bits on (`Sources/JidokaCodeAppSupport/SettingsViewModel.swift:98-101`). These bits express repository policy, but they do not bind an exact object, revision, execution phase, provider budget, or mutation budget.
+- Onboarding completion currently sets `paused=0` in the same settings update (`Sources/JidokaCodeCore/Configuration/ConfigurationStore.swift:348-360`). The menu exposes a binary `Resume`/`Pause` action and `pollNow` (`Sources/JidokaCodeAppSupport/AppViewModel.swift:66-92`, `Sources/JidokaCodeAppSupport/JidokaViews.swift:68-92`). This is broader authority than the progressive rollout requires.
+- Scheduler Resume requests a pass after a one-second debounce, periodic polling is every 600 seconds, and an active pass is not cancelled when pause is set (`Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:26-89`, `Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:363-377`). `maxConcurrency` is an active-lease ceiling, not a cumulative job or effect budget.
+- A coordinator pass performs cleanup recovery and workflow recovery before it checks durable pause, then discovers every enabled repository and dispatches all queued jobs while the generic dispatch gate remains open (`Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:188-232`, `Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:338-381`, `Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:408-566`). Pausing therefore needs a recovery-aware protocol, not only a scheduler Boolean.
+- Normal discovery creates jobs with `requiresDispatchEligibility: true` (`Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:427-520`). Normal lease acquisition rechecks onboarding, acknowledgement, login-helper, pause, and concurrency predicates, but recovery acquisition deliberately bypasses the application dispatch gate (`Sources/JidokaCodeCore/State/DurableJobStore.swift:163-190`, `Sources/JidokaCodeCore/State/DurableJobStore.swift:1363-1434`). Existing queued, retry, recovery, waiting-human, and workflow-generated jobs must all receive an additional rollout check.
+- GitHub discovery consumes the complete paginated open-object listing and classifies PR heads, unlabelled issues, exact `agent:ready` issues, and exact `agent:plan-review` plus `plan:approved` issues (`Sources/JidokaCodeCore/GitHub/GitHubDiscovery.swift:195-337`). The broker requests 100 items per page and iterates to exhaustion with explicit page, byte, and item bounds (`Sources/JidokaCodeCore/GitHub/GitHubRequest.swift:224-305`, `Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:68-71`, `Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:468-493`). A rollout preview cannot inspect only page one.
+- Pull-request review validates repository policy, exact open/non-draft head identity, REST commit order, fetched commit graph, artifact digest, and commit-narrative digest before four fresh roles run (`Sources/JidokaCodeCore/Jobs/PullRequestReviewJobWorkflow.swift:83-153`, `Sources/JidokaCodeCore/Pi/PiWorkflowRouters.swift:284-349`). Publication then uses attributed marker comments and records the exact reviewed revision (`Sources/JidokaCodeCore/Jobs/PullRequestReviewJobWorkflow.swift:608-778`). The ninth live canary proves this workflow only.
+- Issue triage bootstraps up to eight workflow labels, runs one Pi triage role, publishes a marker, and applies exactly one verdict label after input revalidation (`Sources/JidokaCodeCore/Jobs/GitHubWorkflowLabelBootstrapper.swift:31-78`, `Sources/JidokaCodeCore/Jobs/IssueTriageJobWorkflow.swift:452-680`). Current W6 evidence uses fake GitHub transports and deterministic Pi fixtures, so no real triage marker or label transition has been accepted.
+- Issue implementation claims an exact `agent:ready` or approved complex issue, runs bounded planning, may publish a human approval gate, runs orchestration, publishes a create-only branch, creates a PR, links it, applies `agent:qa`, and enqueues a PR-review job (`Sources/JidokaCodeCore/Jobs/IssueImplementationJobWorkflow.swift:570-872`, `Sources/JidokaCodeCore/Jobs/IssueImplementationJobWorkflow.swift:1079-1188`, `Sources/JidokaCodeCore/Jobs/IssueImplementationJobWorkflow.swift:1218-1539`). The current simple path continues directly from a frozen plan into orchestration; it has no rollout checkpoint between planning and code execution.
+- Planning and orchestration each allow at most three rounds. Each round uses one writer, architecture, security, test, and synthesis, so each phase can consume at most 15 provider sessions (`Sources/JidokaCodeCore/Pi/PiWorkflowRouters.swift:614-871`, `Sources/JidokaCodeCore/Pi/PiWorkflowRouters.swift:933-1132`). PR review consumes exactly four roles and triage one role (`Sources/JidokaCodeCore/Pi/PiWorkflowRouters.swift:284-349`, `Sources/JidokaCodeCore/Pi/PiWorkflowRouters.swift:549-579`).
+- Remote writes already have durable prepared-before-send boundaries. GitHub writes call `markSendStarted` immediately before transport send (`Sources/JidokaCodeCore/Reconciliation/GitHubMutationExecutor.swift:27-75`, `Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:120-130`, `Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:361-389`), and create-only Git publication does the same (`Sources/JidokaCodeCore/Git/GitPublication.swift:78-155`, `Sources/JidokaCodeCore/Git/GitPublication.swift:210-260`). The missing primitive is a general durable capability and non-replenishing budget checked atomically at those boundaries.
+- Mutation reconciliation distinguishes prepared, send-started, reconcile-required, attributed, retry-allowed, and escalated states, including exact late attribution for non-idempotent creates (`Sources/JidokaCodeCore/Reconciliation/MutationReconciler.swift:4-39`, `Sources/JidokaCodeCore/Reconciliation/MutationReconciler.swift:128-257`). Revoking rollout authority must preserve read-only attribution while denying a new send.
+- `JobCanaryScope` is an incident-specific PR-review contract with a fixed historical epoch and a 64-part marker ceiling (`Sources/JidokaCodeCore/State/JobCanary.swift:4-46`). It does not model triage, implementation phases, finite polling windows, Git branch publication, PR creation, workflow-label bootstrap, or generated review handoff. Generalizing it would weaken its historical meaning.
+- Database schema 9 is the latest merged schema and every migration is backup-aware (`Sources/JidokaCodeCore/State/DatabaseSchema.swift:1605-1607`, `Sources/JidokaCodeCore/State/SQLiteStore.swift:381-424`). Durable rollout authority therefore belongs in a backed-up schema-10 migration rather than in event-key overloading or an external state file.
+- The production runtime already exposes `prepareForPause()` and `waitForPauseDrain()` to close Pi launch and approved-command admission before durable pause (`Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:337-355`). GitHub/Git and rollout-effect admission are not yet included in that drain.
+- Production currently records three intentionally blocked historical jobs and one succeeded ninth-canary job, with zero active leases. `Wishew/wishew-monorepo` remains repository-enabled but all three workflow flags are disabled. No historical job, run, result, mutation intent, session, descriptor, evidence bundle, or disposition may be rewritten to make rollout simpler.
+
+### Root cause or design gap
+
+The merged application has complete workflow implementations, exact workflow-local safety checks, and durable mutation reconciliation, but its operational authority is still global. Unpausing can traverse every configured repository, previously queued job, due retry, recovery job, and newly generated child job; repository flags and concurrency do not cap total selection or effects. No durable record binds an activation to one repository, workflow, object revision or finite selection predicate, workflow phase, release identity, model/resource identity, provider-session ceiling, command list, Git/GitHub operation envelope, expiry, or stop/recovery policy. Therefore current Resume cannot falsifiably prove that one accepted stage ran and nothing else did. The fix is a separate schema-10 rollout capability checked at every creation, lease, recovery, provider, command, and remote-effect boundary, with unscoped Resume removed from production behavior.
+
+### Scope
+
+- In: schema-10 rollout authority and migration; canonical preview and activation; exact-object and finite-window scopes; repository/workflow/revision and release identity binding; provider/read/command/mutation budgets; normal, queued, retry, waiting-human, recovery, and child-job admission; planning-to-orchestration checkpoint; reconciliation-only behavior; stop/drain; protocol, CLI, menu/settings UI, accessibility, operator evidence, source tests, package/release, notarized installation, real PR-review/triage/implementation pilots, complex-plan approval, generated review, and finite promotion windows.
+- In: release `0.2.0` build `3`, unless a version collision is demonstrated before source editing. Any replacement version must be an append-only execution decision and remain greater than installed `0.1.1` build `2`.
+- Out: merge, release upload, App Store distribution, public package publication, automatic GitHub merge, issue closure except through an explicitly reviewed `Closes` PR body, deployment, tag mutation, direct SQLite editing, historical job recovery, historical late-result acceptance, generalized arbitrary shell, hostile-repository containment beyond the accepted trusted-repository boundary, concurrency greater than one, and simultaneous active repository/workflow lanes.
+- Out: changing Node `26.7.0`, Pi `0.84.2`, Herdr `0.8.2`, protocol 20, the accepted runtime tree, signing identities, Keychain semantics, or the existing canary/replacement history unless a newly reproduced blocker requires a separately approved amendment.
+- Recover excluded historical context from: `quality_reports/plans/active/2026-08-17_single-job-canary.md`, `quality_reports/plans/active/2026-08-23_architecture-host-replacement-fallback.md`, `quality_reports/plans/active/2026-08-24_architecture-host-replacement-completion.md`, `quality_reports/plans/active/2026-08-25_release-owned-hermetic-pi-runtime.md`, `quality_reports/plans/active/2026-08-27_production-readiness-fast-path.md`, `docs/operations/production-cutover-0.1.1.md`, and the preserved evidence directories named above.
+
+### Candidate approaches
+
+| Approach | Decision | Evidence and trade-off |
+|---|---|---|
+| Resume with `maxConcurrency=1` | rejected | It limits simultaneous leases, not the number of serial jobs, discoveries, retries, recoveries, provider calls, or writes in a pass. |
+| Toggle one repository/workflow immediately before Resume | rejected | It does not bind already-created jobs, recovery acquisitions, object revisions, downstream jobs, budgets, or the race between observation and dispatch. |
+| External monitor that pauses after one observed job | rejected | Observation and gate closure are not atomic with the next lease or effect reservation. It cannot own crash recovery. |
+| Reuse or broaden `JobCanaryScope` | rejected | Its fixed epoch, PR-only role sequence, repaired-job predicates, and historical event grammar are accepted evidence. Generalization would create ambiguous authority and still omit implementation effects. |
+| Exact-object authorization only | rejected as the endpoint | It is correct for first pilots but would require a human command for every future object and would not deliver bounded production polling. |
+| Permanent repository/workflow allowlist with no finite budget | rejected | It recreates open-ended Resume at a smaller scope and gives a stale authorization indefinite future effect authority. |
+| Durable exact-object stages followed by finite, expiring, single-repository/single-workflow windows | chosen | It proves each workflow and phase before promotion, supports real automation after qualification, limits selection and effects, and provides one common gate for normal and recovery paths. |
+| New schema-10 tables plus a signed in-bundle release identity | chosen | The authority must survive helper/app crashes, bind the installed release, and be inspectable without overloading job transitions or trusting mutable external files. |
+| Add a new job state for rollout holds | rejected | Rebuilding the central `jobs` table and all foreign-key relationships adds migration risk. A queued job can remain inert because lease acquisition now requires an active matching capability; a new state-machine event can release the lease at the planning boundary without adding a database state value. |
+| Allow broad scheduler operation but filter only at remote writes | rejected | Provider disclosure, repository commands, branch preparation, and local state could still occur for unrelated jobs. Admission must begin at discovery/job binding and be repeated at each point of no return. |
+
+### Independent opinion
+
+No model-based independent opinion ran for this draft. Current authorization excludes further provider calls, and Pi Forge reports that model-facing reviewer workflows remain blocked until pi-subagents exposes a host-only protected-child permit carrier. The Expert Panel was not convened because that would itself initiate provider calls outside the authorized budget. Reduced-confidence areas are the schema-10 SQL transition design, complete effect-gate call-site coverage, and liveness after emergency drain. They are explicit Critical/Major review gates before source completion; no fallback reviewer or prior review is accepted as closure.
+
+## Locked decisions
+
+Append only. Reverse a decision with a new row that names the superseded row.
+
+| # | Decision | Choice | Evidence/rationale | Revisit if |
+|---|---|---|---|---|
+| 1 | Normative source | Start implementation from a clean descendant of `origin/main@b6cb62ba7d53d5de740d6e2983656f911db7bd1c` after this plan is approved and merged | PR `#16` is the source-delivery boundary; local `main` is intentionally not used as authority | Remote main no longer contains that merge as an ancestor |
+| 2 | Durable authority | Add backup-required schema 10 with rollout authorizations, immutable scopes/budgets, job bindings, append-only events, and non-replenishing effect reservations | Global settings and historical event keys cannot express the required capability | A smaller durable representation proves every same invariant before implementation |
+| 3 | Migration default | Schema 10 atomically forces `paused=1`, clears any scheduler scope, creates no authorization, and preserves every historical row byte-for-byte where schema permits | Upgrade must not convert old configuration into new authority | Never |
+| 4 | Production scheduler | Unscoped `paused=0`, Resume, startup pass, manual poll, and periodic pass are denied. Scheduler execution requires one active rollout authorization ID stored atomically with scheduler scope | Existing generation-rollover history already denies ordinary Resume, and option 3 requires a replacement rather than a bypass | A later reviewed design proves equivalent bounded authority |
+| 5 | Scope modes | Support `exactObject` first, then `finiteWindow`; never support an unbounded or cross-repository scope | Exact pilots establish behavior, while finite windows deliver production polling without indefinite authority | Product requirements explicitly require multi-repository atomic operation |
+| 6 | Workflow stages | Closed values are `prReview`, `issueTriage`, `implementationPlan`, `implementationExecute`, and `generatedPRReview` | Implementation planning, human approval, remote code publication, and downstream review have different effects and budgets | Workflow state machine changes materially |
+| 7 | Exact identity | Bind repository UUID/node/owner/name/default branch, object node/number, workflow stage, exact object revision, canonical input digest, relevant head/base/plan/narrative digests, label state, and current durable job step | Head-only or job-ID-only authorization becomes stale when narrative, issue, base, label, or phase changes | An immutable GitHub object version subsumes these fields |
+| 8 | Release/config identity | Bind source commit, bundle version/build, app/helper/Herdr-host code identities, schema/protocol, runtime manifest/tree, model profiles, workflow resources, GitHub account/author ID, repository flags, and canonical policy version | A preview from one installed/configured authority must not execute after replacement or reconfiguration | A stronger signed release identity subsumes fields without loss |
+| 9 | Preview freshness | Exact previews expire after 15 minutes and finite-window previews after 10 minutes. Activation recomputes every remote and local input before any job/effect authority is inserted | Prevents stale approval and limits TOCTOU exposure | Live API latency makes the bound operationally impossible and a reviewed alternative is approved |
+| 10 | One active lane | Schema and runtime permit at most one active/draining/recovery-required authorization globally and retain `maxConcurrency=1` throughout this release | Serial evidence and containment are more important than throughput in the first production release | Every workflow passes real-repository finite-window acceptance and a new plan authorizes concurrency |
+| 11 | Budgets | Every scope has finite expiry, jobs, GitHub API reads/pages/bytes, Git remote reads, provider sessions, approved commands, marker parts, label writes, branch creates, and PR creates. Reservations are durable and never replenished; an idempotent replay of the same reservation does not double-consume | Caps selection, disclosure, local execution, and irreversible effects under retries/crashes | A provider or transport supplies stronger atomic quota enforcement |
+| 12 | Derived mutation envelope | The engine derives the only allowed operation kinds and maxima from stage plus current state. Callers cannot submit an arbitrary mutation allowlist | A user-supplied operation list could accidentally authorize a new capability | Workflow contract changes and receives a new policy version |
+| 13 | Label bootstrap | Preview lists every missing workflow label and exact definition. Activation either binds those exact creates or requires pre-provisioning; no live repository silently receives eight labels | Bootstrap is a real repository mutation before the provider runs | Repository already contains byte-equivalent definitions |
+| 14 | Entry-path gate | Require the same active binding at discovery/job creation, queued lease, retry promotion, waiting-human approval evaluation, recovery acquisition, direct execution, and generated-child dispatch | Any omitted path can bypass selection scope | Never |
+| 15 | Effect gate | Recheck and reserve authority at GitHub read/send, Git fetch/push, Herdr/Pi launch, approved-command launch, and other network/process points of no return. GitHub/Git send reservation is atomic with existing `markSendStarted` | Admission alone becomes stale during a long workflow | A stronger transaction spans the whole workflow |
+| 16 | Planning checkpoint | After a simple/moderate frozen plan is durable, release the lease and leave the job queued at `.orchestrate`; `implementationExecute` needs a new exact preview. Complex planning continues to publish its plan and enter `waitingHuman` | Current recursion would combine planning, code changes, push, and PR creation under one first-use permit | Real evidence proves a narrower safe checkpoint |
+| 17 | Complex approval | Human adds `plan:approved` outside Jidoka only after reviewing the exact plan digest. A new execution preview binds that digest, issue/base revisions, approval label, and durable step; stale input consumes only approval and returns to planning under another authorization | Current stale-plan behavior is correct but must not auto-resume under old authority | GitHub provides a stronger signed approval artifact integrated into the product |
+| 18 | Generated review | Implementation may create the exact PR-review job locally, but that child remains queued and unbound. It requires a separate `generatedPRReview` preview and authorization for the produced PR head | A parent implementation permit must not implicitly add four provider sessions and a comment | A future scope explicitly and visibly budgets the child before parent activation |
+| 19 | Failure policy | Exact pilots stop on the first transient, permanent, budget, stale-input, timeout, or ambiguous-effect boundary. No automatic fresh provider launch or new send occurs. Finite windows may use existing safe retries only within remaining durable budget and expiry | First-use retries would blur what the operator approved | Same stage has passed exact and finite-window fault acceptance |
+| 20 | Reconciliation after stop | Read-only lookup and exact late attribution of an already `sendStarted` effect remain allowed after expiry/revocation; no retry send, provider relaunch, command, branch, PR, label, or comment is allowed without new authority | Reduces uncertainty without turning reconciliation into new effect authority | Never |
+| 21 | Crash behavior | Startup converts any non-terminal active lane to `recoveryRequired`, sets durable pause, launches nothing, and exposes a new read-only recovery preview. Recovery execution is separately authorized and can reconcile exact prior effects or continue the exact job within remaining budget, never substitute another object | Current startup recovery runs before the pause check | A fully atomic external transaction becomes available |
+| 22 | Stop/drain | `Stop and drain` first closes in-memory admission, persists draining, then drains Pi, commands, GitHub/Git effect leases and readbacks, finally persists pause and terminal scope. Timeout produces recovery-required, not a false stopped state | Pause is a drain protocol, not an instant kill | Kernel-backed cancellation with exact remote-effect certainty is introduced |
+| 23 | Repository defaults | New repositories start globally disabled with all workflow flags false. Flags remain defense-in-depth and cannot grant rollout authority | Current true defaults are unsafe for an automation product | A deliberate onboarding flow previews and confirms exact initial settings |
+| 24 | Pagination | Preview and execution use the complete bounded listing. Any page failure, rate-limit, limit exhaustion, duplicate identity, or list drift invalidates preview or stops the lane before new effects | Page-one evidence can omit an earlier-priority or matching object | GitHub introduces an immutable complete snapshot API |
+| 25 | Promotion | A finite window for a repository/workflow requires successful exact-object receipts for that same repository and stage, zero unresolved/ambiguous effects, accepted evidence inventory, and explicit new authorization | Sandbox or another repository cannot establish repository-local operational safety | A separately reviewed cross-repository qualification policy exists |
+| 26 | Finite windows | First promoted window is at most 3 jobs or 4 hours, whichever occurs first. Later windows remain at most 10 jobs or 24 hours in this release. One workflow and repository only, concurrency one | Gives useful polling while retaining bounded reviewable blast radius | New evidence and plan authorize larger limits |
+| 27 | Trusted repository boundary | Implementation may run only on an explicitly trusted repository whose project-owned verification commands are reviewed. The accepted immediate process-group escape residual remains; it is not represented as hostile-code containment | Existing release decision 21 trusts configured repositories and approved commands | Jidoka must implement untrusted repositories or arbitrary commands |
+| 28 | Distribution identity | Release `0.2.0` build `3` uses Application identity `42168752E0FB74059B87BCCF4870356745AAAFA0`, Installer identity `44A3B34F4CCDE0AD66D2024CCB2F6E93483B9F2B`, and Team `X3Q42VNZDC` | These are the qualified local identities; a new schema/protocol/control plane warrants a version advance | Identity unavailable/expired or version collision is proved before signing |
+| 29 | Merge and operations | Source PR merge, signing, notarization, installation, remote reads, each live activation, manual approval label, finite-window promotion, release publication, and rollback are separate stop gates | Each has distinct credentials, cost, external effects, and reversibility | Max explicitly combines exact named gates |
+| 30 | Historical state | No schema-10 migration or rollout command rewrites, retires, recovers, or reattributes the three blocked jobs, historical Pi runs/results, canary events, mutation intents, sessions, or evidence | Option A preserves application work and history | Never for this plan |
+
+## Acceptance criteria
+
+### Source and durable authority
+
+- [ ] A failing pre-fix test proves current unscoped Resume can dispatch more than one serial job with concurrency one, and a second test proves paused coordinator recovery can enter a workflow before the current pause check.
+- [ ] A failing pre-fix test proves a queued job can remain eligible after its repository/workflow flag changes, and another proves the implementation-created review job has no separate provider/publication approval.
+- [ ] Schema 9 to 10 migration creates a mode-`0600` backup, preserves all historical tables and row identities, passes integrity and foreign-key checks, starts paused with no active scope, and rolls back atomically at every injected statement cut.
+- [ ] Old binaries fail closed on schema 10. The new binary opens schema 9 and migrates once, then reopens schema 10 idempotently without another backup or authority.
+- [ ] Scope, budget, event, effect, and binding rows reject unknown enums, malformed identifiers/digests, non-canonical JSON, mutable identity fields, backward state transitions, budget decrement/update/delete, overlapping active lanes, and cross-job/repository/workflow bindings.
+- [ ] A canonical preview is read-only with respect to jobs, dispositions, settings, leases, runs, commands, intents, workspaces, rollout tables, GitHub writes, Git writes, and providers. Read/cache artifacts are isolated, mode-safe, bounded, and declared.
+- [ ] Activation accepts only an exact unexpired preview digest, recomputes all bound inputs, inserts one active authorization and its exact job binding atomically, and cannot select a different object when priority/order changes.
+- [ ] Unscoped Resume, onboarding auto-resume, manual poll, periodic startup dispatch, direct coordinator entry, normal lease, recovery lease, due retry, approval evaluation, and generated child execution all fail without a matching active authorization.
+- [ ] New repositories and workflows are disabled by default. Enabling flags never creates or activates a rollout scope.
+- [ ] Exact stage completion, stop, expiry, cap exhaustion, stale input, failure, and ambiguity close or suspend the lane without granting the next queued object.
+
+### Effect and recovery boundaries
+
+- [ ] Every GitHub request, Git remote request, Pi/Herdr provider launch, approved command, marker part, label operation, branch create, and PR create is attributable to one durable reservation in the active scope.
+- [ ] Reservation and `markSendStarted` are one database transaction for GitHub and Git writes. A crash cannot expose a remote send without a consumed reservation or consume a second reservation on idempotent replay.
+- [ ] Provider caps are stage-derived: PR review 4, triage 1, implementation planning at most 15, implementation execution at most 15. Wrong role, round, session reuse, fifth PR role, sixteenth phase role, or post-expiry launch fails before process creation.
+- [ ] Approved-command authority binds the exact frozen plan, ordered command IDs and definition digests. No command absent from that plan runs, and a failed command stops before later commands.
+- [ ] Marker authorization binds exact document SHA, part count, object, revision, kind, author, and generation before part one. A part-count cap cannot cause an authorized partial batch.
+- [ ] Missing-label bootstrap creates only the exact previewed definitions and count. Any changed/existing-conflicting definition blocks before send.
+- [ ] Stop and drain rejects new reservations immediately, lets only already-started exact readback settle, waits for Pi/command/effect admission to drain, and reports `recoveryRequired` rather than `stopped` on timeout or uncertain effect.
+- [ ] Startup with an interrupted lane performs no automatic provider, command, Git, GitHub write, lease substitution, or new job selection. Explicit recovery cannot replenish budget or accept historical late results.
+- [ ] Revoked/expired scopes can read back prior `sendStarted` intents and attribute exact late effects, but cannot turn `retryAllowed` into a new send.
+
+### Workflow behavior
+
+- [ ] PR review binds exact REST/fetched head, complete commit set/order, commit narrative and artifact; four distinct accepted/settled roles produce one attributed marker and reviewed-revision row, then cleanup and scope settlement.
+- [ ] PR title/body or commit narrative drift at the same head invalidates exact preview before provider launch. Head, base, draft, closure, redirect, or repository-node drift does the same.
+- [ ] Triage binds exact issue revision and base, creates no unpreviewed labels, runs one role, publishes one attributed marker batch, applies only `agent:ready`, `agent:needs-spec`, or `agent:human`, and preserves domain labels.
+- [ ] Triage input drift under an exact scope stops and requires a new preview rather than recursively rerunning under stale authority.
+- [ ] Initial implementation planning claims only exact `agent:ready`, binds issue/base/artifact, runs at most 15 planning roles, and either blocks safely, publishes a complex plan and waits for human, or freezes a simple/moderate plan and releases the lease queued at `.orchestrate`.
+- [ ] No branch push, PR create, issue link, QA label, or orchestration provider call can occur under `implementationPlan` authority.
+- [ ] `implementationExecute` binds the frozen plan and current exact issue/base/labels. Success runs approved commands, imports exact changed paths/head/tree evidence, create-only pushes one branch, creates one exact-head PR, links it, sets `agent:qa`, cleans up, and succeeds.
+- [ ] Complex execution cannot start from `plan:approved` alone. It requires exact plan/issue/base approval preview, and stale issue/base input consumes only the approval and returns to a separately authorized planning stage.
+- [ ] The generated PR-review job is durable and queued but inert after implementation. Separate generated-review authorization proves four roles and one exact-head review marker.
+- [ ] Ambiguous branch, PR, comment, or label visibility preserves durable reconciliation evidence and stops all later mutation kinds.
+
+### Product, release, and operations
+
+- [ ] Engine protocol 12 and closed CLI commands expose preview, activate, status, stop/drain, recovery preview/execute, and finite-window promotion with strict request/response validation and no arbitrary command or token field.
+- [ ] The menu no longer presents blind Resume. It presents stopped/preview/active/draining/recovery-required/settled state, exact target, expiry and remaining budgets, with accessible preview, authorize/run, and stop/drain controls.
+- [ ] `Poll now` is available only inside an active finite window and retains the same exact scope; onboarding completion remains paused.
+- [ ] Source-controlled operations documentation and preflight produce a canonical redacted inventory without token values, private keys, raw provider transcripts, or sensitive repository content.
+- [ ] Fresh `make check`, `make test-e2e`, the rollout acceptance target, strict format, release builds, and `git diff --check` pass after the final source edit. A malformed, stale, partial, zero-test, timed-out, or pre-edit run is not evidence.
+- [ ] Architecture, security, database, and test reviews of the final source report zero unresolved Critical/Major findings; model review unavailability blocks source completion rather than silently lowering the gate.
+- [ ] A clean post-merge source checkout produces one exact signed package. App, helper, host, Node, native modules, and installer signatures/timestamps are exact; Apple notarization is `Accepted`; stapler and Gatekeeper accept the package and app; package/payload manifests are frozen.
+- [ ] Installation preserves a verified schema-9 backup and every historical record, installs one root-owned secure app, migrates once to schema 10, starts paused with helper enabled, and passes two authoritative lifecycle cycles plus installed Pi/Herdr/runtime preflights with zero provider calls.
+- [ ] One fresh private-sandbox exact PR review, one triage, one simple implementation planning/execution/generated review, and one complex planning/approval/execution/generated review pass through the new authority with their exact expected effects and no extras.
+- [ ] On a separately selected real production repository, exact PR review, triage, implementation planning, implementation execution, and generated review each pass separately before any finite window.
+- [ ] The first same-repository finite window processes at most three objects or four hours for one workflow. It stops automatically at terminal budget/expiry and leaves every other repository/workflow/job untouched.
+- [ ] No Jidoka path merges or deploys a produced PR. Release publication remains unclaimed unless separately authorized and evidenced.
+
+## Workstreams
+
+### W0: Freeze the merged baseline and reproduce authority gaps
+
+- Scope: read-only state capture; focused tests in `JobCoordinatorTests.swift`, `DurableSchedulerTests.swift`, `DurableJobStoreTests.swift`, `EngineServiceTests.swift`, and workflow tests.
+- Excluded: production database, GitHub/provider calls, package signing, installation, and any historical-state mutation.
+- [ ] Start from a clean non-primary implementation worktree whose base is the approved plan merge on `main` and whose ancestry includes `b6cb62ba7d53d5de740d6e2983656f911db7bd1c`.
+- [ ] Record source commit/tree, toolchain/runtime manifests, current schema/protocol/package versions, source database fixture inventory, and exact historical evidence references.
+- [ ] Add deterministic failing tests for serial second-job dispatch under Resume/concurrency one, queued flag drift, paused recovery dispatch, generated child dispatch, onboarding auto-resume, and page-one-only candidate selection assumptions.
+- [ ] Preserve failure output before writing the fix. If any claimed gap does not reproduce, stop and amend this plan rather than implementing the presumed design.
+
+### W1: Add schema-10 rollout authority and canonical evidence
+
+- Scope: `DatabaseSchema.swift`, new `RolloutAuthority.swift` and `RolloutAuthorityStore.swift` near state code, `SQLiteStoreTests.swift`, store/property tests.
+- Excluded: scheduler and workflow behavior; recover those from W2-W3.
+- [ ] Add immutable canonical models for policy version, release/config identity, scope mode, workflow stage, object selector, finite-window selector, budgets, preview, authorization, event, effect reservation, status, and report.
+- [ ] Add schema-10 tables for authorization scope/budget, authorization events, job bindings, and effect reservations; add `app_settings.active_rollout_authorization_id` or an equivalent foreign-key-bound scheduler-scope field.
+- [ ] Use SQL constraints, unique indexes, and triggers to enforce one active lane, immutable scope/budget, valid status/effect transitions, no deletion, exact job binding, nonnegative finite limits, no count replenishment, and `paused=0` only with one matching active scope.
+- [ ] Migration begins by preserving a SQLite backup, then ends paused with no active scope. It must not manufacture bindings from repository flags or existing jobs.
+- [ ] Build a canonical read-only preview whose digest covers complete queue/recovery/intent inventory and every locked identity field. Reject unknown fields and non-canonical encodings.
+- [ ] Parameterize migration fault injection at every statement and verify exact schema-9 rollback, schema-10 integrity/FKs, mode `0600`, historical row equality, reopen behavior, and old-binary too-new denial.
+
+### W2: Replace global dispatch with scoped admission
+
+- Scope: `ConfigurationStore.swift`, `DurableScheduler.swift`, `JobCoordinator.swift`, `DurableJobStore.swift`, `ProductionEngineJobRuntime.swift`, state machine, production composition, and focused tests.
+- Excluded: provider and transport call sites; recover those from W3.
+- [ ] Remove onboarding auto-resume and deny generic `setPaused(false)` without atomic rollout activation. Keep `setPaused(true)` as containment.
+- [ ] Refactor the coordinator so production passes require one active scope and visit only its repository/workflow/selector. Exact activation cannot fall through to ordinary discovery or queue iteration.
+- [ ] Bind jobs at creation, and require the same active binding for normal lease, due retry, waiting-human approval evaluation, recovery lease, direct execution, and scope completion.
+- [ ] Ensure jobs created before schema 10, jobs from another scope, and implementation-generated PR jobs remain inert without an explicit binding.
+- [ ] Add a lease-release state-machine event at the durable simple-plan boundary, leaving the same job queued at `.orchestrate` with its frozen plan intact and no new job-state enum.
+- [ ] For finite windows, consume one job slot atomically at first binding, use deterministic job ordering, stop at the cap/expiry, and never borrow another scope's unused budget.
+- [ ] On startup, move interrupted active scope to recovery-required and keep scheduler paused before coordinator recovery. Cleanup may run only where it cannot erase required pilot evidence and must be declared in the report.
+
+### W3: Gate every disclosure, command, and remote effect
+
+- Scope: rollout gate actor/store; `GitHubBroker.swift`; `GitHubMutationExecutor.swift`; `MutationReconciler.swift`; `GitPublication.swift`; Git transport; Pi/Herdr executors and run stores; approved command stores/runners; composition and fault tests.
+- Excluded: changes to model prompts, mutation semantics, or Git force policy except to carry exact rollout identity.
+- [ ] Introduce one closed `RolloutEffectAuthorizing` interface. Production has no allow-all implementation; tests must opt into explicit fixtures.
+- [ ] Reserve GitHub/Git sends in the same transaction that marks an existing mutation intent send-started. Bind operation, request/target digest, job, scope, ordinal, attempt, and remaining cap.
+- [ ] Gate GitHub pages/bytes and Git remote reads before transport, including preview's separate read-only budget. Redirects must preserve repository node identity and consume bounded requests.
+- [ ] Gate each Pi/Herdr logical role before process creation and bind workflow, role, round, run nonce, artifact/plan/narrative/resource/profile digests. Persist reservation before launch and never substitute a session.
+- [ ] Gate each approved command before process creation and bind frozen plan digest, command ID/definition digest, round, workspace head, and order.
+- [ ] Extend pause/drain admission to GitHub/Git and rollout effects. Once draining begins, permit only exact readbacks of already-started operations.
+- [ ] Prove concurrent requests cannot overrun a cap, crash windows cannot expose an unrecorded effect, retries consume only their declared send-attempt budget, and idempotent observation does not double-consume.
+
+### W4: Make workflows phase-aware without weakening local safety
+
+- Scope: the three job workflows, inputs, Pi routers only where identity must be carried, label bootstrap/mutator/marker/PR publishers, and workflow tests.
+- Excluded: new workflow output semantics or broader model tools.
+- [ ] Define stage-derived effect envelopes for PR review, triage, implementation planning, implementation execution, and generated review. Include exact missing-label definitions and every blocked/failure publication path.
+- [ ] Make exact-scope input drift terminal to that scope. Preserve durable current behavior for finite-window safe retries only after producing a new exact job snapshot within the same selector and budget.
+- [ ] Stop simple/moderate implementation after frozen-plan persistence and lease release; require a new execution authorization.
+- [ ] Preserve complex human gate semantics. Bind approval to exact plan digest and prevent `plan:approved` discovery from evaluating a waiting job without execution-stage authority.
+- [ ] Keep create-only branch policy, no force, exact-head PR lookup, issue link, QA label, cleanup, and generated review enqueue unchanged except for mandatory rollout bindings.
+- [ ] Add end-to-end fake-transport tests for each stage, including blocked outputs, stale issue/base, stale approval, command failure, ambiguous branch/PR/comment/label, and generated-child isolation.
+
+### W5: Add protocol-12 operator controls and evidence
+
+- Scope: `EngineProtocol.swift`, `EngineService.swift`, engine main, application client, new `RolloutCLI.swift`, app entry point, App/Settings view models, SwiftUI views/accessibility IDs, operations docs, preflight scripts, and tests.
+- Excluded: arbitrary JSON-to-command execution, direct database access, and hidden developer bypasses.
+- [ ] Bump Engine protocol 11 to 12 and add strict preview, activate, status, stop/drain, recovery-preview, recovery-execute, and finite-window commands. Use canonical base64 JSON only where existing command-line limits require it.
+- [ ] Return redacted structured reports with exact target, release/config digest, current durable step, operation envelope, initial/remaining budgets, effect reservations, terminal/recovery state, and checkpoint receipt.
+- [ ] Replace Resume with a rollout view. Require the operator to inspect the complete preview and confirm its digest before activation; do not use a generic confirmation string that can approve changed bytes.
+- [ ] Show missing labels and all predicted GitHub/Git/provider/command effects. Keep secrets and raw repository/provider content out of UI logs and evidence.
+- [ ] Add `Stop and drain` with visible bounded progress and recovery-required failure. Disable `Poll now` except for an active finite window.
+- [ ] Change new-repository defaults to disabled/all workflows off and keep onboarding paused.
+- [ ] Add source-controlled `docs/operations/progressive-production-rollout.md`, fixed expected-value schema, a read-only preflight, and tests proving credential/provider/GitHub mutation counters remain zero during static/installed qualification.
+
+### W6: Complete source verification, independent review, and source delivery
+
+- Scope: complete changed source tree and documentation.
+- Excluded: Developer ID signing, notarization, installation, production DB, provider calls, and live GitHub reads/writes.
+- [ ] Add a root `jidoka-code-production-automation-acceptance` Make target composed only from source-controlled deterministic tests and scripts. Do not fabricate live E2E evidence.
+- [ ] Run focused tests after each workstream. After the last source edit run `make check`, `make test-e2e`, `make jidoka-code-production-automation-acceptance`, strict recursive swift-format, release app/helper/host builds, and `git diff --check`.
+- [ ] Preserve and investigate the known `.cleanupFailed` process risk if it recurs. A later quiet pass does not erase a reproducible cleanup defect.
+- [ ] Build one redacted review artifact with complete changed-file roster, exact relevant source/diff, schema SQL/digest, authority state graph, call-site inventory, fault matrix, and fresh logs.
+- [ ] Route `pi-forge.architecture-reviewer`, `pi-forge.security-reviewer`, `pi-forge.database-reviewer`, and `pi-forge.test-reviewer` only after the protected-child carrier works. Parent verifies every Critical/Major against source and executable evidence, fixes supported blockers, and reruns affected plus final gates.
+- [ ] Commit only the coherent implementation on a non-primary branch with hooks active, push only its exact same-name branch, and open one PR under standing authorization. Stop before merge.
+- [ ] After Max separately authorizes and performs or requests merge, record the exact remote-main merge commit/tree. All later package evidence binds that commit, not the feature branch.
+
+### W7: Build one merged-tree production package
+
+- Scope: fresh clean worktree at the exact accepted remote-main merge; ignored release staging; existing package scripts plus reviewed release-evidence additions.
+- Excluded: install, launch, production database, provider/GitHub workflow calls, upload, tag, or public release.
+- Stop gate: explicit authorization for Developer ID identities, private-key/notary use, and Apple notarization request.
+- [ ] Recreate the qualified release-runtime input from its pinned manifest and inventory without changing Node/Pi/Herdr versions. Verify exact runtime and signed-native identities before packaging.
+- [ ] Build release `0.2.0` build `3` only from the clean merge commit. Embed a signed release identity containing source commit/tree, protocol 12, schema 10, runtime manifest/tree, workflow resources, and package version.
+- [ ] Sign nested code, app, helper, host, Node, and native modules in the already qualified order with Application identity `42168752E0FB74059B87BCCF4870356745AAAFA0`; sign the package with Installer identity `44A3B34F4CCDE0AD66D2024CCB2F6E93483B9F2B`.
+- [ ] Submit exactly that package to Apple, require `Accepted`, staple, validate staple, run `spctl` on package and app, `pkgutil --check-signature`, strict/deep/all-architecture code-sign checks, payload/BOM equality, runtime JIT/native/Pi probes, and old-binary schema-10 denial.
+- [ ] Freeze package, app/helper/host, payload tree, parent tree, runtime, source, notarization, and manifest digests in mode-`0600` evidence. Do not expose notary key path/content or credentials.
+
+### W8: Install, migrate, and qualify while no workflow is active
+
+- Scope: exact signed package, installed app path `/Library/Application Support/JidokaCode/Applications/Jidoka Code.app`, login helper, schema-9 database and backup, installed preflights.
+- Excluded: rollout activation, provider calls, GitHub workflow reads/writes, manual issue/PR mutation, rollback execution.
+- Stop gates: exact quiesce/backup authorization; separate interactive administrator installation authorization.
+- [ ] Inventory installed ninth app, helper registration, processes, open DB descriptors, schema/integrity/FKs/WAL, all durable tables, historical evidence paths, package receipts, and rollback paths.
+- [ ] Use supported lifecycle commands to deregister/quiesce only the current helper/app; prove all DB writers and managed child processes are absent before backup/install.
+- [ ] Create and verify one authoritative mode-`0600` schema-9 backup, including row counts and per-table hashes. Do not edit SQLite directly.
+- [ ] Install only the frozen package through explicit user-run privileged tooling. Audit receipt, secure ancestors, root:wheel ownership, modes/ACLs, exact payload, signatures, and absence of duplicate bundles before launch.
+- [ ] Launch by exact installed path. Require one schema-10 migration, `paused=1`, no active authorization, zero new jobs/leases/runs/commands/intents/provider/GitHub effects, and exact preservation of the three blocked jobs and all historical records.
+- [ ] Register/qualify the mandatory login helper. Complete two authoritative `Paused` lifecycle cycles and durable quits; `Connecting` alone is not acceptance.
+- [ ] Run installed static, Pi, Herdr, runtime, Keychain, protocol, and UI preflights with provider/network mutation counters at zero. Preserve a frozen evidence inventory.
+
+### W9: Qualify exact PR review in a private sandbox
+
+- Scope: one newly selected open, non-draft PR revision in an explicitly approved private sandbox; exact four-session provider budget and one review marker batch.
+- Excluded: triage, implementation, repository-label changes, branch/PR creation, other PR heads, finite windows.
+- Stop gates: read-only preview authorization, then separate exact activation authorization naming repository, PR, head, preview SHA, four sessions, marker cap, expected comment, and stop owner.
+- [ ] Create or select the sandbox PR only under separate GitHub authorization. Do not reuse PR `#1` or its old marker unless a fresh unchanged-revision review is intentionally approved.
+- [ ] Preview the complete paginated repository/queue state and exact artifact/narrative without provider or GitHub writes.
+- [ ] Activate one exact review. Require four distinct accepted/settled roles, mode-`0600` sessions, no runtime failure, one attributed marker batch, reviewed-revision record, terminal job/scope, zero other job/provider/mutation effects, and automatic pause.
+- [ ] Exercise a stale-head or changed-narrative negative control in a separate no-provider preview; it must reject before activation.
+
+### W10: Qualify exact issue triage in a private sandbox
+
+- Scope: one newly selected unlabelled open issue revision; one provider session; exact missing-label bootstrap, triage marker, and one verdict label.
+- Excluded: implementation claim, branch, PR, generated review, finite windows.
+- Stop gates: issue creation/selection; read-only preview; exact activation including missing-label list and expected possible verdict labels.
+- [ ] Prefer pre-provisioned exact workflow labels. If any are missing, present and separately authorize each exact definition before activation.
+- [ ] Require one accepted/settled triage result, one attributed marker, exactly one allowed workflow verdict label, preserved domain labels, cleanup, terminal scope, and no other object effects.
+- [ ] Negative controls for issue edit, comment change, workflow-label appearance, page-two candidate, rate limit, and ambiguous marker/label stop before unauthorized retry.
+
+### W11: Qualify simple implementation, execution, and generated review in a private sandbox
+
+- Scope: one bounded, mechanically verifiable `agent:ready` issue in a trusted disposable repository; separate planning, execution, and generated-review authorizations.
+- Excluded: complex approval, merging the generated PR, deployment, finite windows.
+- Stop gates: issue/label preparation; planning preview/activation; inspection and approval of frozen plan/commands; execution preview/activation; generated-review preview/activation.
+- [ ] Planning authorization permits claim, exact label transition, at most 15 planning sessions, and blocked/plan output only. Require a simple/moderate frozen plan and queued `.orchestrate` boundary with no code publication.
+- [ ] Human inspects exact plan Markdown, planning-decision digest, command definitions/digests, branch name, expected changed paths, and full predicted mutation envelope before execution authorization.
+- [ ] Execution requires at most 15 orchestration sessions, all approved commands green, exact imported head/tree/changed-path evidence, one create-only branch, one exact-head PR, one issue link, `agent:qa`, cleanup, and no extra ref/comment/label.
+- [ ] Generated review requires a third authorization, exactly four sessions and one exact-head review marker. Preserve the produced PR unmerged for manual inspection.
+- [ ] Inject or stage one safe verification failure in a separate disposable issue; prove no branch/PR publication and no automatic replacement authorization.
+
+### W12: Qualify complex planning and human approval in a private sandbox
+
+- Scope: one bounded issue that deterministically requires complex approval without any human-owned hard-risk flag; separate planning, manual approval, execution, and generated-review gates.
+- Excluded: security/secret core, destructive migration, release/tag, infrastructure blast radius, cross-repository work, automatic approval, merge/deploy.
+- [ ] Before issue creation, review its intended classifier facts so it requires approval for a legitimate repository change rather than gaming the model output. Stop if classification is human-owned or not reproducible.
+- [ ] Planning publishes one exact plan marker and `agent:plan-review`, releases claim/workspace, and enters `waitingHuman` with no orchestration/push/PR.
+- [ ] Max or a named repository owner reviews the exact plan digest and separately adds `plan:approved`. The application never adds its own approval.
+- [ ] Fresh execution preview binds the approval and unchanged issue/base/plan. Stale comment/base negative controls consume only approval, publish a replacement plan under new authority, and do not execute.
+- [ ] Exact approved execution and separate generated review meet the same publication and review criteria as W11. Leave the PR unmerged.
+
+### W13: Repeat exact stages on a selected real production repository
+
+- Scope: one explicitly selected trusted repository, PR, unlabelled issue, and bounded implementation issue; all exact values are appended to Execution decisions before the first read or mutation.
+- Excluded: other repositories, other workflow types during each gate, existing unrelated queued/history, merge/deploy, and finite windows until all relevant exact receipts pass.
+- Stop gates: repository selection and disclosure budget; each preview; each activation; each issue/label/approval mutation; each provider budget.
+- [ ] Reconfirm repository permissions, default branch protection, project-owned verification commands, labels, GitHub identity, expected mutation visibility, rollback owner, and emergency stop authority.
+- [ ] Run exact PR review and accept its remote marker manually.
+- [ ] Run exact triage and accept marker/label semantics manually.
+- [ ] Run implementation planning, inspect plan/commands, run implementation execution, and separately run generated PR review. Include a complex approval path when the selected repository has one safe legitimate candidate; otherwise complex acceptance remains sandbox-qualified and production scope is explicitly partial.
+- [ ] Preserve redacted evidence inventories after each stage and verify zero effects outside the named repository/object/revision.
+
+### W14: Promote one finite production window at a time
+
+- Scope: only a repository/workflow with accepted same-repository exact receipts; one finite window; concurrency one.
+- Excluded: simultaneous lanes, cross-repository pools, >10 jobs, >24 hours, merge/deploy, indefinite renewals.
+- Stop gates: promotion preview and exact authorization for repository/workflow, selector policy, expiry, job/provider/read/command/mutation budgets, expected labels/effects, stop owner, and incident response.
+- [ ] First authorize at most three jobs or four hours. Preview includes complete current paginated candidate set plus the versioned future-object predicate.
+- [ ] Verify deterministic selection, per-job exact snapshot/binding, all caps, rate-limit/backoff behavior, automatic expiry, drain, and evidence inventory.
+- [ ] A new object may enter only if it exactly matches the authorized predicate and all remaining budgets. Config/profile/resource/release changes close the window.
+- [ ] Promote PR review, triage, and implementation in separate windows. Implementation still uses planning/execution/generated-review phase gates unless a later plan explicitly joins them after evidence.
+- [ ] Later windows may increase to at most ten jobs or 24 hours only after the prior window has zero ambiguity and an accepted retrospective. Every renewal is a new digest-bound authorization.
+
+### W15: Close the release without overstating automation
+
+- [ ] Update this plan's Progress, Surprises, Execution decisions, and Outcomes with exact source/release/install/pilot/window evidence.
+- [ ] Record which repositories/workflows are exact-qualified, finite-window-qualified, still disabled, or blocked. Repository flags alone are never presented as qualification.
+- [ ] Preserve all package, migration, lifecycle, provider-session mode, durable-state, GitHub/Git effect, and evidence-inventory hashes.
+- [ ] Report the release as production-operational only after notarized installation plus all three real-repository exact workflows pass. Report finite-window automation only for each repository/workflow that independently passes W14.
+- [ ] Leave rollback, merge of generated PRs, deployment, release upload, tags, branch deletion, and evidence cleanup unexecuted unless separately authorized.
+
+## Verification matrix
+
+| # | Surface/path | Scenario | Expected evidence | Depth |
+|---|---|---|---|---|
+| 1 | Baseline | Resume with concurrency one and two queued jobs | pre-fix second job runs; post-fix unscoped Resume rejected | behavior+regression |
+| 2 | Baseline | paused startup with reconciliation job | pre-fix recovery entry reproduced; post-fix no workflow effect | behavior+regression |
+| 3 | Schema 10 | populated schema 9 and each migration cut | one backup and exact schema 10, or unchanged schema 9 | behavior+error |
+| 4 | Schema 10 | reopen, too-new old binary, malformed rows | idempotent new open; old/malformed fail closed | behavior+edge |
+| 5 | Canonical preview | exact input and every one-field drift | only byte-exact unexpired preview activates | behavior+edge+error |
+| 6 | SQL authority | overlap, wrong binding, mutation/delete, cap race | constraint/transaction denial with no partial row | behavior+concurrency |
+| 7 | Scheduler | startup, periodic, wake, network, manual, legacy Resume | no pass without exact active scope | behavior+error |
+| 8 | Discovery | unrelated repositories/workflows/objects | only scoped selector observed/bound | behavior+isolation |
+| 9 | Existing queue | pre-schema jobs, disabled repo, changed flag | no lease without active matching binding | behavior+regression |
+| 10 | Recovery | queued reconciliation, retry, waiting human, late effect | explicit recovery/readback only; no substitute or new send | behavior+error |
+| 11 | Pagination | 0, 99, 100, 101 items; page failure/duplicate/limit | complete deterministic inventory or hard stop | behavior+boundary |
+| 12 | Rate limits | primary/secondary limit on read and write | bounded backoff/stop; no cap bypass | behavior+error |
+| 13 | GitHub reads | redirect, node mismatch, byte/page cap | exact identity or denial before workflow | behavior+security |
+| 14 | Provider gate | correct roles/rounds and one extra/wrong/reused session | exact cap succeeds; invalid launch absent | behavior+security |
+| 15 | Command gate | exact order, changed digest, failure, timeout, extra command | only frozen sequence; first failure stops | behavior+security |
+| 16 | GitHub send | crash before/after reservation and send-start | durable consumed authority and exact reconciliation | behavior+fault |
+| 17 | Git push | absent/same/conflicting ref and unknown response | create-only attribution, safe retry, or stop | behavior+error |
+| 18 | Marker batch | 1, cap, cap+1 parts and response loss | all authorized before part one; no cap-induced partial | behavior+boundary |
+| 19 | Label bootstrap | all present, exact missing, conflicting definition | no-op/exact creates/block | behavior+edge |
+| 20 | Pause/drain | each provider/command/read/send boundary | no new reservation; exact drain or recovery-required | behavior+concurrency |
+| 21 | PR review | exact four roles and one marker | reviewed revision terminal with zero extras | happy+integration |
+| 22 | PR staleness | head/base/draft/body/title/narrative drift | no provider or write under stale preview | behavior+error |
+| 23 | Triage | ready/needs-spec/human and domain labels | one result/marker/verdict label; domain labels preserved | behavior+integration |
+| 24 | Triage staleness | edit/comment/label/base change | exact scope closes; no recursive stale run | behavior+error |
+| 25 | Planning | simple/moderate plan | frozen plan, lease released at queued orchestrate, no execution | behavior+integration |
+| 26 | Planning | complex/human-owned/blocked | exact human gate or blocked outcome, never implicit execution | behavior+edge |
+| 27 | Complex approval | exact and stale issue/base/plan | exact queues execution; stale consumes approval/replans only | behavior+error |
+| 28 | Orchestration | pass, review veto, command fail, round exhaustion | exact import/publication only on clean pass | behavior+integration |
+| 29 | Publication chain | branch, PR, link, QA at each crash point | ordered attribution or terminal ambiguity; no later effect | behavior+fault |
+| 30 | Child review | implementation succeeds | child queued inert until separate exact binding | behavior+isolation |
+| 31 | Finite window | 3-job/4-hour caps, future matching/nonmatching object | deterministic bounded work and automatic stop | behavior+boundary |
+| 32 | Configuration drift | flags, profile, resource, release, GitHub identity change | active preview/window invalidated before next effect | behavior+security |
+| 33 | UI/protocol | malformed command, stale digest, busy click, accessibility | typed denial; no duplicate activation; controls observable | behavior+UI |
+| 34 | Privacy | logs, reports, sessions, descriptors, evidence modes | no secrets/raw transcripts; private files mode `0600` | security+regression |
+| 35 | Package | clean merged source, nested signatures, notarization/staple | frozen accepted package and exact payload | behavior+release |
+| 36 | Install | quiesce, backup, privileged install, schema migration | one secure app, schema 10 paused, history exact | behavior+operations |
+| 37 | Live PR | sandbox then production exact revision | four sessions, one marker, no extras | live acceptance |
+| 38 | Live triage | sandbox then production exact issue | one session, marker, verdict label, no extras | live acceptance |
+| 39 | Live implementation | simple and complex stage sequence | reviewed plan, exact branch/PR/link/QA/review, no merge | live acceptance |
+| 40 | Rollback containment | source, preinstall, post-schema, active lane failures | revert/reinstall/restore only at authorized safe boundary | behavior+operations |
+
+**Coverage:** 40/40 identified path families across baseline reproduction, schema, evidence, dispatch, recovery, pagination, provider/command/network effects, three workflows, phase handoff, UI, privacy, package, install, live acceptance, finite promotion, and rollback. Gaps remain until execution: exact sandbox and production repository/object IDs, notarization submission ID, final merge/package hashes, and protected reviewer availability.
+
+**Exhaustiveness rationale:** The matrix is the union of authority lifecycle, scheduler entry paths, workflow stages, external effect classes, mutation certainty states, pagination/rate boundaries, crash positions, configuration drift, packaging/install boundaries, and live promotion levels. Parameterized one-field drift, migration-cut, effect-boundary, and workflow-state tests cover each member without multiplying every independent dimension into redundant combinations.
+
+## Review plan
+
+- Routed agents after the protected carrier is available: `pi-forge.architecture-reviewer`, `pi-forge.security-reviewer`, `pi-forge.database-reviewer`, and `pi-forge.test-reviewer`, each fresh and artifact-only. Add `pi-forge.performance-reviewer` if complete pagination or authority lookup introduces a measured pass-time regression.
+- Review artifact: objective and threat boundary; exact base/head/tree; complete changed-file roster and diff; schema-10 statements, digest, triggers, indexes, state graph, populated migration/fault output; all dispatcher/recovery/effect call sites; stage/budget table; canonical preview examples; protocol/UI behavior; privacy inventory; focused/full test logs; known process-cleanup residual; explicit live exclusions.
+- Critical/Major evidence gate: the parent locates each finding in current source, reproduces where practical, rejects unsupported claims with concrete counter-evidence, fixes every supported Critical/Major, and reruns the affected focused gate plus all final gates after the last edit. A missing/blocked reviewer is not zero findings.
+- Pre-sign review: architecture/security/database/test inspect the exact merged source and rendered release/runbook inputs. Package identity changes after review invalidate it.
+- Pre-activation review: parent and operator inspect the complete canonical preview, target, effect envelope, budget, expiry, current durable state, expected mutations, containment owner, and rollback boundary. Prior-stage approval never carries forward implicitly.
+
+## Budget
+
+- Classification: complex. It changes durable authorization, schema, scheduler/recovery behavior, external-effect boundaries, UI/protocol, packaging, and real operations.
+- Source fix rounds: maximum 4. Stop and re-plan if the same authority design fails twice or schema/effect coverage expands materially.
+- Writer concurrency: exactly 1 per checkout/worktree. No overlapping source writer or direct database writer.
+- Delegated launches during implementation: one protected software-engineer at a time; one four-role final review round, with at most one focused re-review per role after fixes. No substitute model/provider route when protected execution is blocked.
+- Planning-phase provider cap per exact job: 15 logical sessions maximum, derived as 5 roles times 3 rounds. Execution phase: 15. PR review: 4. Triage: 1. These are separate non-transferable scopes, not a shared replenishable pool.
+- Live operational budget: supplied anew for every preview/activation. No provider or GitHub/Git mutation budget is granted by approving this plan.
+- Final source evidence: `make check`; `make test-e2e`; `make jidoka-code-production-automation-acceptance`; `xcrun swift-format lint --recursive --strict Sources Tests`; release app/helper/host builds; `git diff --check` after the final edit.
+- Final package/live evidence: only the commands frozen in the reviewed operations runbook, from `/Applications/Xcode.app/Contents/Developer`, using canonical recognizable commands without pipelines for lifecycle checks.
+
+## Risks and rollback
+
+- Risk: one missed coordinator, recovery, provider, command, Git, or GitHub call site bypasses rollout authority. Mitigation: structural inventory of every protocol/concrete implementation, production composition tests with deny-by-default spies, and security review. No production allow-all implementation exists.
+- Risk: schema-10 constraints permit scope mutation, budget replenishment, or overlapping lanes. Mitigation: immutable columns, append-only events, transition triggers, partial unique index, concurrent transaction tests, populated migration review, and database reviewer.
+- Risk: forcing pause during migration changes old startup expectations. Mitigation: explicit migration assertion, backup, no active scope synthesis, protocol/UI messaging, and exact old/new startup tests.
+- Risk: read-only preview itself leaks repository content or exhausts API rate limits. Mitigation: exact repository consent, bounded pages/bytes/requests, redacted output, no provider, isolated cache, and explicit read stop gate.
+- Risk: label bootstrap surprises a real repository. Mitigation: exact missing-definition disclosure and separate authorization or pre-provisioning.
+- Risk: stop cannot undo an already-started remote effect. Mitigation: point-of-no-return reservation, drain, readback-only continuation, recovery-required truth, and no later mutation.
+- Risk: a late provider result or interrupted Herdr launch tempts historical recovery. Mitigation: scope-specific recovery with no automatic relaunch or budget refill; historical blocked jobs and late results are never adopted.
+- Risk: stage release leaves a queued job that generic code later acquires. Mitigation: mandatory binding at store lease transaction and production tests covering direct, scheduler, retry, approval, recovery, and generated-child paths.
+- Risk: finite future-object predicate is broader than its preview inventory. Mitigation: versioned closed predicate, per-object snapshot/binding, low first cap, short expiry, one workflow/repository, and new authorization for every window.
+- Risk: implementation executes trusted repository scripts that can escape process-group cleanup. Mitigation: retain the accepted trusted-repository boundary, review exact commands, concurrency one, and do not claim hostile containment. Stop if an untrusted repository is proposed.
+- Risk: the historical `.cleanupFailed` behavior recurs under load. Mitigation: preserve the first failure, diagnose process identity/cleanup, require final fresh lifecycle evidence, and block release if reproducible.
+- Risk: Apple notarization or nested native signing changes final bytes. Mitigation: build once from exact merge, sign in fixed order, validate final expanded payload, freeze all post-staple digests, and never infer from the ninth candidate.
+- Risk: schema 10 prevents use of the old binary. Mitigation: authoritative schema-9 backup before migration and fail-closed old binary test. Availability rollback after migration requires quiescence, exact package reinstall and exact backup restore under separate approval; this plan promises safe containment, not automatic service restoration.
+- Risk: a generated implementation PR has undesirable content despite green automated review. Mitigation: no auto-merge/deploy, exact changed-path/head evidence, separate generated-review scope, and manual PR acceptance.
+- Rollback before source merge: revert only this plan's implementation commit on its feature branch; no production effect exists.
+- Rollback after package but before install: discard only the exact ignored release staging/package; installed state remains unchanged.
+- Rollback after install before schema migration: reinstall the previously frozen exact app only after quiescence and receipt/path checks.
+- Rollback after schema 10: stop and drain, preserve incident evidence, then separately authorize exact schema-9 backup restoration plus compatible package reinstall. Never downgrade the binary against schema 10 or edit SQLite directly.
+- Rollback during a live lane: revoke and drain the exact scope; reconcile already-started effects read-only; do not delete comments, labels, refs, PRs, jobs, or evidence automatically. Any compensating GitHub mutation is a new reviewed action.
+
+## External side effects
+
+- Plan-only delivery: this draft plan, append-only supersession notes, one local docs commit, exact same-name branch push, and one PR are authorized by Plan Forge standing authorization because the current branch is non-primary. Merge is not authorized.
+- Source implementation after explicit plan approval: local source edits/tests/builds and, on a non-primary implementation branch, one coherent commit, exact same-name push, and one PR are permitted by the orchestrator/source-control standing contract. Source PR merge is not authorized.
+- W7: Developer ID signing, access to signing/notary material, and Apple notarization are not authorized by this plan draft. They require exact later approval; no credential value or private-key content may enter logs/evidence.
+- W8: helper deregistration, process quiescence, backup, privileged installation, receipt change, schema migration, app/helper launch, and rollback are not authorized. Privileged commands require explicit user execution because noninteractive sudo is unavailable.
+- W9-W14: GitHub reads, Git fetches, provider sessions, comments, labels, branch pushes, PR creation, issue preparation, approval labels, finite polling, and any compensating action are not authorized. Every named stage needs a fresh exact scope and budget.
+- Release upload, tag, GitHub Release, App Store action, generated-PR merge/close/update, deployment, branch deletion, evidence deletion, historical job recovery, and database rewriting remain unauthorized throughout.
+
+## Progress
+
+- [x] Verified merged source/tree identity and current workflow, scheduler, recovery, pagination, mutation, package, UI, and historical-plan mechanics
+- [x] Chose schema-10 exact-stage plus finite-window authority; rejected global Resume and historical canary reuse
+- [x] Drafted the post-merge ExecPlan and append-only historical supersession records
+- [ ] Independent model-based plan opinion (blocked by explicit provider budget and protected-child carrier)
+- [ ] Max approves or amends this plan
+- [ ] W0-W6 source implementation, verification, review, and source PR
+- [ ] Source PR merge separately authorized and exact merged identity recorded
+- [ ] W7 signed/notarized package separately authorized
+- [ ] W8 installation/migration separately authorized
+- [ ] W9-W12 private-sandbox exact stages separately authorized
+- [ ] W13 real-production-repository exact stages separately authorized
+- [ ] W14 finite rollout windows separately authorized
+- [ ] W15 closure and retrospective
+
+## Surprises and discoveries
+
+- The coordinator performs workflow recovery before checking `snapshot.app.paused`; repository flags and the current normal-dispatch gate are therefore not a complete pause boundary.
+- Onboarding completion currently unpauses automatically, so replacing the menu label alone would leave another unscoped activation path.
+- Triage and implementation can create up to eight repository labels before their primary provider work. Label bootstrap must be visible in the rollout mutation envelope.
+- A successful implementation creates a PR-review job without `requiresDispatchEligibility`; the normal lease gate currently supplies global safety, but a phase-scoped release must keep that child inert until separately authorized.
+- The simple/moderate implementation path recursively enters orchestration after planning. Progressive qualification requires a deliberate durable lease-release checkpoint even when no human plan approval is otherwise required.
+- Complete GitHub pagination already exists in the broker, but rollout evidence must prove the preview and actual scoped pass consume the same complete bounded semantics.
+- The existing mutation executor and Git publisher already expose the correct immediate pre-send boundary. Schema 10 can add capability consumption there without replacing established reconciliation logic.
+- The historical PR canary's fixed epoch and event grammar make it useful evidence but a poor general API. A separate authority preserves both meanings.
+
+## Execution decisions
+
+No post-approval execution decision has been made. Append dated rows here before changing any locked choice or filling a live repository/object/package identity.
+
+## Outcomes and retrospective
+
+Pending. This draft authorizes no source implementation, provider call, GitHub/Git operation, signing, notarization, installation, migration, activation, promotion, merge, release, rollback, or cleanup.

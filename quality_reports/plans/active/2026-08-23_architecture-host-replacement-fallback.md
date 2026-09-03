@@ -170,3 +170,10 @@ Schema 8 can recover one stale pane only by resetting authority on the same phys
 
 ## Outcomes and retrospective
 Pending.
+
+## Supersession record, 2026-09-03
+
+- This incident plan is historical evidence. Its first-class replacement-host direction was completed and strengthened by `quality_reports/plans/active/2026-08-24_architecture-host-replacement-completion.md`; the accepted source later merged through PR `#16` at `b6cb62ba7d53d5de740d6e2983656f911db7bd1c`.
+- The original architecture pane/reset incident, unknown intents, q1-q3 lineage, replacement identities, and authorization records remain immutable. No unchecked item above authorizes replay, recovery, another host replacement, q5, Resume, or state repair.
+- The ninth-candidate sandbox PR review later settled all four roles and one marker under global pause. Final evidence is preserved at `/Users/maroffo/JidokaCode-live-canary-evidence/20260902-pr1-ninth-terminal-theme`, inventory SHA-256 `21ed3ff062481dfc16d8b7b4e6137c18e6ea3f488cbb640a375bcf4e06595644`.
+- Current operational planning is `quality_reports/plans/active/2026-09-03_progressive-production-automation.md`. It supersedes this fallback for all future release and workflow activation decisions without changing this plan's historical claims.
