@@ -224,8 +224,8 @@ private actor UIFixtureEngine: EngineClient {
     case .runHerdrPreflight:
       herdr = EngineHerdrStatus(
         state: .ready,
-        version: "0.8.0",
-        protocolVersion: 19,
+        version: "0.8.2",
+        protocolVersion: 20,
         executableSHA256: String(repeating: "e", count: 64),
         schemaSHA256: String(repeating: "d", count: 64),
         policySHA256: String(repeating: "c", count: 64)
@@ -288,7 +288,9 @@ private actor UIFixtureEngine: EngineClient {
       .previewJobCanary, .executeJobCanary,
       .previewJobCanaryRecovery, .executeJobCanaryRecovery,
       .previewJobCanaryPiRetry, .executeJobCanaryPiRetry,
-      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement:
+      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement,
+      .previewJobCanaryGenerationRollover, .executeJobCanaryGenerationRollover,
+      .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
       throw EngineClientError(.invalidCommand)
     case .setLoginEnabled(let value):
       loginSelected = value
@@ -664,6 +666,91 @@ private enum UIFixtureRunner {
   }
 }
 
+private enum UIFixtureDemoScreen: String, CaseIterable, Identifiable {
+  case onboarding = "Onboarding"
+  case settings = "Settings"
+  case menu = "Menu"
+
+  var id: Self { self }
+}
+
+@MainActor
+private struct UIFixtureInteractiveView: View {
+  @State private var screen = UIFixtureDemoScreen.onboarding
+
+  private let app: AppViewModel
+  private let onboarding: OnboardingViewModel
+  private let settings: SettingsViewModel
+
+  init() {
+    let engine = UIFixtureEngine()
+    let app = AppViewModel(client: engine)
+    self.app = app
+    onboarding = OnboardingViewModel(client: engine) { state in app.apply(state) }
+    settings = SettingsViewModel(client: engine) { state in app.apply(state) }
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack(spacing: 16) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Jidoka Code")
+            .font(.headline)
+          Text("Interactive UI fixture")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+
+        Picker("Screen", selection: $screen) {
+          ForEach(UIFixtureDemoScreen.allCases) { screen in
+            Text(screen.rawValue).tag(screen)
+          }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 360)
+
+        Spacer()
+
+        Label("Isolated demo", systemImage: "lock.shield")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      .padding(16)
+
+      Divider()
+
+      Group {
+        switch screen {
+        case .onboarding:
+          OnboardingView(model: onboarding) { screen = .settings }
+        case .settings:
+          SettingsView(model: settings)
+        case .menu:
+          ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            VStack(alignment: .leading, spacing: 8) {
+              MenuBarContentView(
+                model: app,
+                openOnboarding: { screen = .onboarding },
+                openSettings: { screen = .settings },
+                openLogs: {},
+                quit: { NSApplication.shared.terminate(nil) }
+              )
+            }
+            .padding(24)
+            .frame(width: 520, alignment: .leading)
+          }
+        }
+      }
+    }
+    .frame(minWidth: 900, minHeight: 780)
+    .task {
+      NSApplication.shared.activate(ignoringOtherApps: true)
+      await app.refresh()
+    }
+  }
+}
+
 @main
 @MainActor
 private struct JidokaCodeUIFixtureApp: App {
@@ -674,10 +761,14 @@ private struct JidokaCodeUIFixtureApp: App {
   }
 
   var body: some Scene {
-    Window("Jidoka Code UI Fixture Runner", id: "fixture-runner") {
-      Color.clear
-        .frame(width: 1, height: 1)
-        .task { await runFixture() }
+    Window("Jidoka Code UI Fixture", id: "fixture-runner") {
+      if arguments == ["--interactive"] {
+        UIFixtureInteractiveView()
+      } else {
+        Color.clear
+          .frame(width: 1, height: 1)
+          .task { await runFixture() }
+      }
     }
     .windowResizability(.contentSize)
   }

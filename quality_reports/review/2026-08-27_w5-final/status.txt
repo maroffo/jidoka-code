@@ -1,0 +1,61 @@
+ M Makefile
+ M Packaging/Info.plist
+ M Packaging/app-component.plist
+ M Packaging/app-inventory.txt
+ D Resources/Herdr/api-schema-0.8.0.json
+ M Resources/Herdr/runtime-builds.json
+ M Sources/JidokaCodeApp/ApplicationEngineClient.swift
+ M Sources/JidokaCodeApp/JidokaCodeApp.swift
+ M Sources/JidokaCodeApp/JobCanaryCLI.swift
+ M Sources/JidokaCodeApp/LocalSpikeCLI.swift
+ M Sources/JidokaCodeCore/Application/EngineProtocol.swift
+ M Sources/JidokaCodeCore/Application/EngineService.swift
+ M Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift
+ M Sources/JidokaCodeCore/Configuration/ConfigurationStore.swift
+ M Sources/JidokaCodeCore/Herdr/HerdrHostRuntime.swift
+ M Sources/JidokaCodeCore/Herdr/HerdrProtocol.swift
+ M Sources/JidokaCodeCore/Herdr/HerdrRoleHostRuntime.swift
+ M Sources/JidokaCodeCore/Herdr/HerdrRuntimeReadiness.swift
+ M Sources/JidokaCodeCore/Herdr/HerdrSocketClient.swift
+ M Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift
+ M Sources/JidokaCodeCore/Pi/PiTUIRuntime.swift
+ M Sources/JidokaCodeCore/Pi/ReleaseOwnedPiRuntime.swift
+ M Sources/JidokaCodeCore/State/DatabaseSchema.swift
+ M Sources/JidokaCodeCore/State/PiRunStore.swift
+ M Sources/JidokaCodeHerdrFixture/main.swift
+ M Sources/JidokaCodeUIFixture/JidokaCodeUIFixtureMain.swift
+ M Tests/JidokaCodeAppSupportTests/ViewModelFlowTests.swift
+ M Tests/JidokaCodeAppTests/ApplicationEngineClientTests.swift
+ M Tests/JidokaCodeCoreTests/ApprovedCommandRunStoreTests.swift
+ M Tests/JidokaCodeCoreTests/EngineProtocolTests.swift
+ M Tests/JidokaCodeCoreTests/EngineServiceTests.swift
+ M Tests/JidokaCodeCoreTests/HerdrHostRuntimeTests.swift
+ M Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift
+ M Tests/JidokaCodeCoreTests/HerdrProtocolTests.swift
+ M Tests/JidokaCodeCoreTests/HerdrRoleHostRuntimeTests.swift
+ M Tests/JidokaCodeCoreTests/HerdrRuntimeReadinessTests.swift
+ M Tests/JidokaCodeCoreTests/HerdrTopologyTests.swift
+ M Tests/JidokaCodeCoreTests/PiRunStoreTests.swift
+ M Tests/JidokaCodeCoreTests/PiTUIRuntimeTests.swift
+ M Tests/JidokaCodeCoreTests/ProductionEngineExternalServicesTests.swift
+ M Tests/JidokaCodeCoreTests/SQLiteStoreTests.swift
+ M docs/operations.md
+ M scripts/package-app.sh
+ M scripts/package-installer.sh
+ M scripts/spikes/herdr-s12-fixture.mjs
+ M scripts/spikes/jidoka-local-spikes.mjs
+ M scripts/spikes/test-s1-package.sh
+ M scripts/spikes/test-s11-herdr.sh
+ M scripts/spikes/test-s12-pi-tui.sh
+ M scripts/spikes/test-s5-s7-local.sh
+?? Resources/Herdr/api-schema-0.8.2.json
+?? Sources/JidokaCodeApp/HerdrReadinessProbeCLI.swift
+?? Sources/JidokaCodeCore/State/JobCanaryGenerationRollover.swift
+?? Sources/JidokaCodeCore/State/JobCanaryGenerationRolloverCommand.swift
+?? docs/operations/
+?? quality_reports/plans/active/2026-08-27_production-readiness-fast-path.md
+?? quality_reports/review/
+?? scripts/production-readiness-preflight.sh
+?? scripts/tests/test-herdr-schema-compatibility.mjs
+?? scripts/tests/test-local-spike-runtime-attestation.mjs
+?? scripts/tests/test-production-readiness-preflight.sh

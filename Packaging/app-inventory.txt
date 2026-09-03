@@ -14,7 +14,7 @@
 ./Contents/MacOS/Jidoka Code
 ./Contents/Resources
 ./Contents/Resources/Herdr
-./Contents/Resources/Herdr/api-schema-0.8.0.json
+./Contents/Resources/Herdr/api-schema-0.8.2.json
 ./Contents/Resources/Herdr/runtime-builds.json
 ./Contents/Resources/Pi
 ./Contents/Resources/Pi/extensions

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "mode": "production",
+  "osProductVersion": "27.0",
+  "toolTimeoutSeconds": 30,
+  "overallDeadlineSeconds": 600,
+  "package": {
+    "identifier": "com.maroffo.JidokaCode.pkg",
+    "receiptVolume": "/",
+    "staticReceiptState": "legacy",
+    "legacyReceiptVersion": "0.1.0",
+    "legacyReceiptLocation": "Applications",
+    "successorReceiptVersion": "0.1.1",
+    "successorReceiptLocation": "Library/Application Support",
+    "legacyPackagePath": "/Users/maroffo/Development/public/jidoka-code-worktrees/feat-settings-guided-configuration/build/settings-guided-w7-release-owned-runtime-71023263-uat-notarized/Jidoka Code.pkg",
+    "legacyPackageSHA256": "7102326303e2fe1f1394c42b4f919351f14ec3c37f5ac26dd962ac23c83ab0cb"
+  },
+  "bundle": {
+    "identifier": "com.maroffo.JidokaCode",
+    "successorVersion": "0.1.1",
+    "successorBuildVersion": "2",
+    "legacyAppPath": "/Applications/Jidoka Code.app",
+    "securePath": "/Library/Application Support/JidokaCode/Applications/Jidoka Code.app",
+    "secureRoot": "/Library/Application Support/JidokaCode",
+    "legacyAppPostInstallState": "absent"
+  },
+  "preInstallParents": [
+    { "path": "/Library", "owner": "0:0", "mode": "40755" },
+    { "path": "/Library/Application Support", "owner": "0:80", "mode": "40755" }
+  ],
+  "postInstallParents": [
+    { "path": "/Library", "owner": "0:0", "mode": "40755" },
+    { "path": "/Library/Application Support", "owner": "0:80", "mode": "40755" },
+    { "path": "/Library/Application Support/JidokaCode", "owner": "0:0", "mode": "40755" },
+    { "path": "/Library/Application Support/JidokaCode/Applications", "owner": "0:0", "mode": "40755" }
+  ],
+  "database": {
+    "path": "/Users/maroffo/Library/Application Support/JidokaCode/jidoka-code.sqlite3",
+    "schemaVersion": 8,
+    "paused": 1,
+    "queuedJobs": 155,
+    "blockedJobs": 87,
+    "runningPiJobs": 1,
+    "totalJobs": 243
+  },
+  "herdr": {
+    "linkPath": "/opt/homebrew/bin/herdr",
+    "resolvedPath": "/opt/homebrew/Cellar/herdr/0.8.2/bin/herdr",
+    "executableSHA256": "3e0f0c2d5edc41f592963ef90f5d872db801cc7dbd0e01731023897ee428904a",
+    "version": "0.8.2",
+    "protocolVersion": 20
+  },
+  "git": {
+    "path": "/usr/bin/git",
+    "sha256": "1685f2c90307faa05ef5ae8f707d3a18a519c9dad75882768f66abb475f1b3d7",
+    "backendPath": "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-http-backend",
+    "backendSHA256": "4026051f87a437197a913d4ca5d3196f1d749bf6060f84c74cc374263988110a"
+  }
+}

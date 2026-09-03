@@ -427,7 +427,7 @@ assert_component_relocation_policy() {
     [[ "$(/usr/bin/xmllint --xpath 'count(/plist/array/dict)' "$policy")" == "1" && \
         "$(/usr/bin/xmllint --xpath 'count(/plist/array/dict/key)' "$policy")" == "5" && \
         "$(/usr/bin/plutil -extract 0.RootRelativeBundlePath raw "$policy")" == \
-            "Jidoka Code.app" && \
+            "JidokaCode/Applications/Jidoka Code.app" && \
         "$(/usr/bin/plutil -extract 0.BundleIsRelocatable raw "$policy")" == "false" && \
         "$(/usr/bin/plutil -extract 0.BundleIsVersionChecked raw "$policy")" == "true" && \
         "$(/usr/bin/plutil -extract 0.BundleHasStrictIdentifier raw "$policy")" == "true" && \
@@ -435,24 +435,27 @@ assert_component_relocation_policy() {
         fail "component policy values differ"
 
     /bin/mkdir -m 0755 "$component_root"
-    /usr/bin/ditto "$app" "$component_root/Jidoka Code.app"
+    /bin/mkdir -m 0755 "$component_root/JidokaCode"
+    /bin/mkdir -m 0755 "$component_root/JidokaCode/Applications"
+    /usr/bin/ditto "$app" "$component_root/JidokaCode/Applications/Jidoka Code.app"
 
     /usr/bin/pkgbuild \
         --root "$component_root" \
         --component-plist "$policy" \
-        --install-location /Applications \
+        --ownership recommended \
+        --install-location "/Library/Application Support" \
         --identifier com.maroffo.JidokaCode.pkg \
-        --version 0.1.0 \
+        --version 0.1.1 \
         "$locked_package" >/dev/null
     /usr/sbin/pkgutil --expand "$locked_package" "$locked_expanded"
     locked_package_info="$locked_expanded/PackageInfo"
     [[ "$(/usr/bin/xmllint --xpath \
-        "count(/pkg-info[@identifier='com.maroffo.JidokaCode.pkg' and @version='0.1.0' and @install-location='/Applications' and @postinstall-action='none' and @auth='root' and @relocatable='false'])" \
+        "count(/pkg-info[@identifier='com.maroffo.JidokaCode.pkg' and @version='0.1.1' and @install-location='/Library/Application Support' and @postinstall-action='none' and @auth='root' and @relocatable='false'])" \
         "$locked_package_info")" == "1" ]] || fail "locked component package policy differs"
     [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle)' \
         "$locked_package_info")" == "1" && \
         "$(/usr/bin/xmllint --xpath \
-            "count(/pkg-info/bundle[@id='com.maroffo.JidokaCode' and @path='./Jidoka Code.app'])" \
+            "count(/pkg-info/bundle[@id='com.maroffo.JidokaCode' and @path='./JidokaCode/Applications/Jidoka Code.app'])" \
             "$locked_package_info")" == "1" && \
         "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle-version/bundle)' \
             "$locked_package_info")" == "1" && \
@@ -478,11 +481,11 @@ assert_component_relocation_policy() {
         "$(/usr/bin/xmllint --xpath 'count(/pkg-info/atomic-update-bundle/bundle)' \
             "$locked_package_info")" == "0" ]] || \
         fail "locked component overwrite policy differs"
-    /usr/bin/lsbom -p fm "$locked_expanded/Bom" >"$locked_bom_modes"
+    /usr/bin/lsbom -p fmug "$locked_expanded/Bom" >"$locked_bom_modes"
     (
         cd "$component_root"
         while IFS= read -r -d '' path; do
-            printf '%s\t%s\n' "$path" "$(/usr/bin/stat -f '%p' "$path")"
+            printf '%s\t%s\t0\t0\n' "$path" "$(/usr/bin/stat -f '%p' "$path")"
         done < <(/usr/bin/find . -print0)
     ) | LC_ALL=C /usr/bin/sort >"$expected_bom_modes"
     /usr/bin/awk -F '\t' '
@@ -490,16 +493,24 @@ assert_component_relocation_policy() {
             gsub(/\/\._/, "/", path)
             return path
         }
-        NR == FNR { expected[$1] = $2; expected_count += 1; next }
+        NR == FNR {
+            expected[$1] = $2 FS $3 FS $4
+            expected_count += 1
+            next
+        }
         {
             path = normalized_path($1)
-            if (!(path in expected) || $2 != expected[path]) exit 1
+            if (!(path in expected) || ($2 FS $3 FS $4) != expected[path]) exit 1
             if (!(path in seen)) seen_count += 1
             seen[path] = 1
         }
         END { if (seen_count != expected_count) exit 1 }
     ' "$expected_bom_modes" "$locked_bom_modes" || \
-        fail "locked component package BOM modes differ"
+        fail "locked component package BOM mode or ownership differs"
+    /usr/bin/grep -Fxq $'./JidokaCode\t40755\t0\t0' "$locked_bom_modes" || \
+        fail "locked authority root BOM metadata differs"
+    /usr/bin/grep -Fxq $'./JidokaCode/Applications\t40755\t0\t0' \
+        "$locked_bom_modes" || fail "locked applications root BOM metadata differs"
 }
 
 assert_recorded_process_identity_absent() {
@@ -852,6 +863,7 @@ pkgbuild_plan="$(
 readonly expected_pkgbuild_plan='pkgbuild_arguments=(
     --root "$COMPONENT_ROOT"
     --component-plist "$COMPONENT_POLICY"
+    --ownership recommended
     --install-location "$INSTALL_LOCATION"
     --identifier "$PACKAGE_IDENTIFIER"
     --version "$app_version"
@@ -886,8 +898,15 @@ readonly -a productsign_arguments'
     fail "timestamped productsign argv differs"
 /usr/bin/grep -Fxq 'readonly PACKAGE_IDENTIFIER="com.maroffo.JidokaCode.pkg"' \
     "$ROOT/scripts/package-installer.sh" || fail "installer receipt identifier differs"
-/usr/bin/grep -Fxq 'readonly INSTALL_LOCATION="/Applications"' \
-    "$ROOT/scripts/package-installer.sh" || fail "installer destination differs"
+/usr/bin/grep -Fxq 'readonly INSTALL_LOCATION="/Library/Application Support"' \
+    "$ROOT/scripts/package-installer.sh" || fail "installer root differs"
+/usr/bin/grep -Fxq \
+    'readonly COMPONENT_APP_RELATIVE_PATH="JidokaCode/Applications/Jidoka Code.app"' \
+    "$ROOT/scripts/package-installer.sh" || fail "installer relative application path differs"
+# shellcheck disable=SC2016
+/usr/bin/grep -Fxq \
+    'readonly INSTALL_APP_PATH="$INSTALL_LOCATION/$COMPONENT_APP_RELATIVE_PATH"' \
+    "$ROOT/scripts/package-installer.sh" || fail "installer application destination differs"
 /usr/bin/perl -0ne '
     $found = 1 if /startMainQuitObserver \{ \[weak self\] in\n\s+self\?\.prepareForRequestedTermination\(\)\n\s+\}/;
     END { exit($found ? 0 : 1) }
@@ -1051,19 +1070,19 @@ launch_agent_plist="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.Jidoka
 [[ "$(/usr/bin/plutil -extract 'MachServices.com\.maroffo\.JidokaCode\.Engine' raw "$launch_agent_plist")" == "true" ]] || \
     fail "launch agent Mach service differs from allowlist"
 
-herdr_schema="$SOURCE_APP/Contents/Resources/Herdr/api-schema-0.8.0.json"
+herdr_schema="$SOURCE_APP/Contents/Resources/Herdr/api-schema-0.8.2.json"
 herdr_policy="$SOURCE_APP/Contents/Resources/Herdr/runtime-builds.json"
 [[ "$(/usr/bin/shasum -a 256 "$herdr_schema" | /usr/bin/awk '{print $1}')" == \
-    "88ff414aa996e390c2db05a37b95d28dbe4e81b98329f6ed7f7a2cc5c6ebf51a" ]] || \
+    "c48f1f54ee0150ca27e11fd44455fe94aeadb20fdf4e4a62393ed822a4e5b150" ]] || \
     fail "packaged Herdr schema differs from approved bytes"
 [[ "$(/usr/bin/shasum -a 256 "$herdr_policy" | /usr/bin/awk '{print $1}')" == \
-    "3fdd7b5d6f273ab264c6c2f502e8c8902819cc353052191769c4ec22213d4673" ]] || \
+    "45674e216b931f7c736c1c8348e899221c2aef080dfa6a92392144b244cd5867" ]] || \
     fail "packaged Herdr policy differs from approved bytes"
 [[ "$(/usr/bin/plutil -extract schemaVersion raw "$herdr_policy")" == "1" ]]
-[[ "$(/usr/bin/plutil -extract builds.0.version raw "$herdr_policy")" == "0.8.0" ]]
-[[ "$(/usr/bin/plutil -extract builds.0.protocolVersion raw "$herdr_policy")" == "19" ]]
+[[ "$(/usr/bin/plutil -extract builds.0.version raw "$herdr_policy")" == "0.8.2" ]]
+[[ "$(/usr/bin/plutil -extract builds.0.protocolVersion raw "$herdr_policy")" == "20" ]]
 [[ "$(/usr/bin/plutil -extract builds.0.executableSHA256 raw "$herdr_policy")" == \
-    "97bdb194a731262d2b70062621a5673b1cd409b9e6870df361bd65799217eaf3" ]]
+    "3e0f0c2d5edc41f592963ef90f5d872db801cc7dbd0e01731023897ee428904a" ]]
 [[ ! -e "$SOURCE_APP/Contents/Helpers/herdr" ]] || fail "external Herdr binary was bundled"
 
 assert_resource_digest() {
@@ -1154,13 +1173,13 @@ assert_resource_digest \
     9d75a49c6b45136189b002574e193ce5e82a6606c26979199ed7c4ee5264f843
 [[ "$(/usr/bin/shasum -a 256 "$SOURCE_APP/Contents/Resources/Spikes/jidoka-local-spikes.mjs" | \
     /usr/bin/awk '{print $1}')" == \
-    "c16e11605ecb8b818bd51abbdbe824414d9c2d19a1d010d3265c48c99cf05ecf" ]] || \
+    "c903de7f2a78d9172941774baa24cb016b1758834d9a1d9d828794b5cdf3b853" ]] || \
     fail "packaged local spike runner digest differs"
 
 for path in \
     "$SOURCE_APP/Contents/Info.plist" \
     "$launch_agent_plist" \
-    "$SOURCE_APP/Contents/Resources/Herdr/api-schema-0.8.0.json" \
+    "$SOURCE_APP/Contents/Resources/Herdr/api-schema-0.8.2.json" \
     "$SOURCE_APP/Contents/Resources/Herdr/runtime-builds.json" \
     "$SOURCE_APP/Contents/Resources/Pi/manifest.json" \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-resources.json" \

@@ -2,6 +2,13 @@ import CryptoKit
 import Darwin
 import Foundation
 
+enum HerdrRoleHostProcessObservation: Equatable, Sendable {
+  case matching
+  case replaced
+  case absent
+  case unknown
+}
+
 public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
   public private(set) var schemaVersion: Int
   public let roleHostID: String
@@ -18,6 +25,8 @@ public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
   public let hostExecutable: String
   public let hostExecutableSHA256: String
   public private(set) var predecessorRoleHostID: String?
+  public private(set) var predecessorRunID: String?
+  public private(set) var generationRolloverEvidenceSHA256: String?
   public private(set) var replacementEvidenceSHA256: String?
   public private(set) var incidentAuditSHA256: String?
   public private(set) var initialQueueSequence: Int?
@@ -70,6 +79,8 @@ public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
     self.hostExecutable = canonicalExecutable.path
     self.hostExecutableSHA256 = try Self.sha256(canonicalExecutable)
     self.predecessorRoleHostID = nil
+    self.predecessorRunID = nil
+    self.generationRolloverEvidenceSHA256 = nil
     self.replacementEvidenceSHA256 = nil
     self.incidentAuditSHA256 = nil
     self.initialQueueSequence = nil
@@ -117,8 +128,51 @@ public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
     self.initialQueueSequence = 4
   }
 
+  init(
+    generationRolloverRoleHostID: String,
+    predecessorRoleHostID: String,
+    predecessorRunID: String,
+    generationRolloverEvidenceSHA256: String,
+    repositoryID: String,
+    jobID: String,
+    generation: Int,
+    allowedWorkflows: Set<PiWorkflowKind>,
+    expectedWorkspaceID: String,
+    workingDirectory: URL,
+    agentAlias: String,
+    title: String,
+    displayAgent: String,
+    hostExecutable: URL
+  ) throws {
+    try self.init(
+      roleHostID: generationRolloverRoleHostID,
+      repositoryID: repositoryID,
+      jobID: jobID,
+      generation: generation,
+      role: .architecture,
+      allowedWorkflows: allowedWorkflows,
+      expectedWorkspaceID: expectedWorkspaceID,
+      workingDirectory: workingDirectory,
+      agentAlias: agentAlias,
+      title: title,
+      displayAgent: displayAgent,
+      hostExecutable: hostExecutable
+    )
+    guard predecessorRoleHostID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
+      predecessorRoleHostID != generationRolloverRoleHostID,
+      predecessorRunID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
+      generationRolloverEvidenceSHA256.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
+      generation > 1
+    else { throw HerdrHostError.invalidDescriptor }
+    self.schemaVersion = 4
+    self.predecessorRoleHostID = predecessorRoleHostID
+    self.predecessorRunID = predecessorRunID
+    self.generationRolloverEvidenceSHA256 = generationRolloverEvidenceSHA256
+    self.initialQueueSequence = 4
+  }
+
   func validate(roleHostID expectedRoleHostID: String) throws {
-    guard [2, 3].contains(schemaVersion), roleHostID == expectedRoleHostID,
+    guard [2, 3, 4].contains(schemaVersion), roleHostID == expectedRoleHostID,
       repositoryID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
       jobID.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
       (1...1_000_000).contains(generation),
@@ -142,15 +196,26 @@ public struct HerdrRoleHostBootstrapDescriptor: Codable, Equatable, Sendable {
     }
     switch schemaVersion {
     case 2:
-      guard predecessorRoleHostID == nil, replacementEvidenceSHA256 == nil,
+      guard predecessorRoleHostID == nil, predecessorRunID == nil,
+        generationRolloverEvidenceSHA256 == nil, replacementEvidenceSHA256 == nil,
         incidentAuditSHA256 == nil, initialQueueSequence == nil
       else { throw HerdrHostError.invalidDescriptor }
     case 3:
       guard role == .architecture,
         predecessorRoleHostID?.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
         predecessorRoleHostID != roleHostID,
+        predecessorRunID == nil, generationRolloverEvidenceSHA256 == nil,
         replacementEvidenceSHA256?.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
         incidentAuditSHA256?.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
+        initialQueueSequence == 4
+      else { throw HerdrHostError.invalidDescriptor }
+    case 4:
+      guard role == .architecture, generation > 1,
+        predecessorRoleHostID?.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
+        predecessorRoleHostID != roleHostID,
+        predecessorRunID?.wholeMatch(of: /^[a-z0-9][a-z0-9-]{7,63}$/) != nil,
+        generationRolloverEvidenceSHA256?.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
+        replacementEvidenceSHA256 == nil, incidentAuditSHA256 == nil,
         initialQueueSequence == 4
       else { throw HerdrHostError.invalidDescriptor }
     default:
@@ -854,6 +919,41 @@ public enum HerdrRoleHostRuntime {
       executableSHA256: SHA256.hash(data: data)
         .map { String(format: "%02x", $0) }.joined()
     )
+  }
+
+  static func observeProcess(
+    _ expected: HerdrHostProcessIdentity
+  ) -> HerdrRoleHostProcessObservation {
+    var information = proc_bsdinfo()
+    errno = 0
+    let size = proc_pidinfo(
+      expected.processID,
+      PROC_PIDTBSDINFO,
+      0,
+      &information,
+      Int32(MemoryLayout<proc_bsdinfo>.size)
+    )
+    if size == MemoryLayout<proc_bsdinfo>.size,
+      information.pbi_pid == UInt32(expected.processID)
+    {
+      if information.pbi_status == UInt32(SZOMB) { return .absent }
+      guard
+        let observed = try? HerdrHostProcessIdentity(
+          processID: expected.processID,
+          startSeconds: information.pbi_start_tvsec,
+          startMicroseconds: information.pbi_start_tvusec
+        )
+      else { return .unknown }
+      return observed == expected ? .matching : .replaced
+    }
+    let inspectionError = errno
+    errno = 0
+    let signalResult = Darwin.kill(expected.processID, 0)
+    let signalError = errno
+    if inspectionError == ESRCH || (signalResult == -1 && signalError == ESRCH) {
+      return .absent
+    }
+    return .unknown
   }
 
   static func processIdentity(_ processID: Int32) throws -> HerdrHostProcessIdentity {

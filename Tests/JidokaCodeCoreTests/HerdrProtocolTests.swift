@@ -36,8 +36,8 @@ struct HerdrProtocolTests {
     )
     let client = try Self.client(server: server, ids: ["req-1", "req-2"])
     let handshake = try await client.handshake()
-    #expect(handshake.pong.version == "0.8.0")
-    #expect(handshake.pong.protocolVersion == 19)
+    #expect(handshake.pong.version == "0.8.2")
+    #expect(handshake.pong.protocolVersion == 20)
     #expect(handshake.snapshot.focusedWorkspaceID == "w-user")
     #expect(handshake.snapshot.workspaces.map(\.workspaceID) == ["w-user", "w-jidoka"])
     #expect(handshake.snapshot.tabs.last?.label == "j/imp/i42/k7m2/g2")
@@ -56,7 +56,7 @@ struct HerdrProtocolTests {
         HerdrCompatibilityError.versionMismatch
       ),
       (
-        Self.pong(id: "req", protocolVersion: 20),
+        Self.pong(id: "req", protocolVersion: 19),
         HerdrCompatibilityError.protocolMismatch
       ),
       (
@@ -83,7 +83,7 @@ struct HerdrProtocolTests {
     let server = try HerdrFakeSocketServer(
       replies: [
         HerdrFakeReply(Self.pong(id: "req-1")),
-        HerdrFakeReply(Self.snapshot(id: "req-2", protocolVersion: 20)),
+        HerdrFakeReply(Self.snapshot(id: "req-2", protocolVersion: 19)),
       ]
     )
     let client = try Self.client(server: server, ids: ["req-1", "req-2"])
@@ -137,7 +137,7 @@ struct HerdrProtocolTests {
   @Test("malformed UTF-8 oversize and missing LF are rejected")
   func malformedRecords() async throws {
     var invalidUTF8 = Data(Self.pong(id: "req").utf8)
-    let version = try #require(invalidUTF8.range(of: Data("0.8.0".utf8)))
+    let version = try #require(invalidUTF8.range(of: Data("0.8.2".utf8)))
     invalidUTF8[version.lowerBound] = 0xFF
     let malformed = try HerdrFakeSocketServer(
       replies: [HerdrFakeReply(chunks: [invalidUTF8])]
@@ -263,7 +263,7 @@ struct HerdrProtocolTests {
         ? ",{\"pane_id\":\"w-user:p2\",\"terminal_id\":\"term-replacement\",\"workspace_id\":\"w-user\",\"tab_id\":\"w-user:t1\",\"revision\":1,\"focused\":false,\"agent_status\":\"unknown\",\"cwd\":\"\(root.path)\",\"foreground_cwd\":\"\(root.path)\"}"
         : ""
       return """
-        {"id":"\(id)","result":{"type":"session_snapshot","snapshot":{"version":"0.8.0","protocol":19,"focused_workspace_id":"w-user","focused_tab_id":"w-user:t1","focused_pane_id":"w-user:p1","workspaces":[{"workspace_id":"w-user","active_tab_id":"w-user:t1","label":"personal","number":1,"pane_count":\(includeReplacement ? 2 : 1),"tab_count":1,"focused":true,"agent_status":"unknown"},{"workspace_id":"w-jidoka","active_tab_id":"w-jidoka:t1","label":"maroffo/jidoka-code","number":2,"pane_count":1,"tab_count":1,"focused":false,"agent_status":"working"}],"tabs":[{"tab_id":"w-user:t1","workspace_id":"w-user","label":"main","number":1,"pane_count":\(includeReplacement ? 2 : 1),"focused":true,"agent_status":"unknown"},{"tab_id":"w-jidoka:t1","workspace_id":"w-jidoka","label":"job","number":1,"pane_count":1,"focused":false,"agent_status":"working"}],"panes":[{"pane_id":"w-user:p1","terminal_id":"term-user","workspace_id":"w-user","tab_id":"w-user:t1","revision":1,"focused":true,"agent_status":"unknown","cwd":"/tmp/user","foreground_cwd":"/tmp/user"},{"pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"focused":false,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo","agent":"pi","tokens":{"managed_by":"jidoka","run_id":"run-1"}}\(replacementPane)],"agents":[{"agent":"pi","name":"jc-job","pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"state_change_seq":9,"focused":false,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo","screen_detection_skipped":true,"tokens":{"managed_by":"jidoka","run_id":"run-1"}}]}}}
+        {"id":"\(id)","result":{"type":"session_snapshot","snapshot":{"version":"0.8.2","protocol":20,"focused_workspace_id":"w-user","focused_tab_id":"w-user:t1","focused_pane_id":"w-user:p1","workspaces":[{"workspace_id":"w-user","active_tab_id":"w-user:t1","label":"personal","number":1,"pane_count":\(includeReplacement ? 2 : 1),"tab_count":1,"focused":true,"agent_status":"unknown"},{"workspace_id":"w-jidoka","active_tab_id":"w-jidoka:t1","label":"maroffo/jidoka-code","number":2,"pane_count":1,"tab_count":1,"focused":false,"agent_status":"working"}],"tabs":[{"tab_id":"w-user:t1","workspace_id":"w-user","label":"main","number":1,"pane_count":\(includeReplacement ? 2 : 1),"focused":true,"agent_status":"unknown"},{"tab_id":"w-jidoka:t1","workspace_id":"w-jidoka","label":"job","number":1,"pane_count":1,"focused":false,"agent_status":"working"}],"panes":[{"pane_id":"w-user:p1","terminal_id":"term-user","workspace_id":"w-user","tab_id":"w-user:t1","revision":1,"focused":true,"agent_status":"unknown","cwd":"/tmp/user","foreground_cwd":"/tmp/user"},{"pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"focused":false,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo","agent":"pi","tokens":{"managed_by":"jidoka","run_id":"run-1"}}\(replacementPane)],"agents":[{"agent":"pi","name":"jc-job","pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"state_change_seq":9,"focused":false,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo","screen_detection_skipped":true,"tokens":{"managed_by":"jidoka","run_id":"run-1"}}]}}}
         """ + "\n"
     }
     let split = """
@@ -1433,7 +1433,7 @@ struct HerdrProtocolTests {
       "result": [
         "type": "session_snapshot",
         "snapshot": [
-          "version": "0.8.0", "protocol": 19,
+          "version": "0.8.2", "protocol": 20,
           "focused_workspace_id": "w-user", "focused_tab_id": "w-user:t1",
           "focused_pane_id": "w-user:p1",
           "workspaces": [
@@ -1503,8 +1503,8 @@ struct HerdrProtocolTests {
 
   private static func pong(
     id: String,
-    version: String = "0.8.0",
-    protocolVersion: Int = 19,
+    version: String = "0.8.2",
+    protocolVersion: Int = 20,
     liveHandoff: Bool = true,
     detachedServerDaemon: Bool = true
   ) -> String {
@@ -1513,9 +1513,9 @@ struct HerdrProtocolTests {
     """ + "\n"
   }
 
-  private static func snapshot(id: String, protocolVersion: Int = 19) -> String {
+  private static func snapshot(id: String, protocolVersion: Int = 20) -> String {
     """
-    {"id":"\(id)","result":{"type":"session_snapshot","snapshot":{"version":"0.8.0","protocol":\(protocolVersion),"focused_workspace_id":"w-user","focused_tab_id":"w-user:t1","focused_pane_id":"w-user:p1","workspaces":[{"workspace_id":"w-user","active_tab_id":"w-user:t1","label":"personal","number":1,"pane_count":1,"tab_count":1,"focused":true,"agent_status":"unknown"},{"workspace_id":"w-jidoka","active_tab_id":"w-jidoka:t1","label":"maroffo/jidoka-code","number":2,"pane_count":1,"tab_count":1,"focused":false,"agent_status":"working"}],"tabs":[{"tab_id":"w-user:t1","workspace_id":"w-user","label":"main","number":1,"pane_count":1,"focused":true,"agent_status":"unknown"},{"tab_id":"w-jidoka:t1","workspace_id":"w-jidoka","label":"j/imp/i42/k7m2/g2","number":1,"pane_count":1,"focused":false,"agent_status":"working"}],"panes":[{"pane_id":"w-user:p1","terminal_id":"term-user","workspace_id":"w-user","tab_id":"w-user:t1","revision":1,"focused":true,"agent_status":"unknown","cwd":"/tmp/user","foreground_cwd":"/tmp/user"},{"pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"focused":false,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo","agent":"pi","tokens":{"managed_by":"jidoka","run_id":"run-1"}}],"agents":[{"agent":"pi","name":"jc-imp-i42-k7m2-g2-impl","pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"state_change_seq":9,"focused":false,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo","screen_detection_skipped":true,"display_agent":"Jidoka | implementation","title":"Issue 42 | implementation","tokens":{"managed_by":"jidoka","run_id":"run-1"}}]}}}
+    {"id":"\(id)","result":{"type":"session_snapshot","snapshot":{"version":"0.8.2","protocol":\(protocolVersion),"focused_workspace_id":"w-user","focused_tab_id":"w-user:t1","focused_pane_id":"w-user:p1","workspaces":[{"workspace_id":"w-user","active_tab_id":"w-user:t1","label":"personal","number":1,"pane_count":1,"tab_count":1,"focused":true,"agent_status":"unknown"},{"workspace_id":"w-jidoka","active_tab_id":"w-jidoka:t1","label":"maroffo/jidoka-code","number":2,"pane_count":1,"tab_count":1,"focused":false,"agent_status":"working"}],"tabs":[{"tab_id":"w-user:t1","workspace_id":"w-user","label":"main","number":1,"pane_count":1,"focused":true,"agent_status":"unknown"},{"tab_id":"w-jidoka:t1","workspace_id":"w-jidoka","label":"j/imp/i42/k7m2/g2","number":1,"pane_count":1,"focused":false,"agent_status":"working"}],"panes":[{"pane_id":"w-user:p1","terminal_id":"term-user","workspace_id":"w-user","tab_id":"w-user:t1","revision":1,"focused":true,"agent_status":"unknown","cwd":"/tmp/user","foreground_cwd":"/tmp/user"},{"pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"focused":false,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo","agent":"pi","tokens":{"managed_by":"jidoka","run_id":"run-1"}}],"agents":[{"agent":"pi","name":"jc-imp-i42-k7m2-g2-impl","pane_id":"w-jidoka:p1","terminal_id":"term-jidoka","workspace_id":"w-jidoka","tab_id":"w-jidoka:t1","revision":7,"state_change_seq":9,"focused":false,"agent_status":"working","cwd":"/tmp/repo","foreground_cwd":"/tmp/repo","screen_detection_skipped":true,"display_agent":"Jidoka | implementation","title":"Issue 42 | implementation","tokens":{"managed_by":"jidoka","run_id":"run-1"}}]}}}
     """ + "\n"
   }
 }
@@ -1722,7 +1722,7 @@ private actor DriftingHerdrPeerExchange: HerdrSocketExchanging {
     return HerdrSocketExchange(
       record: Data(
         """
-        {"id":"ping","result":{"type":"pong","version":"0.8.0","protocol":19,"capabilities":{"live_handoff":true,"detached_server_daemon":true}}}
+        {"id":"ping","result":{"type":"pong","version":"0.8.2","protocol":20,"capabilities":{"live_handoff":true,"detached_server_daemon":true}}}
         """.utf8
       ),
       authority: baseline
@@ -1770,7 +1770,7 @@ private actor RotatingHerdrSocketExchange: HerdrSocketExchanging {
     return HerdrSocketExchange(
       record: Data(
         """
-        {"id":"ping","result":{"type":"pong","version":"0.8.0","protocol":19,"capabilities":{"live_handoff":true,"detached_server_daemon":true}}}
+        {"id":"ping","result":{"type":"pong","version":"0.8.2","protocol":20,"capabilities":{"live_handoff":true,"detached_server_daemon":true}}}
         """.utf8
       ),
       authority: try HerdrConnectionAuthority(

@@ -157,6 +157,62 @@ struct GitHubTokenStoreTests {
       ),
       prompt: 0
     )
+    let normalizedPartition = GitHubTokenKeychainAccessPolicy.AccessACL(
+      authorizations: [kSecACLAuthorizationPartitionID as String],
+      applications: nil,
+      descriptor: try partitionDescriptor(
+        teamIdentifier: "X3Q42VNZDC",
+        count: 1
+      ),
+      prompt: 0
+    )
+    let foreignPartition = GitHubTokenKeychainAccessPolicy.AccessACL(
+      authorizations: [kSecACLAuthorizationPartitionID as String],
+      applications: nil,
+      descriptor: try partitionDescriptor(
+        teamIdentifier: "FOREIGNTEAM",
+        count: 1
+      ),
+      prompt: 0
+    )
+    let emptyPartition = GitHubTokenKeychainAccessPolicy.AccessACL(
+      authorizations: partition.authorizations,
+      applications: nil,
+      descriptor: try partitionDescriptor(teamIdentifier: "X3Q42VNZDC", count: 0),
+      prompt: 0
+    )
+    let oversizedPartition = GitHubTokenKeychainAccessPolicy.AccessACL(
+      authorizations: partition.authorizations,
+      applications: nil,
+      descriptor: try partitionDescriptor(teamIdentifier: "X3Q42VNZDC", count: 3),
+      prompt: 0
+    )
+    let mixedPartition = GitHubTokenKeychainAccessPolicy.AccessACL(
+      authorizations: partition.authorizations,
+      applications: nil,
+      descriptor: try partitionDescriptor(
+        values: ["teamid:X3Q42VNZDC", "teamid:FOREIGNTEAM"]
+      ),
+      prompt: 0
+    )
+    let malformedPartition = GitHubTokenKeychainAccessPolicy.AccessACL(
+      authorizations: partition.authorizations,
+      applications: nil,
+      descriptor: "not-lowercase-hex",
+      prompt: 0
+    )
+    let alteredRequired = GitHubTokenKeychainAccessPolicy.AccessACL(
+      authorizations: required.authorizations,
+      applications: required.applications,
+      descriptor: "wrong descriptor",
+      prompt: required.prompt
+    )
+    let unknownAuthorization = GitHubTokenKeychainAccessPolicy.AccessACL(
+      authorizations: ["acl-unknown"],
+      applications: nil,
+      descriptor: required.descriptor,
+      prompt: 0
+    )
     #expect(
       GitHubTokenKeychainAccessPolicy.accessACLsAreExact(
         observed: [required, required, required, integrity, partition],
@@ -185,6 +241,15 @@ struct GitHubTokenStoreTests {
         expectedPartitionCount: 2
       )
     )
+    for validPartition in [normalizedPartition, partition] {
+      #expect(
+        GitHubTokenKeychainAccessPolicy.accessACLsAreExact(
+          observed: [required, integrity, validPartition],
+          expected: [required, partition],
+          expectedPartitionCount: 2
+        )
+      )
+    }
     #expect(
       !GitHubTokenKeychainAccessPolicy.accessACLsAreExact(
         observed: [required, integrity, partition],
@@ -192,6 +257,27 @@ struct GitHubTokenStoreTests {
         expectedPartitionCount: 1
       )
     )
+    for invalidPartition in [
+      foreignPartition, emptyPartition, oversizedPartition, mixedPartition,
+      malformedPartition,
+    ] {
+      #expect(
+        !GitHubTokenKeychainAccessPolicy.accessACLsAreExact(
+          observed: [required, integrity, invalidPartition],
+          expected: [required, partition],
+          expectedPartitionCount: 2
+        )
+      )
+    }
+    for unexpectedACL in [alteredRequired, unknownAuthorization] {
+      #expect(
+        !GitHubTokenKeychainAccessPolicy.accessACLsAreExact(
+          observed: [required, integrity, normalizedPartition, unexpectedACL],
+          expected: [required, partition],
+          expectedPartitionCount: 2
+        )
+      )
+    }
     #expect(throws: GitHubTokenStoreError.invalidAccessPolicy) {
       _ = try GitHubTokenKeychainAccessPolicy(
         executableURL: unrelated,
@@ -239,7 +325,6 @@ struct GitHubTokenStoreTests {
     let backend = SystemGitHubTokenKeychainBackend(accessPolicy: policy)
     let exact = try policy.makeAccess(descriptor: GitHubTokenConstants.label)
     let mismatched = try policy.makeAccess(descriptor: "wrong descriptor")
-
     var exactReads = 0
     var exactUpdates = 0
     #expect(
@@ -333,13 +418,17 @@ private func partitionDescriptor(
   teamIdentifier: String,
   count: Int
 ) throws -> String {
+  try partitionDescriptor(
+    values: Array(
+      repeating: "teamid:\(teamIdentifier)",
+      count: count
+    )
+  )
+}
+
+private func partitionDescriptor(values: [String]) throws -> String {
   let data = try PropertyListSerialization.data(
-    fromPropertyList: [
-      "Partitions": Array(
-        repeating: "teamid:\(teamIdentifier)",
-        count: count
-      )
-    ],
+    fromPropertyList: ["Partitions": values],
     format: .xml,
     options: 0
   )

@@ -21,6 +21,8 @@ readonly MANIFEST="$ROOT/Resources/Pi/workflow-resources.json"
 readonly TUI_MANIFEST="$ROOT/Resources/Pi/tui-resources.json"
 readonly EXPECTED_MANIFEST_SHA256="230c9a45b9dd53443837166c6e8b60adac67d3bfeb32249de8ca5228f1e1357d"
 readonly EXPECTED_TUI_MANIFEST_SHA256="5392fec5eb544dbe0c721692440e8445604d3c05509a39b450f2bb964245f07f"
+readonly EXPECTED_RELEASE_MANIFEST_SHA256="fe15573a58a4604a3695b092ba8b07ae2432da7b7f07743a8d54a4421ab3aa83"
+readonly EXPECTED_RELEASE_RUNTIME_ID="node-26.7.0-pi-0.84.2-darwin-arm64-v1"
 readonly RUN_ID="run-s12-triage"
 readonly RUN_NONCE="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 readonly FRESH_LAUNCH_ATTEMPT_ID="attempt-s12-triage-0001"
@@ -55,8 +57,8 @@ json_value() {
 "$NODE" --check "$PROVIDER_FIXTURE"
 "$NODE" "$ROOT/scripts/tests/test-pi-runtime-attestation.mjs"
 command -v herdr >/dev/null 2>&1 || fail "Herdr is unavailable"
-[[ "$(herdr --version | /usr/bin/awk '{print $2}')" == "0.8.0" ]] || \
-    fail "Herdr 0.8.0 is required"
+[[ "$(herdr --version | /usr/bin/awk '{print $2}')" == "0.8.2" ]] || \
+    fail "Herdr 0.8.2 is required"
 [[ "$(${NODE} -p \
     'require(process.env.JIDOKA_RELEASE_RUNTIME_ROOT + "/pi/package.json").version')" \
     =~ ^0\.84\.[0-9]+$ ]] || fail "an attested Pi 0.84.x build is required"
@@ -66,17 +68,42 @@ command -v herdr >/dev/null 2>&1 || fail "Herdr is unavailable"
     "$EXPECTED_TUI_MANIFEST_SHA256" ]] || fail "TUI resource manifest drifted"
 
 cd "$ROOT"
+/usr/bin/xcrun swift build --product JidokaCodeApp
 /usr/bin/xcrun swift build --product JidokaCodeHerdrHost
 /usr/bin/xcrun swift build --product JidokaCodeHerdrFixture
 BIN_DIR="$(/usr/bin/xcrun swift build --show-bin-path)"
 BIN_DIR="$(cd "$BIN_DIR" && pwd -P)"
 readonly BIN_DIR
+readonly RUNTIME_VERIFIER="$BIN_DIR/JidokaCodeApp"
 readonly HOST="$BIN_DIR/JidokaCodeHerdrHost"
 readonly PREPARER="$BIN_DIR/JidokaCodeHerdrFixture"
+[[ -f "$RUNTIME_VERIFIER" && -x "$RUNTIME_VERIFIER" && ! -L "$RUNTIME_VERIFIER" ]] || \
+    fail "missing independent release runtime verifier"
 [[ -f "$HOST" && -x "$HOST" && ! -L "$HOST" ]] || fail "missing host product"
 [[ -f "$PREPARER" && -x "$PREPARER" && ! -L "$PREPARER" ]] || fail "missing H3 preparer"
 [[ -f "$NODE" && -x "$NODE" && ! -L "$NODE" ]] || fail "missing exact Node runtime"
 [[ -f "$PI_CLI" && ! -L "$PI_CLI" ]] || fail "missing exact Pi CLI"
+
+# The vnode authority includes st_dev, which can change when the same volume is remounted.
+# Bind the launch to one fresh, independently verified identity instead of a stale host value.
+runtime_verification="$(
+    "$RUNTIME_VERIFIER" --release-runtime-verify-input "$JIDOKA_RELEASE_RUNTIME_ROOT"
+)"
+EXPECTED_RELEASE_IDENTITY_SHA256="$(
+    printf '%s\n' "$runtime_verification" | \
+        /usr/bin/plutil -extract runtimeIdentitySHA256 raw -o - -
+)"
+readonly EXPECTED_RELEASE_IDENTITY_SHA256
+[[ "$EXPECTED_RELEASE_IDENTITY_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
+    fail "release runtime verifier emitted an invalid identity"
+expected_runtime_verification="$(printf \
+    '{"manifestSHA256":"%s","runtimeID":"%s","runtimeIdentitySHA256":"%s","schemaVersion":1}' \
+    "$EXPECTED_RELEASE_MANIFEST_SHA256" \
+    "$EXPECTED_RELEASE_RUNTIME_ID" \
+    "$EXPECTED_RELEASE_IDENTITY_SHA256")"
+readonly expected_runtime_verification
+[[ "$runtime_verification" == "$expected_runtime_verification" ]] || \
+    fail "release runtime verifier emitted unexpected authority fields"
 
 /bin/mkdir -p "$ROOT/build/evidence"
 TMP="$(/usr/bin/mktemp -d "$ROOT/build/evidence/jidoka-herdr-s12.XXXXXX")"
@@ -201,6 +228,11 @@ done
 [[ -f "$NETWORK_TRAP_READY" ]] || fail "provider network trap did not start"
 
 [[ "$SOCKET" != "$DEFAULT_SOCKET" ]] || fail "isolated socket resolved to default"
+# Start Herdr with a permissive inherited umask so only the dedicated role host can
+# establish the private file-creation boundary inherited by the real Pi process.
+HARNESS_UMASK="$(umask)"
+readonly HARNESS_UMASK
+umask 022
 # The single-quoted program is evaluated by Expect and reads its own environment.
 # shellcheck disable=SC2016
 env \
@@ -216,6 +248,7 @@ env \
     'log_user 0; set timeout -1; set stty_init "rows 48 columns 140"; spawn -noecho herdr --session $env(SESSION_NAME); expect eof' \
     >"$TMP/server.out" 2>"$TMP/server.err" &
 server_pid=$!
+umask "$HARNESS_UMASK"
 for _ in $(/usr/bin/seq 1 100); do
     [[ -S "$SOCKET" ]] && break
     /bin/sleep 0.05
@@ -223,8 +256,8 @@ done
 [[ -S "$SOCKET" ]] || fail "named session socket did not start"
 [[ "$(/usr/bin/stat -f '%Sp' "$SOCKET")" == "srw-------" ]] || fail "unsafe socket mode"
 "$NODE" "$FIXTURE" ping "$SOCKET" >"$TMP/ping.json"
-[[ "$(json_value "$TMP/ping.json" 'version')" == "0.8.0" ]] || fail "Herdr version mismatch"
-[[ "$(json_value "$TMP/ping.json" 'protocol')" == "19" ]] || fail "Herdr protocol mismatch"
+[[ "$(json_value "$TMP/ping.json" 'version')" == "0.8.2" ]] || fail "Herdr version mismatch"
+[[ "$(json_value "$TMP/ping.json" 'protocol')" == "20" ]] || fail "Herdr protocol mismatch"
 
 "$NODE" "$FIXTURE" snapshot "$SOCKET" >"$TMP/before.json"
 "$NODE" "$FIXTURE" create-workspace \
@@ -265,29 +298,37 @@ const expectedExtensions = [
   `${root}/Resources/Pi/extensions/jidoka-tui-runtime.ts`,
   `${root}/scripts/spikes/pi-tui-fixture-provider.ts`,
 ];
-if (value.schemaVersion !== 3 || value.launchAttemptID !== "attempt-s12-triage-0001"
+if (value.schemaVersion !== 4 || value.launchAttemptID !== "attempt-s12-triage-0001"
     || value.runID !== "run-s12-triage" || args.includes("--mode") || args.includes(prompt)
     || JSON.stringify(extensions) !== JSON.stringify(expectedExtensions)
     || args.includes("--session")) process.exit(1);
 NODE
-"$NODE" - "$RUN_ROOT/$FRESH_LAUNCH_ATTEMPT_ID/launch.json" "$TEMP_ROOT" <<'NODE'
+"$NODE" - \
+    "$RUN_ROOT/$FRESH_LAUNCH_ATTEMPT_ID/launch.json" \
+    "$JIDOKA_RELEASE_RUNTIME_ROOT" \
+    "$EXPECTED_RELEASE_MANIFEST_SHA256" \
+    "$EXPECTED_RELEASE_IDENTITY_SHA256" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
-const launch = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const temporaryRoot = fs.realpathSync(process.argv[3]);
+const [launchPath, requestedRuntimeRoot, manifestSHA256, identitySHA256] =
+  process.argv.slice(2);
+const launch = JSON.parse(fs.readFileSync(launchPath, "utf8"));
+const runtimeRoot = fs.realpathSync(requestedRuntimeRoot);
 const executable = fs.realpathSync(launch.childExecutable);
-const snapshotRoot = path.dirname(executable);
 const cli = fs.realpathSync(launch.childArguments[0]);
-const libraryDirectory = fs.realpathSync(launch.childEnvironment.DYLD_LIBRARY_PATH ?? "");
-const marker = JSON.parse(fs.readFileSync(path.join(snapshotRoot, "snapshot.json"), "utf8"));
-const node = fs.lstatSync(executable), root = fs.lstatSync(snapshotRoot);
-if (!snapshotRoot.startsWith(`${temporaryRoot}/runtime-snapshot-`)
-    || executable !== path.join(snapshotRoot, "node")
-    || cli !== path.join(snapshotRoot, "pi/dist/cli.js")
-    || libraryDirectory !== path.join(snapshotRoot, "lib")
-    || marker.piCLIRelativePath !== "dist/cli.js"
+const invocation = launch.piTUIInvocation;
+const identity = invocation?.releaseRuntimeIdentity;
+const node = fs.lstatSync(executable), root = fs.lstatSync(runtimeRoot);
+if (launch.schemaVersion !== 4 || invocation?.schemaVersion !== 2
+    || executable !== path.join(runtimeRoot, "node/bin/node")
+    || cli !== path.join(runtimeRoot, "pi/dist/cli.js")
+    || "DYLD_LIBRARY_PATH" in launch.childEnvironment
+    || invocation.releaseRuntimeRoot !== runtimeRoot
+    || identity?.canonicalRoot !== runtimeRoot
+    || identity?.manifestSHA256 !== manifestSHA256
+    || invocation.releaseRuntimeIdentitySHA256 !== identitySHA256
     || node.uid !== process.getuid() || node.nlink !== 1 || (node.mode & 0o022) !== 0
-    || root.uid !== process.getuid() || (root.mode & 0o077) !== 0) process.exit(1);
+    || root.uid !== process.getuid() || (root.mode & 0o022) !== 0) process.exit(1);
 NODE
 "$NODE" "$FIXTURE" apply-layout \
     "$SOCKET" "$workspace_id" "j/s12/g1" "$HOST" "$RUN_ROOT" "$WORK_ROOT" \
@@ -301,7 +342,7 @@ readonly pane_id tab_id
 HERDR_SOCKET_PATH="$SOCKET" herdr terminal session observe \
     "$pane_id" --cols 120 --rows 40 >"$TMP/observer.out" 2>"$TMP/observer.err" &
 observer_pid=$!
-# Runtime snapshot attestation precedes spawn and may traverse tens of thousands of files.
+# Release-owned runtime attestation precedes spawn and traverses the complete Pi tree.
 # Start the UI visibility deadline only after the host has atomically recorded the child.
 for _ in $(/usr/bin/seq 1 2400); do
     [[ -f "$CHILD_PROCESS_RECORD" ]] && break
@@ -408,6 +449,11 @@ stop_observer
 [[ "$(/usr/bin/wc -l <"$PROVIDER_CALL" | /usr/bin/tr -d ' ')" == "2" ]] || \
     fail "causal tool loop did not make exactly two provider requests"
 [[ -f "$CHANNEL_ROOT/session.json" ]] || fail "Pi session identity was not recorded"
+session_file="$(json_value "$CHANNEL_ROOT/session.json" 'sessionFile')"
+readonly session_file
+[[ -f "$session_file" && ! -L "$session_file" ]] || fail "Pi session file is invalid"
+[[ "$(/usr/bin/stat -f '%Lp' "$session_file")" == "600" ]] || \
+    fail "Pi session file did not inherit the host-private umask"
 [[ ! -f "$CHANNEL_ROOT/result.json" ]] || fail "fault point ran after side-channel result"
 [[ ! -f "$CHANNEL_ROOT/acknowledgement.json" ]] || fail "crashed Pi was acknowledged early"
 [[ ! -f "$CHANNEL_ROOT/runtime-failure.json" ]] || fail "causal crash became a runtime failure"
@@ -456,7 +502,7 @@ NODE
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const index = value.argumentValues.indexOf("--session");
-if (value.schemaVersion !== 3 || value.runID !== "run-s12-triage"
+if (value.schemaVersion !== 4 || value.runID !== "run-s12-triage"
     || value.launchAttemptID !== "attempt-s12-triage-0002"
     || index < 0 || value.argumentValues[index + 1] !== process.argv[3]) process.exit(1);
 NODE

@@ -48,6 +48,18 @@ public protocol EngineJobRuntime: Sendable {
   func executeCanaryRoleHostReplacement(
     _ authorization: JobCanaryRoleHostReplacementAuthorization
   ) async throws -> JobCanaryRoleHostReplacementExecution
+  func previewCanaryGenerationRollover(
+    _ request: JobCanaryGenerationRolloverRequest
+  ) async throws -> JobCanaryGenerationRolloverReport
+  func executeCanaryGenerationRollover(
+    _ authorization: JobCanaryGenerationRolloverAuthorization
+  ) async throws -> JobCanaryGenerationRolloverReport
+  func previewCanaryGenerationRolloverQ4(
+    _ request: JobCanaryGenerationRolloverQ4Request
+  ) async throws -> JobCanaryGenerationRolloverQ4Report
+  func executeCanaryGenerationRolloverQ4(
+    _ authorization: JobCanaryGenerationRolloverQ4ExecutionAuthorization
+  ) async throws -> JobCanaryGenerationRolloverQ4Report
   func waitUntilIdle() async throws
   func timingSnapshot() async -> SchedulerTimingSnapshot?
   func coordinatorSnapshot() async -> JobCoordinatorSnapshot?
@@ -94,6 +106,26 @@ extension EngineJobRuntime {
   public func executeCanaryRoleHostReplacement(
     _ authorization: JobCanaryRoleHostReplacementAuthorization
   ) async throws -> JobCanaryRoleHostReplacementExecution {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryGenerationRollover(
+    _ request: JobCanaryGenerationRolloverRequest
+  ) async throws -> JobCanaryGenerationRolloverReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryGenerationRollover(
+    _ authorization: JobCanaryGenerationRolloverAuthorization
+  ) async throws -> JobCanaryGenerationRolloverReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryGenerationRolloverQ4(
+    _ request: JobCanaryGenerationRolloverQ4Request
+  ) async throws -> JobCanaryGenerationRolloverQ4Report {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryGenerationRolloverQ4(
+    _ authorization: JobCanaryGenerationRolloverQ4ExecutionAuthorization
+  ) async throws -> JobCanaryGenerationRolloverQ4Report {
     throw EngineClientError(.unavailable)
   }
 }
@@ -144,6 +176,26 @@ public actor InactiveEngineJobRuntime: EngineJobRuntime {
   public func executeCanaryRoleHostReplacement(
     _ authorization: JobCanaryRoleHostReplacementAuthorization
   ) throws -> JobCanaryRoleHostReplacementExecution {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryGenerationRollover(
+    _ request: JobCanaryGenerationRolloverRequest
+  ) throws -> JobCanaryGenerationRolloverReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryGenerationRollover(
+    _ authorization: JobCanaryGenerationRolloverAuthorization
+  ) throws -> JobCanaryGenerationRolloverReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewCanaryGenerationRolloverQ4(
+    _ request: JobCanaryGenerationRolloverQ4Request
+  ) throws -> JobCanaryGenerationRolloverQ4Report {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeCanaryGenerationRolloverQ4(
+    _ authorization: JobCanaryGenerationRolloverQ4ExecutionAuthorization
+  ) throws -> JobCanaryGenerationRolloverQ4Report {
     throw EngineClientError(.unavailable)
   }
   public func waitUntilIdle() {}
@@ -336,6 +388,8 @@ public actor EngineService: EngineClient {
     var jobCanaryRecovery: JobCanaryRecoveryReport? = nil
     var jobCanaryPiRetry: JobCanaryPiRetryReport? = nil
     var jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport? = nil
+    var jobCanaryGenerationRollover: JobCanaryGenerationRolloverReport? = nil
+    var jobCanaryGenerationRolloverQ4: JobCanaryGenerationRolloverQ4Report? = nil
     switch command {
     case .snapshot:
       checkpoint = nil
@@ -468,6 +522,9 @@ public actor EngineService: EngineClient {
       if paused { await runtime.prepareForPause() }
       do {
         try await configuration.setPaused(paused, now: now())
+      } catch ConfigurationStoreError.generationRolloverRequiresAuthorization {
+        if paused { await runtime.setDispatchAllowed(try await dispatchAllowed()) }
+        throw EngineClientError(.staleEvidence)
       } catch {
         if paused { await runtime.setDispatchAllowed(try await dispatchAllowed()) }
         throw error
@@ -659,6 +716,58 @@ public actor EngineService: EngineClient {
         throw error
       }
       didMutate()
+    case .previewJobCanaryGenerationRollover(let request):
+      guard try await configuration.appConfiguration().paused,
+        piStatus.state == .ready, herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      jobCanaryGenerationRollover = try await runtime.previewCanaryGenerationRollover(
+        request
+      )
+      checkpoint = nil
+    case .executeJobCanaryGenerationRollover(let authorization):
+      guard try await configuration.appConfiguration().paused,
+        piStatus.state == .ready, herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      try await runtime.beginExclusiveOperation()
+      do {
+        jobCanaryGenerationRollover = try await runtime.executeCanaryGenerationRollover(
+          authorization
+        )
+        _ = try await database.checkpoint()
+        checkpoint = try await checkpointReceipt()
+        await runtime.endExclusiveOperation()
+      } catch {
+        await runtime.endExclusiveOperation()
+        throw error
+      }
+      didMutate()
+    case .previewJobCanaryGenerationRolloverQ4(let request):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready, herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      jobCanaryGenerationRolloverQ4 = try await runtime.previewCanaryGenerationRolloverQ4(
+        request
+      )
+      checkpoint = nil
+    case .executeJobCanaryGenerationRolloverQ4(let authorization):
+      guard try await configuration.appConfiguration().paused,
+        credentialStatus.state == .valid,
+        piStatus.state == .ready, herdrStatus.state == .ready
+      else { throw EngineClientError(.busy) }
+      try await runtime.beginExclusiveOperation()
+      do {
+        jobCanaryGenerationRolloverQ4 = try await runtime.executeCanaryGenerationRolloverQ4(
+          authorization
+        )
+        _ = try await database.checkpoint()
+        checkpoint = try await checkpointReceipt()
+        await runtime.endExclusiveOperation()
+      } catch {
+        await runtime.endExclusiveOperation()
+        throw error
+      }
+      didMutate()
     case .setLoginEnabled(let selected):
       let current = try await configuration.appConfiguration()
       try await configuration.setLoginItem(
@@ -679,7 +788,11 @@ public actor EngineService: EngineClient {
       guard Self.onboardingReady(state.onboarding) else {
         throw EngineClientError(.onboardingIncomplete)
       }
-      try await configuration.setOnboardingComplete(true, now: now())
+      do {
+        try await configuration.setOnboardingComplete(true, now: now())
+      } catch ConfigurationStoreError.generationRolloverRequiresAuthorization {
+        throw EngineClientError(.staleEvidence)
+      }
       try await runtime.reload(dispatchAllowed: try await dispatchAllowed())
       checkpoint = nil
       didMutate()
@@ -719,7 +832,9 @@ public actor EngineService: EngineClient {
       jobCanary: jobCanary,
       jobCanaryRecovery: jobCanaryRecovery,
       jobCanaryPiRetry: jobCanaryPiRetry,
-      jobCanaryRoleHostReplacement: jobCanaryRoleHostReplacement
+      jobCanaryRoleHostReplacement: jobCanaryRoleHostReplacement,
+      jobCanaryGenerationRollover: jobCanaryGenerationRollover,
+      jobCanaryGenerationRolloverQ4: jobCanaryGenerationRolloverQ4
     )
   }
 
@@ -973,7 +1088,9 @@ public actor EngineService: EngineClient {
       .applyJobMaintenance, .previewJobCanary, .executeJobCanary,
       .previewJobCanaryRecovery, .executeJobCanaryRecovery,
       .previewJobCanaryPiRetry, .executeJobCanaryPiRetry,
-      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement:
+      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement,
+      .previewJobCanaryGenerationRollover, .executeJobCanaryGenerationRollover,
+      .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
       .staleEvidence
     case .completeOnboarding: .onboardingIncomplete
     case .prepareForHandoff, .prepareForQuit: .checkpointFailed

@@ -257,6 +257,42 @@ public struct HerdrHostDescriptor: Codable, Equatable, Sendable {
     )
   }
 
+  #if DEBUG
+    public static func debugFixture(
+      launchAttemptID: String,
+      runID: String,
+      runNonce: String,
+      repositoryID: String,
+      jobID: String,
+      generation: Int,
+      role: String,
+      agentAlias: String,
+      title: String,
+      displayAgent: String,
+      expectedWorkspaceID: String,
+      piTUIInvocation: PiTUIHostInvocationDescriptor,
+      settlement: HerdrHostSettlementDescriptor,
+      resolvedRuntime: PiResolvedRuntime
+    ) throws -> Self {
+      try Self(
+        launchAttemptID: launchAttemptID,
+        runID: runID,
+        runNonce: runNonce,
+        repositoryID: repositoryID,
+        jobID: jobID,
+        generation: generation,
+        role: role,
+        agentAlias: agentAlias,
+        title: title,
+        displayAgent: displayAgent,
+        expectedWorkspaceID: expectedWorkspaceID,
+        piTUIInvocation: piTUIInvocation,
+        settlement: settlement,
+        resolvedRuntime: resolvedRuntime
+      )
+    }
+  #endif
+
   init(
     launchAttemptID: String,
     runID: String,
@@ -463,7 +499,7 @@ public struct HerdrChildProcessRecord: Codable, Equatable, Sendable {
   public let startSeconds: UInt64
   public let startMicroseconds: UInt64
 
-  init(
+  public init(
     launchAttemptID: String,
     processID: Int32,
     processGroupID: Int32,
@@ -507,6 +543,17 @@ public enum HerdrHostDescriptorStore {
   ) throws -> String {
     try prepare(descriptor, in: root, failingAt: nil)
   }
+
+  #if DEBUG
+    @discardableResult
+    public static func prepareDebugFixture(
+      _ descriptor: HerdrHostDescriptor,
+      in root: URL,
+      resolvedRuntime: PiResolvedRuntime
+    ) throws -> String {
+      try prepare(descriptor, in: root, resolvedRuntime: resolvedRuntime)
+    }
+  #endif
 
   @discardableResult
   static func prepare(
@@ -613,6 +660,20 @@ public enum HerdrHostDescriptorStore {
       resolvedRuntime: nil
     )
   }
+
+  #if DEBUG
+    public static func loadDebugFixture(
+      launchAttemptID: String,
+      from root: URL,
+      resolvedRuntime: PiResolvedRuntime
+    ) throws -> HerdrHostDescriptor {
+      try load(
+        launchAttemptID: launchAttemptID,
+        from: root,
+        resolvedRuntime: resolvedRuntime
+      )
+    }
+  #endif
 
   static func load(
     launchAttemptID: String,
@@ -989,6 +1050,26 @@ public enum HerdrHostRuntime {
       )
     }
     do {
+      #if DEBUG
+        if let runtimeRoot = environment["JIDOKA_CODE_DEBUG_RELEASE_RUNTIME_ROOT"] {
+          let runtime = try ReleaseOwnedPiRuntimeDebugFixture.resolveExactStagedRuntime(
+            at: URL(fileURLWithPath: runtimeRoot, isDirectory: true)
+          )
+          return try await run(
+            arguments: arguments,
+            environment: environment,
+            responseTimeoutSeconds: 2,
+            descriptorLoader: {
+              try HerdrHostDescriptorStore.loadDebugFixture(
+                launchAttemptID: $0,
+                from: $1,
+                resolvedRuntime: runtime
+              )
+            },
+            launchOperation: { try await launch($0) }
+          )
+        }
+      #endif
       return try await run(
         arguments: arguments,
         environment: environment,

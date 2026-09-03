@@ -1471,7 +1471,7 @@ private final class HerdrHostWireResponder: @unchecked Sendable {
     switch method {
     case "ping":
       result = """
-        {"type":"pong","version":"0.8.0","protocol":19,"capabilities":{"live_handoff":true,"detached_server_daemon":true}}
+        {"type":"pong","version":"0.8.2","protocol":20,"capabilities":{"live_handoff":true,"detached_server_daemon":true}}
         """
     case "session.snapshot":
       let moved = nextSnapshotIsMoved()
@@ -1479,7 +1479,7 @@ private final class HerdrHostWireResponder: @unchecked Sendable {
       let workspaceID = moved ? "w-moved" : "w-repo"
       let tabID = moved ? "w-moved:t9" : "w-repo:t2"
       result = """
-        {"type":"session_snapshot","snapshot":{"version":"0.8.0","protocol":19,"focused_workspace_id":null,"focused_tab_id":null,"focused_pane_id":null,"workspaces":[{"workspace_id":"\(workspaceID)","active_tab_id":"\(tabID)","label":"maroffo/jidoka-code","number":1,"pane_count":1,"tab_count":1,"focused":false,"agent_status":"working"}],"tabs":[{"tab_id":"\(tabID)","workspace_id":"\(workspaceID)","label":"j/h2/g1","number":1,"pane_count":1,"focused":false,"agent_status":"working"}],"panes":[{"pane_id":"\(paneID)","terminal_id":"term-host","workspace_id":"\(workspaceID)","tab_id":"\(tabID)","revision":1,"focused":false,"agent_status":"working","cwd":"\(escaped(fixture.workingDirectory.path))","foreground_cwd":"\(escaped(fixture.workingDirectory.path))"}],"agents":[]}}
+        {"type":"session_snapshot","snapshot":{"version":"0.8.2","protocol":20,"focused_workspace_id":null,"focused_tab_id":null,"focused_pane_id":null,"workspaces":[{"workspace_id":"\(workspaceID)","active_tab_id":"\(tabID)","label":"maroffo/jidoka-code","number":1,"pane_count":1,"tab_count":1,"focused":false,"agent_status":"working"}],"tabs":[{"tab_id":"\(tabID)","workspace_id":"\(workspaceID)","label":"j/h2/g1","number":1,"pane_count":1,"focused":false,"agent_status":"working"}],"panes":[{"pane_id":"\(paneID)","terminal_id":"term-host","workspace_id":"\(workspaceID)","tab_id":"\(tabID)","revision":1,"focused":false,"agent_status":"working","cwd":"\(escaped(fixture.workingDirectory.path))","foreground_cwd":"\(escaped(fixture.workingDirectory.path))"}],"agents":[]}}
         """
     case "agent.rename":
       result = """

@@ -729,12 +729,14 @@ public enum PiTUIInvocationBuilder {
     }
     let data = try PiTUIFileProtocol.readPrivateFile(settings, maximumBytes: 64 * 1_024)
     if data == lockedSettings { return true }
-    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      Set(object.keys)
-        == Set([
-          "compaction", "defaultProjectTrust", "enableInstallTelemetry", "lastChangelogVersion",
-          "retry", "theme", "transport",
-        ]),
+    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return false }
+    let persistedKeys = Set([
+      "compaction", "defaultProjectTrust", "enableInstallTelemetry", "lastChangelogVersion",
+      "retry", "transport",
+    ])
+    let keys = Set(object.keys)
+    guard keys == persistedKeys || keys == persistedKeys.union(["theme"]),
       let compaction = object["compaction"] as? [String: Any],
       Set(compaction.keys) == Set(["enabled"]),
       compaction["enabled"] as? Bool == false,
@@ -747,12 +749,12 @@ public enum PiTUIInvocationBuilder {
       let provider = retry["provider"] as? [String: Any],
       Set(provider.keys) == Set(["maxRetries"]),
       provider["maxRetries"] as? Int == 0,
-      object["theme"] as? String == "dark",
       object["transport"] as? String == "sse"
     else {
       return false
     }
-    return true
+    guard let theme = object["theme"] else { return true }
+    return theme as? String == "dark" || theme as? String == "light"
   }
 
   private static func arguments(

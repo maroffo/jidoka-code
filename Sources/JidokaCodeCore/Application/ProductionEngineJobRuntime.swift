@@ -825,6 +825,130 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     )
   }
 
+  public func previewCanaryGenerationRollover(
+    _ request: JobCanaryGenerationRolloverRequest
+  ) async throws -> JobCanaryGenerationRolloverReport {
+    guard exclusiveOperations == 0, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    let candidate = try await components.herdrRuntime.canaryGenerationRolloverCandidate(
+      request: request
+    )
+    return try JobCanaryGenerationRolloverReport(
+      authorization: candidate.authorization,
+      status: .preview,
+      replayed: false
+    )
+  }
+
+  public func executeCanaryGenerationRollover(
+    _ authorization: JobCanaryGenerationRolloverAuthorization
+  ) async throws -> JobCanaryGenerationRolloverReport {
+    try authorization.validate()
+    guard exclusiveOperations == 1, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    if try await components.herdrRuntime.generationRolloverTopologyIsActive(
+      authorization
+    ) {
+      return try JobCanaryGenerationRolloverReport(
+        authorization: authorization,
+        status: .topologyActivated,
+        replayed: true
+      )
+    }
+    let candidate: HerdrGenerationRolloverCandidate
+    if try await components.herdrRuntime.hasGenerationRolloverAuthorization(
+      authorization
+    ) {
+      candidate = try await components.herdrRuntime.canaryGenerationRolloverCandidate(
+        authorization: authorization
+      )
+    } else {
+      candidate = try await components.herdrRuntime.canaryGenerationRolloverCandidate(
+        request: authorization.request,
+        authorizedRolloverEvidenceSHA256: authorization.rolloverEvidenceSHA256
+      )
+    }
+    guard candidate.authorization == authorization else {
+      throw EngineClientError(.staleEvidence)
+    }
+    try await components.canaryMarkerGate.begin(jobID: authorization.jobID)
+    await components.herdrRuntime.beginCanaryLaunchAdmission(jobID: authorization.jobID)
+    do {
+      let replayed = try await components.herdrRuntime.activateCanaryGenerationRollover(
+        candidate,
+        authorization: authorization
+      )
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      return try JobCanaryGenerationRolloverReport(
+        authorization: authorization,
+        status: .topologyActivated,
+        replayed: replayed
+      )
+    } catch {
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      throw error
+    }
+  }
+
+  public func previewCanaryGenerationRolloverQ4(
+    _ request: JobCanaryGenerationRolloverQ4Request
+  ) async throws -> JobCanaryGenerationRolloverQ4Report {
+    guard exclusiveOperations == 0, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    let candidate = try await components.herdrRuntime.canaryGenerationRolloverQ4Candidate(
+      request: request,
+      resourceTreeSHA256: try await canaryResourceTreeSHA256()
+    )
+    return try JobCanaryGenerationRolloverQ4Report(
+      authorization: candidate.authorization,
+      status: .preview,
+      replayed: false
+    )
+  }
+
+  public func executeCanaryGenerationRolloverQ4(
+    _ authorization: JobCanaryGenerationRolloverQ4ExecutionAuthorization
+  ) async throws -> JobCanaryGenerationRolloverQ4Report {
+    try authorization.validate()
+    guard exclusiveOperations == 1, paused, let components else {
+      throw EngineClientError(.busy)
+    }
+    let request = JobCanaryGenerationRolloverQ4Request(
+      rolloverAuthorization: authorization.rollover,
+      plannedLaunchAttemptID: authorization.q4.plannedLaunchAttemptID
+    )
+    let candidate = try await components.herdrRuntime.canaryGenerationRolloverQ4Candidate(
+      request: request,
+      resourceTreeSHA256: try await canaryResourceTreeSHA256(),
+      authorizedQ4: authorization.q4
+    )
+    guard candidate.authorization == authorization.q4 else {
+      throw EngineClientError(.staleEvidence)
+    }
+    try await components.canaryMarkerGate.begin(jobID: authorization.rollover.jobID)
+    await components.herdrRuntime.beginCanaryLaunchAdmission(
+      jobID: authorization.rollover.jobID
+    )
+    do {
+      let report = try await components.herdrRuntime.executeCanaryGenerationRolloverQ4(
+        candidate,
+        authorization: authorization
+      )
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      return report
+    } catch {
+      await components.herdrRuntime.closeLaunchAdmission()
+      await components.canaryMarkerGate.end()
+      throw error
+    }
+  }
+
   private func productionRoleHostReplacementBoundary(
     components: ProductionJobComponents
   ) -> ProductionRoleHostReplacementBoundary {

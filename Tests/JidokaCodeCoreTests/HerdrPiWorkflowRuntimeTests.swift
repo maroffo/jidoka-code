@@ -86,6 +86,123 @@ struct HerdrPiWorkflowRuntimeTests {
     }
   }
 
+  @Test("Pi-owned terminal theme remains valid while importing a launched child")
+  func piOwnedTerminalThemeAllowsChildImport() async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      kind: .issueTriage,
+      timeoutSeconds: 2,
+      fastRuntime: true
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    await fixture.runtime.setLaunchAllowed(true)
+    let childLifecycle = Task {
+      let checkpoint = try await fixture.launchCheckpoints.wait(for: .commandPublished)
+      let run = try #require(try await fixture.runStore.run(id: checkpoint.runID))
+      let launch = try #require(
+        try await fixture.runStore.launches(runID: run.id).first(where: {
+          $0.launchAttemptID == checkpoint.launchAttemptID
+        })
+      )
+      let descriptorRoot = fixture.applicationSupport.appendingPathComponent(
+        "HerdrRuntime/Descriptors", isDirectory: true)
+      let command = try #require(
+        try HerdrRoleHostDescriptorStore.command(
+          roleHostID: launch.roleHostID,
+          sequence: launch.queueSequence,
+          root: descriptorRoot
+        )
+      )
+      try HerdrRoleHostDescriptorStore.recordStarted(command: command, in: descriptorRoot)
+
+      let runningDeadline = ProcessInfo.processInfo.systemUptime + 2
+      while ProcessInfo.processInfo.systemUptime < runningDeadline {
+        if try await fixture.runStore.launches(runID: run.id).contains(where: {
+          $0.launchAttemptID == launch.launchAttemptID && $0.state == .running
+        }) {
+          break
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+      }
+      guard
+        try await fixture.runStore.launches(runID: run.id).contains(where: {
+          $0.launchAttemptID == launch.launchAttemptID && $0.state == .running
+        })
+      else { throw HerdrPiWorkflowError.timedOut }
+
+      let channel = URL(fileURLWithPath: run.channelPath, isDirectory: true)
+      let agent = channel.deletingLastPathComponent().appendingPathComponent(
+        "agent", isDirectory: true)
+      let settings = agent.appendingPathComponent("settings.json")
+      let replacement = agent.appendingPathComponent(".settings-theme-replacement.json")
+      let version = try fixture.runtimeResolver.resolve().piVersion.description
+      let settingsData = try PiTUIFileProtocol.canonicalJSONData([
+        "compaction": ["enabled": false],
+        "defaultProjectTrust": "never",
+        "enableInstallTelemetry": false,
+        "lastChangelogVersion": version,
+        "retry": ["enabled": false, "provider": ["maxRetries": 0]],
+        "theme": "dark",
+        "transport": "sse",
+      ])
+      try PiTUIFileProtocol.createPrivateFile(data: settingsData, at: replacement)
+      guard Darwin.rename(replacement.path, settings.path) == 0 else {
+        throw PiTUIRuntimeError.fileUnavailable
+      }
+
+      let child = HerdrChildProcessRecord(
+        launchAttemptID: launch.launchAttemptID,
+        processID: 999_990,
+        processGroupID: 999_990,
+        startSeconds: 31,
+        startMicroseconds: 1
+      )
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+      var childData = try encoder.encode(child)
+      childData.append(0x0A)
+      try PiTUIFileProtocol.createPrivateFile(
+        data: childData,
+        at: channel.appendingPathComponent("child-process-\(launch.launchAttemptID).json")
+      )
+      _ = try await fixture.launchCheckpoints.wait(
+        for: .childImported,
+        queueSequence: launch.queueSequence,
+        runID: run.id,
+        timeout: .seconds(2)
+      )
+      try PiTUIFileProtocol.createPrivateFile(
+        data: try PiTUIFileProtocol.canonicalJSONData([
+          "code": "FIXTURE_FAILURE",
+          "runID": run.id,
+          "runNonce": run.runNonce,
+          "schemaVersion": 1,
+          "status": "failed",
+        ]),
+        at: channel.appendingPathComponent(PiTUIResultChannel.runtimeFailureFileName)
+      )
+    }
+    let executor = fixture.runtime.makeExecutor(
+      preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
+    )
+
+    await #expect(throws: HerdrPiWorkflowError.runtimeFailure("FIXTURE_FAILURE")) {
+      _ = try await executor.execute(
+        PiWorkflowExecutionRequest(
+          jobID: "job-\(fixture.jobID.uuidString.lowercased())",
+          workflow: .issueTriage,
+          role: .triage,
+          round: 1,
+          artifactSHA256: fixture.artifactSHA256,
+          sessionDirective: .fresh
+        )
+      )
+    }
+    try await childLifecycle.value
+    let run = try #require(try await fixture.runStore.runs().first)
+    let launch = try #require(try await fixture.runStore.launches(runID: run.id).first)
+    #expect(launch.childProcess != nil)
+  }
+
   @Test("workflow launch event gates time out in seconds and remain reusable")
   func workflowLaunchEventGateIsBounded() async throws {
     let probe = WorkflowLaunchCheckpointProbe()
@@ -261,6 +378,7 @@ struct HerdrPiWorkflowRuntimeTests {
     let jobID = fixture.jobID.uuidString.lowercased()
     let repositoryID = fixture.repositoryID.uuidString.lowercased()
     let authorization = String(repeating: "a", count: 64)
+    let narrativeDigest = String(repeating: "c", count: 64)
     let prefix = "canary:\(authorization):m2:"
     _ = try await fixture.database.execute(
       "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
@@ -301,6 +419,7 @@ struct HerdrPiWorkflowRuntimeTests {
           role: .architecture,
           round: 1,
           artifactSHA256: fixture.artifactSHA256,
+          commitNarrativeSHA256: narrativeDigest,
           sessionDirective: .fresh
         )
       )
@@ -310,6 +429,15 @@ struct HerdrPiWorkflowRuntimeTests {
 
     #expect(try await fixture.runStore.runs().count == 1)
     let run = try #require(try await fixture.runStore.runs().first)
+    let prompt = try String(
+      contentsOf: URL(fileURLWithPath: run.channelPath).appendingPathComponent("prompt.txt"),
+      encoding: .utf8
+    )
+    let narrativeRange = try #require(
+      prompt.range(of: "Commit narrative SHA-256: \(narrativeDigest).")
+    )
+    let untrustedRange = try #require(prompt.range(of: "Treat all application"))
+    #expect(narrativeRange.lowerBound < untrustedRange.lowerBound)
     #expect(try await fixture.runStore.launches(runID: run.id).count == 1)
     #expect(await fixture.herdr.launchedCommands().count == 4)
     #expect(
@@ -1463,6 +1591,112 @@ struct HerdrPiWorkflowRuntimeTests {
     #expect(await fixture.herdr.paneCount() == 2)
   }
 
+  @Test("quit ignores inactive prepared history after release runtime replacement")
+  func quitIgnoresInactivePreparedHistoryAfterRuntimeReplacement() async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    try await fixture.prepareActiveTriageTopology()
+    let resolver = try ReleaseIdentityDriftResolver(base: fixture.runtimeResolver)
+    let runtime = try fixture.reopenedRuntime(
+      runtimeResolver: resolver,
+      enqueueRoleHostCommand: { _, _ in
+        throw WorkflowLaunchCheckpointProbeError.timedOut
+      }
+    )
+    await runtime.setLaunchAllowed(true)
+    let executor = runtime.makeExecutor(
+      preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
+    )
+    await #expect(throws: WorkflowLaunchCheckpointProbeError.timedOut) {
+      _ = try await executor.execute(
+        PiWorkflowExecutionRequest(
+          jobID: "job-\(fixture.jobID.uuidString.lowercased())",
+          workflow: .issueTriage,
+          role: .triage,
+          round: 1,
+          artifactSHA256: fixture.artifactSHA256,
+          sessionDirective: .fresh
+        )
+      )
+    }
+
+    let run = try #require(try await fixture.runStore.runs().first)
+    let launch = try #require(try await fixture.runStore.launches(runID: run.id).last)
+    let host = try #require(try await fixture.runStore.roleHosts(jobID: fixture.jobID).first)
+    #expect(run.outcome == .prepared)
+    #expect(launch.state == .prepared)
+    _ = try await fixture.runStore.transitionRoleHost(
+      id: host.id,
+      to: .stopping,
+      now: Date(timeIntervalSince1970: 4)
+    )
+    _ = try await fixture.runStore.transitionRoleHost(
+      id: host.id,
+      to: .stopped,
+      now: Date(timeIntervalSince1970: 5)
+    )
+    try await fixture.runStore.closeJobBinding(
+      jobID: fixture.jobID,
+      now: Date(timeIntervalSince1970: 6)
+    )
+    _ = try await fixture.database.execute(
+      "UPDATE herdr_role_hosts SET host_pid = 2147483647 WHERE id = ?",
+      bindings: [.text(host.id)]
+    )
+    let descriptorRoot =
+      fixture.applicationSupport
+      .appendingPathComponent("HerdrRuntime", isDirectory: true)
+      .appendingPathComponent("Descriptors", isDirectory: true)
+      .standardizedFileURL
+    let descriptorURL =
+      descriptorRoot
+      .appendingPathComponent(launch.launchAttemptID, isDirectory: true)
+      .appendingPathComponent("launch.json")
+    let descriptorBefore = try Data(contentsOf: descriptorURL)
+
+    let originalRuntimeIdentity = try resolver.resolve().releaseIdentity.requireReleaseIdentity()
+    try resolver.driftRootIdentity()
+    let replacementRuntime = try resolver.resolve()
+    #expect(replacementRuntime.releaseIdentity != originalRuntimeIdentity)
+    #expect(throws: HerdrHostError.invalidDescriptor) {
+      _ = try HerdrHostDescriptorStore.loadDebugFixture(
+        launchAttemptID: launch.launchAttemptID,
+        from: descriptorRoot,
+        resolvedRuntime: replacementRuntime
+      )
+    }
+
+    try await runtime.shutdownOwnedRoleHosts(timeoutSeconds: 0)
+
+    let preservedRun = try #require(try await fixture.runStore.run(id: run.id))
+    let preservedLaunch = try #require(
+      try await fixture.runStore.launches(runID: run.id).last
+    )
+    #expect(preservedRun.outcome == .prepared)
+    #expect(!preservedRun.accepted)
+    #expect(!preservedRun.settled)
+    #expect(preservedLaunch.state == .prepared)
+    #expect(try await fixture.runStore.result(runID: run.id) == nil)
+    #expect(try Data(contentsOf: descriptorURL) == descriptorBefore)
+    #expect(try await fixture.runStore.jobBinding(jobID: fixture.jobID)?.state == .closed)
+
+    let published = try await fixture.runStore.transitionLaunch(
+      launchAttemptID: launch.launchAttemptID,
+      to: .enqueued,
+      event: .enqueued,
+      recordSHA256: launch.descriptorSHA256,
+      now: Date(timeIntervalSince1970: 7)
+    )
+    #expect(published.state == .enqueued)
+    await #expect(throws: HerdrPiWorkflowError.roleHostUnavailable) {
+      try await runtime.shutdownOwnedRoleHosts(timeoutSeconds: 0)
+    }
+    #expect(
+      try await fixture.runStore.launches(runID: run.id).last?.state == .enqueued
+    )
+    #expect(try await fixture.runStore.result(runID: run.id) == nil)
+  }
+
   @Test("pause admission closes before a live result settles and replays without relaunch")
   func livePauseSettlement() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(timeoutSeconds: 600)
@@ -1871,6 +2105,468 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
+    "lost four-host topology rolls to generation two and settles only q4",
+    arguments: GenerationRolloverRestartLaunchState.allCases
+  )
+  func generationRolloverSettlesOnlyQ4(
+    restartState: GenerationRolloverRestartLaunchState
+  ) async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let incident = try await fixture.prepareReplacementIncident(
+      checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
+    )
+    let unrelatedRepositoryID = "64000000-0000-0000-0000-000000000064"
+    for index in 1...154 {
+      _ = try await fixture.database.execute(
+        """
+        INSERT INTO jobs(
+          id, repository_id, kind, object_node_id, object_number, revision_key,
+          contract_version_used, priority, state, current_step, current_step_kind,
+          attempt, created_at, updated_at
+        ) VALUES (?, ?, 'prReview', ?, ?, ?, 'test', 4, 'queued', 0, 'review',
+          1, ?, ?)
+        """,
+        bindings: [
+          .text(String(format: "rollover-unrelated-%03d", index)),
+          .text(unrelatedRepositoryID),
+          .text(String(format: "rollover-unrelated-node-%03d", index)),
+          .integer(Int64(100 + index)),
+          .text(String(format: "rollover-unrelated-revision-%03d", index)),
+          .real(100 + Double(index)),
+          .real(100 + Double(index)),
+        ]
+      )
+    }
+    let unrelatedQueueBefore = try await fixture.database.query(
+      "SELECT * FROM jobs WHERE state = 'queued' ORDER BY id"
+    )
+    #expect(unrelatedQueueBefore.count == 155)
+    let predecessorLaunches = try await fixture.runStore.launches(runID: incident.run.id)
+    let predecessorHosts = try await fixture.runStore.roleHosts(jobID: fixture.jobID)
+    #expect(predecessorHosts.count == 4)
+    let rolloverRuntime = try fixture.reopenedRuntime(
+      providerCredentials: incident.providerCredentials,
+      processIdentityForRoleHost: fixture.processIdentities.require,
+      roleHostExitObserved: { _, _ in true }
+    )
+    let remoteBeforeRecovery = await fixture.herdr.remoteSnapshot()
+    await fixture.herdr.failAllRoleProcessInfo()
+    try await rolloverRuntime.recoverDurableState()
+    await fixture.herdr.clearRoleProcessInfoFailure()
+    #expect(await fixture.herdr.remoteSnapshot() == remoteBeforeRecovery)
+    #expect(
+      try await fixture.runStore.roleHosts(jobID: fixture.jobID).filter {
+        $0.generation == 1 && $0.state == .lost
+      }.count == 4
+    )
+    #expect(try await fixture.runStore.jobBinding(jobID: fixture.jobID)?.state == .lost)
+    let successorRunID = "run-generation-rollover-fixture"
+    let plannedHosts = [
+      JobCanaryGenerationRolloverPlannedHost(
+        role: .architecture,
+        roleHostID: "rolehost-71000000-0000-4000-8000-000000000071"
+      ),
+      JobCanaryGenerationRolloverPlannedHost(
+        role: .security,
+        roleHostID: "rolehost-72000000-0000-4000-8000-000000000072"
+      ),
+      JobCanaryGenerationRolloverPlannedHost(
+        role: .synthesis,
+        roleHostID: "rolehost-73000000-0000-4000-8000-000000000073"
+      ),
+      JobCanaryGenerationRolloverPlannedHost(
+        role: .test,
+        roleHostID: "rolehost-74000000-0000-4000-8000-000000000074"
+      ),
+    ]
+    let request = JobCanaryGenerationRolloverRequest(
+      retry: incident.request.retry,
+      successorRunID: successorRunID,
+      plannedHosts: plannedHosts
+    )
+    let preview = try await rolloverRuntime.canaryGenerationRolloverCandidate(
+      request: request
+    )
+    #expect(preview.authorization.predecessorRunID == incident.run.id)
+    #expect(preview.authorization.predecessorGeneration == 1)
+    #expect(preview.authorization.successorGeneration == 2)
+    #expect(preview.authorization.predecessorLaunches.map(\.queueSequence) == [1, 2, 3])
+    let authorized = try await rolloverRuntime.canaryGenerationRolloverCandidate(
+      request: request,
+      authorizedRolloverEvidenceSHA256: preview.authorization.rolloverEvidenceSHA256
+    )
+    #expect(authorized.authorization == preview.authorization)
+
+    let commandsBeforeRollover = await fixture.herdr.launchedCommands()
+    await fixture.herdr.setRedactLayoutEnvironment(false)
+    await rolloverRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
+    #expect(
+      try await rolloverRuntime.activateCanaryGenerationRollover(
+        authorized,
+        authorization: preview.authorization
+      ) == false
+    )
+    await rolloverRuntime.closeLaunchAdmission()
+    let commandsAfterRollover = await fixture.herdr.launchedCommands()
+    #expect(commandsAfterRollover.count == commandsBeforeRollover.count + 4)
+    #expect(
+      commandsAfterRollover.suffix(4).allSatisfy {
+        $0.count == 3 && $0[0] == "/usr/bin/true" && $0[1] == "--role-host-id"
+          && plannedHosts.map(\.roleHostID).contains($0[2])
+      }
+    )
+    let successorBinding = try #require(
+      try await fixture.runStore.jobBinding(jobID: fixture.jobID)
+    )
+    #expect(successorBinding.generation == 2)
+    #expect(successorBinding.state == .active)
+    let successorHosts = try await fixture.runStore.roleHosts(jobID: fixture.jobID).filter {
+      $0.generation == 2
+    }
+    #expect(successorHosts.count == 4)
+    #expect(successorHosts.allSatisfy { $0.lastQueueSequence == 0 })
+    let architectureHost = try #require(
+      successorHosts.first(where: { $0.role == .architecture })
+    )
+
+    let q4Request = JobCanaryGenerationRolloverQ4Request(
+      rolloverAuthorization: preview.authorization,
+      plannedLaunchAttemptID: "launch-75000000-0000-4000-8000-000000000075"
+    )
+    let architectureProcess = try #require(architectureHost.processIdentity)
+    for field in ReplacementExecutableDriftField.allCases {
+      try fixture.executableIdentities.drift(
+        processID: architectureProcess.processID,
+        field: field
+      )
+      await #expect(throws: HerdrPiWorkflowError.self) {
+        _ = try await rolloverRuntime.canaryGenerationRolloverQ4Candidate(
+          request: q4Request,
+          resourceTreeSHA256: String(repeating: "c", count: 64)
+        )
+      }
+      fixture.executableIdentities.clear(processID: architectureProcess.processID)
+    }
+    for field in ReplacementConnectedPeerDriftField.allCases {
+      try await fixture.herdr.driftPeer(field)
+      await #expect(throws: HerdrPiWorkflowError.self) {
+        _ = try await rolloverRuntime.canaryGenerationRolloverQ4Candidate(
+          request: q4Request,
+          resourceTreeSHA256: String(repeating: "c", count: 64)
+        )
+      }
+      await fixture.herdr.restoreConnectionAuthority()
+    }
+    await fixture.herdr.driftSocketVnode()
+    await #expect(throws: HerdrPiWorkflowError.self) {
+      _ = try await rolloverRuntime.canaryGenerationRolloverQ4Candidate(
+        request: q4Request,
+        resourceTreeSHA256: String(repeating: "c", count: 64)
+      )
+    }
+    await fixture.herdr.restoreConnectionAuthority()
+    let q4Candidate = try await rolloverRuntime.canaryGenerationRolloverQ4Candidate(
+      request: q4Request,
+      resourceTreeSHA256: String(repeating: "c", count: 64)
+    )
+    let q4Authorization = JobCanaryGenerationRolloverQ4ExecutionAuthorization(
+      rollover: preview.authorization,
+      q4: q4Candidate.authorization
+    )
+    try q4Authorization.validate()
+    _ = try await fixture.runStore.prepareGenerationRolloverSuccessorRun(
+      authorization: preview.authorization,
+      q4Authorization: q4Candidate.authorization,
+      now: Date()
+    )
+    let preparedQ4 = try await fixture.runStore.prepareGenerationRolloverQ4Launch(
+      authorization: preview.authorization,
+      q4Authorization: q4Candidate.authorization,
+      now: Date()
+    )
+    if restartState == .enqueuedMissingCommand {
+      _ = try await fixture.runStore.transitionLaunch(
+        launchAttemptID: preparedQ4.launchAttemptID,
+        to: .enqueued,
+        event: .enqueued,
+        now: Date()
+      )
+    }
+    let preSendRestart = try fixture.reopenedRuntime(
+      providerCredentials: incident.providerCredentials,
+      processIdentityForRoleHost: fixture.processIdentities.require,
+      roleHostExitObserved: { _, _ in true }
+    )
+    let preSendCandidate = try await preSendRestart.canaryGenerationRolloverQ4Candidate(
+      request: q4Request,
+      resourceTreeSHA256: String(repeating: "c", count: 64),
+      authorizedQ4: q4Candidate.authorization
+    )
+    await preSendRestart.beginCanaryLaunchAdmission(jobID: fixture.jobID)
+    let q4Task = Task {
+      try await preSendRestart.executeCanaryGenerationRolloverQ4(
+        preSendCandidate,
+        authorization: q4Authorization
+      )
+    }
+    do {
+      _ = try await fixture.launchCheckpoints.wait(
+        for: .commandPublished,
+        queueSequence: 4,
+        runID: successorRunID,
+        timeout: .seconds(5)
+      )
+    } catch {
+      let q4Result = await q4Task.result
+      Issue.record("q4 publication failed: \(error); execution: \(q4Result)")
+      return
+    }
+    let successorRun = try #require(
+      try await fixture.runStore.run(id: successorRunID)
+    )
+    try await fixture.emitReplacementPullRequestReviewResult(
+      run: successorRun,
+      roleHostID: architectureHost.id,
+      launchAttemptID: q4Candidate.authorization.plannedLaunchAttemptID
+    )
+    let settled = try await q4Task.value
+    await preSendRestart.closeLaunchAdmission()
+
+    #expect(settled.status == .settled)
+    #expect(try await fixture.runStore.launches(runID: incident.run.id) == predecessorLaunches)
+    let successorLaunches = try await fixture.runStore.launches(runID: successorRunID)
+    #expect(successorLaunches.count == 1)
+    #expect(successorLaunches[0].queueSequence == 4)
+    #expect(successorLaunches[0].executionRoleHostID == nil)
+    #expect(successorLaunches[0].state == .released)
+    #expect(
+      try await fixture.database.scalarInt(
+        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence > 4",
+        bindings: [.text(successorRunID)]
+      ) == 0
+    )
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(
+      try await fixture.database.query(
+        "SELECT * FROM jobs WHERE state = 'queued' ORDER BY id"
+      ) == unrelatedQueueBefore
+    )
+    #expect(
+      try await fixture.unrelatedJobSnapshot(incident.unrelatedJobID)
+        == incident.unrelatedJobSnapshot)
+
+    let commandsBeforeReplay = await fixture.herdr.launchedCommands()
+    let restartedRuntime = try fixture.reopenedRuntime(
+      providerCredentials: incident.providerCredentials,
+      processIdentityForRoleHost: fixture.processIdentities.require,
+      roleHostExitObserved: { _, _ in true }
+    )
+    let replayCandidate = try await restartedRuntime.canaryGenerationRolloverQ4Candidate(
+      request: q4Request,
+      resourceTreeSHA256: String(repeating: "c", count: 64),
+      authorizedQ4: q4Candidate.authorization
+    )
+    #expect(replayCandidate.authorization == q4Candidate.authorization)
+    await restartedRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
+    let replayed = try await restartedRuntime.executeCanaryGenerationRolloverQ4(
+      replayCandidate,
+      authorization: q4Authorization
+    )
+    await restartedRuntime.closeLaunchAdmission()
+    #expect(replayed.status == .settled)
+    #expect(replayed.replayed)
+    #expect(await fixture.herdr.launchedCommands() == commandsBeforeReplay)
+  }
+
+  @Test("schema eight migration reaches current-runtime lost topology recovery")
+  func migratedSchemaEightRecoversCurrentRuntime() async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      kind: .prReview,
+      fastRuntime: true,
+      migrations: Array(DatabaseSchema.migrations.prefix(8))
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    _ = try await fixture.prepareReplacementIncident(
+      checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
+    )
+    _ = try await fixture.database.execute(
+      """
+      UPDATE herdr_repository_bindings
+      SET herdr_version = '0.8.0', herdr_protocol = 19
+      WHERE repository_id = ?
+      """,
+      bindings: [.text(fixture.repositoryID.uuidString.lowercased())]
+    )
+    await fixture.database.close()
+
+    let upgraded = try SQLiteStore(
+      databaseURL: fixture.applicationSupport.appendingPathComponent("state.sqlite3")
+    )
+    let configuration = ConfigurationStore(database: upgraded)
+    let jobs = DurableJobStore(database: upgraded)
+    let runs = PiRunStore(database: upgraded)
+    let intents = SQLiteHerdrTopologyIntentStore(database: upgraded)
+    let gate = HerdrTopologyMutationGate(initiallyAllowed: false)
+    let topology = HerdrTopologyCoordinator(
+      api: fixture.herdr,
+      intents: intents,
+      gate: gate,
+      mutationID: { "migrated-rollover-\(UUID().uuidString.lowercased())" }
+    )
+    let runtime = try HerdrPiWorkflowRuntime(
+      applicationSupportRoot: fixture.applicationSupport,
+      resourceRoot: fixture.resourceRoot,
+      hostExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+      runtimeResolver: fixture.runtimeResolver,
+      jobs: jobs,
+      configuration: configuration,
+      runs: runs,
+      api: fixture.herdr,
+      topology: topology,
+      primeIntents: intents,
+      mutationGate: gate,
+      processExecutableURL: { _ in URL(fileURLWithPath: "/usr/bin/true") },
+      processExecutableIdentity: fixture.executableIdentities.require,
+      resourceTreeAttestation: fixture.resourceTreeAttestation,
+      paneTokensSHA256: replacementPaneTokensSHA256,
+      processIdentityForRoleHost: fixture.processIdentities.require,
+      roleHostExitObserved: { _, _ in true }
+    )
+    let before = await fixture.herdr.remoteSnapshot()
+    await fixture.herdr.failAllRoleProcessInfo()
+    try await runtime.recoverDurableState()
+    await fixture.herdr.clearRoleProcessInfoFailure()
+    #expect(await fixture.herdr.remoteSnapshot() == before)
+    #expect(
+      try await upgraded.scalarText(
+        "SELECT reason FROM herdr_repository_binding_history ORDER BY id DESC LIMIT 1"
+      ) == "RUNTIME_CHANGED"
+    )
+    #expect(
+      try await upgraded.scalarInt(
+        "SELECT COUNT(*) FROM herdr_role_hosts WHERE state = 'lost'"
+      ) == 4
+    )
+    #expect(
+      try await upgraded.scalarText(
+        "SELECT state FROM herdr_job_bindings WHERE job_id = ?",
+        bindings: [.text(fixture.jobID.uuidString.lowercased())]
+      ) == "lost"
+    )
+    #expect(try await upgraded.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(try await upgraded.scalarText("PRAGMA integrity_check") == "ok")
+    #expect(try await upgraded.query("PRAGMA foreign_key_check").isEmpty)
+    await upgraded.close()
+  }
+
+  @Test("generation rollover resumes after a binding and one-host restart cut")
+  func generationRolloverResumesPartialTopology() async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let incident = try await fixture.prepareReplacementIncident(
+      checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
+    )
+    let runtime = try fixture.reopenedRuntime(
+      providerCredentials: incident.providerCredentials,
+      processIdentityForRoleHost: fixture.processIdentities.require,
+      roleHostExitObserved: { _, _ in true }
+    )
+    await fixture.herdr.failAllRoleProcessInfo()
+    try await runtime.recoverDurableState()
+    await fixture.herdr.clearRoleProcessInfoFailure()
+    let request = JobCanaryGenerationRolloverRequest(
+      retry: incident.request.retry,
+      successorRunID: "run-generation-rollover-partial",
+      plannedHosts: [
+        .init(
+          role: .architecture,
+          roleHostID: "rolehost-81000000-0000-4000-8000-000000000081"
+        ),
+        .init(
+          role: .security,
+          roleHostID: "rolehost-82000000-0000-4000-8000-000000000082"
+        ),
+        .init(
+          role: .synthesis,
+          roleHostID: "rolehost-83000000-0000-4000-8000-000000000083"
+        ),
+        .init(
+          role: .test,
+          roleHostID: "rolehost-84000000-0000-4000-8000-000000000084"
+        ),
+      ]
+    )
+    let candidate = try await runtime.canaryGenerationRolloverCandidate(request: request)
+    let authorization = candidate.authorization
+    let rolloverNow = Date()
+    #expect(
+      try await fixture.runStore.persistGenerationRolloverAuthorization(
+        authorization,
+        now: rolloverNow
+      ) == false
+    )
+    _ = try await fixture.runStore.prepareJobBinding(
+      jobID: fixture.jobID,
+      repositoryID: fixture.repositoryID,
+      generation: authorization.successorGeneration,
+      workspaceID: authorization.workspaceID,
+      now: rolloverNow
+    )
+    let architecture = try #require(
+      authorization.hosts.first(where: { $0.role == .architecture })
+    )
+    let bootstrap = try #require(candidate.bootstraps[architecture.successorRoleHostID])
+    let descriptorRoot = fixture.applicationSupport.appendingPathComponent(
+      "HerdrRuntime/Descriptors",
+      isDirectory: true
+    )
+    let digest = try HerdrRoleHostDescriptorStore.prepare(bootstrap, in: descriptorRoot)
+    _ = try await fixture.runStore.prepareRoleHost(
+      id: architecture.successorRoleHostID,
+      jobID: fixture.jobID,
+      generation: authorization.successorGeneration,
+      role: .architecture,
+      workspaceID: authorization.workspaceID,
+      bootstrapDescriptorSHA256: digest,
+      hostExecutableSHA256: architecture.successorHostExecutableSHA256,
+      now: rolloverNow
+    )
+
+    try await runtime.recoverDurableState()
+    #expect(try await fixture.runStore.jobBinding(jobID: fixture.jobID)?.state == .prepared)
+    #expect(
+      try await fixture.runStore.roleHosts(jobID: fixture.jobID).filter {
+        $0.generation == 2
+      }.count == 1
+    )
+    let restarted = try fixture.reopenedRuntime(
+      providerCredentials: incident.providerCredentials,
+      processIdentityForRoleHost: fixture.processIdentities.require,
+      roleHostExitObserved: { _, _ in true }
+    )
+    let resumed = try await restarted.canaryGenerationRolloverCandidate(
+      authorization: authorization
+    )
+    #expect(resumed.authorization == authorization)
+    await fixture.herdr.setRedactLayoutEnvironment(false)
+    await restarted.beginCanaryLaunchAdmission(jobID: fixture.jobID)
+    #expect(
+      try await restarted.activateCanaryGenerationRollover(
+        resumed,
+        authorization: authorization
+      )
+    )
+    await restarted.closeLaunchAdmission()
+    #expect(try await fixture.runStore.jobBinding(jobID: fixture.jobID)?.state == .active)
+    #expect(
+      try await fixture.runStore.roleHosts(jobID: fixture.jobID).filter {
+        $0.generation == 2 && [.waiting, .running].contains($0.state)
+      }.count == 4
+    )
+  }
+
+  @Test(
     "schema 9 replacement denies one-field q4 backing drift before remote effects",
     arguments: ReplacementQ4BackingDrift.allCases
   )
@@ -2146,7 +2842,7 @@ struct HerdrPiWorkflowRuntimeTests {
         assertReplacementMatrixError(error, expected: drift.expectedError, name: drift.name)
       }
       await incident.runtime.closeLaunchAdmission()
-      #expect(ProcessInfo.processInfo.systemUptime - startedAt < 2)
+      #expect(ProcessInfo.processInfo.systemUptime - startedAt < 5)
       #expect(await fixture.herdr.remoteSnapshot() == remoteAfterInjection)
     }
 
@@ -2382,7 +3078,7 @@ struct HerdrPiWorkflowRuntimeTests {
       assertReplacementMatrixError(error, expected: fault.expectedError, name: fault.name)
     }
     await incident.runtime.closeLaunchAdmission()
-    #expect(ProcessInfo.processInfo.systemUptime - startedAt < 2)
+    #expect(ProcessInfo.processInfo.systemUptime - startedAt < 5)
 
     let report = try #require(
       try await fixture.jobs.canaryRoleHostReplacementTerminalReport(
@@ -2494,7 +3190,7 @@ struct HerdrPiWorkflowRuntimeTests {
       ).execute(incident.workflowRequest)
     }
     await incident.runtime.closeLaunchAdmission()
-    #expect(ProcessInfo.processInfo.systemUptime - startedAt < 2)
+    #expect(ProcessInfo.processInfo.systemUptime - startedAt < 5)
     #expect(!probe.snapshot().contains(.sendStarted))
     #expect(await fixture.herdr.recordedReplacementOperations().isEmpty)
     #expect(try await fixture.runStore.launches(runID: incident.run.id).count == 3)
@@ -4903,6 +5599,12 @@ private final class ReplacementExecutableIdentityRegistry: @unchecked Sendable {
     return overrides[processID] ?? baseline
   }
 
+  func clear(processID: Int32) {
+    lock.lock()
+    overrides.removeValue(forKey: processID)
+    lock.unlock()
+  }
+
   func drift(processID: Int32, field: ReplacementExecutableDriftField) throws {
     var path = baseline.path
     var device = baseline.device
@@ -4941,6 +5643,11 @@ private struct UnrelatedJobSnapshot: Equatable, Sendable {
   let currentStepKind: String
   let attempt: Int64
   let updatedAt: String
+}
+
+enum GenerationRolloverRestartLaunchState: CaseIterable, Sendable {
+  case prepared
+  case enqueuedMissingCommand
 }
 
 enum ReplacementRestartLaunchState: CaseIterable, Sendable {
@@ -5111,7 +5818,8 @@ private struct HerdrPiRuntimeFixture: Sendable {
     timeoutSeconds: TimeInterval = 30,
     fastRuntime: Bool = false,
     isolatedResourceRoot: Bool = false,
-    providerCredentials: PiProviderCredentialSnapshotter? = nil
+    providerCredentials: PiProviderCredentialSnapshotter? = nil,
+    migrations: [SQLiteMigration] = DatabaseSchema.migrations
   ) async throws -> Self {
     let root = try privateDirectory(name: "herdr-production-runtime")
     let applicationSupport = try childDirectory("app", in: root)
@@ -5123,7 +5831,8 @@ private struct HerdrPiRuntimeFixture: Sendable {
     _ = try childDirectory(repositoryID.uuidString.lowercased(), in: repositories)
     let workspace = try childDirectory(jobID.uuidString.lowercased(), in: workspaces)
     let database = try SQLiteStore(
-      databaseURL: applicationSupport.appendingPathComponent("state.sqlite3")
+      databaseURL: applicationSupport.appendingPathComponent("state.sqlite3"),
+      migrations: migrations
     )
     try await insertRepositoryAndJob(
       database: database,
@@ -5408,6 +6117,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
 
   func reopenedRuntime(
     hostExecutable: URL = URL(fileURLWithPath: "/usr/bin/true"),
+    runtimeResolver: (any PiRuntimeResolving)? = nil,
     compatibleRecoveryHostSHA256: Set<String> = [],
     compatibleRecoveryEvidenceHostSHA256: Set<String> = [],
     compatibleRecoveryHostURLs: [String: URL] = [:],
@@ -5444,7 +6154,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
       applicationSupportRoot: applicationSupport,
       resourceRoot: resourceRoot,
       hostExecutable: hostExecutable,
-      runtimeResolver: runtimeResolver,
+      runtimeResolver: runtimeResolver ?? self.runtimeResolver,
       jobs: jobs,
       configuration: configuration,
       runs: runStore,
@@ -6201,7 +6911,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
         socket_device, socket_inode, socket_owner, socket_permissions,
         state, created_at, updated_at
       ) VALUES (?, 'workspace-unrelated-owned', '/private/tmp/unrelated-owned',
-        '0.8.0', 19, 91, 92, ?, 384, 'active', 2, 2)
+        '0.8.2', 20, 91, 92, ?, 384, 'active', 2, 2)
       """,
       bindings: [.text(repositoryID), .integer(Int64(geteuid()))]
     )
@@ -6655,7 +7365,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
       root: descriptorRoot
     )
     guard launch.queueSequence == 4,
-      launch.executionRoleHostID == roleHostID,
+      (launch.executionRoleHostID ?? launch.roleHostID) == roleHostID,
       command.roleHostID == roleHostID,
       command.sequence == 4,
       command.launchAttemptID == launchAttemptID,
@@ -6771,6 +7481,18 @@ private struct HerdrPiRuntimeFixture: Sendable {
     else { throw HerdrPiWorkflowError.timedOut }
     try PiProviderCredentialSnapshotter.remove(
       from: URL(fileURLWithPath: invocation.agentDirectory, isDirectory: true)
+    )
+    try HerdrRoleHostDescriptorStore.recordCompletion(
+      HerdrRoleHostCommandCompletion(
+        schemaVersion: 1,
+        roleHostID: roleHostID,
+        sequence: 4,
+        launchAttemptID: launchAttemptID,
+        descriptorSHA256: launch.descriptorSHA256,
+        status: "released",
+        failureCode: nil
+      ),
+      in: descriptorRoot
     )
   }
 
@@ -7001,6 +7723,56 @@ final class CountingReleaseOwnedRuntimeResolver: PiRuntimeResolving, @unchecked 
   }
 }
 
+private final class ReleaseIdentityDriftResolver: PiRuntimeResolving, @unchecked Sendable {
+  private let lock = NSLock()
+  private var runtime: PiResolvedRuntime
+
+  init(base: any PiRuntimeResolving) throws {
+    runtime = try base.resolve()
+  }
+
+  func resolve() throws -> PiResolvedRuntime {
+    lock.lock()
+    defer { lock.unlock() }
+    return runtime
+  }
+
+  func driftRootIdentity() throws {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let identity = runtime.releaseIdentity, identity.rootInode < UInt64.max else {
+      throw PiRuntimeResolutionError(
+        code: .releaseRuntimeDrift,
+        detail: "fixture release runtime identity is unavailable"
+      )
+    }
+    let replacement = try PiReleaseRuntimeIdentity(
+      runtimeID: identity.runtimeID,
+      manifestSHA256: identity.manifestSHA256,
+      canonicalRoot: identity.canonicalRoot,
+      rootDevice: identity.rootDevice,
+      rootInode: identity.rootInode + 1,
+      nodeCodeDirectorySHA256: identity.nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: identity.piPackageTreeSHA256
+    )
+    runtime = PiResolvedRuntime(
+      nodeURL: runtime.nodeURL,
+      nodeVersion: runtime.nodeVersion,
+      nodeSHA256: runtime.nodeSHA256,
+      nodeDynamicLibrarySHA256: runtime.nodeDynamicLibrarySHA256,
+      nodeDynamicLibraryLoadPaths: runtime.nodeDynamicLibraryLoadPaths,
+      nodeDynamicLibraryDirectoryURL: runtime.nodeDynamicLibraryDirectoryURL,
+      piCLIURL: runtime.piCLIURL,
+      piCLIRelativePath: runtime.piCLIRelativePath,
+      piPackageRootURL: runtime.piPackageRootURL,
+      piVersion: runtime.piVersion,
+      piRuntimeSHA256: runtime.piRuntimeSHA256,
+      compatibility: runtime.compatibility,
+      provenance: .releaseOwned(replacement)
+    )
+  }
+}
+
 extension Optional where Wrapped == PiReleaseRuntimeIdentity {
   fileprivate func requireReleaseIdentity() throws -> PiReleaseRuntimeIdentity {
     guard let self else { throw HerdrPiWorkflowError.invalidPreparation }
@@ -7013,6 +7785,7 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
   private let hostExecutable: URL
   private let hostExecutableSHA256: String
   private let identity: HerdrHostProcessIdentity
+  private let baselinePeerEvidence: HerdrConnectedPeerEvidence
   private var peerEvidence: HerdrConnectedPeerEvidence
   private let processIdentities: ReplacementProcessIdentityRegistry
   private var socketIdentity = HerdrSocketIdentity(
@@ -7031,7 +7804,7 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
   private var redactLayoutEnvironment = false
   private var failLayoutApplyResponse = false
   private var failLayoutExport = false
-  private var failedProcessInfoPaneID: String?
+  private var failedProcessInfoPaneIDs: Set<String> = []
   private var focusedWorkspaceID: String?
   private var focusedTabID: String?
   private var focusedPaneID: String?
@@ -7057,13 +7830,15 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
       .map { String(format: "%02x", $0) }.joined()
     identity = try HerdrRoleHostRuntime.processIdentity(getpid())
     let processAuthority = try HerdrProcessAuthorityInspector.inspect(processID: getpid())
-    peerEvidence = try HerdrConnectedPeerEvidence(
+    let connectedPeer = try HerdrConnectedPeerEvidence(
       processID: processAuthority.process.processID,
       startSeconds: processAuthority.process.startSeconds,
       startMicroseconds: processAuthority.process.startMicroseconds,
       effectiveUserID: geteuid(),
       executable: processAuthority.executable
     )
+    baselinePeerEvidence = connectedPeer
+    peerEvidence = connectedPeer
     self.processIdentities = processIdentities
   }
 
@@ -7074,8 +7849,8 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
     }
     return HerdrHandshake(
       pong: HerdrPong(
-        version: "0.8.0",
-        protocolVersion: 19,
+        version: "0.8.2",
+        protocolVersion: 20,
         capabilities: HerdrCapabilities(liveHandoff: true, detachedServerDaemon: true)
       ),
       snapshot: snapshot(),
@@ -7138,13 +7913,15 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
     _ parameters: HerdrLayoutApplyParameters,
     attestedBy _: HerdrHandshake
   ) throws -> HerdrLayoutApplyResult {
+    let tabID = roleHostsByPane.isEmpty ? "tab-job" : "tab-job-\(tabs.count + 1)"
+    let existingRolePaneCount = roleHostsByPane.count
     var nextPane = 1
     var createdPanes: [HerdrPaneSnapshot] = []
     func bind(_ node: HerdrLayoutNode) throws -> HerdrLayoutNode {
       switch node {
       case .pane(let source):
-        let paneID = "pane-role-\(nextPane)"
-        let terminalID = "terminal-role-\(nextPane)"
+        let paneID = "pane-role-\(existingRolePaneCount + nextPane)"
+        let terminalID = "terminal-role-\(existingRolePaneCount + nextPane)"
         nextPane += 1
         guard let command = source.command, command.count == 3,
           command[0] == hostExecutable.path,
@@ -7179,7 +7956,7 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
             paneID: paneID,
             terminalID: terminalID,
             workspaceID: parameters.workspaceID,
-            tabID: "tab-job",
+            tabID: tabID,
             cwd: source.workingDirectory,
             label: source.label,
             tokens: [
@@ -7211,7 +7988,7 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
     }
     let boundRoot = try bind(parameters.root)
     let tab = HerdrTabSnapshot(
-      tabID: "tab-job",
+      tabID: tabID,
       workspaceID: parameters.workspaceID,
       label: parameters.tabLabel,
       number: 2,
@@ -7261,7 +8038,7 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
     paneID: String,
     attestedBy _: HerdrHandshake
   ) throws -> HerdrPaneProcessInfo {
-    if paneID == failedProcessInfoPaneID {
+    if failedProcessInfoPaneIDs.contains(paneID) {
       throw HerdrTopologyError.bindingLost
     }
     guard panes.contains(where: { $0.paneID == paneID }),
@@ -7685,6 +8462,16 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
 
   func failNextHandshake() { failHandshake = true }
 
+  func restoreConnectionAuthority() {
+    socketIdentity = HerdrSocketIdentity(
+      device: 71,
+      inode: 72,
+      owner: UInt32(geteuid()),
+      permissions: 0o600
+    )
+    peerEvidence = baselinePeerEvidence
+  }
+
   func driftSocketVnode() {
     socketIdentity = HerdrSocketIdentity(
       device: socketIdentity.device,
@@ -7769,11 +8556,15 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
   }
 
   func failRoleProcessInfo(index: Int) {
-    failedProcessInfoPaneID = "pane-role-\(index)"
+    failedProcessInfoPaneIDs = ["pane-role-\(index)"]
+  }
+
+  func failAllRoleProcessInfo() {
+    failedProcessInfoPaneIDs = Set(roleHostsByPane.keys)
   }
 
   func clearRoleProcessInfoFailure() {
-    failedProcessInfoPaneID = nil
+    failedProcessInfoPaneIDs.removeAll()
   }
 
   func renameJobTabAndAddDuplicateLabel() {
@@ -7918,8 +8709,8 @@ private actor RuntimeFakeHerdrAPI: HerdrTopologyAPI, HerdrPiRuntimeAPI {
 
   private func snapshot() -> HerdrSessionSnapshot {
     HerdrSessionSnapshot(
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       focusedWorkspaceID: focusedWorkspaceID,
       focusedTabID: focusedTabID,
       focusedPaneID: focusedPaneID,

@@ -812,6 +812,141 @@ struct EngineProtocolTests {
       from: await handler.handle(try encoder.encode(busyRequest))
     )
     #expect(busyResponse.error == EngineClientError(.busy))
+
+    await client.fail(with: .credentialAccessFailed)
+    let credentialRequest = EngineXPCRequest(command: .snapshot)
+    let credentialResponseData = await handler.handle(
+      try encoder.encode(credentialRequest)
+    )
+    #expect(
+      !String(decoding: credentialResponseData, as: UTF8.self)
+        .localizedCaseInsensitiveContains("token")
+    )
+    let credentialResponse = try JSONDecoder().decode(
+      EngineXPCResponse.self,
+      from: credentialResponseData
+    )
+    #expect(credentialResponse.error == EngineClientError(.credentialAccessFailed))
+    #expect(throws: EngineClientError(.credentialAccessFailed)) {
+      try credentialResponse.validate(for: credentialRequest)
+    }
+  }
+
+  @Test("generation rollover responses bind phase authority and checkpoints")
+  func generationRolloverResponses() throws {
+    let scope = JobCanaryScope(
+      jobID: UUID(uuidString: "97000000-0000-4000-8000-000000000097")!,
+      boundaryEpochSeconds: JobCanaryScope.authorizedBoundaryEpochSeconds,
+      repairEvidenceSHA256: String(repeating: "a", count: 64),
+      maximumCommentParts: 8
+    )
+    let retry = JobCanaryPiRetryAuthorization(
+      recovery: JobCanaryRecoveryAuthorization(
+        canary: JobCanaryAuthorization(
+          scope: scope,
+          previewEvidenceSHA256: String(repeating: "b", count: 64)
+        ),
+        recoveryEvidenceSHA256: String(repeating: "c", count: 64)
+      ),
+      retryEvidenceSHA256: String(repeating: "d", count: 64)
+    )
+    let fixture = try engineGenerationRolloverFixture(retry: retry)
+    let state = engineProtocolState(paused: true)
+    let checkpoint = EngineCheckpointReceipt(
+      checkpointID: UUID(uuidString: "98000000-0000-4000-8000-000000000098")!,
+      completedAt: Date(timeIntervalSince1970: 1),
+      nonterminalJobCount: 156,
+      ambiguousMutationCount: 0,
+      databaseCheckpointed: true
+    )
+
+    let previewReport = try JobCanaryGenerationRolloverReport(
+      authorization: fixture.authorization,
+      status: .preview,
+      replayed: false
+    )
+    let previewRequest = EngineXPCRequest(
+      requestID: "99000000-0000-4000-8000-000000000099",
+      command: .previewJobCanaryGenerationRollover(fixture.request)
+    )
+    let previewResult = EngineCommandResponse(
+      command: previewRequest.command.kind,
+      state: state,
+      jobCanaryGenerationRollover: previewReport
+    )
+    #expect(
+      try EngineXPCResponse(requestID: previewRequest.requestID, result: previewResult)
+        .validate(for: previewRequest) == previewResult
+    )
+
+    let executeReport = try JobCanaryGenerationRolloverReport(
+      authorization: fixture.authorization,
+      status: .topologyActivated,
+      replayed: false
+    )
+    let executeRequest = EngineXPCRequest(
+      requestID: "9a000000-0000-4000-8000-00000000009a",
+      command: .executeJobCanaryGenerationRollover(fixture.authorization)
+    )
+    let executeResult = EngineCommandResponse(
+      command: executeRequest.command.kind,
+      state: state,
+      checkpoint: checkpoint,
+      jobCanaryGenerationRollover: executeReport
+    )
+    #expect(
+      try EngineXPCResponse(requestID: executeRequest.requestID, result: executeResult)
+        .validate(for: executeRequest) == executeResult
+    )
+
+    let q4PreviewReport = try JobCanaryGenerationRolloverQ4Report(
+      authorization: fixture.q4Execution.q4,
+      status: .preview,
+      replayed: false
+    )
+    let q4PreviewRequest = EngineXPCRequest(
+      requestID: "9b000000-0000-4000-8000-00000000009b",
+      command: .previewJobCanaryGenerationRolloverQ4(fixture.q4Request)
+    )
+    let q4PreviewResult = EngineCommandResponse(
+      command: q4PreviewRequest.command.kind,
+      state: state,
+      jobCanaryGenerationRolloverQ4: q4PreviewReport
+    )
+    #expect(
+      try EngineXPCResponse(requestID: q4PreviewRequest.requestID, result: q4PreviewResult)
+        .validate(for: q4PreviewRequest) == q4PreviewResult
+    )
+
+    let q4ExecuteReport = try JobCanaryGenerationRolloverQ4Report(
+      authorization: fixture.q4Execution.q4,
+      status: .settled,
+      replayed: false
+    )
+    let q4ExecuteRequest = EngineXPCRequest(
+      requestID: "9c000000-0000-4000-8000-00000000009c",
+      command: .executeJobCanaryGenerationRolloverQ4(fixture.q4Execution)
+    )
+    let q4ExecuteResult = EngineCommandResponse(
+      command: q4ExecuteRequest.command.kind,
+      state: state,
+      checkpoint: checkpoint,
+      jobCanaryGenerationRolloverQ4: q4ExecuteReport
+    )
+    #expect(
+      try EngineXPCResponse(requestID: q4ExecuteRequest.requestID, result: q4ExecuteResult)
+        .validate(for: q4ExecuteRequest) == q4ExecuteResult
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      _ = try EngineXPCResponse(
+        requestID: q4ExecuteRequest.requestID,
+        result: EngineCommandResponse(
+          command: q4ExecuteRequest.command.kind,
+          state: state,
+          jobCanaryGenerationRolloverQ4: q4ExecuteReport
+        )
+      ).validate(for: q4ExecuteRequest)
+    }
   }
 
   @Test("all commands survive a Codable round trip without changing kind")
@@ -866,6 +1001,7 @@ struct EngineProtocolTests {
       plannedReplacementRoleHostID: "rolehost-77777777-7777-4777-8777-777777777777",
       plannedLaunchAttemptID: "launch-88888888-8888-4888-8888-888888888888"
     )
+    let rollover = try engineGenerationRolloverFixture(retry: replacementRetry)
     let commands: [EngineCommand] = [
       .snapshot,
       .refreshModelCatalog,
@@ -959,6 +1095,10 @@ struct EngineProtocolTests {
           q4Binding: replacementQ4Binding()
         )
       ),
+      .previewJobCanaryGenerationRollover(rollover.request),
+      .executeJobCanaryGenerationRollover(rollover.authorization),
+      .previewJobCanaryGenerationRolloverQ4(rollover.q4Request),
+      .executeJobCanaryGenerationRolloverQ4(rollover.q4Execution),
       .setLoginEnabled(true),
       .synchronizeLoginStatus(selected: true, status: .enabled),
       .completeOnboarding,
@@ -998,6 +1138,116 @@ private func replacementQ4Binding() -> JobCanaryRoleHostReplacementQ4Binding {
     priorLaunchDescriptorSHA256: String(repeating: "5", count: 64),
     priorLaunchConfigurationSHA256: String(repeating: "6", count: 64),
     resourceTreeSHA256: String(repeating: "7", count: 64)
+  )
+}
+
+struct EngineGenerationRolloverFixture {
+  let request: JobCanaryGenerationRolloverRequest
+  let authorization: JobCanaryGenerationRolloverAuthorization
+  let q4Request: JobCanaryGenerationRolloverQ4Request
+  let q4Execution: JobCanaryGenerationRolloverQ4ExecutionAuthorization
+}
+
+func engineGenerationRolloverFixture(
+  retry: JobCanaryPiRetryAuthorization
+) throws -> EngineGenerationRolloverFixture {
+  let planned: [JobCanaryGenerationRolloverPlannedHost] = [
+    .init(role: .architecture, roleHostID: "rolehost-91000000-0000-4000-8000-000000000091"),
+    .init(role: .security, roleHostID: "rolehost-92000000-0000-4000-8000-000000000092"),
+    .init(role: .synthesis, roleHostID: "rolehost-93000000-0000-4000-8000-000000000093"),
+    .init(role: .test, roleHostID: "rolehost-94000000-0000-4000-8000-000000000094"),
+  ]
+  let request = JobCanaryGenerationRolloverRequest(
+    retry: retry,
+    successorRunID: "run-engine-rollover-successor",
+    plannedHosts: planned
+  )
+  let hosts = planned.enumerated().map { index, host in
+    JobCanaryGenerationRolloverHostPair(
+      role: host.role,
+      predecessorRoleHostID: "rolehost-engine-old-\(host.role.rawValue)",
+      predecessorBootstrapDescriptorSHA256: String(repeating: "1", count: 64),
+      successorRoleHostID: host.roleHostID,
+      successorBootstrapDescriptorSHA256: String(repeating: "2", count: 64),
+      predecessorHostExecutableSHA256: String(repeating: "3", count: 64),
+      successorHostExecutableSHA256: String(repeating: "4", count: 64),
+      successorExecutableEvidenceSHA256: String(
+        repeating: Character(String(format: "%x", index + 5)),
+        count: 64
+      )
+    )
+  }
+  let launches = [
+    JobCanaryGenerationRolloverLaunchEvidence(
+      launchAttemptID: "launch-engine-q1", queueSequence: 1,
+      descriptorSHA256: String(repeating: "1", count: 64),
+      failureCode: "RUNTIME_TIMEOUT",
+      childProcess: HerdrChildProcessRecord(
+        launchAttemptID: "launch-engine-q1", processID: 81, processGroupID: 81,
+        startSeconds: 82, startMicroseconds: 83
+      )
+    ),
+    JobCanaryGenerationRolloverLaunchEvidence(
+      launchAttemptID: "launch-engine-q2", queueSequence: 2,
+      descriptorSHA256: String(repeating: "2", count: 64),
+      failureCode: "HERDR_TRANSACTION_FAILED", childProcess: nil
+    ),
+    JobCanaryGenerationRolloverLaunchEvidence(
+      launchAttemptID: "launch-engine-q3", queueSequence: 3,
+      descriptorSHA256: String(repeating: "3", count: 64),
+      failureCode: "HERDR_TRANSACTION_FAILED", childProcess: nil
+    ),
+  ]
+  let authorization = JobCanaryGenerationRolloverAuthorization(
+    request: request,
+    canaryAuthorizationSHA256: retry.recovery.canary.authorizationSHA256,
+    rolloverEvidenceSHA256: String(repeating: "5", count: 64),
+    isolationSHA256: String(repeating: "6", count: 64),
+    repositoryID: UUID(uuidString: "95000000-0000-4000-8000-000000000095")!,
+    jobID: retry.recovery.canary.scope.jobID,
+    predecessorGeneration: 1,
+    successorGeneration: 2,
+    predecessorRunID: "run-engine-rollover-predecessor",
+    predecessorLaunches: launches,
+    hosts: hosts,
+    workspaceID: "workspace-engine-rollover",
+    socket: JobCanaryGenerationRolloverSocketEvidence(
+      device: 1, inode: 2, owner: 501, permissions: 0o600,
+      peerEvidenceSHA256: String(repeating: "7", count: 64)
+    ),
+    successorRunID: request.successorRunID
+  )
+  let q4 = JobCanaryGenerationRolloverQ4Authorization(
+    rolloverAuthorizationSHA256: authorization.authorizationSHA256,
+    q4EvidenceSHA256: String(repeating: "8", count: 64),
+    successorRunID: request.successorRunID,
+    plannedLaunchAttemptID: "launch-96000000-0000-4000-8000-000000000096",
+    runNonce: String(repeating: "9", count: 64),
+    requestSHA256: String(repeating: "a", count: 64),
+    resourceVersion: "1",
+    resourceHash: String(repeating: "b", count: 64),
+    model: "fixture/model:off",
+    sessionPath: "/tmp/engine-rollover-session",
+    channelPath: "/tmp/engine-rollover-channel",
+    q4Binding: replacementQ4Binding()
+  )
+  let q4Request = JobCanaryGenerationRolloverQ4Request(
+    rolloverAuthorization: authorization,
+    plannedLaunchAttemptID: q4.plannedLaunchAttemptID
+  )
+  let q4Execution = JobCanaryGenerationRolloverQ4ExecutionAuthorization(
+    rollover: authorization,
+    q4: q4
+  )
+  try request.validate()
+  try authorization.validate()
+  try q4Request.validate()
+  try q4Execution.validate()
+  return EngineGenerationRolloverFixture(
+    request: request,
+    authorization: authorization,
+    q4Request: q4Request,
+    q4Execution: q4Execution
   )
 }
 

@@ -210,6 +210,170 @@ struct ApplicationEngineClientTests {
     }
   }
 
+  @Test("generation rollover CLI accepts only canonical two-phase authority")
+  func generationRolloverCLI() throws {
+    let replacement = applicationReplacementAuthorization()
+    let plannedHosts: [JobCanaryGenerationRolloverPlannedHost] = [
+      .init(
+        role: .architecture,
+        roleHostID: "rolehost-71000000-0000-4000-8000-000000000071"
+      ),
+      .init(
+        role: .security,
+        roleHostID: "rolehost-72000000-0000-4000-8000-000000000072"
+      ),
+      .init(
+        role: .synthesis,
+        roleHostID: "rolehost-73000000-0000-4000-8000-000000000073"
+      ),
+      .init(
+        role: .test,
+        roleHostID: "rolehost-74000000-0000-4000-8000-000000000074"
+      ),
+    ]
+    let request = JobCanaryGenerationRolloverRequest(
+      retry: replacement.request.retry,
+      successorRunID: "run-generation-rollover-cli",
+      plannedHosts: plannedHosts
+    )
+    let roles = plannedHosts.map(\.role)
+    let hostPairs = zip(roles, plannedHosts).enumerated().map { index, value in
+      JobCanaryGenerationRolloverHostPair(
+        role: value.0,
+        predecessorRoleHostID: "rolehost-old-\(value.0.rawValue)",
+        predecessorBootstrapDescriptorSHA256: String(
+          repeating: Character(String(format: "%x", index + 1)),
+          count: 64
+        ),
+        successorRoleHostID: value.1.roleHostID,
+        successorBootstrapDescriptorSHA256: String(
+          repeating: Character(String(format: "%x", index + 5)),
+          count: 64
+        ),
+        predecessorHostExecutableSHA256: String(repeating: "d", count: 64),
+        successorHostExecutableSHA256: String(repeating: "e", count: 64),
+        successorExecutableEvidenceSHA256: String(repeating: "f", count: 64)
+      )
+    }
+    let launches = [
+      JobCanaryGenerationRolloverLaunchEvidence(
+        launchAttemptID: "launch-cli-q1",
+        queueSequence: 1,
+        descriptorSHA256: String(repeating: "1", count: 64),
+        failureCode: "RUNTIME_TIMEOUT",
+        childProcess: HerdrChildProcessRecord(
+          launchAttemptID: "launch-cli-q1",
+          processID: 91,
+          processGroupID: 91,
+          startSeconds: 92,
+          startMicroseconds: 93
+        )
+      ),
+      JobCanaryGenerationRolloverLaunchEvidence(
+        launchAttemptID: "launch-cli-q2",
+        queueSequence: 2,
+        descriptorSHA256: String(repeating: "2", count: 64),
+        failureCode: "HERDR_TRANSACTION_FAILED",
+        childProcess: nil
+      ),
+      JobCanaryGenerationRolloverLaunchEvidence(
+        launchAttemptID: "launch-cli-q3",
+        queueSequence: 3,
+        descriptorSHA256: String(repeating: "3", count: 64),
+        failureCode: "HERDR_TRANSACTION_FAILED",
+        childProcess: nil
+      ),
+    ]
+    let rollover = JobCanaryGenerationRolloverAuthorization(
+      request: request,
+      canaryAuthorizationSHA256: replacement.request.retry.recovery.canary.authorizationSHA256,
+      rolloverEvidenceSHA256: String(repeating: "a", count: 64),
+      isolationSHA256: String(repeating: "9", count: 64),
+      repositoryID: UUID(uuidString: "76000000-0000-4000-8000-000000000076")!,
+      jobID: replacement.request.retry.recovery.canary.scope.jobID,
+      predecessorGeneration: 1,
+      successorGeneration: 2,
+      predecessorRunID: "run-generation-rollover-predecessor",
+      predecessorLaunches: launches,
+      hosts: hostPairs,
+      workspaceID: "workspace-generation-rollover",
+      socket: JobCanaryGenerationRolloverSocketEvidence(
+        device: 1,
+        inode: 2,
+        owner: 501,
+        permissions: 0o600,
+        peerEvidenceSHA256: String(repeating: "f", count: 64)
+      ),
+      successorRunID: request.successorRunID
+    )
+    let q4 = JobCanaryGenerationRolloverQ4Authorization(
+      rolloverAuthorizationSHA256: rollover.authorizationSHA256,
+      q4EvidenceSHA256: String(repeating: "b", count: 64),
+      successorRunID: request.successorRunID,
+      plannedLaunchAttemptID: "launch-75000000-0000-4000-8000-000000000075",
+      runNonce: String(repeating: "c", count: 64),
+      requestSHA256: String(repeating: "d", count: 64),
+      resourceVersion: "1",
+      resourceHash: String(repeating: "e", count: 64),
+      model: "fixture/model:off",
+      sessionPath: "/tmp/jidoka-generation-rollover-session",
+      channelPath: "/tmp/jidoka-generation-rollover-channel",
+      q4Binding: JobCanaryRoleHostReplacementQ4Binding(
+        descriptorSHA256: String(repeating: "1", count: 64),
+        configurationSHA256: String(repeating: "2", count: 64),
+        promptSHA256: String(repeating: "3", count: 64),
+        workflowConfigurationSHA256: String(repeating: "4", count: 64),
+        priorLaunchDescriptorSHA256: String(repeating: "5", count: 64),
+        priorLaunchConfigurationSHA256: String(repeating: "6", count: 64),
+        resourceTreeSHA256: String(repeating: "7", count: 64)
+      )
+    )
+    let q4Request = JobCanaryGenerationRolloverQ4Request(
+      rolloverAuthorization: rollover,
+      plannedLaunchAttemptID: q4.plannedLaunchAttemptID
+    )
+    let q4Execution = JobCanaryGenerationRolloverQ4ExecutionAuthorization(
+      rollover: rollover,
+      q4: q4
+    )
+    try request.validate()
+    try rollover.validate()
+    try q4Request.validate()
+    try q4Execution.validate()
+
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    func argument<T: Encodable>(_ value: T) throws -> String {
+      try encoder.encode(value).base64EncodedString()
+    }
+    #expect(
+      try JobCanaryCLI.parse(["preview-generation-rollover", argument(request)])
+        == .previewJobCanaryGenerationRollover(request)
+    )
+    #expect(
+      try JobCanaryCLI.parse(["execute-generation-rollover", argument(rollover)])
+        == .executeJobCanaryGenerationRollover(rollover)
+    )
+    #expect(
+      try JobCanaryCLI.parse(["preview-generation-rollover-q4", argument(q4Request)])
+        == .previewJobCanaryGenerationRolloverQ4(q4Request)
+    )
+    #expect(
+      try JobCanaryCLI.parse(["execute-generation-rollover-q4", argument(q4Execution)])
+        == .executeJobCanaryGenerationRolloverQ4(q4Execution)
+    )
+    var noncanonical = try encoder.encode(request)
+    noncanonical.append(0x20)
+    #expect(throws: EngineClientError(.invalidCommand)) {
+      _ = try JobCanaryCLI.parse([
+        "preview-generation-rollover", noncanonical.base64EncodedString(),
+      ])
+    }
+    #expect(throws: EngineClientError(.invalidCommand)) {
+      _ = try JobCanaryCLI.parse(["execute-generation-rollover", "not-base64"])
+    }
+  }
+
   @Test(
     "application XPC and CLI JSON preserve every typed replacement outcome",
     arguments: ApplicationReplacementOutcomeCase.allCases
@@ -249,6 +413,8 @@ struct ApplicationEngineClientTests {
       recovery: nil,
       retry: nil,
       replacement: replacement,
+      generationRollover: nil,
+      generationRolloverQ4: nil,
       checkpoint: checkpoint
     )
     let reportData = try encoder.encode(report)
@@ -317,10 +483,12 @@ struct ApplicationEngineClientTests {
       loginStatus: .notRegistered,
       events: events
     )
+    let preparer = BackgroundCredentialAccessPreparerFake(events: events)
     let factory = BootstrapFactory(events: events, onboardingReady: true)
     let client = ProductionEngineClient(
       loginItems: login,
       helper: helper,
+      backgroundCredentialAccess: preparer,
       bootstrapFactory: { await factory.make() }
     )
 
@@ -336,6 +504,7 @@ struct ApplicationEngineClientTests {
     try expectOrder(
       values,
       [
+        "credential-access:prepare",
         "bootstrap-1:prepareForHandoff",
         "bootstrap-1:close",
         "login:register",
@@ -347,7 +516,7 @@ struct ApplicationEngineClientTests {
     #expect(await factory.count == 1)
   }
 
-  @Test("an enabled helper receives the exact credential ACL before its first request")
+  @Test("an enabled helper verifies the credential ACL once per UI process")
   func enabledHelperPreparesCredentialAccess() async throws {
     let events = TopologyEventLog()
     let login = LoginItemControllerFake(
@@ -364,31 +533,136 @@ struct ApplicationEngineClientTests {
     )
     let preparer = BackgroundCredentialAccessPreparerFake(events: events)
     let factory = BootstrapFactory(events: events, onboardingReady: true)
-    let uptime = TestUptimeClock(value: 100)
     let client = ProductionEngineClient(
       loginItems: login,
       helper: helper,
       backgroundCredentialAccess: preparer,
-      uptime: { uptime.value },
       bootstrapFactory: { await factory.make() }
     )
 
     _ = try await client.send(.snapshot)
     _ = try await client.send(.snapshot)
-    #expect(await preparer.count == 1)
-    uptime.advance(by: 60)
     _ = try await client.send(.snapshot)
 
-    #expect(await preparer.count == 2)
+    #expect(await preparer.count == 1)
     #expect(await factory.count == 0)
     #expect(
       await events.values == [
         "credential-access:prepare",
         "helper:snapshot",
         "helper:snapshot",
-        "credential-access:prepare",
         "helper:snapshot",
       ])
+  }
+
+  @Test("an interactive command waits for the active automatic snapshot")
+  func interactiveCommandWaitsForSnapshot() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .enabled,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let snapshotGate = EngineCommandSuspension()
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: true,
+      loginStatus: .enabled,
+      events: events,
+      suspendedKind: .snapshot,
+      suspension: snapshotGate
+    )
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      bootstrapFactory: { await factory.make() }
+    )
+
+    let snapshot = Task { try await client.send(.snapshot) }
+    await snapshotGate.waitUntilStarted()
+    let result = CommandResultProbe()
+    let addRepository = Task {
+      do {
+        let response = try await client.send(
+          .addRepository(
+            EngineRepositoryDraft(
+              owner: "fixture",
+              name: "sandbox",
+              reviewEnabled: false,
+              triageEnabled: false,
+              implementationEnabled: false
+            )
+          )
+        )
+        await result.succeed(response.command)
+      } catch {
+        await result.fail(error)
+      }
+    }
+
+    try await Task.sleep(nanoseconds: 50_000_000)
+    #expect(await result.isPending)
+    await snapshotGate.release()
+    _ = try await snapshot.value
+    await addRepository.value
+
+    #expect(await result.command == .addRepository)
+    #expect(await result.error == nil)
+    try expectOrder(
+      await events.values,
+      [
+        "helper:snapshot",
+        "helper:addRepository",
+      ]
+    )
+  }
+
+  @Test("two mutating commands remain fail-closed")
+  func mutatingCommandsRemainExclusive() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .enabled,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let mutationGate = EngineCommandSuspension()
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: true,
+      loginStatus: .enabled,
+      events: events,
+      suspendedKind: .addRepository,
+      suspension: mutationGate
+    )
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      bootstrapFactory: { await factory.make() }
+    )
+    let addRepository = Task {
+      try await client.send(
+        .addRepository(
+          EngineRepositoryDraft(
+            owner: "fixture",
+            name: "sandbox",
+            reviewEnabled: false,
+            triageEnabled: false,
+            implementationEnabled: false
+          )
+        )
+      )
+    }
+    await mutationGate.waitUntilStarted()
+
+    await #expect(throws: EngineClientError(.busy)) {
+      _ = try await client.send(.setMaxConcurrency(3))
+    }
+    await mutationGate.release()
+    _ = try await addRepository.value
   }
 
   @Test("credential ACL migration failure never reaches the helper")
@@ -406,44 +680,191 @@ struct ApplicationEngineClientTests {
       loginStatus: .enabled,
       events: events
     )
-    let uptime = TestUptimeClock(value: 100)
     let preparer = BackgroundCredentialAccessPreparerFake(
       events: events,
-      shouldFail: true,
-      onPrepare: { uptime.advance(by: 30) }
+      shouldFail: true
     )
     let factory = BootstrapFactory(events: events, onboardingReady: true)
     let client = ProductionEngineClient(
       loginItems: login,
       helper: helper,
       backgroundCredentialAccess: preparer,
-      uptime: { uptime.value },
       bootstrapFactory: { await factory.make() }
     )
 
-    await #expect(throws: EngineClientError(.unavailable)) {
+    await #expect(throws: EngineClientError(.credentialAccessFailed)) {
       _ = try await client.send(.snapshot)
     }
-    await #expect(throws: EngineClientError(.unavailable)) {
-      _ = try await client.send(.snapshot)
-    }
-    #expect(await preparer.count == 1)
-    uptime.advance(by: 59)
-    await #expect(throws: EngineClientError(.unavailable)) {
+    await #expect(throws: EngineClientError(.credentialAccessFailed)) {
       _ = try await client.send(.snapshot)
     }
     #expect(await preparer.count == 1)
-    uptime.advance(by: 1)
-    await #expect(throws: EngineClientError(.unavailable)) {
-      _ = try await client.send(.snapshot)
-    }
-    #expect(await preparer.count == 2)
-    #expect(
-      await events.values == [
-        "credential-access:prepare",
-        "credential-access:prepare",
-      ])
+    #expect(await events.values == ["credential-access:prepare"])
     #expect(await factory.count == 0)
+
+    let disabled = try await client.send(.setLoginEnabled(false))
+    #expect(!disabled.state.settings.loginItemSelected)
+    #expect(disabled.state.settings.loginItemStatus == .notRegistered)
+    try expectOrder(
+      await events.values,
+      [
+        "credential-access:prepare",
+        "helper:prepareForQuit",
+        "login:unregister",
+        "bootstrap-1:synchronizeLoginStatus",
+      ]
+    )
+  }
+
+  @Test("the production retry policy tolerates a slow helper and pins its exact bound")
+  func helperStartupRetry() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .notRegistered,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: false,
+      loginStatus: .notRegistered,
+      events: events,
+      unavailableAttempts: [.snapshot: 100]
+    )
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      helperStartupWait: { nanoseconds in
+        await events.append("helper:wait:\(nanoseconds)")
+      },
+      bootstrapFactory: { await factory.make() }
+    )
+
+    let enabled = try await client.send(.setLoginEnabled(true))
+    #expect(enabled.state.settings.loginItemSelected)
+    #expect(enabled.state.settings.loginItemStatus == .enabled)
+    #expect(ProductionEngineClient.productionHelperStartupAttemptLimit == 240)
+    #expect(ProductionEngineClient.productionHelperStartupRetryNanoseconds == 250_000_000)
+    let values = await events.values
+    #expect(values.filter { $0 == "helper:snapshot" }.count == 101)
+    #expect(
+      values.filter {
+        $0
+          == "helper:wait:\(ProductionEngineClient.productionHelperStartupRetryNanoseconds)"
+      }.count == 100
+    )
+    try expectOrder(values, ["login:register", "helper:synchronizeLoginStatus"])
+  }
+
+  @Test("helper startup does not retry a typed non-availability failure")
+  func helperStartupTypedFailure() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .notRegistered,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: false,
+      loginStatus: .notRegistered,
+      events: events,
+      failingCodes: [.snapshot: .timedOut]
+    )
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      helperStartupWait: { nanoseconds in
+        await events.append("helper:wait:\(nanoseconds)")
+      },
+      bootstrapFactory: { await factory.make() }
+    )
+
+    await #expect(throws: EngineClientError(.loginItemFailed)) {
+      _ = try await client.send(.setLoginEnabled(true))
+    }
+    let values = await events.values
+    #expect(values.filter { $0 == "helper:snapshot" }.count == 1)
+    #expect(!values.contains(where: { $0.hasPrefix("helper:wait:") }))
+  }
+
+  @Test("a successful credential replacement avoids a second ACL prompt during handoff")
+  func credentialReplacementCarriesPreparedAccessIntoHandoff() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .notRegistered,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: false,
+      loginStatus: .notRegistered,
+      events: events
+    )
+    let preparer = BackgroundCredentialAccessPreparerFake(events: events)
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      backgroundCredentialAccess: preparer,
+      bootstrapFactory: { await factory.make() }
+    )
+
+    _ = try await client.send(
+      .replaceCredential(Data(String(repeating: "t", count: 32).utf8))
+    )
+    _ = try await client.send(.setLoginEnabled(true))
+
+    #expect(await preparer.count == 0)
+    #expect(!(await events.values).contains("credential-access:prepare"))
+  }
+
+  @Test("credential deletion rechecks background access before the next helper request")
+  func credentialDeletionResetsPreparedAccess() async throws {
+    let events = TopologyEventLog()
+    let login = LoginItemControllerFake(
+      status: .enabled,
+      registeredStatus: .enabled,
+      events: events
+    )
+    let helper = TopologyEngineClientFake(
+      name: "helper",
+      onboardingReady: true,
+      loginSelected: true,
+      loginStatus: .enabled,
+      events: events
+    )
+    let preparer = BackgroundCredentialAccessPreparerFake(events: events)
+    let factory = BootstrapFactory(events: events, onboardingReady: true)
+    let client = ProductionEngineClient(
+      loginItems: login,
+      helper: helper,
+      backgroundCredentialAccess: preparer,
+      bootstrapFactory: { await factory.make() }
+    )
+
+    _ = try await client.send(
+      .replaceCredential(Data(String(repeating: "t", count: 32).utf8))
+    )
+    _ = try await client.send(.deleteCredential)
+    _ = try await client.send(.snapshot)
+
+    #expect(await preparer.count == 1)
+    try expectOrder(
+      await events.values,
+      [
+        "helper:replaceCredential",
+        "helper:deleteCredential",
+        "credential-access:prepare",
+        "helper:snapshot",
+      ]
+    )
   }
 
   @Test("an unregistered agent missing from BTM uses bootstrap and can quit durably")
@@ -655,13 +1076,27 @@ struct ApplicationEngineClientTests {
     let client = ProductionEngineClient(
       loginItems: login,
       helper: helper,
+      helperStartupWait: { nanoseconds in
+        await events.append("helper:wait:\(nanoseconds)")
+      },
       bootstrapFactory: { await factory.make() }
     )
 
     await #expect(throws: EngineClientError(.loginItemFailed)) {
       _ = try await client.send(.setLoginEnabled(true))
     }
-    try expectOrder(await events.values, ["login:register", "helper:snapshot"])
+    let values = await events.values
+    #expect(
+      values.filter { $0 == "helper:snapshot" }.count
+        == ProductionEngineClient.productionHelperStartupAttemptLimit
+    )
+    #expect(
+      values.filter {
+        $0
+          == "helper:wait:\(ProductionEngineClient.productionHelperStartupRetryNanoseconds)"
+      }.count == ProductionEngineClient.productionHelperStartupAttemptLimit - 1
+    )
+    try expectOrder(values, ["login:register", "helper:snapshot"])
     #expect(!(await events.values).contains("helper:prepareForQuit"))
     #expect(!(await events.values).contains("login:unregister"))
     #expect(await factory.count == 1)
@@ -985,23 +1420,6 @@ private final class TestEngineTopologyLock: EngineTopologyLocking, @unchecked Se
   func release() {}
 }
 
-private final class TestUptimeClock: @unchecked Sendable {
-  private let lock = NSLock()
-  private var storedValue: TimeInterval
-
-  init(value: TimeInterval) {
-    storedValue = value
-  }
-
-  var value: TimeInterval {
-    lock.withLock { storedValue }
-  }
-
-  func advance(by interval: TimeInterval) {
-    lock.withLock { storedValue += interval }
-  }
-}
-
 private actor TopologyEventLog {
   private(set) var values: [String] = []
 
@@ -1068,12 +1486,60 @@ private actor LoginItemControllerFake: LoginItemControlling {
   }
 }
 
+private actor EngineCommandSuspension {
+  private var started = false
+  private var released = false
+  private var startWaiters: [CheckedContinuation<Void, Never>] = []
+  private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+  func waitUntilStarted() async {
+    if started { return }
+    await withCheckedContinuation { startWaiters.append($0) }
+  }
+
+  func suspend() async {
+    if released { return }
+    started = true
+    let waiters = startWaiters
+    startWaiters.removeAll(keepingCapacity: false)
+    for waiter in waiters { waiter.resume() }
+    await withCheckedContinuation { releaseContinuation = $0 }
+  }
+
+  func release() {
+    released = true
+    let continuation = releaseContinuation
+    releaseContinuation = nil
+    continuation?.resume()
+  }
+}
+
+private actor CommandResultProbe {
+  private(set) var command: EngineCommandKind?
+  private(set) var error: EngineClientErrorCode?
+  private(set) var isPending = true
+
+  func succeed(_ command: EngineCommandKind) {
+    self.command = command
+    isPending = false
+  }
+
+  func fail(_ error: Error) {
+    self.error = (error as? EngineClientError)?.code ?? .internalFailure
+    isPending = false
+  }
+}
+
 private actor TopologyEngineClientFake: EngineClient {
   private let name: String
   private let onboardingReady: Bool
   private let events: TopologyEventLog
   private let checkpointSucceeds: Bool
   private let failingKinds: Set<EngineCommandKind>
+  private let failingCodes: [EngineCommandKind: EngineClientErrorCode]
+  private let suspendedKind: EngineCommandKind?
+  private let suspension: EngineCommandSuspension?
+  private var unavailableAttempts: [EngineCommandKind: Int]
   private var lifecycle = EngineLifecycleState.onboarding
   private var loginSelected: Bool
   private var loginStatus: LifecycleServiceStatus
@@ -1085,7 +1551,11 @@ private actor TopologyEngineClientFake: EngineClient {
     loginStatus: LifecycleServiceStatus,
     events: TopologyEventLog,
     checkpointSucceeds: Bool = true,
-    failingKinds: Set<EngineCommandKind> = []
+    failingKinds: Set<EngineCommandKind> = [],
+    unavailableAttempts: [EngineCommandKind: Int] = [:],
+    failingCodes: [EngineCommandKind: EngineClientErrorCode] = [:],
+    suspendedKind: EngineCommandKind? = nil,
+    suspension: EngineCommandSuspension? = nil
   ) {
     self.name = name
     self.onboardingReady = onboardingReady
@@ -1094,10 +1564,24 @@ private actor TopologyEngineClientFake: EngineClient {
     self.events = events
     self.checkpointSucceeds = checkpointSucceeds
     self.failingKinds = failingKinds
+    self.unavailableAttempts = unavailableAttempts
+    self.failingCodes = failingCodes
+    self.suspendedKind = suspendedKind
+    self.suspension = suspension
   }
 
   func send(_ command: EngineCommand) async throws -> EngineCommandResponse {
     await events.append("\(name):\(command.kind.rawValue)")
+    if command.kind == suspendedKind, let suspension {
+      await suspension.suspend()
+    }
+    if let remaining = unavailableAttempts[command.kind], remaining > 0 {
+      unavailableAttempts[command.kind] = remaining - 1
+      throw EngineClientError(.unavailable)
+    }
+    if let code = failingCodes[command.kind] {
+      throw EngineClientError(code)
+    }
     if failingKinds.contains(command.kind) {
       throw EngineClientError(.unavailable)
     }
@@ -1144,8 +1628,8 @@ private actor TopologyEngineClientFake: EngineClient {
       onboardingReady
       ? EngineHerdrStatus(
         state: .ready,
-        version: "0.8.0",
-        protocolVersion: 19,
+        version: "0.8.2",
+        protocolVersion: 20,
         executableSHA256: String(repeating: "e", count: 64),
         schemaSHA256: String(repeating: "d", count: 64),
         policySHA256: String(repeating: "c", count: 64)

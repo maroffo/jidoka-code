@@ -107,6 +107,7 @@ public struct PiWorkflowExecutionRequest: Equatable, Sendable {
   public let role: PiWorkflowRole
   public let round: Int
   public let artifactSHA256: String
+  public let commitNarrativeSHA256: String?
   public let sessionDirective: PiWorkflowSessionDirective
   public let normalizedRoleInputs: [PiNormalizedRoleResult]
   public let canonicalCommandDigests: [String]
@@ -120,6 +121,7 @@ public struct PiWorkflowExecutionRequest: Equatable, Sendable {
     role: PiWorkflowRole,
     round: Int,
     artifactSHA256: String,
+    commitNarrativeSHA256: String? = nil,
     sessionDirective: PiWorkflowSessionDirective,
     normalizedRoleInputs: [PiNormalizedRoleResult] = [],
     canonicalCommandDigests: [String] = [],
@@ -132,6 +134,7 @@ public struct PiWorkflowExecutionRequest: Equatable, Sendable {
     self.role = role
     self.round = round
     self.artifactSHA256 = artifactSHA256
+    self.commitNarrativeSHA256 = commitNarrativeSHA256
     self.sessionDirective = sessionDirective
     self.normalizedRoleInputs = normalizedRoleInputs
     self.canonicalCommandDigests = canonicalCommandDigests
@@ -286,6 +289,7 @@ public struct PiPullRequestReviewRouter: Sendable {
           role: role,
           round: 1,
           artifactSHA256: input.artifactSHA256,
+          commitNarrativeSHA256: narrativeDigest,
           sessionDirective: .fresh
         )
       )
@@ -311,6 +315,7 @@ public struct PiPullRequestReviewRouter: Sendable {
         role: .synthesis,
         round: 1,
         artifactSHA256: input.artifactSHA256,
+        commitNarrativeSHA256: narrativeDigest,
         sessionDirective: .fresh,
         normalizedRoleInputs: results.map(PiNormalizedRoleResult.make)
       )
@@ -395,6 +400,7 @@ public struct PiPullRequestReviewRouter: Sendable {
         role: .architecture,
         round: 1,
         artifactSHA256: input.artifactSHA256,
+        commitNarrativeSHA256: narrativeDigest,
         sessionDirective: .fresh
       )
     )

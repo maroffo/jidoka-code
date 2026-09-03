@@ -5,6 +5,7 @@ import JidokaCodeCore
 @main
 enum JidokaCodeHerdrHostMain {
   static func main() async {
+    _ = Darwin.umask(0o077)
     let task = Task {
       try await HerdrHostRuntime.run(
         arguments: Array(CommandLine.arguments.dropFirst()),

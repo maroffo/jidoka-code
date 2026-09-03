@@ -67,6 +67,12 @@ struct ViewModelFlowTests {
     #expect(model.token.isEmpty)
     #expect(model.message?.title == "Credential not accepted")
     #expect(!(model.message?.detail.contains(sentinel) ?? true))
+
+    let accessFailure = PresentationCopy.message(
+      for: EngineClientError(.credentialAccessFailed)
+    )
+    #expect(accessFailure.title == "Keychain access needs attention")
+    #expect(accessFailure.detail.contains("signed engine helper"))
   }
 
   @Test("menu pause suppresses poll but durable quit still checkpoints")
@@ -96,6 +102,25 @@ struct ViewModelFlowTests {
     #expect(failedCheckpointModel.message?.title == "Checkpoint failed")
     await failedCheckpointEngine.setCheckpointDatabaseSucceeded(true)
     #expect(await failedCheckpointModel.prepareForQuit()?.databaseCheckpointed == true)
+  }
+
+  @Test("durable quit waits for an in-flight refresh")
+  func quitWaitsForRefresh() async {
+    let client = DelayedSnapshotEngineClient()
+    let model = AppViewModel(client: client)
+    let refresh = Task { @MainActor in await model.refresh() }
+    for _ in 0..<100 {
+      if model.isWorking { break }
+      await Task.yield()
+    }
+    #expect(model.isWorking)
+
+    let checkpoint = await model.prepareForQuit()
+    await refresh.value
+
+    #expect(checkpoint?.databaseCheckpointed == true)
+    #expect(model.state?.lifecycle == .quitting)
+    #expect(await client.observedCommandKinds() == [.snapshot, .prepareForQuit])
   }
 
   @Test("polling reports one deterministic blocker for every dispatch gate")
@@ -449,6 +474,21 @@ struct ViewModelFlowTests {
   }
 }
 
+private actor DelayedSnapshotEngineClient: EngineClient {
+  private let base = AppSupportEngineFake(onboardingComplete: true)
+
+  func send(_ command: EngineCommand) async throws -> EngineCommandResponse {
+    if command.kind == .snapshot {
+      try await Task.sleep(nanoseconds: 250_000_000)
+    }
+    return try await base.send(command)
+  }
+
+  func observedCommandKinds() async -> [EngineCommandKind] {
+    await base.commandKinds
+  }
+}
+
 private actor AppSupportEngineFake: EngineClient {
   private var lifecycle: EngineLifecycleState
   private var paused = false
@@ -588,7 +628,9 @@ private actor AppSupportEngineFake: EngineClient {
       .previewJobCanary, .executeJobCanary,
       .previewJobCanaryRecovery, .executeJobCanaryRecovery,
       .previewJobCanaryPiRetry, .executeJobCanaryPiRetry,
-      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement:
+      .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement,
+      .previewJobCanaryGenerationRollover, .executeJobCanaryGenerationRollover,
+      .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
       throw EngineClientError(.invalidCommand)
     case .setLoginEnabled(let value):
       loginSelected = value
@@ -679,8 +721,8 @@ private actor AppSupportEngineFake: EngineClient {
   private static func readyHerdr() -> EngineHerdrStatus {
     EngineHerdrStatus(
       state: .ready,
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       executableSHA256: String(repeating: "e", count: 64),
       schemaSHA256: String(repeating: "d", count: 64),
       policySHA256: String(repeating: "c", count: 64)

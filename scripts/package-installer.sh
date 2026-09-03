@@ -19,7 +19,9 @@ BOUNDED_COMMAND=""
 readonly PACKAGE_TOOL_TIMEOUT_SECONDS=300
 readonly APPLICATION_IDENTIFIER="com.maroffo.JidokaCode"
 readonly PACKAGE_IDENTIFIER="com.maroffo.JidokaCode.pkg"
-readonly INSTALL_LOCATION="/Applications"
+readonly INSTALL_LOCATION="/Library/Application Support"
+readonly COMPONENT_APP_RELATIVE_PATH="JidokaCode/Applications/Jidoka Code.app"
+readonly INSTALL_APP_PATH="$INSTALL_LOCATION/$COMPONENT_APP_RELATIVE_PATH"
 readonly COMPONENT_POLICY="$ROOT/Packaging/app-component.plist"
 readonly SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 readonly INSTALLER_SIGN_IDENTITY="${INSTALLER_SIGN_IDENTITY:-}"
@@ -35,6 +37,13 @@ TEMP_ROOT=""
 fail() {
     printf 'installer packaging failed: %s\n' "$1" >&2
     exit 1
+}
+
+path_has_allow_acl() {
+    /bin/ls -lde "$1" | /usr/bin/awk '
+        NR > 1 && $0 ~ / allow / { found = 1 }
+        END { exit(found ? 0 : 1) }
+    '
 }
 
 run_package_tool() {
@@ -116,7 +125,7 @@ validate_component_policy() {
             fail "application component policy keys differ"
     done
     [[ "$(/usr/bin/plutil -extract 0.RootRelativeBundlePath raw "$COMPONENT_POLICY")" == \
-        "Jidoka Code.app" && \
+        "$COMPONENT_APP_RELATIVE_PATH" && \
         "$(/usr/bin/plutil -extract 0.BundleIsRelocatable raw "$COMPONENT_POLICY")" == "false" && \
         "$(/usr/bin/plutil -extract 0.BundleIsVersionChecked raw "$COMPONENT_POLICY")" == "true" && \
         "$(/usr/bin/plutil -extract 0.BundleHasStrictIdentifier raw "$COMPONENT_POLICY")" == "true" && \
@@ -170,11 +179,11 @@ verify_installer_bom_modes() {
     local output="$2"
     local component_root="$3"
     local expected="$TEMP_ROOT/expected-bom-modes.txt"
-    /usr/bin/lsbom -p fm "$bom" >"$output" || fail "installer BOM is unreadable"
+    /usr/bin/lsbom -p fmug "$bom" >"$output" || fail "installer BOM is unreadable"
     (
         cd "$component_root"
         while IFS= read -r -d '' path; do
-            printf '%s\t%s\n' "$path" "$(/usr/bin/stat -f '%p' "$path")"
+            printf '%s\t%s\t0\t0\n' "$path" "$(/usr/bin/stat -f '%p' "$path")"
         done < <(/usr/bin/find . -print0)
     ) | LC_ALL=C /usr/bin/sort >"$expected"
     /usr/bin/awk -F '\t' '
@@ -182,17 +191,43 @@ verify_installer_bom_modes() {
             gsub(/\/\._/, "/", path)
             return path
         }
-        NR == FNR { expected[$1] = $2; expected_count += 1; next }
+        NR == FNR {
+            expected[$1] = $2 FS $3 FS $4
+            expected_count += 1
+            next
+        }
         {
             path = normalized_path($1)
-            if (!(path in expected) || $2 != expected[path]) exit 1
+            if (!(path in expected) || $2 FS $3 FS $4 != expected[path]) exit 1
             if (!(path in seen)) seen_count += 1
             seen[path] = 1
         }
         END {
             if (seen_count != expected_count) exit 1
         }
-    ' "$expected" "$output" || fail "installer BOM modes differ"
+    ' "$expected" "$output" || fail "installer BOM mode or root ownership differs"
+}
+
+write_parent_tree_inventory() {
+    local bom_modes="$1"
+    local output="$2"
+    /usr/bin/awk -F '\t' '
+        $1 == "./JidokaCode" {
+            print "directory\tJidokaCode\t" $2 "\t" $3 "\t" $4
+            found_root = 1
+        }
+        $1 == "./JidokaCode/Applications" {
+            print "directory\tJidokaCode/Applications\t" $2 "\t" $3 "\t" $4
+            found_apps = 1
+        }
+        END { exit(found_root && found_apps ? 0 : 1) }
+    ' "$bom_modes" >"$output" || fail "installer parent tree is absent from the BOM"
+    [[ "$(/usr/bin/wc -l <"$output" | /usr/bin/tr -d ' ')" == "2" ]] || \
+        fail "installer parent tree inventory is ambiguous"
+    /usr/bin/grep -Fxq $'directory\tJidokaCode\t40755\t0\t0' "$output" || \
+        fail "installer authority root metadata differs"
+    /usr/bin/grep -Fxq $'directory\tJidokaCode/Applications\t40755\t0\t0' "$output" || \
+        fail "installer applications authority metadata differs"
 }
 
 validate_notarization_configuration() {
@@ -270,15 +305,19 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 readonly COMPONENT_ROOT="$TEMP_ROOT/component-root"
-readonly COMPONENT_APP="$COMPONENT_ROOT/Jidoka Code.app"
+readonly COMPONENT_AUTHORITY_ROOT="$COMPONENT_ROOT/JidokaCode"
+readonly COMPONENT_APPLICATIONS_ROOT="$COMPONENT_AUTHORITY_ROOT/Applications"
+readonly COMPONENT_APP="$COMPONENT_ROOT/$COMPONENT_APP_RELATIVE_PATH"
 readonly COMPONENT_PACKAGE="$TEMP_ROOT/JidokaCode-component.pkg"
 readonly UNSIGNED_PRODUCT_PACKAGE="$TEMP_ROOT/Jidoka Code-unsigned.pkg"
 readonly PRODUCT_PACKAGE="$TEMP_ROOT/Jidoka Code.pkg"
 readonly EXPANDED_PACKAGE="$TEMP_ROOT/expanded"
 readonly FULL_EXPANDED_PACKAGE="$TEMP_ROOT/expanded-full"
-readonly PAYLOAD_APP="$FULL_EXPANDED_PACKAGE/JidokaCode-component.pkg/Payload/Jidoka Code.app"
+readonly PAYLOAD_ROOT="$FULL_EXPANDED_PACKAGE/JidokaCode-component.pkg/Payload"
+readonly PAYLOAD_APP="$PAYLOAD_ROOT/$COMPONENT_APP_RELATIVE_PATH"
 readonly COMPONENT_TREE_INVENTORY="$TEMP_ROOT/component-tree.txt"
 readonly PAYLOAD_TREE_INVENTORY="$TEMP_ROOT/payload-tree.txt"
+readonly PARENT_TREE_INVENTORY="$TEMP_ROOT/parent-tree.txt"
 readonly RAW_PAYLOAD_LIST="$TEMP_ROOT/payload-raw.txt"
 readonly PAYLOAD_LIST="$TEMP_ROOT/payload.txt"
 readonly METADATA_PAYLOAD_LIST="$TEMP_ROOT/payload-metadata.txt"
@@ -329,6 +368,16 @@ readonly DEVELOPER_ID_BUNDLE_VERIFIER="$BOUNDED_COMMAND_BIN_DIR/JidokaCodeApp"
 /usr/bin/codesign --verify --strict --deep "$APP"
 
 /bin/mkdir -m 0755 "$COMPONENT_ROOT"
+/bin/mkdir -m 0755 "$COMPONENT_AUTHORITY_ROOT"
+/bin/mkdir -m 0755 "$COMPONENT_APPLICATIONS_ROOT"
+for parent in "$COMPONENT_AUTHORITY_ROOT" "$COMPONENT_APPLICATIONS_ROOT"; do
+    [[ -d "$parent" && ! -L "$parent" && \
+        "$(/usr/bin/stat -f '%OLp' "$parent")" == "755" ]] || \
+        fail "component authority parent metadata differs"
+    if path_has_allow_acl "$parent"; then
+        fail "component authority parent ACL is unsafe"
+    fi
+done
 /usr/bin/ditto "$APP" "$COMPONENT_APP"
 [[ -d "$COMPONENT_APP" && ! -L "$COMPONENT_APP" ]] || \
     fail "component application copy is missing"
@@ -343,10 +392,14 @@ app_version="$(
     /usr/bin/plutil -extract CFBundleShortVersionString raw \
         "$COMPONENT_APP/Contents/Info.plist"
 )"
+app_build_version="$(
+    /usr/bin/plutil -extract CFBundleVersion raw "$COMPONENT_APP/Contents/Info.plist"
+)"
 app_bundle_identifier="$(
     /usr/bin/plutil -extract CFBundleIdentifier raw "$COMPONENT_APP/Contents/Info.plist"
 )"
 [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid application version"
+[[ "$app_build_version" =~ ^[1-9][0-9]*$ ]] || fail "invalid application build version"
 [[ "$app_bundle_identifier" == "$APPLICATION_IDENTIFIER" ]] || \
     fail "unexpected application bundle identifier"
 if LC_ALL=C /usr/bin/grep -R -F -l "$ROOT" "$COMPONENT_APP" >/dev/null 2>&1; then
@@ -354,10 +407,11 @@ if LC_ALL=C /usr/bin/grep -R -F -l "$ROOT" "$COMPONENT_APP" >/dev/null 2>&1; the
 elif [[ "$?" -ne 1 ]]; then
     fail "could not audit the component application for checkout paths"
 fi
-write_application_tree_inventory "$COMPONENT_APP" "$COMPONENT_TREE_INVENTORY"
+write_application_tree_inventory "$COMPONENT_ROOT" "$COMPONENT_TREE_INVENTORY"
 pkgbuild_arguments=(
     --root "$COMPONENT_ROOT"
     --component-plist "$COMPONENT_POLICY"
+    --ownership recommended
     --install-location "$INSTALL_LOCATION"
     --identifier "$PACKAGE_IDENTIFIER"
     --version "$app_version"
@@ -382,6 +436,15 @@ run_package_tool productsign /usr/bin/productsign "${productsign_arguments[@]}"
 /usr/sbin/pkgutil --expand-full "$PRODUCT_PACKAGE" "$FULL_EXPANDED_PACKAGE"
 [[ -d "$PAYLOAD_APP" && ! -L "$PAYLOAD_APP" ]] || \
     fail "expanded product payload application is missing"
+for relative_parent in JidokaCode JidokaCode/Applications; do
+    payload_parent="$PAYLOAD_ROOT/$relative_parent"
+    [[ -d "$payload_parent" && ! -L "$payload_parent" && \
+        "$(/usr/bin/stat -f '%OLp' "$payload_parent")" == "755" ]] || \
+        fail "expanded product payload parent metadata differs"
+    if path_has_allow_acl "$payload_parent"; then
+        fail "expanded product payload parent ACL is unsafe"
+    fi
+done
 [[ "$(/usr/bin/find "$FULL_EXPANDED_PACKAGE" -type d -name 'Jidoka Code.app' -print)" == \
     "$PAYLOAD_APP" ]] || fail "expanded product payload application is ambiguous"
 /usr/bin/codesign --verify --strict --deep "$PAYLOAD_APP" || \
@@ -393,10 +456,12 @@ run_package_tool \
     "$PAYLOAD_APP" >/dev/null
 [[ "$(/usr/bin/plutil -extract CFBundleShortVersionString raw \
     "$PAYLOAD_APP/Contents/Info.plist")" == "$app_version" && \
+    "$(/usr/bin/plutil -extract CFBundleVersion raw \
+    "$PAYLOAD_APP/Contents/Info.plist")" == "$app_build_version" && \
     "$(/usr/bin/plutil -extract CFBundleIdentifier raw \
     "$PAYLOAD_APP/Contents/Info.plist")" == "$app_bundle_identifier" ]] || \
     fail "expanded product payload application identity differs"
-write_application_tree_inventory "$PAYLOAD_APP" "$PAYLOAD_TREE_INVENTORY"
+write_application_tree_inventory "$PAYLOAD_ROOT" "$PAYLOAD_TREE_INVENTORY"
 /usr/bin/cmp -s "$COMPONENT_TREE_INVENTORY" "$PAYLOAD_TREE_INVENTORY" || \
     fail "expanded product payload bytes differ from the validated component"
 payload_tree_sha256="$(
@@ -421,13 +486,16 @@ while IFS= read -r path; do
     fi
 done <"$RAW_PAYLOAD_LIST"
 {
-    /bin/cat "$ROOT/Packaging/app-inventory.txt"
-    /bin/cat "$RUNTIME_INVENTORY"
-} | /usr/bin/awk '
-    $0 == "." { print "Jidoka Code.app"; next }
-    /^\.\// { print "Jidoka Code.app/" substr($0, 3); next }
-    { exit 2 }
-' >"$EXPECTED_PAYLOAD_LIST" || fail "invalid application inventory"
+    printf 'JidokaCode\nJidokaCode/Applications\n'
+    {
+        /bin/cat "$ROOT/Packaging/app-inventory.txt"
+        /bin/cat "$RUNTIME_INVENTORY"
+    } | /usr/bin/awk -v app="$COMPONENT_APP_RELATIVE_PATH" '
+        $0 == "." { print app; next }
+        /^\.\// { print app "/" substr($0, 3); next }
+        { exit 2 }
+    '
+} >"$EXPECTED_PAYLOAD_LIST" || fail "invalid application or parent inventory"
 LC_ALL=C /usr/bin/sort -o "$EXPECTED_PAYLOAD_LIST" "$EXPECTED_PAYLOAD_LIST"
 LC_ALL=C /usr/bin/sort -o "$PAYLOAD_LIST" "$PAYLOAD_LIST"
 LC_ALL=C /usr/bin/sort -o "$METADATA_PAYLOAD_LIST" "$METADATA_PAYLOAD_LIST"
@@ -448,12 +516,16 @@ bom_file="$(/usr/bin/find "$EXPANDED_PACKAGE" -type f -name Bom -print)"
 [[ "$(printf '%s\n' "$bom_file" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" == "1" ]] || \
     fail "installer BOM is ambiguous"
 verify_installer_bom_modes "$bom_file" "$BOM_MODE_LIST" "$COMPONENT_ROOT"
+write_parent_tree_inventory "$BOM_MODE_LIST" "$PARENT_TREE_INVENTORY"
+parent_tree_sha256="$(
+    /usr/bin/shasum -a 256 "$PARENT_TREE_INVENTORY" | /usr/bin/awk '{print $1}'
+)"
 [[ "$(/usr/bin/xmllint --xpath \
     "count(/pkg-info[@identifier='$PACKAGE_IDENTIFIER' and @version='$app_version' and @install-location='$INSTALL_LOCATION' and @postinstall-action='none' and @auth='root' and @relocatable='false'])" \
     "$package_info")" == "1" ]] || fail "installer package identity or policy differs"
 [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle)' "$package_info")" == "1" && \
     "$(/usr/bin/xmllint --xpath \
-        "count(/pkg-info/bundle[@id='$app_bundle_identifier' and @path='./Jidoka Code.app'])" \
+        "count(/pkg-info/bundle[@id='$app_bundle_identifier' and @path='./$COMPONENT_APP_RELATIVE_PATH'])" \
         "$package_info")" == "1" && \
     "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle-version/bundle)' "$package_info")" == "1" && \
     "$(/usr/bin/xmllint --xpath \
@@ -478,7 +550,9 @@ readonly DISTRIBUTION="$EXPANDED_PACKAGE/Distribution"
     fail "installer distribution unexpectedly allows scripts"
 /usr/bin/grep -Fq 'onConclusion="none"' "$DISTRIBUTION" || \
     fail "installer conclusion action differs"
-/usr/bin/grep -Fq "id=\"$app_bundle_identifier\" path=\"Jidoka Code.app\"" "$DISTRIBUTION" || \
+/usr/bin/grep -Fq \
+    "id=\"$app_bundle_identifier\" path=\"$COMPONENT_APP_RELATIVE_PATH\"" \
+    "$DISTRIBUTION" || \
     fail "installer bundle identity differs"
 package_notarized=false
 notarization_submission_id=""
@@ -577,7 +651,7 @@ herdr_policy_sha256="$(
         /usr/bin/awk '{print $1}'
 )"
 herdr_schema_sha256="$(
-    /usr/bin/shasum -a 256 "$PAYLOAD_APP/Contents/Resources/Herdr/api-schema-0.8.0.json" | \
+    /usr/bin/shasum -a 256 "$PAYLOAD_APP/Contents/Resources/Herdr/api-schema-0.8.2.json" | \
         /usr/bin/awk '{print $1}'
 )"
 minimum_os_version="$(
@@ -607,20 +681,20 @@ fi
 [[ "$package_signer" == Developer\ ID\ Installer:*"($app_team)" ]] || \
     fail "application and installer signing teams differ"
 [[ "$herdr_policy_sha256" == \
-    "3fdd7b5d6f273ab264c6c2f502e8c8902819cc353052191769c4ec22213d4673" ]] || \
+    "45674e216b931f7c736c1c8348e899221c2aef080dfa6a92392144b244cd5867" ]] || \
     fail "installer Herdr policy digest differs"
 [[ "$herdr_schema_sha256" == \
-    "88ff414aa996e390c2db05a37b95d28dbe4e81b98329f6ed7f7a2cc5c6ebf51a" ]] || \
+    "c48f1f54ee0150ca27e11fd44455fe94aeadb20fdf4e4a62393ed822a4e5b150" ]] || \
     fail "installer Herdr schema digest differs"
 [[ "$minimum_os_version" == "14.0" ]] || fail "installer minimum OS differs"
 
 if [[ "$package_notarized" == "true" ]]; then
     printf '%s\n' \
-        "{\"appBundleIdentifier\":\"$app_bundle_identifier\",\"applicationSigningIdentitySHA1\":\"$SIGN_IDENTITY\",\"appInventorySHA256\":\"$inventory_sha256\",\"appVersion\":\"$app_version\",\"herdrBundled\":false,\"herdrHostSHA256\":\"$host_sha256\",\"herdrPolicySHA256\":\"$herdr_policy_sha256\",\"herdrSchemaSHA256\":\"$herdr_schema_sha256\",\"installLocation\":\"/Applications/Jidoka Code.app\",\"installerScripts\":false,\"installerSigningCertificateSHA256\":\"$installer_certificate_sha256\",\"installerSigningIdentitySHA1\":\"$INSTALLER_SIGN_IDENTITY\",\"minimumOSVersion\":\"$minimum_os_version\",\"notarizationResultSHA256\":\"$notarization_result_sha256\",\"notarizationSubmissionID\":\"$notarization_submission_id\",\"packageIdentifier\":\"$PACKAGE_IDENTIFIER\",\"packageNotarized\":true,\"packageSHA256\":\"$package_sha256\",\"packageSigned\":true,\"payloadTreeSHA256\":\"$payload_tree_sha256\",\"schemaVersion\":4,\"signingTeamIdentifier\":\"$app_team\",\"trustedTimestamp\":true}" \
+        "{\"appBuildVersion\":\"$app_build_version\",\"appBundleIdentifier\":\"$app_bundle_identifier\",\"applicationSigningIdentitySHA1\":\"$SIGN_IDENTITY\",\"appInventorySHA256\":\"$inventory_sha256\",\"appVersion\":\"$app_version\",\"herdrBundled\":false,\"herdrHostSHA256\":\"$host_sha256\",\"herdrPolicySHA256\":\"$herdr_policy_sha256\",\"herdrSchemaSHA256\":\"$herdr_schema_sha256\",\"installLocation\":\"$INSTALL_APP_PATH\",\"installerScripts\":false,\"installerSigningCertificateSHA256\":\"$installer_certificate_sha256\",\"installerSigningIdentitySHA1\":\"$INSTALLER_SIGN_IDENTITY\",\"installRoot\":\"$INSTALL_LOCATION\",\"minimumOSVersion\":\"$minimum_os_version\",\"notarizationResultSHA256\":\"$notarization_result_sha256\",\"notarizationSubmissionID\":\"$notarization_submission_id\",\"packageIdentifier\":\"$PACKAGE_IDENTIFIER\",\"packageNotarized\":true,\"packageSHA256\":\"$package_sha256\",\"packageSigned\":true,\"parentTreeSHA256\":\"$parent_tree_sha256\",\"payloadRootRelativeAppPath\":\"$COMPONENT_APP_RELATIVE_PATH\",\"payloadTreeSHA256\":\"$payload_tree_sha256\",\"schemaVersion\":6,\"signingTeamIdentifier\":\"$app_team\",\"trustedTimestamp\":true}" \
         >"$PACKAGE_MANIFEST"
 else
     printf '%s\n' \
-        "{\"appBundleIdentifier\":\"$app_bundle_identifier\",\"applicationSigningIdentitySHA1\":\"$SIGN_IDENTITY\",\"appInventorySHA256\":\"$inventory_sha256\",\"appVersion\":\"$app_version\",\"herdrBundled\":false,\"herdrHostSHA256\":\"$host_sha256\",\"herdrPolicySHA256\":\"$herdr_policy_sha256\",\"herdrSchemaSHA256\":\"$herdr_schema_sha256\",\"installLocation\":\"/Applications/Jidoka Code.app\",\"installerScripts\":false,\"installerSigningCertificateSHA256\":\"$installer_certificate_sha256\",\"installerSigningIdentitySHA1\":\"$INSTALLER_SIGN_IDENTITY\",\"minimumOSVersion\":\"$minimum_os_version\",\"packageIdentifier\":\"$PACKAGE_IDENTIFIER\",\"packageNotarized\":false,\"packageSHA256\":\"$package_sha256\",\"packageSigned\":true,\"payloadTreeSHA256\":\"$payload_tree_sha256\",\"schemaVersion\":3,\"signingTeamIdentifier\":\"$app_team\",\"trustedTimestamp\":true}" \
+        "{\"appBuildVersion\":\"$app_build_version\",\"appBundleIdentifier\":\"$app_bundle_identifier\",\"applicationSigningIdentitySHA1\":\"$SIGN_IDENTITY\",\"appInventorySHA256\":\"$inventory_sha256\",\"appVersion\":\"$app_version\",\"herdrBundled\":false,\"herdrHostSHA256\":\"$host_sha256\",\"herdrPolicySHA256\":\"$herdr_policy_sha256\",\"herdrSchemaSHA256\":\"$herdr_schema_sha256\",\"installLocation\":\"$INSTALL_APP_PATH\",\"installerScripts\":false,\"installerSigningCertificateSHA256\":\"$installer_certificate_sha256\",\"installerSigningIdentitySHA1\":\"$INSTALLER_SIGN_IDENTITY\",\"installRoot\":\"$INSTALL_LOCATION\",\"minimumOSVersion\":\"$minimum_os_version\",\"packageIdentifier\":\"$PACKAGE_IDENTIFIER\",\"packageNotarized\":false,\"packageSHA256\":\"$package_sha256\",\"packageSigned\":true,\"parentTreeSHA256\":\"$parent_tree_sha256\",\"payloadRootRelativeAppPath\":\"$COMPONENT_APP_RELATIVE_PATH\",\"payloadTreeSHA256\":\"$payload_tree_sha256\",\"schemaVersion\":5,\"signingTeamIdentifier\":\"$app_team\",\"trustedTimestamp\":true}" \
         >"$PACKAGE_MANIFEST"
 fi
 /usr/bin/plutil -convert xml1 -o /dev/null "$PACKAGE_MANIFEST"
@@ -628,7 +702,8 @@ fi
 printf 'package=%s\n' "$PACKAGE"
 printf 'package_sha256=%s\n' "$package_sha256"
 printf 'package_identifier=%s\n' "$PACKAGE_IDENTIFIER"
-printf 'install_location=/Applications/Jidoka Code.app\n'
+printf 'install_location=%s\n' "$INSTALL_APP_PATH"
+printf 'parent_tree_sha256=%s\n' "$parent_tree_sha256"
 printf 'nested_signing=developer-id\n'
 printf 'package_signing=developer-id-installer\n'
 printf 'package_notarized=%s\n' "$package_notarized"

@@ -576,7 +576,7 @@ for input in \
     "$ROOT/Packaging/app-inventory.txt" \
     "$ROOT/Packaging/runtime-node-entitlements.plist" \
     "$ROOT/Packaging/com.maroffo.JidokaCode.Engine.plist" \
-    "$ROOT/Resources/Herdr/api-schema-0.8.0.json" \
+    "$ROOT/Resources/Herdr/api-schema-0.8.2.json" \
     "$ROOT/Resources/Herdr/runtime-builds.json" \
     "$ROOT/Resources/Pi/manifest.json" \
     "$ROOT/Resources/Pi/workflow-resources.json" \
@@ -713,8 +713,8 @@ fi
     "$ROOT/Packaging/com.maroffo.JidokaCode.Engine.plist" \
     "$LAUNCH_AGENTS/com.maroffo.JidokaCode.Engine.plist"
 /usr/bin/install -m 0644 \
-    "$ROOT/Resources/Herdr/api-schema-0.8.0.json" \
-    "$HERDR_RESOURCES/api-schema-0.8.0.json"
+    "$ROOT/Resources/Herdr/api-schema-0.8.2.json" \
+    "$HERDR_RESOURCES/api-schema-0.8.2.json"
 /usr/bin/install -m 0644 \
     "$ROOT/Resources/Herdr/runtime-builds.json" \
     "$HERDR_RESOURCES/runtime-builds.json"
@@ -817,11 +817,11 @@ assert_portable_macho "$ASKPASS_EXECUTABLE"
 assert_portable_macho "$PUSH_GUARD_EXECUTABLE"
 assert_portable_macho "$HERDR_HOST_EXECUTABLE"
 
-[[ "$(/usr/bin/shasum -a 256 "$HERDR_RESOURCES/api-schema-0.8.0.json" | /usr/bin/awk '{print $1}')" == \
-    "88ff414aa996e390c2db05a37b95d28dbe4e81b98329f6ed7f7a2cc5c6ebf51a" ]] || \
+[[ "$(/usr/bin/shasum -a 256 "$HERDR_RESOURCES/api-schema-0.8.2.json" | /usr/bin/awk '{print $1}')" == \
+    "c48f1f54ee0150ca27e11fd44455fe94aeadb20fdf4e4a62393ed822a4e5b150" ]] || \
     fail "packaged Herdr API schema digest differs"
 [[ "$(/usr/bin/shasum -a 256 "$HERDR_RESOURCES/runtime-builds.json" | /usr/bin/awk '{print $1}')" == \
-    "3fdd7b5d6f273ab264c6c2f502e8c8902819cc353052191769c4ec22213d4673" ]] || \
+    "45674e216b931f7c736c1c8348e899221c2aef080dfa6a92392144b244cd5867" ]] || \
     fail "packaged Herdr runtime policy digest differs"
 /usr/bin/plutil -convert xml1 -o /dev/null "$HERDR_RESOURCES/runtime-builds.json"
 /usr/bin/plutil -lint "$CONTENTS/Info.plist"

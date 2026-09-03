@@ -353,7 +353,7 @@ struct EngineServiceTests {
         state: .blocked,
         issueCode: .versionMismatch,
         summary: "Incompatible Herdr.",
-        recovery: "Restore Herdr 0.8.0."
+        recovery: "Restore Herdr 0.8.2."
       )
     )
     let blocked = try await fixture.service.send(.runHerdrPreflight)
@@ -655,6 +655,80 @@ struct EngineServiceTests {
     #expect(await fixture.runtime.exclusiveBeginCount == beginsBefore + 2)
     #expect(await fixture.runtime.exclusiveEndCount == endsBefore + 2)
     #expect(await fixture.runtime.pollCount == 0)
+  }
+
+  @Test("generation rollover service keeps phases paused exclusive and checkpointed")
+  func generationRolloverServiceBoundary() async throws {
+    let fixture = try await EngineServiceFixture()
+    defer { fixture.remove() }
+    try await fixture.completeOnboarding()
+    _ = try await fixture.service.send(.setPaused(true))
+    let retry = engineServiceReplacementAuthorization().request.retry
+    let rollover = try engineGenerationRolloverFixture(retry: retry)
+    let previewReport = try JobCanaryGenerationRolloverReport(
+      authorization: rollover.authorization,
+      status: .preview,
+      replayed: false
+    )
+    let executeReport = try JobCanaryGenerationRolloverReport(
+      authorization: rollover.authorization,
+      status: .topologyActivated,
+      replayed: false
+    )
+    let q4PreviewReport = try JobCanaryGenerationRolloverQ4Report(
+      authorization: rollover.q4Execution.q4,
+      status: .preview,
+      replayed: false
+    )
+    let q4ExecuteReport = try JobCanaryGenerationRolloverQ4Report(
+      authorization: rollover.q4Execution.q4,
+      status: .settled,
+      replayed: false
+    )
+    await fixture.runtime.setGenerationRolloverReports(
+      preview: previewReport,
+      execution: executeReport,
+      q4Preview: q4PreviewReport,
+      q4Execution: q4ExecuteReport
+    )
+
+    let preview = try await fixture.service.send(
+      .previewJobCanaryGenerationRollover(rollover.request)
+    )
+    #expect(preview.jobCanaryGenerationRollover == previewReport)
+    #expect(preview.checkpoint == nil)
+    #expect(preview.state.paused)
+
+    let beginsBefore = await fixture.runtime.exclusiveBeginCount
+    let endsBefore = await fixture.runtime.exclusiveEndCount
+    let executed = try await fixture.service.send(
+      .executeJobCanaryGenerationRollover(rollover.authorization)
+    )
+    #expect(executed.jobCanaryGenerationRollover == executeReport)
+    #expect(executed.checkpoint?.databaseCheckpointed == true)
+    #expect(await fixture.runtime.exclusiveBeginCount == beginsBefore + 1)
+    #expect(await fixture.runtime.exclusiveEndCount == endsBefore + 1)
+
+    let q4Preview = try await fixture.service.send(
+      .previewJobCanaryGenerationRolloverQ4(rollover.q4Request)
+    )
+    #expect(q4Preview.jobCanaryGenerationRolloverQ4 == q4PreviewReport)
+    #expect(q4Preview.checkpoint == nil)
+    let q4Executed = try await fixture.service.send(
+      .executeJobCanaryGenerationRolloverQ4(rollover.q4Execution)
+    )
+    #expect(q4Executed.jobCanaryGenerationRolloverQ4 == q4ExecuteReport)
+    #expect(q4Executed.checkpoint?.databaseCheckpointed == true)
+    #expect(q4Executed.state.paused)
+    #expect(await fixture.runtime.exclusiveBeginCount == beginsBefore + 2)
+    #expect(await fixture.runtime.exclusiveEndCount == endsBefore + 2)
+    let request = EngineXPCRequest(
+      command: .executeJobCanaryGenerationRolloverQ4(rollover.q4Execution)
+    )
+    #expect(
+      try EngineXPCResponse(requestID: request.requestID, result: q4Executed)
+        .validate(for: request) == q4Executed
+    )
   }
 
   @Test(
@@ -1003,8 +1077,8 @@ private actor EngineServiceExternalFake: EngineExternalServicing {
   static func readyHerdr() -> EngineHerdrStatus {
     EngineHerdrStatus(
       state: .ready,
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       executableSHA256: String(repeating: "e", count: 64),
       schemaSHA256: String(repeating: "d", count: 64),
       policySHA256: String(repeating: "c", count: 64)
@@ -1066,6 +1140,10 @@ private actor EngineServiceRuntimeFake: EngineJobRuntime {
   private var canaryRecoveryExecution: JobCanaryRecoveryExecution?
   private var replacementExecution: JobCanaryRoleHostReplacementExecution?
   private var replacementError: EngineClientError?
+  private var generationRolloverPreview: JobCanaryGenerationRolloverReport?
+  private var generationRolloverExecution: JobCanaryGenerationRolloverReport?
+  private var generationRolloverQ4Preview: JobCanaryGenerationRolloverQ4Report?
+  private var generationRolloverQ4Execution: JobCanaryGenerationRolloverQ4Report?
 
   func reload(dispatchAllowed: Bool) async throws {
     reloadValues.append(dispatchAllowed)
@@ -1216,6 +1294,56 @@ private actor EngineServiceRuntimeFake: EngineJobRuntime {
       execution.replacement.q4Binding == authorization.q4Binding
     else { throw EngineClientError(.staleEvidence) }
     return execution
+  }
+
+  func setGenerationRolloverReports(
+    preview: JobCanaryGenerationRolloverReport,
+    execution: JobCanaryGenerationRolloverReport,
+    q4Preview: JobCanaryGenerationRolloverQ4Report,
+    q4Execution: JobCanaryGenerationRolloverQ4Report
+  ) {
+    generationRolloverPreview = preview
+    generationRolloverExecution = execution
+    generationRolloverQ4Preview = q4Preview
+    generationRolloverQ4Execution = q4Execution
+  }
+
+  func previewCanaryGenerationRollover(
+    _ request: JobCanaryGenerationRolloverRequest
+  ) throws -> JobCanaryGenerationRolloverReport {
+    guard let report = generationRolloverPreview,
+      report.authorization.request == request
+    else { throw EngineClientError(.staleEvidence) }
+    return report
+  }
+
+  func executeCanaryGenerationRollover(
+    _ authorization: JobCanaryGenerationRolloverAuthorization
+  ) throws -> JobCanaryGenerationRolloverReport {
+    guard let report = generationRolloverExecution,
+      report.authorization == authorization
+    else { throw EngineClientError(.staleEvidence) }
+    return report
+  }
+
+  func previewCanaryGenerationRolloverQ4(
+    _ request: JobCanaryGenerationRolloverQ4Request
+  ) throws -> JobCanaryGenerationRolloverQ4Report {
+    guard let report = generationRolloverQ4Preview,
+      report.authorization.rolloverAuthorizationSHA256
+        == request.rolloverAuthorization.authorizationSHA256,
+      report.authorization.plannedLaunchAttemptID == request.plannedLaunchAttemptID
+    else { throw EngineClientError(.staleEvidence) }
+    return report
+  }
+
+  func executeCanaryGenerationRolloverQ4(
+    _ authorization: JobCanaryGenerationRolloverQ4ExecutionAuthorization
+  ) throws -> JobCanaryGenerationRolloverQ4Report {
+    guard let report = generationRolloverQ4Execution,
+      report.authorization == authorization.q4
+    else { throw EngineClientError(.staleEvidence) }
+    return report
   }
 
   func waitUntilIdle() {}

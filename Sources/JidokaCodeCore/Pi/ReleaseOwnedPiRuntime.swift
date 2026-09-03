@@ -2237,6 +2237,29 @@ private enum ReleaseOwnedCodeSignatureValidator {
   }
 }
 
+#if DEBUG
+  public enum ReleaseOwnedPiRuntimeDebugFixture {
+    public static func resolveExactStagedRuntime(at runtimeRoot: URL) throws
+      -> PiResolvedRuntime
+    {
+      try ReleaseOwnedPiRuntimeResolver(
+        testingRuntimeRoot: runtimeRoot,
+        expectedManifestSHA256: ReleaseOwnedPiRuntimeResolver.expectedManifestSHA256,
+        signatureEvidence: ReleaseOwnedPiRuntimeSyntheticSignatureEvidence(
+          identifier: "works.earendil.jidoka.runtime.node",
+          teamIdentifier: nil,
+          codeDirectorySHA256:
+            "da0ef1cc83b51b610819c85f6275a043ec2af3e14ad02b0e715578694efd0b5c",
+          entitlementSHA256:
+            "7faab808f2696c84032a67166b79e0d9b49128fcf990cdcf696383ac62558a08",
+          hardenedRuntime: true
+        ),
+        signaturePolicy: .adHoc
+      ).resolve(at: .tuiHost)
+    }
+  }
+#endif
+
 struct ReleaseOwnedPiRuntimeManifest: Equatable {
   let runtimeID: String
   let rootEntries: [String]

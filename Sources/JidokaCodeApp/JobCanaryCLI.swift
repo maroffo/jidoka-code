@@ -24,6 +24,8 @@ struct JobCanaryCLIReport: Codable, Sendable {
   let recovery: JobCanaryRecoveryReport?
   let retry: JobCanaryPiRetryReport?
   let replacement: JobCanaryRoleHostReplacementReport?
+  let generationRollover: JobCanaryGenerationRolloverReport?
+  let generationRolloverQ4: JobCanaryGenerationRolloverQ4Report?
   let checkpoint: EngineCheckpointReceipt?
 }
 
@@ -69,6 +71,22 @@ enum JobCanaryCLI {
         response.jobCanaryPiRetry == nil,
         response.jobCanaryRoleHostReplacement != nil
       else { throw EngineClientError(.invalidResponse) }
+    case .previewJobCanaryGenerationRollover,
+      .executeJobCanaryGenerationRollover:
+      guard response.jobCanary == nil, response.jobCanaryRecovery == nil,
+        response.jobCanaryPiRetry == nil,
+        response.jobCanaryRoleHostReplacement == nil,
+        response.jobCanaryGenerationRollover != nil,
+        response.jobCanaryGenerationRolloverQ4 == nil
+      else { throw EngineClientError(.invalidResponse) }
+    case .previewJobCanaryGenerationRolloverQ4,
+      .executeJobCanaryGenerationRolloverQ4:
+      guard response.jobCanary == nil, response.jobCanaryRecovery == nil,
+        response.jobCanaryPiRetry == nil,
+        response.jobCanaryRoleHostReplacement == nil,
+        response.jobCanaryGenerationRollover == nil,
+        response.jobCanaryGenerationRolloverQ4 != nil
+      else { throw EngineClientError(.invalidResponse) }
     default:
       throw EngineClientError(.invalidResponse)
     }
@@ -78,6 +96,8 @@ enum JobCanaryCLI {
       recovery: response.jobCanaryRecovery,
       retry: response.jobCanaryPiRetry,
       replacement: response.jobCanaryRoleHostReplacement,
+      generationRollover: response.jobCanaryGenerationRollover,
+      generationRolloverQ4: response.jobCanaryGenerationRolloverQ4,
       checkpoint: response.checkpoint
     )
   }
@@ -126,6 +146,25 @@ enum JobCanaryCLI {
       return .previewJobCanaryRoleHostReplacement(
         try replacementRequest(arguments)
       )
+    case "preview-generation-rollover" where arguments.count == 2:
+      let request: JobCanaryGenerationRolloverRequest = try canonicalArgument(arguments[1])
+      try request.validate()
+      return .previewJobCanaryGenerationRollover(request)
+    case "execute-generation-rollover" where arguments.count == 2:
+      let authorization: JobCanaryGenerationRolloverAuthorization = try canonicalArgument(
+        arguments[1]
+      )
+      try authorization.validate()
+      return .executeJobCanaryGenerationRollover(authorization)
+    case "preview-generation-rollover-q4" where arguments.count == 2:
+      let request: JobCanaryGenerationRolloverQ4Request = try canonicalArgument(arguments[1])
+      try request.validate()
+      return .previewJobCanaryGenerationRolloverQ4(request)
+    case "execute-generation-rollover-q4" where arguments.count == 2:
+      let authorization: JobCanaryGenerationRolloverQ4ExecutionAuthorization =
+        try canonicalArgument(arguments[1])
+      try authorization.validate()
+      return .executeJobCanaryGenerationRolloverQ4(authorization)
     case "execute-host-replacement" where arguments.count == 22:
       let authorization = JobCanaryRoleHostReplacementAuthorization(
         request: try replacementRequest(arguments),
@@ -145,6 +184,20 @@ enum JobCanaryCLI {
     default:
       throw EngineClientError(.invalidCommand)
     }
+  }
+
+  private static func canonicalArgument<T: Codable>(_ value: String) throws -> T {
+    guard value.utf8.count <= 262_144,
+      let data = Data(base64Encoded: value), !data.isEmpty, data.count <= 196_608,
+      data.base64EncodedString() == value,
+      let decoded = try? JSONDecoder().decode(T.self, from: data)
+    else { throw EngineClientError(.invalidCommand) }
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    guard try encoder.encode(decoded) == data else {
+      throw EngineClientError(.invalidCommand)
+    }
+    return decoded
   }
 
   private static func replacementRequest(
@@ -280,6 +333,9 @@ enum JobCanaryCLI {
       .executeJobCanaryRecovery,
       .executeJobCanaryPiRetry,
       .executeJobCanaryRoleHostReplacement,
+      .executeJobCanaryGenerationRollover,
+      .previewJobCanaryGenerationRolloverQ4,
+      .executeJobCanaryGenerationRolloverQ4,
     ].contains(command) ? 3_500 : 30
   }
 }

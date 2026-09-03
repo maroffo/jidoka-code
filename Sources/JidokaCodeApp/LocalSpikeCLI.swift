@@ -4,7 +4,7 @@ import JidokaCodeCore
 
 private enum LocalSpikeCLIConstants {
   static let runnerRelativePath = "Spikes/jidoka-local-spikes.mjs"
-  static let runnerSHA256 = "c16e11605ecb8b818bd51abbdbe824414d9c2d19a1d010d3265c48c99cf05ecf"
+  static let runnerSHA256 = "c903de7f2a78d9172941774baa24cb016b1758834d9a1d9d828794b5cdf3b853"
   static let maximumOutputBytes = 1_048_576
 }
 

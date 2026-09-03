@@ -167,22 +167,12 @@ struct SystemGitHubTokenKeychainBackend: GitHubTokenKeychainBackend {
   }
 
   func read(service: String, account: String) throws -> Data? {
-    var result: CFTypeRef?
-    var query = baseQuery(service: service, account: account)
-    query[kSecReturnData as String] = true
-    query[kSecMatchLimit as String] = kSecMatchLimitOne
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
-    switch status {
-    case errSecSuccess:
-      guard let data = result as? Data else {
-        throw GitHubTokenStoreError.inconsistentMutation
-      }
-      return data
-    case errSecItemNotFound:
-      return nil
-    default:
-      throw GitHubTokenStoreError.unexpectedStatus(status)
-    }
+    try recoverPendingReplacement(
+      service: service,
+      account: account,
+      label: GitHubTokenConstants.label
+    )
+    return try itemData(service: service, account: account)
   }
 
   func add(
@@ -191,13 +181,18 @@ struct SystemGitHubTokenKeychainBackend: GitHubTokenKeychainBackend {
     value: Data,
     label: String
   ) throws -> GitHubKeychainAddResult {
-    var query = baseQuery(service: service, account: account)
-    query[kSecValueData as String] = value
-    query[kSecAttrLabel as String] = label
-    query[kSecAttrAccess as String] = try accessPolicy.makeAccess(descriptor: label)
-    let status = SecItemAdd(query as CFDictionary, nil)
+    try recoverPendingReplacement(service: service, account: account, label: label)
+    let desiredAccess = try accessPolicy.makeAccess(descriptor: label)
+    let status = addItem(
+      service: service,
+      account: account,
+      value: value,
+      label: label,
+      access: desiredAccess
+    )
     switch status {
     case errSecSuccess:
+      try verifyAccess(service: service, account: account, label: label)
       return .added
     case errSecDuplicateItem:
       return .duplicate
@@ -212,39 +207,44 @@ struct SystemGitHubTokenKeychainBackend: GitHubTokenKeychainBackend {
     value: Data,
     label: String
   ) throws -> GitHubKeychainUpdateResult {
-    let attributes: [String: Any] = [
-      kSecValueData as String: value,
-      kSecAttrLabel as String: label,
-      kSecAttrAccess as String: try accessPolicy.makeAccess(descriptor: label),
-    ]
-    let status = SecItemUpdate(
-      baseQuery(service: service, account: account) as CFDictionary,
-      attributes as CFDictionary
-    )
-    switch status {
-    case errSecSuccess:
-      return .updated
-    case errSecItemNotFound:
+    try recoverPendingReplacement(service: service, account: account, label: label)
+    guard try currentItem(service: service, account: account) != nil else {
       return .missing
-    default:
-      throw GitHubTokenStoreError.unexpectedStatus(status)
     }
+    let desiredAccess = try accessPolicy.makeAccess(descriptor: label)
+    try replaceItem(
+      service: service,
+      account: account,
+      value: value,
+      label: label,
+      desiredAccess: desiredAccess
+    )
+    return .updated
   }
 
   func prepareBackgroundAccess(service: String, account: String, label: String) throws -> Bool {
-    try prepareBackgroundAccess(
+    try recoverPendingReplacement(service: service, account: account, label: label)
+    return try prepareBackgroundAccess(
       label: label,
       currentAccess: {
-        try currentAccess(service: service, account: account)
+        guard let item = try currentItem(service: service, account: account) else {
+          return nil
+        }
+        return try access(for: item)
       },
       updateAccess: { desiredAccess in
-        SecItemUpdate(
-          baseQuery(service: service, account: account) as CFDictionary,
-          [
-            kSecAttrLabel as String: label,
-            kSecAttrAccess as String: desiredAccess,
-          ] as CFDictionary
+        guard var value = try itemData(service: service, account: account) else {
+          return errSecItemNotFound
+        }
+        defer { value.resetBytes(in: 0..<value.count) }
+        try replaceItem(
+          service: service,
+          account: account,
+          value: value,
+          label: label,
+          desiredAccess: desiredAccess
         )
+        return errSecSuccess
       }
     )
   }
@@ -252,14 +252,14 @@ struct SystemGitHubTokenKeychainBackend: GitHubTokenKeychainBackend {
   func prepareBackgroundAccess(
     label: String,
     currentAccess: () throws -> SecAccess?,
-    updateAccess: (SecAccess) -> OSStatus
+    updateAccess: (SecAccess) throws -> OSStatus
   ) throws -> Bool {
     guard let existingAccess = try currentAccess() else { return false }
     if accessPolicy.matchesExistingAccess(existingAccess, descriptor: label) {
       return true
     }
     let desiredAccess = try accessPolicy.makeAccess(descriptor: label)
-    let status = updateAccess(desiredAccess)
+    let status = try updateAccess(desiredAccess)
     switch status {
     case errSecSuccess:
       guard
@@ -277,6 +277,7 @@ struct SystemGitHubTokenKeychainBackend: GitHubTokenKeychainBackend {
   }
 
   func prepareAllForBackgroundAccess(service: String, label: String) throws {
+    try recoverAllPendingReplacements(service: service, label: label)
     var result: CFTypeRef?
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
@@ -306,7 +307,7 @@ struct SystemGitHubTokenKeychainBackend: GitHubTokenKeychainBackend {
     }
   }
 
-  private func currentAccess(service: String, account: String) throws -> SecAccess? {
+  private func currentItem(service: String, account: String) throws -> SecKeychainItem? {
     var result: CFTypeRef?
     var query = baseQuery(service: service, account: account)
     query[kSecReturnRef as String] = true
@@ -319,14 +320,7 @@ struct SystemGitHubTokenKeychainBackend: GitHubTokenKeychainBackend {
       else {
         throw GitHubTokenStoreError.inconsistentMutation
       }
-      let item = unsafeDowncast(result, to: SecKeychainItem.self)
-      var access: SecAccess?
-      guard SecKeychainItemCopyAccess(item, &access) == errSecSuccess,
-        let access
-      else {
-        throw GitHubTokenStoreError.inconsistentMutation
-      }
-      return access
+      return unsafeDowncast(result, to: SecKeychainItem.self)
     case errSecItemNotFound:
       return nil
     default:
@@ -334,10 +328,209 @@ struct SystemGitHubTokenKeychainBackend: GitHubTokenKeychainBackend {
     }
   }
 
-  func delete(service: String, account: String) throws -> Bool {
-    let status = SecItemDelete(
-      baseQuery(service: service, account: account) as CFDictionary
+  private func access(for item: SecKeychainItem) throws -> SecAccess {
+    var access: SecAccess?
+    guard SecKeychainItemCopyAccess(item, &access) == errSecSuccess,
+      let access
+    else {
+      throw GitHubTokenStoreError.inconsistentMutation
+    }
+    return access
+  }
+
+  private func itemData(service: String, account: String) throws -> Data? {
+    var result: CFTypeRef?
+    var query = baseQuery(service: service, account: account)
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    switch status {
+    case errSecSuccess:
+      guard let data = result as? Data else {
+        throw GitHubTokenStoreError.inconsistentMutation
+      }
+      return data
+    case errSecItemNotFound:
+      return nil
+    default:
+      throw GitHubTokenStoreError.unexpectedStatus(status)
+    }
+  }
+
+  private func addItem(
+    service: String,
+    account: String,
+    value: Data,
+    label: String,
+    access: SecAccess
+  ) -> OSStatus {
+    var query = baseQuery(service: service, account: account)
+    query[kSecValueData as String] = value
+    query[kSecAttrLabel as String] = label
+    query[kSecAttrAccess as String] = access
+    return SecItemAdd(query as CFDictionary, nil)
+  }
+
+  private func deleteItem(service: String, account: String) -> OSStatus {
+    SecItemDelete(baseQuery(service: service, account: account) as CFDictionary)
+  }
+
+  private func verifyAccess(service: String, account: String, label: String) throws {
+    guard let item = try currentItem(service: service, account: account),
+      accessPolicy.matchesExistingAccess(try access(for: item), descriptor: label)
+    else {
+      throw GitHubTokenStoreError.inconsistentMutation
+    }
+  }
+
+  private func replacementService(for service: String) -> String {
+    "\(service).replacement"
+  }
+
+  private func recoverAllPendingReplacements(service: String, label: String) throws {
+    var result: CFTypeRef?
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: replacementService(for: service),
+      kSecReturnAttributes as String: true,
+      kSecMatchLimit as String: kSecMatchLimitAll,
+    ]
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    if status == errSecItemNotFound { return }
+    guard status == errSecSuccess, let rows = result as? [[String: Any]] else {
+      throw GitHubTokenStoreError.unexpectedStatus(status)
+    }
+    try GitHubTokenKeychainAccessPolicy.validateMigratedAccountCount(rows.count)
+    let accounts = try Set(
+      rows.map { row in
+        guard let account = row[kSecAttrAccount as String] as? String,
+          GitHubInputValidation.validOwner(account)
+        else {
+          throw GitHubTokenStoreError.invalidAccessPolicy
+        }
+        return account
+      })
+    for account in accounts.sorted() {
+      try recoverPendingReplacement(service: service, account: account, label: label)
+    }
+  }
+
+  private func recoverPendingReplacement(
+    service: String,
+    account: String,
+    label: String
+  ) throws {
+    let shadowService = replacementService(for: service)
+    guard let shadowItem = try currentItem(service: shadowService, account: account) else {
+      return
+    }
+    guard accessPolicy.matchesExistingAccess(try access(for: shadowItem), descriptor: label) else {
+      throw GitHubTokenStoreError.invalidAccessPolicy
+    }
+    if try currentItem(service: service, account: account) != nil {
+      let status = deleteItem(service: shadowService, account: account)
+      guard status == errSecSuccess || status == errSecItemNotFound else {
+        throw GitHubTokenStoreError.unexpectedStatus(status)
+      }
+      return
+    }
+    guard var value = try itemData(service: shadowService, account: account) else {
+      throw GitHubTokenStoreError.inconsistentMutation
+    }
+    defer { value.resetBytes(in: 0..<value.count) }
+    let desiredAccess = try accessPolicy.makeAccess(descriptor: label)
+    let addStatus = addItem(
+      service: service,
+      account: account,
+      value: value,
+      label: label,
+      access: desiredAccess
     )
+    guard addStatus == errSecSuccess else {
+      throw GitHubTokenStoreError.unexpectedStatus(addStatus)
+    }
+    do {
+      try verifyAccess(service: service, account: account, label: label)
+    } catch {
+      _ = deleteItem(service: service, account: account)
+      throw error
+    }
+    let cleanupStatus = deleteItem(service: shadowService, account: account)
+    guard cleanupStatus == errSecSuccess || cleanupStatus == errSecItemNotFound else {
+      throw GitHubTokenStoreError.unexpectedStatus(cleanupStatus)
+    }
+  }
+
+  private func replaceItem(
+    service: String,
+    account: String,
+    value: Data,
+    label: String,
+    desiredAccess: SecAccess
+  ) throws {
+    try recoverPendingReplacement(service: service, account: account, label: label)
+    guard try currentItem(service: service, account: account) != nil else {
+      throw GitHubTokenStoreError.inconsistentMutation
+    }
+    let shadowService = replacementService(for: service)
+    let shadowStatus = addItem(
+      service: shadowService,
+      account: account,
+      value: value,
+      label: label,
+      access: desiredAccess
+    )
+    guard shadowStatus == errSecSuccess else {
+      throw GitHubTokenStoreError.unexpectedStatus(shadowStatus)
+    }
+    do {
+      try verifyAccess(service: shadowService, account: account, label: label)
+    } catch {
+      _ = deleteItem(service: shadowService, account: account)
+      throw error
+    }
+    let deleteStatus = deleteItem(service: service, account: account)
+    guard deleteStatus == errSecSuccess else {
+      _ = deleteItem(service: shadowService, account: account)
+      if deleteStatus == errSecItemNotFound {
+        throw GitHubTokenStoreError.inconsistentMutation
+      }
+      throw GitHubTokenStoreError.unexpectedStatus(deleteStatus)
+    }
+    let primaryAccess = try accessPolicy.makeAccess(descriptor: label)
+    let addStatus = addItem(
+      service: service,
+      account: account,
+      value: value,
+      label: label,
+      access: primaryAccess
+    )
+    guard addStatus == errSecSuccess else {
+      throw GitHubTokenStoreError.unexpectedStatus(addStatus)
+    }
+    do {
+      try verifyAccess(service: service, account: account, label: label)
+    } catch {
+      _ = deleteItem(service: service, account: account)
+      throw error
+    }
+    let cleanupStatus = deleteItem(service: shadowService, account: account)
+    guard cleanupStatus == errSecSuccess || cleanupStatus == errSecItemNotFound else {
+      throw GitHubTokenStoreError.unexpectedStatus(cleanupStatus)
+    }
+  }
+
+  func delete(service: String, account: String) throws -> Bool {
+    try recoverPendingReplacement(
+      service: service,
+      account: account,
+      label: GitHubTokenConstants.label
+    )
+    let status = deleteItem(service: service, account: account)
+    let shadowStatus = deleteItem(service: replacementService(for: service), account: account)
+    guard shadowStatus == errSecSuccess || shadowStatus == errSecItemNotFound else {
+      throw GitHubTokenStoreError.unexpectedStatus(shadowStatus)
+    }
     switch status {
     case errSecSuccess:
       return true
@@ -478,13 +671,27 @@ struct GitHubTokenKeychainAccessPolicy: Sendable {
     else {
       return false
     }
-    let required = Set(expected)
-    guard required.count == expected.count,
-      required.isSubset(of: Set(observed))
-    else {
+    let required = Set(
+      expected.filter { acl in
+        !isIntegrityACL(acl) && !isPartitionACL(acl)
+      })
+    let observedSet = Set(observed)
+    guard !required.isEmpty, required.isSubset(of: observedSet) else {
       return false
     }
-    return Set(observed).allSatisfy { acl in
+    if expected.contains(where: isIntegrityACL),
+      !observed.contains(where: validIntegrityACL)
+    {
+      return false
+    }
+    if expected.contains(where: isPartitionACL),
+      !observed.contains(where: {
+        validPartitionACL($0, expectedCount: expectedPartitionCount)
+      })
+    {
+      return false
+    }
+    return observedSet.allSatisfy { acl in
       required.contains(acl)
         || validIntegrityACL(acl)
         || validPartitionACL(acl, expectedCount: expectedPartitionCount)
@@ -575,9 +782,18 @@ struct GitHubTokenKeychainAccessPolicy: Sendable {
     )
   }
 
-  private static func validIntegrityACL(_ acl: AccessACL) -> Bool {
+  private static func isIntegrityACL(_ acl: AccessACL) -> Bool {
     acl.authorizations == [kSecACLAuthorizationIntegrity as String]
       && acl.applications == nil
+  }
+
+  private static func isPartitionACL(_ acl: AccessACL) -> Bool {
+    acl.authorizations == [kSecACLAuthorizationPartitionID as String]
+      && acl.applications == nil
+  }
+
+  private static func validIntegrityACL(_ acl: AccessACL) -> Bool {
+    isIntegrityACL(acl)
       && acl.prompt == 0
       && acl.descriptor.utf8.count == 64
       && acl.descriptor.utf8.allSatisfy {
@@ -586,7 +802,7 @@ struct GitHubTokenKeychainAccessPolicy: Sendable {
   }
 
   private static func validPartitionACL(_ acl: AccessACL, expectedCount: Int) -> Bool {
-    guard acl.authorizations == [kSecACLAuthorizationPartitionID as String],
+    guard isPartitionACL(acl),
       acl.applications == nil,
       acl.prompt == 0,
       let data = lowercaseHexData(acl.descriptor),
@@ -599,7 +815,7 @@ struct GitHubTokenKeychainAccessPolicy: Sendable {
       let dictionary = propertyList as? [String: Any],
       Set(dictionary.keys) == Set(["Partitions"]),
       let partitions = dictionary["Partitions"] as? [String],
-      partitions.count == expectedCount
+      (1...expectedCount).contains(partitions.count)
     else {
       return false
     }

@@ -273,6 +273,92 @@ struct HerdrRoleHostRuntimeTests {
     #expect(await observed.values() == ["4"])
   }
 
+  @Test("generation rollover bootstrap binds lineage and starts only at q4")
+  func generationRolloverStartsAtFourthSequence() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "generation-rollover-role-host-\(UUID().uuidString.lowercased())",
+      isDirectory: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(
+      at: root,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    let roleHostID = "rolehost-71000000-0000-4000-8000-000000000071"
+    let descriptor = try HerdrRoleHostBootstrapDescriptor(
+      generationRolloverRoleHostID: roleHostID,
+      predecessorRoleHostID: "rolehost-predecessor-architecture",
+      predecessorRunID: "run-generation-one-predecessor",
+      generationRolloverEvidenceSHA256: String(repeating: "a", count: 64),
+      repositoryID: "repository-00000001",
+      jobID: "job-00000001",
+      generation: 2,
+      allowedWorkflows: [.pullRequestReview],
+      expectedWorkspaceID: "workspace-1",
+      workingDirectory: root,
+      agentAlias: "jidoka_architecture_q4",
+      title: "Jidoka architecture",
+      displayAgent: "Jidoka | architecture",
+      hostExecutable: URL(fileURLWithPath: "/usr/bin/true")
+    )
+    _ = try HerdrRoleHostDescriptorStore.prepare(descriptor, in: root)
+    let loaded = try HerdrRoleHostDescriptorStore.load(roleHostID: roleHostID, from: root)
+    #expect(loaded.schemaVersion == 4)
+    #expect(loaded.predecessorRoleHostID == "rolehost-predecessor-architecture")
+    #expect(loaded.predecessorRunID == "run-generation-one-predecessor")
+    #expect(loaded.generationRolloverEvidenceSHA256 == String(repeating: "a", count: 64))
+    #expect(loaded.initialQueueSequence == 4)
+    for sequence in 1...3 {
+      #expect(throws: HerdrHostError.queueCommandMismatch) {
+        try HerdrRoleHostDescriptorStore.enqueue(
+          HerdrRoleHostCommand(
+            roleHostID: roleHostID,
+            sequence: sequence,
+            launchAttemptID: "launch-rollover-q\(sequence)",
+            descriptorSHA256: String(repeating: Character(String(sequence)), count: 64),
+            expectedWorkspaceID: "workspace-1",
+            expectedTabID: "tab-2",
+            expectedPaneID: "pane-2",
+            expectedTerminalID: "terminal-2"
+          ),
+          in: root
+        )
+      }
+    }
+    try HerdrRoleHostDescriptorStore.enqueue(
+      HerdrRoleHostCommand(
+        roleHostID: roleHostID,
+        sequence: 4,
+        launchAttemptID: "launch-75000000-0000-4000-8000-000000000075",
+        descriptorSHA256: String(repeating: "4", count: 64),
+        expectedWorkspaceID: "workspace-1",
+        expectedTabID: "tab-2",
+        expectedPaneID: "pane-2",
+        expectedTerminalID: "terminal-2"
+      ),
+      in: root
+    )
+  }
+
+  @Test("process absence distinguishes matching replacement and missing identities")
+  func processAbsenceIsTriState() throws {
+    let current = try HerdrRoleHostRuntime.runtimeIdentity().process
+    #expect(HerdrRoleHostRuntime.observeProcess(current) == .matching)
+    let replaced = try HerdrHostProcessIdentity(
+      processID: current.processID,
+      startSeconds: current.startSeconds + 1,
+      startMicroseconds: current.startMicroseconds
+    )
+    #expect(HerdrRoleHostRuntime.observeProcess(replaced) == .replaced)
+    let missing = try HerdrHostProcessIdentity(
+      processID: Int32.max,
+      startSeconds: 1,
+      startMicroseconds: 1
+    )
+    #expect(HerdrRoleHostRuntime.observeProcess(missing) == .absent)
+  }
+
   @Test("bootstrap and queue records reject mutation and wrong host identity")
   func recordsAreDigestBound() async throws {
     let fixture = try RoleHostFixture.make()

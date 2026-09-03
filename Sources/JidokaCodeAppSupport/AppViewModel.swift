@@ -11,6 +11,7 @@ public final class AppViewModel {
   public var pendingRetryAuthorization: EngineAmbiguousMutation?
 
   @ObservationIgnored private let client: any EngineClient
+  @ObservationIgnored private var terminationRequested = false
 
   public init(client: any EngineClient) {
     self.client = client
@@ -119,9 +120,18 @@ public final class AppViewModel {
 
   @discardableResult
   public func prepareForQuit() async -> EngineCheckpointReceipt? {
+    terminationRequested = true
+    while isWorking {
+      if Task.isCancelled {
+        terminationRequested = false
+        return nil
+      }
+      try? await Task.sleep(nanoseconds: 10_000_000)
+    }
     guard let checkpoint = await execute(.prepareForQuit)?.checkpoint,
       checkpoint.databaseCheckpointed
     else {
+      terminationRequested = false
       message = PresentationCopy.message(for: EngineClientError(.checkpointFailed))
       return nil
     }
@@ -130,7 +140,9 @@ public final class AppViewModel {
 
   @discardableResult
   private func execute(_ command: EngineCommand) async -> EngineCommandResponse? {
-    guard !isWorking else { return nil }
+    guard !isWorking,
+      !terminationRequested || command.kind == .prepareForQuit
+    else { return nil }
     isWorking = true
     defer { isWorking = false }
     do {

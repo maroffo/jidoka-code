@@ -145,6 +145,24 @@ struct JidokaCodeApp: App {
       exit(EXIT_FAILURE)
     }
 
+    if arguments.first == "--herdr-readiness-probe" {
+      guard arguments == ["--herdr-readiness-probe"] else {
+        FileHandle.standardError.write(
+          Data("Herdr readiness probe failed: INVALID_ARGUMENTS\n".utf8)
+        )
+        exit(EXIT_FAILURE)
+      }
+      do {
+        try HerdrReadinessProbeCLI.write(HerdrReadinessProbeCLI.run())
+        exit(EXIT_SUCCESS)
+      } catch {
+        FileHandle.standardError.write(
+          Data("Herdr readiness probe failed: \(error)\n".utf8)
+        )
+        exit(EXIT_FAILURE)
+      }
+    }
+
     if arguments.first == "--pi-probe" {
       do {
         PiProbeCLI.write(try PiProbeCLI.run(arguments: Array(arguments.dropFirst())))

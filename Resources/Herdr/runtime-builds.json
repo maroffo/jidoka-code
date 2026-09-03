@@ -1,12 +1,12 @@
 {
   "builds": [
     {
-      "apiSchemaResource": "api-schema-0.8.0.json",
-      "apiSchemaSHA256": "88ff414aa996e390c2db05a37b95d28dbe4e81b98329f6ed7f7a2cc5c6ebf51a",
+      "apiSchemaResource": "api-schema-0.8.2.json",
+      "apiSchemaSHA256": "c48f1f54ee0150ca27e11fd44455fe94aeadb20fdf4e4a62393ed822a4e5b150",
       "architecture": "arm64",
-      "executableSHA256": "97bdb194a731262d2b70062621a5673b1cd409b9e6870df361bd65799217eaf3",
-      "protocolVersion": 19,
-      "version": "0.8.0"
+      "executableSHA256": "3e0f0c2d5edc41f592963ef90f5d872db801cc7dbd0e01731023897ee428904a",
+      "protocolVersion": 20,
+      "version": "0.8.2"
     }
   ],
   "schemaVersion": 1

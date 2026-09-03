@@ -17,6 +17,7 @@ struct PiWorkflowRouterTests {
       baseSHA: base
     )
     let executor = ScriptedWorkflowExecutor { request in
+      #expect(request.commitNarrativeSHA256 == digest)
       if request.role == .synthesis {
         #expect(request.normalizedRoleInputs.map(\.role) == [.architecture, .security, .test])
       } else {
@@ -60,6 +61,7 @@ struct PiWorkflowRouterTests {
     )
     let executor = ScriptedWorkflowExecutor { request in
       #expect(request.role == .architecture)
+      #expect(request.commitNarrativeSHA256 == digest)
       #expect(request.normalizedRoleInputs.isEmpty)
       return PiWorkflowExecution(
         sessionID: "replacement-architecture-session",

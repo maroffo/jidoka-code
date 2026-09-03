@@ -81,7 +81,8 @@ private struct XPCApplicationEngineClient: EngineClient {
       .focusInHerdr:
       90
     case .executeJobCanary, .executeJobCanaryRecovery, .executeJobCanaryPiRetry,
-      .executeJobCanaryRoleHostReplacement:
+      .executeJobCanaryRoleHostReplacement, .executeJobCanaryGenerationRollover,
+      .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
       3_500
     case .setProfile, .recheckAmbiguousMutation, .authorizeRetry, .runHerdrPreflight,
       .prepareForHandoff, .prepareForQuit:
@@ -90,7 +91,7 @@ private struct XPCApplicationEngineClient: EngineClient {
       .deleteCredential, .updateRepository, .removeRepository, .setMaxConcurrency,
       .setPaused, .pollNow, .previewJobMaintenance, .applyJobMaintenance,
       .previewJobCanary, .previewJobCanaryRecovery, .previewJobCanaryPiRetry,
-      .previewJobCanaryRoleHostReplacement,
+      .previewJobCanaryRoleHostReplacement, .previewJobCanaryGenerationRollover,
       .setLoginEnabled, .synchronizeLoginStatus,
       .completeOnboarding, .rollbackOnboarding:
       30
@@ -156,6 +157,12 @@ private struct NoopBackgroundCredentialAccessPreparer: BackgroundCredentialAcces
   func prepare() {}
 }
 
+private enum BackgroundCredentialAccessState {
+  case unchecked
+  case prepared
+  case failed
+}
+
 private actor SystemLoginItemController: LoginItemControlling {
   private let service = SMAppService.agent(
     plistName: LifecycleProbeConstants.launchAgentPlistName
@@ -180,20 +187,26 @@ actor ProductionEngineClient: EngineClient {
   private let backgroundCredentialAccess: any BackgroundCredentialAccessPreparing
   private let bootstrapFactory: @Sendable () async throws -> any BootstrapEngineContaining
   private let engineLockFactory: @Sendable () async throws -> any EngineTopologyLocking
-  private let uptime: @Sendable () -> TimeInterval
+  private let helperStartupAttemptLimit: Int
+  private let helperStartupRetryNanoseconds: UInt64
+  private let helperStartupWait: @Sendable (UInt64) async -> Void
   private var local: (any BootstrapEngineContaining)?
-  private var backgroundCredentialAccessPreparedUntil: TimeInterval?
-  private var backgroundCredentialAccessRetryAfter: TimeInterval?
-  private var commandInProgress = false
+  private var backgroundCredentialAccessState = BackgroundCredentialAccessState.unchecked
+  private var activeCommand: EngineCommandKind?
+  private var snapshotCompletionWaiters: [CheckedContinuation<Void, Never>] = []
 
-  private static let backgroundCredentialAccessValidationInterval: TimeInterval = 60
-  private static let backgroundCredentialAccessRetryDelay: TimeInterval = 60
+  static let productionHelperStartupAttemptLimit = 240
+  static let productionHelperStartupRetryNanoseconds: UInt64 = 250_000_000
 
   init(duplicateInstanceCheckPassed: Bool) {
     loginItems = SystemLoginItemController()
     helper = XPCApplicationEngineClient()
     backgroundCredentialAccess = SystemBackgroundCredentialAccessPreparer()
-    uptime = { ProcessInfo.processInfo.systemUptime }
+    helperStartupAttemptLimit = Self.productionHelperStartupAttemptLimit
+    helperStartupRetryNanoseconds = Self.productionHelperStartupRetryNanoseconds
+    helperStartupWait = { nanoseconds in
+      try? await Task.sleep(nanoseconds: nanoseconds)
+    }
     engineLockFactory = {
       try await Self.acquireEngineLock()
     }
@@ -212,24 +225,32 @@ actor ProductionEngineClient: EngineClient {
     engineLockFactory: @escaping @Sendable () async throws -> any EngineTopologyLocking = {
       NoopEngineTopologyLock()
     },
-    uptime: @escaping @Sendable () -> TimeInterval = {
-      ProcessInfo.processInfo.systemUptime
-    },
+    helperStartupAttemptLimit: Int = ProductionEngineClient.productionHelperStartupAttemptLimit,
+    helperStartupRetryNanoseconds: UInt64 =
+      ProductionEngineClient.productionHelperStartupRetryNanoseconds,
+    helperStartupWait: @escaping @Sendable (UInt64) async -> Void = { _ in },
     bootstrapFactory: @escaping @Sendable () async throws -> any BootstrapEngineContaining
   ) {
     self.loginItems = loginItems
     self.helper = helper
+    precondition(helperStartupAttemptLimit > 0)
+    precondition(helperStartupRetryNanoseconds > 0)
     self.backgroundCredentialAccess = backgroundCredentialAccess
     self.engineLockFactory = engineLockFactory
-    self.uptime = uptime
+    self.helperStartupAttemptLimit = helperStartupAttemptLimit
+    self.helperStartupRetryNanoseconds = helperStartupRetryNanoseconds
+    self.helperStartupWait = helperStartupWait
     self.bootstrapFactory = bootstrapFactory
   }
 
   func send(_ command: EngineCommand) async throws -> EngineCommandResponse {
     try command.validate()
-    guard !commandInProgress else { throw EngineClientError(.busy) }
-    commandInProgress = true
-    defer { commandInProgress = false }
+    while activeCommand == .snapshot, command.kind != .snapshot {
+      await waitForSnapshotCompletion()
+    }
+    guard activeCommand == nil else { throw EngineClientError(.busy) }
+    activeCommand = command.kind
+    defer { completeActiveCommand() }
     switch command {
     case .setLoginEnabled(let enabled):
       return try await setLoginEnabled(enabled)
@@ -238,18 +259,37 @@ actor ProductionEngineClient: EngineClient {
     default:
       let status = try await loginItems.status()
       let response = try await send(command, status: status)
-      guard command.kind != .synchronizeLoginStatus,
-        command.kind != .prepareForQuit,
-        command.kind != .prepareForHandoff
-      else {
-        return response
+      let result: EngineCommandResponse
+      if command.kind == .synchronizeLoginStatus
+        || command.kind == .prepareForQuit
+        || command.kind == .prepareForHandoff
+      {
+        result = response
+      } else {
+        result = try await synchronize(
+          response: response,
+          status: status,
+          selected: status == .enabled || status == .requiresApproval
+        )
       }
-      return try await synchronize(
-        response: response,
-        status: status,
-        selected: status == .enabled || status == .requiresApproval
-      )
+      if command.kind == .replaceCredential {
+        backgroundCredentialAccessState = .prepared
+      } else if command.kind == .deleteCredential {
+        backgroundCredentialAccessState = .unchecked
+      }
+      return result
     }
+  }
+
+  private func waitForSnapshotCompletion() async {
+    await withCheckedContinuation { snapshotCompletionWaiters.append($0) }
+  }
+
+  private func completeActiveCommand() {
+    activeCommand = nil
+    let waiters = snapshotCompletionWaiters
+    snapshotCompletionWaiters.removeAll(keepingCapacity: false)
+    for waiter in waiters { waiter.resume() }
   }
 
   private func setLoginEnabled(_ enabled: Bool) async throws -> EngineCommandResponse {
@@ -271,6 +311,7 @@ actor ProductionEngineClient: EngineClient {
       else {
         throw EngineClientError(.onboardingIncomplete)
       }
+      try await prepareBackgroundCredentialAccess()
       _ = try await bootstrap.client.send(
         .synchronizeLoginStatus(selected: false, status: .notRegistered)
       )
@@ -289,7 +330,7 @@ actor ProductionEngineClient: EngineClient {
         guard registered == .enabled || registered == .requiresApproval else {
           throw EngineClientError(.loginItemFailed)
         }
-        let response = try await send(.snapshot, status: registered)
+        let response = try await waitForHelperSnapshot(status: registered)
         helperReachedControlPlane = registered == .enabled
         return try await synchronize(response: response, status: registered, selected: true)
       } catch {
@@ -364,7 +405,9 @@ actor ProductionEngineClient: EngineClient {
   ) async throws -> EngineCommandResponse {
     switch status {
     case .enabled:
-      try await prepareBackgroundCredentialAccess()
+      if requiresBackgroundCredentialAccess(for: command) {
+        try await prepareBackgroundCredentialAccess()
+      }
       if let local {
         await local.close()
         self.local = nil
@@ -392,28 +435,48 @@ actor ProductionEngineClient: EngineClient {
     )
   }
 
-  private func prepareBackgroundCredentialAccess() async throws {
-    let currentUptime = uptime()
-    if let preparedUntil = backgroundCredentialAccessPreparedUntil,
-      currentUptime < preparedUntil
-    {
-      return
+  private func requiresBackgroundCredentialAccess(for command: EngineCommand) -> Bool {
+    switch command {
+    case .replaceCredential, .deleteCredential, .synchronizeLoginStatus,
+      .rollbackOnboarding, .prepareForHandoff, .prepareForQuit:
+      false
+    case .setPaused(let paused):
+      !paused
+    default:
+      true
     }
-    if let retryAfter = backgroundCredentialAccessRetryAfter,
-      currentUptime < retryAfter
-    {
-      throw EngineClientError(.unavailable)
+  }
+
+  private func waitForHelperSnapshot(
+    status: LifecycleServiceStatus
+  ) async throws -> EngineCommandResponse {
+    for attempt in 1...helperStartupAttemptLimit {
+      do {
+        return try await send(.snapshot, status: status)
+      } catch let error as EngineClientError
+        where error.code == .unavailable && attempt < helperStartupAttemptLimit
+      {
+        await helperStartupWait(helperStartupRetryNanoseconds)
+      }
+    }
+    throw EngineClientError(.unavailable)
+  }
+
+  private func prepareBackgroundCredentialAccess() async throws {
+    switch backgroundCredentialAccessState {
+    case .prepared:
+      return
+    case .failed:
+      throw EngineClientError(.credentialAccessFailed)
+    case .unchecked:
+      break
     }
     do {
       try await backgroundCredentialAccess.prepare()
-      backgroundCredentialAccessPreparedUntil =
-        uptime() + Self.backgroundCredentialAccessValidationInterval
-      backgroundCredentialAccessRetryAfter = nil
+      backgroundCredentialAccessState = .prepared
     } catch {
-      backgroundCredentialAccessPreparedUntil = nil
-      backgroundCredentialAccessRetryAfter =
-        uptime() + Self.backgroundCredentialAccessRetryDelay
-      throw EngineClientError(.unavailable)
+      backgroundCredentialAccessState = .failed
+      throw EngineClientError(.credentialAccessFailed)
     }
   }
 

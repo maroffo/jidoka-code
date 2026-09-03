@@ -477,8 +477,8 @@ private final class HerdrTopologyFixture: @unchecked Sendable {
   func handshake(snapshot: HerdrSessionSnapshot) -> HerdrHandshake {
     HerdrHandshake(
       pong: HerdrPong(
-        version: "0.8.0",
-        protocolVersion: 19,
+        version: "0.8.2",
+        protocolVersion: 20,
         capabilities: HerdrCapabilities(liveHandoff: true, detachedServerDaemon: true)
       ),
       snapshot: snapshot,
@@ -523,8 +523,8 @@ private final class HerdrTopologyFixture: @unchecked Sendable {
       )
     }
     return HerdrSessionSnapshot(
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       focusedWorkspaceID: nil,
       focusedTabID: nil,
       focusedPaneID: nil,
@@ -565,8 +565,8 @@ private final class HerdrTopologyFixture: @unchecked Sendable {
       launchAttemptID: "attempt-review-0001"
     )
     return HerdrSessionSnapshot(
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       focusedWorkspaceID: focusedPaneID == nil ? nil : "w-repo",
       focusedTabID: focusedPaneID == nil ? nil : layout.tabID,
       focusedPaneID: focusedPaneID,
@@ -620,8 +620,8 @@ private final class HerdrTopologyFixture: @unchecked Sendable {
 
   func snapshot(panes: [HerdrPaneSnapshot]) -> HerdrSessionSnapshot {
     HerdrSessionSnapshot(
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       focusedWorkspaceID: nil,
       focusedTabID: nil,
       focusedPaneID: nil,

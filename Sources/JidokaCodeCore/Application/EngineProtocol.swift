@@ -1,7 +1,7 @@
 import Foundation
 
 public enum EngineProtocolVersion {
-  public static let current = 9
+  public static let current = 11
 }
 
 public enum LifecycleProbeProtocolVersion {
@@ -393,6 +393,10 @@ public enum EngineCommandKind: String, CaseIterable, Codable, Hashable, Sendable
   case executeJobCanaryPiRetry
   case previewJobCanaryRoleHostReplacement
   case executeJobCanaryRoleHostReplacement
+  case previewJobCanaryGenerationRollover
+  case executeJobCanaryGenerationRollover
+  case previewJobCanaryGenerationRolloverQ4
+  case executeJobCanaryGenerationRolloverQ4
   case setLoginEnabled
   case synchronizeLoginStatus
   case completeOnboarding
@@ -431,6 +435,10 @@ extension EngineCommandKind {
     .executeJobCanaryPiRetry,
     .previewJobCanaryRoleHostReplacement,
     .executeJobCanaryRoleHostReplacement,
+    .previewJobCanaryGenerationRollover,
+    .executeJobCanaryGenerationRollover,
+    .previewJobCanaryGenerationRolloverQ4,
+    .executeJobCanaryGenerationRolloverQ4,
     .synchronizeLoginStatus,
     .completeOnboarding,
     .rollbackOnboarding,
@@ -467,6 +475,12 @@ public enum EngineCommand: Codable, Equatable, Sendable {
   case executeJobCanaryPiRetry(JobCanaryPiRetryAuthorization)
   case previewJobCanaryRoleHostReplacement(JobCanaryRoleHostReplacementRequest)
   case executeJobCanaryRoleHostReplacement(JobCanaryRoleHostReplacementAuthorization)
+  case previewJobCanaryGenerationRollover(JobCanaryGenerationRolloverRequest)
+  case executeJobCanaryGenerationRollover(JobCanaryGenerationRolloverAuthorization)
+  case previewJobCanaryGenerationRolloverQ4(JobCanaryGenerationRolloverQ4Request)
+  case executeJobCanaryGenerationRolloverQ4(
+    JobCanaryGenerationRolloverQ4ExecutionAuthorization
+  )
   case setLoginEnabled(Bool)
   case synchronizeLoginStatus(selected: Bool, status: LifecycleServiceStatus)
   case completeOnboarding
@@ -504,6 +518,10 @@ public enum EngineCommand: Codable, Equatable, Sendable {
     case .executeJobCanaryPiRetry: .executeJobCanaryPiRetry
     case .previewJobCanaryRoleHostReplacement: .previewJobCanaryRoleHostReplacement
     case .executeJobCanaryRoleHostReplacement: .executeJobCanaryRoleHostReplacement
+    case .previewJobCanaryGenerationRollover: .previewJobCanaryGenerationRollover
+    case .executeJobCanaryGenerationRollover: .executeJobCanaryGenerationRollover
+    case .previewJobCanaryGenerationRolloverQ4: .previewJobCanaryGenerationRolloverQ4
+    case .executeJobCanaryGenerationRolloverQ4: .executeJobCanaryGenerationRolloverQ4
     case .setLoginEnabled: .setLoginEnabled
     case .synchronizeLoginStatus: .synchronizeLoginStatus
     case .completeOnboarding: .completeOnboarding
@@ -569,6 +587,14 @@ public enum EngineCommand: Codable, Equatable, Sendable {
       try request.validate()
     case .executeJobCanaryRoleHostReplacement(let authorization):
       try authorization.validate()
+    case .previewJobCanaryGenerationRollover(let request):
+      try request.validate()
+    case .executeJobCanaryGenerationRollover(let authorization):
+      try authorization.validate()
+    case .previewJobCanaryGenerationRolloverQ4(let request):
+      try request.validate()
+    case .executeJobCanaryGenerationRolloverQ4(let authorization):
+      try authorization.validate()
     case .snapshot, .refreshModelCatalog, .acknowledgeExternalAutomation,
       .acknowledgeProviderDisclosure,
       .runPiPreflight, .runHerdrPreflight, .focusInHerdr, .deleteCredential,
@@ -611,6 +637,8 @@ public struct EngineCommandResponse: Codable, Equatable, Sendable {
   public let jobCanaryRecovery: JobCanaryRecoveryReport?
   public let jobCanaryPiRetry: JobCanaryPiRetryReport?
   public let jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport?
+  public let jobCanaryGenerationRollover: JobCanaryGenerationRolloverReport?
+  public let jobCanaryGenerationRolloverQ4: JobCanaryGenerationRolloverQ4Report?
 
   public init(
     command: EngineCommandKind,
@@ -620,7 +648,9 @@ public struct EngineCommandResponse: Codable, Equatable, Sendable {
     jobCanary: JobCanaryReport? = nil,
     jobCanaryRecovery: JobCanaryRecoveryReport? = nil,
     jobCanaryPiRetry: JobCanaryPiRetryReport? = nil,
-    jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport? = nil
+    jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport? = nil,
+    jobCanaryGenerationRollover: JobCanaryGenerationRolloverReport? = nil,
+    jobCanaryGenerationRolloverQ4: JobCanaryGenerationRolloverQ4Report? = nil
   ) {
     self.command = command
     self.state = state
@@ -630,6 +660,8 @@ public struct EngineCommandResponse: Codable, Equatable, Sendable {
     self.jobCanaryRecovery = jobCanaryRecovery
     self.jobCanaryPiRetry = jobCanaryPiRetry
     self.jobCanaryRoleHostReplacement = jobCanaryRoleHostReplacement
+    self.jobCanaryGenerationRollover = jobCanaryGenerationRollover
+    self.jobCanaryGenerationRolloverQ4 = jobCanaryGenerationRolloverQ4
   }
 }
 
@@ -644,6 +676,7 @@ public enum EngineClientErrorCode: String, CaseIterable, Codable, Sendable {
   case staleEvidence
   case onboardingIncomplete
   case credentialRejected
+  case credentialAccessFailed
   case credentialInUse
   case repositoryRejected
   case piBlocked
@@ -742,6 +775,7 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
     try Self.validateCanaryRecovery(result, for: request.command)
     try Self.validateCanaryPiRetry(result, for: request.command)
     try Self.validateCanaryRoleHostReplacement(result, for: request.command)
+    try Self.validateCanaryGenerationRollover(result, for: request.command)
     return result
   }
 
@@ -975,6 +1009,52 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
     }
   }
 
+  private static func validateCanaryGenerationRollover(
+    _ result: EngineCommandResponse,
+    for command: EngineCommand
+  ) throws {
+    switch command {
+    case .previewJobCanaryGenerationRollover(let request):
+      guard result.state.paused,
+        let report = result.jobCanaryGenerationRollover,
+        report.authorization.request == request,
+        report.status == .preview, !report.replayed,
+        result.jobCanaryGenerationRolloverQ4 == nil,
+        result.checkpoint == nil
+      else { throw EngineClientError(.invalidResponse) }
+    case .executeJobCanaryGenerationRollover(let authorization):
+      guard result.state.paused,
+        let report = result.jobCanaryGenerationRollover,
+        report.authorization == authorization,
+        report.status == .topologyActivated,
+        result.jobCanaryGenerationRolloverQ4 == nil,
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+    case .previewJobCanaryGenerationRolloverQ4(let request):
+      guard result.state.paused,
+        result.jobCanaryGenerationRollover == nil,
+        let report = result.jobCanaryGenerationRolloverQ4,
+        report.authorization.rolloverAuthorizationSHA256
+          == request.rolloverAuthorization.authorizationSHA256,
+        report.authorization.plannedLaunchAttemptID == request.plannedLaunchAttemptID,
+        report.status == .preview, !report.replayed,
+        result.checkpoint == nil
+      else { throw EngineClientError(.invalidResponse) }
+    case .executeJobCanaryGenerationRolloverQ4(let authorization):
+      guard result.state.paused,
+        result.jobCanaryGenerationRollover == nil,
+        let report = result.jobCanaryGenerationRolloverQ4,
+        report.authorization == authorization.q4,
+        [.settled, .failed, .outcomeAmbiguous].contains(report.status),
+        result.checkpoint?.databaseCheckpointed == true
+      else { throw EngineClientError(.invalidResponse) }
+    default:
+      guard result.jobCanaryGenerationRollover == nil,
+        result.jobCanaryGenerationRolloverQ4 == nil
+      else { throw EngineClientError(.invalidResponse) }
+    }
+  }
+
   private static func validCanaryPiRetryReport(_ report: JobCanaryPiRetryReport) -> Bool {
     let authorityEvidenceValid: Bool
     switch report.agentAuthorityProtocol {
@@ -1069,8 +1149,8 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
         throw EngineClientError(.invalidResponse)
       }
     case .ready:
-      guard status.version == HerdrCompatibilityManifest.herdr080.version,
-        status.protocolVersion == HerdrCompatibilityManifest.herdr080.protocolVersion,
+      guard status.version == HerdrCompatibilityManifest.approved.version,
+        status.protocolVersion == HerdrCompatibilityManifest.approved.protocolVersion,
         validSHA256(status.executableSHA256), validSHA256(status.schemaSHA256),
         validSHA256(status.policySHA256), status.issueCode == nil,
         status.summary == nil, status.recovery == nil

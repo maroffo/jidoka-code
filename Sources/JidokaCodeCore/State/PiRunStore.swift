@@ -372,20 +372,27 @@ public actor PiRunStore {
     try await database.transaction { database in
       let current = try Self.requireRepositoryBinding(repositoryID, database: database)
       if current.state == .lost { return }
-      guard current.state == .active,
-        current.socketIdentity != observedHandshake.socketIdentity,
-        observedHandshake.pong.version == "0.8.0",
-        observedHandshake.pong.protocolVersion == 19
+      let runtimeChanged =
+        current.herdrVersion == "0.8.0" && current.herdrProtocol == 19
+        && observedHandshake.pong.version == HerdrCompatibilityManifest.approved.version
+        && observedHandshake.pong.protocolVersion
+          == HerdrCompatibilityManifest.approved.protocolVersion
+      let socketChanged = current.socketIdentity != observedHandshake.socketIdentity
+      guard current.state == .active, runtimeChanged || socketChanged,
+        observedHandshake.pong.version == HerdrCompatibilityManifest.approved.version,
+        observedHandshake.pong.protocolVersion
+          == HerdrCompatibilityManifest.approved.protocolVersion
       else {
         throw PiRunStoreError.bindingCollision
       }
+      let invalidationReason = runtimeChanged ? "RUNTIME_CHANGED" : "SOCKET_CHANGED"
       _ = try database.execute(
         """
         INSERT INTO herdr_repository_binding_history(
           repository_id, workspace_id, identity_root, herdr_version, herdr_protocol,
           socket_device, socket_inode, socket_owner, socket_permissions,
           reason, invalidated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'SOCKET_CHANGED', ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         bindings: [
           .text(Self.uuid(repositoryID)),
@@ -397,6 +404,7 @@ public actor PiRunStore {
           .integer(try Self.int64(current.socketIdentity.inode)),
           .integer(Int64(current.socketIdentity.owner)),
           .integer(Int64(current.socketIdentity.permissions)),
+          .text(invalidationReason),
           .real(now.timeIntervalSince1970),
         ]
       )
@@ -557,9 +565,52 @@ public actor PiRunStore {
         {
           return existing
         }
+        let unresolvedRetryLineage = try database.scalarInt(
+          """
+          SELECT COUNT(*)
+          FROM pi_runs AS run
+          WHERE run.job_id = ? AND run.runtime_kind = 'herdr'
+            AND run.role = 'architecture' AND run.topology_generation = ?
+            AND run.accepted = 0 AND run.settled = 0
+            AND (SELECT COUNT(*) FROM pi_run_launches WHERE run_id = run.id) = 3
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches
+              WHERE run_id = run.id AND queue_sequence = 1 AND state = 'failed'
+                AND failure_code = 'RUNTIME_TIMEOUT' AND child_pid IS NOT NULL
+            )
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches
+              WHERE run_id = run.id AND queue_sequence = 2 AND state = 'failed'
+                AND failure_code = 'HERDR_TRANSACTION_FAILED' AND child_pid IS NULL
+            )
+            AND EXISTS (
+              SELECT 1 FROM pi_run_launches
+              WHERE run_id = run.id AND queue_sequence = 3 AND state = 'failed'
+                AND failure_code = 'HERDR_TRANSACTION_FAILED' AND child_pid IS NULL
+            )
+          """,
+          bindings: [
+            .text(Self.uuid(jobID)),
+            .integer(Int64(existing.generation)),
+          ]
+        )
+        let rolloverAuthorizationCount =
+          try Self.tableExists("herdr_generation_rollover_authorizations", database: database)
+          ? database.scalarInt(
+            """
+            SELECT COUNT(*) FROM herdr_generation_rollover_authorizations
+            WHERE job_id = ? AND predecessor_generation = ? AND successor_generation = ?
+            """,
+            bindings: [
+              .text(Self.uuid(jobID)),
+              .integer(Int64(existing.generation)),
+              .integer(Int64(generation)),
+            ]
+          ) : 0
         guard existing.repositoryID == repositoryID,
           [.lost, .closed].contains(existing.state),
           generation == existing.generation + 1,
+          unresolvedRetryLineage == 0 || rolloverAuthorizationCount == 1,
           try database.scalarInt(
             """
             SELECT COUNT(*) FROM herdr_role_hosts
@@ -759,6 +810,29 @@ public actor PiRunStore {
       }
       guard try !Self.replacementRoleHostIDCollision(id: id, database: database) else {
         throw PiRunStoreError.bindingCollision
+      }
+      let rolloverRows =
+        try Self.tableExists("herdr_generation_rollover_authorizations", database: database)
+        ? database.query(
+          """
+          SELECT * FROM herdr_generation_rollover_authorizations
+          WHERE job_id = ? AND successor_generation = ?
+          """,
+          bindings: [
+            .text(Self.uuid(jobID)),
+            .integer(Int64(generation)),
+          ]
+        ) : []
+      guard rolloverRows.count <= 1 else { throw PiRunStoreError.bindingCollision }
+      if let rollover = rolloverRows.first {
+        let rolePrefix = role.rawValue
+        guard ["architecture", "security", "test", "synthesis"].contains(rolePrefix),
+          try Self.text(rollover, "successor_\(rolePrefix)_host_id") == id,
+          try Self.text(rollover, "successor_\(rolePrefix)_bootstrap_sha256")
+            == bootstrapDescriptorSHA256,
+          try Self.text(rollover, "successor_\(rolePrefix)_host_executable_sha256")
+            == hostExecutableSHA256
+        else { throw PiRunStoreError.bindingCollision }
       }
       if let existing = try Self.loadRoleHost(id, database: database) {
         guard existing.jobID == jobID, existing.generation == generation,
@@ -1294,6 +1368,672 @@ public actor PiRunStore {
     ).map(Self.decodeRun)
   }
 
+  public func generationRolloverIsolationSHA256(jobID: UUID) async throws -> String {
+    try await database.transaction { database in
+      try Self.generationRolloverIsolationSHA256(jobID: jobID, database: database)
+    }
+  }
+
+  @discardableResult
+  public func persistGenerationRolloverAuthorization(
+    _ authorization: JobCanaryGenerationRolloverAuthorization,
+    now: Date
+  ) async throws -> Bool {
+    try authorization.validate()
+    guard let architecture = authorization.hosts.first(where: { $0.role == .architecture }),
+      let security = authorization.hosts.first(where: { $0.role == .security }),
+      let test = authorization.hosts.first(where: { $0.role == .test }),
+      let synthesis = authorization.hosts.first(where: { $0.role == .synthesis }),
+      let q1 = authorization.predecessorLaunches.first(where: { $0.queueSequence == 1 }),
+      let q2 = authorization.predecessorLaunches.first(where: { $0.queueSequence == 2 }),
+      let q3 = authorization.predecessorLaunches.first(where: { $0.queueSequence == 3 }),
+      let q1Child = q1.childProcess
+    else { throw PiRunStoreError.invalidRecord }
+
+    return try await database.transaction { database in
+      guard
+        try Self.generationRolloverIsolationSHA256(
+          jobID: authorization.jobID,
+          database: database
+        ) == authorization.isolationSHA256
+      else {
+        throw PiRunStoreError.invalidTransition
+      }
+      let authorizationSHA256 = authorization.authorizationSHA256
+      let existing = try database.query(
+        """
+        SELECT * FROM herdr_generation_rollover_authorizations
+        WHERE job_id = ? OR rollover_authorization_sha256 = ?
+          OR rollover_evidence_sha256 = ? OR lineage_sha256 = ?
+          OR successor_run_id = ?
+        """,
+        bindings: [
+          .text(Self.uuid(authorization.jobID)),
+          .text(authorizationSHA256),
+          .text(authorization.rolloverEvidenceSHA256),
+          .text(authorization.lineageSHA256),
+          .text(authorization.successorRunID),
+        ]
+      )
+      if let row = existing.first {
+        guard existing.count == 1,
+          try Self.generationRolloverAuthorizationMatches(
+            row,
+            authorization: authorization
+          )
+        else { throw PiRunStoreError.bindingCollision }
+        return true
+      }
+
+      let columns = [
+        "rollover_authorization_sha256", "rollover_evidence_sha256",
+        "canary_authorization_sha256", "lineage_sha256", "isolation_sha256",
+        "repository_id", "job_id",
+        "predecessor_generation", "successor_generation", "predecessor_run_id",
+        "q1_launch_attempt_id", "q1_descriptor_sha256", "q1_failure_code",
+        "q1_child_pid", "q1_child_process_group_id", "q1_child_start_seconds",
+        "q1_child_start_microseconds", "q2_launch_attempt_id", "q2_descriptor_sha256",
+        "q2_failure_code", "q3_launch_attempt_id", "q3_descriptor_sha256",
+        "q3_failure_code", "predecessor_architecture_host_id",
+        "predecessor_architecture_bootstrap_sha256", "successor_architecture_host_id",
+        "successor_architecture_bootstrap_sha256",
+        "predecessor_architecture_host_executable_sha256",
+        "successor_architecture_host_executable_sha256",
+        "successor_architecture_executable_evidence_sha256",
+        "predecessor_security_host_id", "predecessor_security_bootstrap_sha256",
+        "successor_security_host_id", "successor_security_bootstrap_sha256",
+        "predecessor_security_host_executable_sha256",
+        "successor_security_host_executable_sha256",
+        "successor_security_executable_evidence_sha256", "predecessor_test_host_id",
+        "predecessor_test_bootstrap_sha256", "successor_test_host_id",
+        "successor_test_bootstrap_sha256",
+        "predecessor_test_host_executable_sha256",
+        "successor_test_host_executable_sha256",
+        "successor_test_executable_evidence_sha256",
+        "predecessor_synthesis_host_id", "predecessor_synthesis_bootstrap_sha256",
+        "successor_synthesis_host_id", "successor_synthesis_bootstrap_sha256",
+        "predecessor_synthesis_host_executable_sha256",
+        "successor_synthesis_host_executable_sha256",
+        "successor_synthesis_executable_evidence_sha256", "workspace_id", "socket_device",
+        "socket_inode", "socket_owner", "socket_permissions",
+        "socket_peer_evidence_sha256", "successor_run_id",
+        "prior_attempt_count", "created_at",
+      ]
+      let bindings: [SQLiteValue] = [
+        .text(authorizationSHA256),
+        .text(authorization.rolloverEvidenceSHA256),
+        .text(authorization.canaryAuthorizationSHA256),
+        .text(authorization.lineageSHA256),
+        .text(authorization.isolationSHA256),
+        .text(Self.uuid(authorization.repositoryID)),
+        .text(Self.uuid(authorization.jobID)),
+        .integer(Int64(authorization.predecessorGeneration)),
+        .integer(Int64(authorization.successorGeneration)),
+        .text(authorization.predecessorRunID),
+        .text(q1.launchAttemptID), .text(q1.descriptorSHA256), .text(q1.failureCode),
+        .integer(Int64(q1Child.processID)), .integer(Int64(q1Child.processGroupID)),
+        .integer(try Self.int64(q1Child.startSeconds)),
+        .integer(try Self.int64(q1Child.startMicroseconds)),
+        .text(q2.launchAttemptID), .text(q2.descriptorSHA256), .text(q2.failureCode),
+        .text(q3.launchAttemptID), .text(q3.descriptorSHA256), .text(q3.failureCode),
+        .text(architecture.predecessorRoleHostID),
+        .text(architecture.predecessorBootstrapDescriptorSHA256),
+        .text(architecture.successorRoleHostID),
+        .text(architecture.successorBootstrapDescriptorSHA256),
+        .text(architecture.predecessorHostExecutableSHA256),
+        .text(architecture.successorHostExecutableSHA256),
+        .text(architecture.successorExecutableEvidenceSHA256),
+        .text(security.predecessorRoleHostID),
+        .text(security.predecessorBootstrapDescriptorSHA256),
+        .text(security.successorRoleHostID),
+        .text(security.successorBootstrapDescriptorSHA256),
+        .text(security.predecessorHostExecutableSHA256),
+        .text(security.successorHostExecutableSHA256),
+        .text(security.successorExecutableEvidenceSHA256),
+        .text(test.predecessorRoleHostID),
+        .text(test.predecessorBootstrapDescriptorSHA256),
+        .text(test.successorRoleHostID),
+        .text(test.successorBootstrapDescriptorSHA256),
+        .text(test.predecessorHostExecutableSHA256),
+        .text(test.successorHostExecutableSHA256),
+        .text(test.successorExecutableEvidenceSHA256),
+        .text(synthesis.predecessorRoleHostID),
+        .text(synthesis.predecessorBootstrapDescriptorSHA256),
+        .text(synthesis.successorRoleHostID),
+        .text(synthesis.successorBootstrapDescriptorSHA256),
+        .text(synthesis.predecessorHostExecutableSHA256),
+        .text(synthesis.successorHostExecutableSHA256),
+        .text(synthesis.successorExecutableEvidenceSHA256),
+        .text(authorization.workspaceID),
+        .integer(try Self.int64(authorization.socket.device)),
+        .integer(try Self.int64(authorization.socket.inode)),
+        .integer(Int64(authorization.socket.owner)),
+        .integer(Int64(authorization.socket.permissions)),
+        .text(authorization.socket.peerEvidenceSHA256),
+        .text(authorization.successorRunID),
+        .integer(3),
+        .real(now.timeIntervalSince1970),
+      ]
+      guard columns.count == bindings.count else { throw PiRunStoreError.invalidRecord }
+      _ = try database.execute(
+        "INSERT INTO herdr_generation_rollover_authorizations(\(columns.joined(separator: ", "))) VALUES (\(Array(repeating: "?", count: columns.count).joined(separator: ", ")))",
+        bindings: bindings
+      )
+      return false
+    }
+  }
+
+  public func hasGenerationRolloverAuthorization(
+    _ authorization: JobCanaryGenerationRolloverAuthorization
+  ) async throws -> Bool {
+    try authorization.validate()
+    let rows = try await database.query(
+      """
+      SELECT * FROM herdr_generation_rollover_authorizations
+      WHERE rollover_authorization_sha256 = ?
+      """,
+      bindings: [.text(authorization.authorizationSHA256)]
+    )
+    guard rows.count == 1, let row = rows.first else { return false }
+    return try Self.generationRolloverAuthorizationMatches(
+      row,
+      authorization: authorization
+    )
+  }
+
+  func hasGenerationRolloverPreparation(
+    jobID: UUID,
+    generation: Int
+  ) async throws -> Bool {
+    guard generation > 0 else { throw PiRunStoreError.invalidRecord }
+    return try await database.scalarInt(
+      """
+      SELECT COUNT(*) FROM herdr_generation_rollover_authorizations
+      WHERE job_id = ? AND successor_generation = ?
+      """,
+      bindings: [.text(Self.uuid(jobID)), .integer(Int64(generation))]
+    ) == 1
+  }
+
+  func isGenerationRolloverSuccessor(runID: String) async throws -> Bool {
+    guard Self.validRuntimeID(runID) else { throw PiRunStoreError.invalidRecord }
+    return try await database.scalarInt(
+      "SELECT COUNT(*) FROM herdr_pi_run_rollovers WHERE successor_run_id = ?",
+      bindings: [.text(runID)]
+    ) == 1
+  }
+
+  public func generationRolloverTopologyIsActive(
+    _ authorization: JobCanaryGenerationRolloverAuthorization
+  ) async throws -> Bool {
+    try authorization.validate()
+    guard try await hasGenerationRolloverAuthorization(authorization),
+      let binding = try await jobBinding(jobID: authorization.jobID),
+      binding.repositoryID == authorization.repositoryID,
+      binding.generation == authorization.successorGeneration,
+      binding.workspaceID == authorization.workspaceID,
+      binding.state == .active
+    else { return false }
+    let hosts = try await roleHosts(jobID: authorization.jobID).filter {
+      $0.generation == authorization.successorGeneration
+    }
+    guard hosts.count == 4,
+      authorization.hosts.allSatisfy({ pair in
+        hosts.contains(where: {
+          $0.id == pair.successorRoleHostID && $0.role == pair.role
+            && $0.bootstrapDescriptorSHA256 == pair.successorBootstrapDescriptorSHA256
+            && $0.hostExecutableSHA256 == pair.successorHostExecutableSHA256
+            && [.waiting, .running].contains($0.state)
+            && (pair.role == .architecture
+              ? [0, 3, 4].contains($0.lastQueueSequence)
+              : $0.lastQueueSequence == 0)
+        })
+      })
+    else { return false }
+    return true
+  }
+
+  @discardableResult
+  public func prepareGenerationRolloverSuccessorRun(
+    authorization: JobCanaryGenerationRolloverAuthorization,
+    q4Authorization: JobCanaryGenerationRolloverQ4Authorization,
+    now: Date
+  ) async throws -> PiRunRecord {
+    try authorization.validate()
+    try q4Authorization.validate()
+    guard q4Authorization.rolloverAuthorizationSHA256 == authorization.authorizationSHA256,
+      q4Authorization.successorRunID == authorization.successorRunID,
+      let architecture = authorization.hosts.first(where: { $0.role == .architecture })
+    else { throw PiRunStoreError.invalidRecord }
+
+    return try await database.transaction { database in
+      try Self.requireLaunchEligibility(database: database, jobID: authorization.jobID)
+      guard
+        try Self.generationRolloverIsolationSHA256(
+          jobID: authorization.jobID,
+          database: database
+        ) == authorization.isolationSHA256
+      else {
+        throw PiRunStoreError.invalidTransition
+      }
+      let authorizationRows = try database.query(
+        """
+        SELECT * FROM herdr_generation_rollover_authorizations
+        WHERE rollover_authorization_sha256 = ? AND job_id = ?
+        """,
+        bindings: [
+          .text(authorization.authorizationSHA256),
+          .text(Self.uuid(authorization.jobID)),
+        ]
+      )
+      guard authorizationRows.count == 1,
+        try Self.text(authorizationRows[0], "lineage_sha256") == authorization.lineageSHA256
+      else { throw PiRunStoreError.invalidTransition }
+
+      let existingRollover = try database.query(
+        """
+        SELECT * FROM herdr_pi_run_rollovers
+        WHERE rollover_authorization_sha256 = ? OR successor_run_id = ?
+        """,
+        bindings: [
+          .text(authorization.authorizationSHA256),
+          .text(authorization.successorRunID),
+        ]
+      )
+      if let row = existingRollover.first {
+        guard existingRollover.count == 1,
+          try Self.text(row, "rollover_authorization_sha256")
+            == authorization.authorizationSHA256,
+          try Self.text(row, "predecessor_run_id") == authorization.predecessorRunID,
+          try Self.text(row, "successor_run_id") == authorization.successorRunID,
+          try Self.text(row, "q4_authorization_sha256")
+            == q4Authorization.authorizationSHA256,
+          try Self.text(row, "q4_evidence_sha256") == q4Authorization.q4EvidenceSHA256,
+          try Self.text(row, "successor_run_nonce") == q4Authorization.runNonce,
+          try Self.text(row, "successor_request_sha256") == q4Authorization.requestSHA256,
+          try Self.text(row, "successor_resource_version") == q4Authorization.resourceVersion,
+          try Self.text(row, "successor_resource_hash") == q4Authorization.resourceHash,
+          try Self.text(row, "successor_model") == q4Authorization.model,
+          try Self.text(row, "successor_session_path") == q4Authorization.sessionPath,
+          try Self.text(row, "successor_channel_path") == q4Authorization.channelPath,
+          try Self.text(row, "planned_q4_launch_attempt_id")
+            == q4Authorization.plannedLaunchAttemptID,
+          try Self.text(row, "lineage_sha256") == authorization.lineageSHA256,
+          try Self.text(row, "q4_descriptor_sha256")
+            == q4Authorization.q4Binding.descriptorSHA256,
+          try Self.text(row, "q4_configuration_sha256")
+            == q4Authorization.q4Binding.configurationSHA256,
+          try Self.text(row, "q4_prompt_sha256")
+            == q4Authorization.q4Binding.promptSHA256,
+          try Self.text(row, "q4_workflow_configuration_sha256")
+            == q4Authorization.q4Binding.workflowConfigurationSHA256,
+          try Self.text(row, "q4_prior_launch_descriptor_sha256")
+            == q4Authorization.q4Binding.priorLaunchDescriptorSHA256,
+          try Self.text(row, "q4_prior_launch_configuration_sha256")
+            == q4Authorization.q4Binding.priorLaunchConfigurationSHA256,
+          try Self.text(row, "q4_resource_tree_sha256")
+            == q4Authorization.q4Binding.resourceTreeSHA256
+        else { throw PiRunStoreError.bindingCollision }
+        return try Self.requireRun(authorization.successorRunID, database: database)
+      }
+
+      let predecessor = try Self.requireRun(
+        authorization.predecessorRunID,
+        database: database
+      )
+      let binding = try Self.requireJobBinding(authorization.jobID, database: database)
+      let currentHosts = try database.query(
+        """
+        SELECT * FROM herdr_role_hosts
+        WHERE job_id = ? AND generation = ? ORDER BY role, id
+        """,
+        bindings: [
+          .text(Self.uuid(authorization.jobID)),
+          .integer(Int64(authorization.successorGeneration)),
+        ]
+      ).map(Self.decodeRoleHost)
+      guard predecessor.jobID == authorization.jobID,
+        predecessor.topologyGeneration == authorization.predecessorGeneration,
+        predecessor.workflow == .pullRequestReview,
+        predecessor.role == .architecture,
+        predecessor.resumesRunID == nil,
+        !predecessor.accepted, !predecessor.settled, predecessor.outcome == .running,
+        binding.repositoryID == authorization.repositoryID,
+        binding.generation == authorization.successorGeneration,
+        binding.workspaceID == authorization.workspaceID,
+        binding.state == .active,
+        currentHosts.count == 4,
+        currentHosts.allSatisfy({ $0.state == .waiting && $0.lastQueueSequence == 0 }),
+        authorization.hosts.allSatisfy({ pair in
+          currentHosts.contains(where: {
+            $0.id == pair.successorRoleHostID
+              && $0.role == pair.role
+              && $0.bootstrapDescriptorSHA256 == pair.successorBootstrapDescriptorSHA256
+              && $0.hostExecutableSHA256 == pair.successorHostExecutableSHA256
+          })
+        }),
+        try Self.loadRun(authorization.successorRunID, database: database) == nil,
+        try database.scalarInt(
+          """
+          SELECT COUNT(*) FROM pi_runs
+          WHERE job_id = ? AND topology_generation = ?
+          """,
+          bindings: [
+            .text(Self.uuid(authorization.jobID)),
+            .integer(Int64(authorization.successorGeneration)),
+          ]
+        ) == 0
+      else { throw PiRunStoreError.invalidTransition }
+
+      let rolloverColumns = [
+        "rollover_authorization_sha256", "q4_authorization_sha256",
+        "q4_evidence_sha256", "predecessor_run_id", "successor_run_id",
+        "successor_architecture_host_id", "planned_q4_launch_attempt_id",
+        "prior_attempt_count", "lineage_sha256", "successor_run_nonce",
+        "successor_request_sha256", "successor_resource_version",
+        "successor_resource_hash", "successor_model", "successor_session_path",
+        "successor_channel_path", "q4_descriptor_sha256", "q4_configuration_sha256",
+        "q4_prompt_sha256", "q4_workflow_configuration_sha256",
+        "q4_prior_launch_descriptor_sha256", "q4_prior_launch_configuration_sha256",
+        "q4_resource_tree_sha256", "created_at",
+      ]
+      let rolloverBindings: [SQLiteValue] = [
+        .text(authorization.authorizationSHA256),
+        .text(q4Authorization.authorizationSHA256),
+        .text(q4Authorization.q4EvidenceSHA256),
+        .text(authorization.predecessorRunID),
+        .text(authorization.successorRunID),
+        .text(architecture.successorRoleHostID),
+        .text(q4Authorization.plannedLaunchAttemptID),
+        .integer(3), .text(authorization.lineageSHA256), .text(q4Authorization.runNonce),
+        .text(q4Authorization.requestSHA256), .text(q4Authorization.resourceVersion),
+        .text(q4Authorization.resourceHash), .text(q4Authorization.model),
+        .text(q4Authorization.sessionPath), .text(q4Authorization.channelPath),
+        .text(q4Authorization.q4Binding.descriptorSHA256),
+        .text(q4Authorization.q4Binding.configurationSHA256),
+        .text(q4Authorization.q4Binding.promptSHA256),
+        .text(q4Authorization.q4Binding.workflowConfigurationSHA256),
+        .text(q4Authorization.q4Binding.priorLaunchDescriptorSHA256),
+        .text(q4Authorization.q4Binding.priorLaunchConfigurationSHA256),
+        .text(q4Authorization.q4Binding.resourceTreeSHA256),
+        .real(now.timeIntervalSince1970),
+      ]
+      _ = try database.execute(
+        "INSERT INTO herdr_pi_run_rollovers(\(rolloverColumns.joined(separator: ", "))) VALUES (\(Array(repeating: "?", count: rolloverColumns.count).joined(separator: ", ")))",
+        bindings: rolloverBindings
+      )
+      _ = try database.execute(
+        """
+        INSERT INTO pi_runs(
+          id, job_id, runtime_kind, workflow, role, round, job_attempt,
+          topology_generation, job_step, resumes_run_id,
+          run_nonce, request_sha256, resource_version, resource_hash, model,
+          session_path, session_id, session_boundary_sha256, channel_path,
+          accepted, settled, structured_result_digest, outcome, created_at, updated_at
+        ) VALUES (?, ?, 'herdr', ?, 'architecture', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?,
+          NULL, NULL, ?, 0, 0, NULL, 'prepared', ?, ?)
+        """,
+        bindings: [
+          .text(authorization.successorRunID),
+          .text(Self.uuid(authorization.jobID)),
+          .text(predecessor.workflow.rawValue),
+          .integer(Int64(predecessor.round)),
+          .integer(Int64(predecessor.jobAttempt)),
+          .integer(Int64(authorization.successorGeneration)),
+          .integer(Int64(predecessor.jobStep)),
+          .text(q4Authorization.runNonce), .text(q4Authorization.requestSHA256),
+          .text(q4Authorization.resourceVersion), .text(q4Authorization.resourceHash),
+          .text(q4Authorization.model), .text(q4Authorization.sessionPath),
+          .text(q4Authorization.channelPath),
+          .real(now.timeIntervalSince1970), .real(now.timeIntervalSince1970),
+        ]
+      )
+      try Self.appendEvent(
+        runID: authorization.successorRunID,
+        launchAttemptID: nil,
+        kind: .prepared,
+        recordSHA256: q4Authorization.requestSHA256,
+        detailCode: nil,
+        now: now,
+        database: database
+      )
+      guard
+        try database.execute(
+          """
+          UPDATE herdr_role_hosts
+          SET last_queue_sequence = 3, updated_at = ?
+          WHERE id = ? AND job_id = ? AND generation = ?
+            AND role = 'architecture' AND state = 'waiting' AND last_queue_sequence = 0
+          """,
+          bindings: [
+            .real(now.timeIntervalSince1970),
+            .text(architecture.successorRoleHostID),
+            .text(Self.uuid(authorization.jobID)),
+            .integer(Int64(authorization.successorGeneration)),
+          ]
+        ) == 1
+      else { throw PiRunStoreError.invalidTransition }
+      return try Self.requireRun(authorization.successorRunID, database: database)
+    }
+  }
+
+  @discardableResult
+  public func prepareGenerationRolloverQ4Launch(
+    authorization: JobCanaryGenerationRolloverAuthorization,
+    q4Authorization: JobCanaryGenerationRolloverQ4Authorization,
+    now: Date
+  ) async throws -> PiRunLaunchRecord {
+    try authorization.validate()
+    try q4Authorization.validate()
+    guard q4Authorization.rolloverAuthorizationSHA256 == authorization.authorizationSHA256,
+      q4Authorization.successorRunID == authorization.successorRunID,
+      let architecture = authorization.hosts.first(where: { $0.role == .architecture })
+    else { throw PiRunStoreError.invalidRecord }
+    return try await database.transaction { database in
+      try Self.requireLaunchEligibility(database: database, jobID: authorization.jobID)
+      guard
+        try Self.generationRolloverIsolationSHA256(
+          jobID: authorization.jobID,
+          database: database
+        ) == authorization.isolationSHA256
+      else {
+        throw PiRunStoreError.invalidTransition
+      }
+      let run = try Self.requireRun(authorization.successorRunID, database: database)
+      let host = try Self.requireRoleHost(
+        architecture.successorRoleHostID,
+        database: database
+      )
+      let rolloverCount = try database.scalarInt(
+        """
+        SELECT COUNT(*)
+        FROM herdr_pi_run_rollovers AS rollover
+        JOIN herdr_generation_rollover_authorizations AS authorization
+          ON authorization.rollover_authorization_sha256
+            = rollover.rollover_authorization_sha256
+        WHERE rollover.rollover_authorization_sha256 = ?
+          AND rollover.successor_run_id = ?
+          AND rollover.successor_architecture_host_id = ?
+          AND rollover.q4_authorization_sha256 = ?
+          AND rollover.q4_evidence_sha256 = ?
+          AND rollover.planned_q4_launch_attempt_id = ?
+          AND rollover.q4_descriptor_sha256 = ?
+          AND rollover.q4_configuration_sha256 = ?
+          AND rollover.q4_prompt_sha256 = ?
+          AND rollover.q4_workflow_configuration_sha256 = ?
+          AND rollover.q4_prior_launch_descriptor_sha256 = ?
+          AND rollover.q4_prior_launch_configuration_sha256 = ?
+          AND rollover.q4_resource_tree_sha256 = ?
+          AND rollover.lineage_sha256 = ?
+        """,
+        bindings: [
+          .text(authorization.authorizationSHA256),
+          .text(run.id),
+          .text(host.id),
+          .text(q4Authorization.authorizationSHA256),
+          .text(q4Authorization.q4EvidenceSHA256),
+          .text(q4Authorization.plannedLaunchAttemptID),
+          .text(q4Authorization.q4Binding.descriptorSHA256),
+          .text(q4Authorization.q4Binding.configurationSHA256),
+          .text(q4Authorization.q4Binding.promptSHA256),
+          .text(q4Authorization.q4Binding.workflowConfigurationSHA256),
+          .text(q4Authorization.q4Binding.priorLaunchDescriptorSHA256),
+          .text(q4Authorization.q4Binding.priorLaunchConfigurationSHA256),
+          .text(q4Authorization.q4Binding.resourceTreeSHA256),
+          .text(authorization.lineageSHA256),
+        ]
+      )
+      guard rolloverCount == 1, run.jobID == authorization.jobID,
+        run.topologyGeneration == authorization.successorGeneration,
+        run.role == .architecture, run.resumesRunID == nil,
+        host.jobID == authorization.jobID,
+        host.generation == authorization.successorGeneration,
+        host.role == .architecture, [.waiting, .running].contains(host.state)
+      else { throw PiRunStoreError.invalidTransition }
+      if let existing = try Self.loadLaunch(
+        q4Authorization.plannedLaunchAttemptID,
+        database: database
+      ) {
+        guard existing.runID == run.id, existing.roleHostID == host.id,
+          existing.executionRoleHostID == nil, existing.queueSequence == 4,
+          existing.launchMode == .fresh,
+          existing.descriptorSHA256 == q4Authorization.q4Binding.descriptorSHA256,
+          existing.expectedSessionID == nil, existing.resumeBoundarySHA256 == nil
+        else { throw PiRunStoreError.bindingCollision }
+        return existing
+      }
+      guard !run.settled, [.prepared, .running].contains(run.outcome),
+        host.lastQueueSequence == 3,
+        try database.scalarInt(
+          "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ?",
+          bindings: [.text(run.id)]
+        ) == 0,
+        try database.scalarInt(
+          "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ?",
+          bindings: [.text(authorization.predecessorRunID)]
+        ) == 3
+      else { throw PiRunStoreError.invalidTransition }
+      _ = try database.execute(
+        """
+        INSERT INTO pi_run_launches(
+          launch_attempt_id, run_id, role_host_id, execution_role_host_id,
+          queue_sequence, launch_mode, descriptor_sha256, expected_session_id,
+          resume_boundary_sha256, state, failure_code, created_at, updated_at
+        ) VALUES (?, ?, ?, NULL, 4, 'fresh', ?, NULL, NULL, 'prepared', NULL, ?, ?)
+        """,
+        bindings: [
+          .text(q4Authorization.plannedLaunchAttemptID),
+          .text(run.id), .text(host.id),
+          .text(q4Authorization.q4Binding.descriptorSHA256),
+          .real(now.timeIntervalSince1970), .real(now.timeIntervalSince1970),
+        ]
+      )
+      guard
+        try database.execute(
+          """
+          UPDATE herdr_role_hosts SET last_queue_sequence = 4, updated_at = ?
+          WHERE id = ? AND last_queue_sequence = 3 AND state IN ('waiting', 'running')
+          """,
+          bindings: [
+            .real(now.timeIntervalSince1970), .text(host.id),
+          ]
+        ) == 1
+      else { throw PiRunStoreError.invalidTransition }
+      return try Self.requireLaunch(
+        q4Authorization.plannedLaunchAttemptID,
+        database: database
+      )
+    }
+  }
+
+  func validateGenerationRolloverQ4Publication(
+    authorization: JobCanaryGenerationRolloverAuthorization,
+    q4Authorization: JobCanaryGenerationRolloverQ4Authorization,
+    roleHostID: String
+  ) async throws {
+    try authorization.validate()
+    try q4Authorization.validate()
+    guard q4Authorization.rolloverAuthorizationSHA256 == authorization.authorizationSHA256,
+      q4Authorization.successorRunID == authorization.successorRunID,
+      Self.validRuntimeID(roleHostID)
+    else { throw PiRunStoreError.invalidRecord }
+    try await database.transaction { database in
+      guard
+        try Self.generationRolloverIsolationSHA256(
+          jobID: authorization.jobID,
+          database: database
+        ) == authorization.isolationSHA256,
+        try database.scalarInt(
+          "SELECT paused FROM app_settings WHERE singleton = 1"
+        ) == 1,
+        let authorizationRow = try database.query(
+          "SELECT * FROM herdr_generation_rollover_authorizations WHERE rollover_authorization_sha256 = ?",
+          bindings: [.text(authorization.authorizationSHA256)]
+        ).first,
+        try Self.generationRolloverAuthorizationMatches(
+          authorizationRow,
+          authorization: authorization
+        ),
+        try database.scalarInt(
+          """
+          SELECT COUNT(*)
+          FROM herdr_pi_run_rollovers AS rollover
+          JOIN pi_runs AS run ON run.id = rollover.successor_run_id
+          JOIN pi_run_launches AS launch ON launch.run_id = run.id
+          JOIN herdr_job_bindings AS binding ON binding.job_id = run.job_id
+          JOIN herdr_role_hosts AS host ON host.id = launch.role_host_id
+          WHERE rollover.rollover_authorization_sha256 = ?
+            AND rollover.q4_authorization_sha256 = ?
+            AND rollover.q4_evidence_sha256 = ?
+            AND rollover.successor_run_id = ?
+            AND rollover.successor_architecture_host_id = ?
+            AND rollover.planned_q4_launch_attempt_id = ?
+            AND rollover.lineage_sha256 = ?
+            AND rollover.q4_descriptor_sha256 = ?
+            AND rollover.q4_configuration_sha256 = ?
+            AND rollover.q4_prompt_sha256 = ?
+            AND rollover.q4_workflow_configuration_sha256 = ?
+            AND rollover.q4_prior_launch_descriptor_sha256 = ?
+            AND rollover.q4_prior_launch_configuration_sha256 = ?
+            AND rollover.q4_resource_tree_sha256 = ?
+            AND run.job_id = ? AND run.topology_generation = ?
+            AND run.accepted = 0 AND run.settled = 0
+            AND run.outcome IN ('prepared', 'running')
+            AND binding.generation = ? AND binding.state = 'active'
+            AND host.id = ? AND host.role = 'architecture'
+            AND host.state IN ('waiting', 'running') AND host.last_queue_sequence = 4
+            AND launch.launch_attempt_id = ? AND launch.queue_sequence = 4
+            AND launch.execution_role_host_id IS NULL
+            AND launch.descriptor_sha256 = ?
+            AND launch.state IN ('prepared', 'enqueued')
+            AND (SELECT COUNT(*) FROM pi_run_launches WHERE run_id = run.id) = 1
+            AND (SELECT COUNT(*) FROM pi_run_results WHERE run_id = run.id) = 0
+          """,
+          bindings: [
+            .text(authorization.authorizationSHA256),
+            .text(q4Authorization.authorizationSHA256),
+            .text(q4Authorization.q4EvidenceSHA256),
+            .text(authorization.successorRunID), .text(roleHostID),
+            .text(q4Authorization.plannedLaunchAttemptID),
+            .text(authorization.lineageSHA256),
+            .text(q4Authorization.q4Binding.descriptorSHA256),
+            .text(q4Authorization.q4Binding.configurationSHA256),
+            .text(q4Authorization.q4Binding.promptSHA256),
+            .text(q4Authorization.q4Binding.workflowConfigurationSHA256),
+            .text(q4Authorization.q4Binding.priorLaunchDescriptorSHA256),
+            .text(q4Authorization.q4Binding.priorLaunchConfigurationSHA256),
+            .text(q4Authorization.q4Binding.resourceTreeSHA256),
+            .text(Self.uuid(authorization.jobID)),
+            .integer(Int64(authorization.successorGeneration)),
+            .integer(Int64(authorization.successorGeneration)),
+            .text(roleHostID), .text(q4Authorization.plannedLaunchAttemptID),
+            .text(q4Authorization.q4Binding.descriptorSHA256),
+          ]
+        ) == 1
+      else { throw PiRunStoreError.invalidTransition }
+    }
+  }
+
   @discardableResult
   public func prepareRun(
     id: String,
@@ -1366,6 +2106,23 @@ public actor PiRunStore {
           throw PiRunStoreError.bindingCollision
         }
         return existing
+      }
+      if try Self.tableExists(
+        "herdr_generation_rollover_authorizations",
+        database: database
+      ) {
+        guard
+          try database.scalarInt(
+            """
+            SELECT COUNT(*) FROM herdr_generation_rollover_authorizations
+            WHERE job_id = ? AND successor_generation = ?
+            """,
+            bindings: [
+              .text(Self.uuid(jobID)),
+              .integer(Int64(topologyGeneration)),
+            ]
+          ) == 0
+        else { throw PiRunStoreError.invalidTransition }
       }
       let occupiedSlot = try database.query(
         """
@@ -2184,7 +2941,12 @@ public actor PiRunStore {
       guard run.jobID == host.jobID,
         run.topologyGeneration == host.generation,
         run.role == host.role,
-        [.waiting, .running].contains(host.state)
+        [.waiting, .running].contains(host.state),
+        try !Self.tableExists("herdr_pi_run_rollovers", database: database)
+          || database.scalarInt(
+            "SELECT COUNT(*) FROM herdr_pi_run_rollovers WHERE successor_run_id = ?",
+            bindings: [.text(run.id)]
+          ) == 0
       else {
         throw PiRunStoreError.invalidTransition
       }
@@ -2492,14 +3254,6 @@ public actor PiRunStore {
         else { throw PiRunStoreError.invalidTransition }
       }
       _ = try database.execute(
-        "UPDATE herdr_role_hosts SET last_queue_sequence = ?, updated_at = ? WHERE id = ?",
-        bindings: [
-          .integer(Int64(sequence)),
-          .real(now.timeIntervalSince1970),
-          .text(roleHostID),
-        ]
-      )
-      _ = try database.execute(
         """
         INSERT INTO pi_run_launches(
           launch_attempt_id, run_id, role_host_id, queue_sequence, launch_mode,
@@ -2520,6 +3274,20 @@ public actor PiRunStore {
           .real(now.timeIntervalSince1970),
         ]
       )
+      guard
+        try database.execute(
+          """
+          UPDATE herdr_role_hosts SET last_queue_sequence = ?, updated_at = ?
+          WHERE id = ? AND last_queue_sequence = ?
+          """,
+          bindings: [
+            .integer(Int64(sequence)),
+            .real(now.timeIntervalSince1970),
+            .text(roleHostID),
+            .integer(Int64(sequence - 1)),
+          ]
+        ) == 1
+      else { throw PiRunStoreError.invalidTransition }
       return try Self.requireLaunch(launchAttemptID, database: database)
     }
   }
@@ -2845,12 +3613,27 @@ public actor PiRunStore {
   }
 
   public func activeRuns() async throws -> [PiRunRecord] {
-    try await database.query(
-      """
-      SELECT * FROM pi_runs
-      WHERE runtime_kind = 'herdr' AND outcome IN ('prepared', 'running', 'settled')
-      ORDER BY created_at, id
-      """
+    let hasRollovers =
+      try await database.scalarInt(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'herdr_pi_run_rollovers'"
+      ) == 1
+    return try await database.query(
+      hasRollovers
+        ? """
+        SELECT * FROM pi_runs AS run
+        WHERE run.runtime_kind = 'herdr'
+          AND run.outcome IN ('prepared', 'running', 'settled')
+          AND NOT EXISTS (
+            SELECT 1 FROM herdr_pi_run_rollovers AS rollover
+            WHERE rollover.predecessor_run_id = run.id
+          )
+        ORDER BY run.created_at, run.id
+        """
+        : """
+        SELECT * FROM pi_runs
+        WHERE runtime_kind = 'herdr' AND outcome IN ('prepared', 'running', 'settled')
+        ORDER BY created_at, id
+        """
     ).map(Self.decodeRun)
   }
 
@@ -3088,6 +3871,243 @@ public actor PiRunStore {
       throw PiRunStoreError.roleHostNotFound(id)
     }
     return value
+  }
+
+  private static func generationRolloverIsolationSHA256(
+    jobID: UUID,
+    database: isolated SQLiteStore
+  ) throws -> String {
+    let job = uuid(jobID)
+    guard
+      let repository = try database.scalarText(
+        "SELECT repository_id FROM jobs WHERE id = ?",
+        bindings: [.text(job)]
+      )
+    else { throw PiRunStoreError.invalidRecord }
+    let queries: [(String, String, [SQLiteValue])] = [
+      ("app_settings", "SELECT * FROM app_settings ORDER BY singleton", []),
+      ("model_profiles", "SELECT * FROM model_profiles ORDER BY role", []),
+      ("repositories", "SELECT * FROM repositories ORDER BY id", []),
+      ("repository_backoff", "SELECT * FROM repository_backoff ORDER BY repository_id", []),
+      (
+        "object_dispositions",
+        "SELECT * FROM object_dispositions ORDER BY repository_id, kind, object_node_id, revision_key",
+        []
+      ),
+      (
+        "reviewed_revisions",
+        "SELECT * FROM reviewed_revisions ORDER BY repository_node_id, pr_node_id, head_sha", []
+      ),
+      ("jobs", "SELECT * FROM jobs WHERE id != ? ORDER BY id", [.text(job)]),
+      (
+        "repository_leases",
+        "SELECT * FROM repository_leases WHERE job_id != ? ORDER BY repository_id, job_id, generation",
+        [.text(job)]
+      ),
+      (
+        "job_steps", "SELECT * FROM job_steps WHERE job_id != ? ORDER BY job_id, ordinal",
+        [.text(job)]
+      ),
+      (
+        "job_transitions", "SELECT * FROM job_transitions WHERE job_id != ? ORDER BY id",
+        [.text(job)]
+      ),
+      (
+        "issue_claims",
+        "SELECT * FROM issue_claims WHERE job_id != ? ORDER BY issue_node_id, generation",
+        [.text(job)]
+      ),
+      ("workspaces", "SELECT * FROM workspaces WHERE job_id != ? ORDER BY job_id", [.text(job)]),
+      (
+        "reconciliation_events",
+        "SELECT * FROM reconciliation_events WHERE job_id != ? ORDER BY id", [.text(job)]
+      ),
+      ("artifacts", "SELECT * FROM artifacts WHERE job_id != ? ORDER BY id", [.text(job)]),
+      (
+        "approved_command_runs",
+        "SELECT * FROM approved_command_runs WHERE job_id != ? ORDER BY id", [.text(job)]
+      ),
+      (
+        "approved_command_results",
+        "SELECT result.* FROM approved_command_results AS result JOIN approved_command_runs AS run ON run.id = result.run_id WHERE run.job_id != ? ORDER BY result.run_id",
+        [.text(job)]
+      ),
+      (
+        "approved_command_events",
+        "SELECT event.* FROM approved_command_events AS event JOIN approved_command_runs AS run ON run.id = event.run_id WHERE run.job_id != ? ORDER BY event.run_id, event.sequence",
+        [.text(job)]
+      ),
+      (
+        "mutation_intents", "SELECT * FROM mutation_intents WHERE job_id != ? ORDER BY id",
+        [.text(job)]
+      ),
+      ("pi_runs", "SELECT * FROM pi_runs WHERE job_id != ? ORDER BY id", [.text(job)]),
+      (
+        "pi_run_launches",
+        "SELECT launch.* FROM pi_run_launches AS launch JOIN pi_runs AS run ON run.id = launch.run_id WHERE run.job_id != ? ORDER BY launch.launch_attempt_id",
+        [.text(job)]
+      ),
+      (
+        "pi_run_results",
+        "SELECT result.* FROM pi_run_results AS result JOIN pi_runs AS run ON run.id = result.run_id WHERE run.job_id != ? ORDER BY result.run_id",
+        [.text(job)]
+      ),
+      (
+        "pi_run_session_origins",
+        "SELECT origin.* FROM pi_run_session_origins AS origin JOIN pi_runs AS run ON run.id = origin.run_id WHERE run.job_id != ? ORDER BY origin.run_id",
+        [.text(job)]
+      ),
+      (
+        "pi_run_events",
+        "SELECT event.* FROM pi_run_events AS event JOIN pi_runs AS run ON run.id = event.run_id WHERE run.job_id != ? ORDER BY event.run_id, event.sequence",
+        [.text(job)]
+      ),
+      (
+        "herdr_repository_bindings",
+        "SELECT * FROM herdr_repository_bindings WHERE repository_id != ? ORDER BY repository_id",
+        [.text(repository)]
+      ),
+      (
+        "herdr_repository_binding_history",
+        "SELECT * FROM herdr_repository_binding_history WHERE repository_id != ? ORDER BY id",
+        [.text(repository)]
+      ),
+      (
+        "herdr_job_bindings", "SELECT * FROM herdr_job_bindings WHERE job_id != ? ORDER BY job_id",
+        [.text(job)]
+      ),
+      (
+        "herdr_role_hosts", "SELECT * FROM herdr_role_hosts WHERE job_id != ? ORDER BY id",
+        [.text(job)]
+      ),
+      (
+        "herdr_replacement_role_hosts",
+        "SELECT * FROM herdr_replacement_role_hosts WHERE job_id != ? ORDER BY id", [.text(job)]
+      ),
+      (
+        "herdr_role_host_replacement_authorizations",
+        "SELECT * FROM herdr_role_host_replacement_authorizations WHERE job_id != ? ORDER BY job_id",
+        [.text(job)]
+      ),
+      (
+        "herdr_generation_rollover_authorizations",
+        "SELECT * FROM herdr_generation_rollover_authorizations WHERE job_id != ? ORDER BY job_id",
+        [.text(job)]
+      ),
+      (
+        "herdr_pi_run_rollovers",
+        "SELECT rollover.* FROM herdr_pi_run_rollovers AS rollover JOIN herdr_generation_rollover_authorizations AS authorization ON authorization.rollover_authorization_sha256 = rollover.rollover_authorization_sha256 WHERE authorization.job_id != ? ORDER BY rollover.successor_run_id",
+        [.text(job)]
+      ),
+      (
+        "herdr_topology_intents",
+        "SELECT * FROM herdr_topology_intents WHERE job_id != ? ORDER BY id", [.text(job)]
+      ),
+    ]
+    var components: [String] = []
+    for (name, sql, bindings) in queries {
+      let rows = try database.query(sql, bindings: bindings)
+      components.append("table:\(name):\(rows.count)")
+      for (index, row) in rows.enumerated() {
+        for column in row.columns {
+          guard let value = row[column] else { throw PiRunStoreError.invalidRecord }
+          let encoded: String
+          switch value {
+          case .integer(let number): encoded = "i:\(number)"
+          case .real(let number): encoded = "r:\(number.bitPattern)"
+          case .text(let text): encoded = "t:\(Data(text.utf8).base64EncodedString())"
+          case .blob(let data): encoded = "b:\(data.base64EncodedString())"
+          case .null: encoded = "n:"
+          }
+          components.append("row:\(name):\(index):\(column):\(encoded)")
+        }
+      }
+    }
+    return GitHubMarkerCodec.sha256(Data(components.joined(separator: "\n").utf8))
+  }
+
+  private static func generationRolloverAuthorizationMatches(
+    _ row: SQLiteRow,
+    authorization: JobCanaryGenerationRolloverAuthorization
+  ) throws -> Bool {
+    guard let architecture = authorization.hosts.first(where: { $0.role == .architecture }),
+      let security = authorization.hosts.first(where: { $0.role == .security }),
+      let test = authorization.hosts.first(where: { $0.role == .test }),
+      let synthesis = authorization.hosts.first(where: { $0.role == .synthesis }),
+      let q1 = authorization.predecessorLaunches.first(where: { $0.queueSequence == 1 }),
+      let q2 = authorization.predecessorLaunches.first(where: { $0.queueSequence == 2 }),
+      let q3 = authorization.predecessorLaunches.first(where: { $0.queueSequence == 3 }),
+      let q1Child = q1.childProcess
+    else { return false }
+    func storedText(_ column: String) -> String? { try? text(row, column) }
+    func storedInteger(_ column: String) -> Int64? { try? integer(row, column) }
+    let hostPairs = [architecture, security, test, synthesis]
+    guard
+      storedText("rollover_authorization_sha256")
+        == authorization.authorizationSHA256,
+      storedText("rollover_evidence_sha256") == authorization.rolloverEvidenceSHA256,
+      storedText("canary_authorization_sha256") == authorization.canaryAuthorizationSHA256,
+      storedText("lineage_sha256") == authorization.lineageSHA256,
+      storedText("isolation_sha256") == authorization.isolationSHA256,
+      storedText("repository_id") == uuid(authorization.repositoryID),
+      storedText("job_id") == uuid(authorization.jobID),
+      storedInteger("predecessor_generation")
+        == Int64(authorization.predecessorGeneration),
+      storedInteger("successor_generation") == Int64(authorization.successorGeneration),
+      storedText("predecessor_run_id") == authorization.predecessorRunID,
+      storedText("q1_launch_attempt_id") == q1.launchAttemptID,
+      storedText("q1_descriptor_sha256") == q1.descriptorSHA256,
+      storedText("q1_failure_code") == q1.failureCode,
+      storedInteger("q1_child_pid") == Int64(q1Child.processID),
+      storedInteger("q1_child_process_group_id") == Int64(q1Child.processGroupID),
+      storedInteger("q1_child_start_seconds") == (try int64(q1Child.startSeconds)),
+      storedInteger("q1_child_start_microseconds")
+        == (try int64(q1Child.startMicroseconds)),
+      storedText("q2_launch_attempt_id") == q2.launchAttemptID,
+      storedText("q2_descriptor_sha256") == q2.descriptorSHA256,
+      storedText("q2_failure_code") == q2.failureCode,
+      storedText("q3_launch_attempt_id") == q3.launchAttemptID,
+      storedText("q3_descriptor_sha256") == q3.descriptorSHA256,
+      storedText("q3_failure_code") == q3.failureCode,
+      storedText("workspace_id") == authorization.workspaceID,
+      storedInteger("socket_device") == (try int64(authorization.socket.device)),
+      storedInteger("socket_inode") == (try int64(authorization.socket.inode)),
+      storedInteger("socket_owner") == Int64(authorization.socket.owner),
+      storedInteger("socket_permissions") == Int64(authorization.socket.permissions),
+      storedText("socket_peer_evidence_sha256")
+        == authorization.socket.peerEvidenceSHA256,
+      storedText("successor_run_id") == authorization.successorRunID,
+      storedInteger("prior_attempt_count") == 3
+    else { return false }
+    for pair in hostPairs {
+      let role = pair.role.rawValue
+      guard
+        storedText("predecessor_\(role)_host_id")
+          == pair.predecessorRoleHostID,
+        storedText("predecessor_\(role)_bootstrap_sha256")
+          == pair.predecessorBootstrapDescriptorSHA256,
+        storedText("successor_\(role)_host_id") == pair.successorRoleHostID,
+        storedText("successor_\(role)_bootstrap_sha256")
+          == pair.successorBootstrapDescriptorSHA256,
+        storedText("predecessor_\(role)_host_executable_sha256")
+          == pair.predecessorHostExecutableSHA256,
+        storedText("successor_\(role)_host_executable_sha256")
+          == pair.successorHostExecutableSHA256,
+        storedText("successor_\(role)_executable_evidence_sha256")
+          == pair.successorExecutableEvidenceSHA256
+      else { return false }
+    }
+    return true
+  }
+
+  private static func tableExists(
+    _ table: String,
+    database: isolated SQLiteStore
+  ) throws -> Bool {
+    try database.scalarInt(
+      "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?",
+      bindings: [.text(table)]
+    ) == 1
   }
 
   private static func loadReplacementRoleHost(
@@ -3492,7 +4512,8 @@ public actor PiRunStore {
       launchAttemptID: try text(row, "launch_attempt_id"),
       runID: try text(row, "run_id"),
       roleHostID: try text(row, "role_host_id"),
-      executionRoleHostID: try optionalText(row, "execution_role_host_id"),
+      executionRoleHostID: row["execution_role_host_id"] == nil
+        ? nil : try optionalText(row, "execution_role_host_id"),
       queueSequence: Int(try integer(row, "queue_sequence")),
       launchMode: mode,
       descriptorSHA256: try text(row, "descriptor_sha256"),

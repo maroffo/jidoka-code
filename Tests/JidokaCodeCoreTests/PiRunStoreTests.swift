@@ -1728,6 +1728,414 @@ struct PiRunStoreTests {
     }
   }
 
+  @Test("lost generation retry lineage advances through one q4 successor")
+  func lostGenerationRetryLineageRequiresQ4Successor() async throws {
+    let fixture = try await ReplacementCutoverFixture.make(
+      persistAuthorization: false,
+      prepareIntent: false,
+      sendIntentStarted: false
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+    let predecessorBinding = try #require(
+      try await fixture.store.jobBinding(jobID: fixture.jobID)
+    )
+    let repositoryBinding = try #require(
+      try await fixture.store.repositoryBinding(repositoryID: predecessorBinding.repositoryID)
+    )
+    let predecessorHosts = try await fixture.store.roleHosts(jobID: fixture.jobID)
+    let predecessorLaunches = try await fixture.store.launches(runID: fixture.runID)
+    let successorDefinitions: [(PiWorkflowRole, String, Character)] = [
+      (.architecture, "rolehost-70000000-0000-4000-8000-000000000007", "7"),
+      (.security, "rolehost-80000000-0000-4000-8000-000000000008", "8"),
+      (.test, "rolehost-90000000-0000-4000-8000-000000000009", "9"),
+      (.synthesis, "rolehost-a0000000-0000-4000-8000-00000000000a", "a"),
+    ]
+    let successorRunID = "run-generation-two-successor"
+    let q4LaunchAttemptID = "launch-aaaaaaaa-0000-4000-8000-00000000000a"
+    for index in 1...155 {
+      _ = try await fixture.database.execute(
+        """
+        INSERT INTO jobs(
+          id, repository_id, kind, object_node_id, object_number, revision_key,
+          contract_version_used, priority, state, current_step, current_step_kind,
+          attempt, created_at, updated_at
+        ) VALUES (?, ?, 'issueTriage', ?, ?, ?, 'test', 4, 'queued', 0, 'triage',
+          0, ?, ?)
+        """,
+        bindings: [
+          .text(String(format: "unrelated-job-%03d", index)),
+          .text(predecessorBinding.repositoryID.uuidString.lowercased()),
+          .text(String(format: "unrelated-node-%03d", index)),
+          .integer(Int64(index)),
+          .text(String(format: "unrelated-revision-%03d", index)),
+          .real(20 + Double(index)),
+          .real(20 + Double(index)),
+        ]
+      )
+    }
+    let unrelatedBefore = try await fixture.database.query(
+      "SELECT * FROM jobs WHERE id GLOB 'unrelated-job-*' ORDER BY id"
+    )
+    #expect(unrelatedBefore.count == 155)
+    #expect(predecessorBinding.generation == 1)
+    #expect(predecessorHosts.count == 4)
+    #expect(predecessorLaunches.map(\.queueSequence) == [1, 2, 3])
+
+    for (index, host) in predecessorHosts.enumerated() {
+      try await fixture.store.markRoleHostLost(
+        id: host.id,
+        now: Date(timeIntervalSince1970: 30 + Double(index))
+      )
+    }
+    try await fixture.store.markJobBindingLost(
+      jobID: fixture.jobID,
+      generation: 1,
+      now: Date(timeIntervalSince1970: 34)
+    )
+    await #expect(throws: PiRunStoreError.self) {
+      _ = try await fixture.store.prepareJobBinding(
+        jobID: fixture.jobID,
+        repositoryID: predecessorBinding.repositoryID,
+        generation: 2,
+        workspaceID: predecessorBinding.workspaceID,
+        now: Date(timeIntervalSince1970: 34.5)
+      )
+    }
+
+    let hostPairs = try successorDefinitions.map { role, successorID, digestCharacter in
+      let predecessor = try #require(predecessorHosts.first(where: { $0.role == role }))
+      return JobCanaryGenerationRolloverHostPair(
+        role: role,
+        predecessorRoleHostID: predecessor.id,
+        predecessorBootstrapDescriptorSHA256: predecessor.bootstrapDescriptorSHA256,
+        successorRoleHostID: successorID,
+        successorBootstrapDescriptorSHA256: String(repeating: digestCharacter, count: 64),
+        predecessorHostExecutableSHA256: predecessor.hostExecutableSHA256,
+        successorHostExecutableSHA256: String(repeating: "d", count: 64),
+        successorExecutableEvidenceSHA256: String(repeating: "e", count: 64)
+      )
+    }.sorted { $0.role.rawValue < $1.role.rawValue }
+    let rolloverRequest = JobCanaryGenerationRolloverRequest(
+      retry: fixture.replacementAuthorization.request.retry,
+      successorRunID: successorRunID,
+      plannedHosts: successorDefinitions.map {
+        JobCanaryGenerationRolloverPlannedHost(role: $0.0, roleHostID: $0.1)
+      }.sorted { $0.role.rawValue < $1.role.rawValue }
+    )
+    let rolloverAuthorization = JobCanaryGenerationRolloverAuthorization(
+      request: rolloverRequest,
+      canaryAuthorizationSHA256:
+        fixture.replacementAuthorization.request.retry.recovery.canary.authorizationSHA256,
+      rolloverEvidenceSHA256: String(repeating: "e", count: 64),
+      isolationSHA256: try await fixture.store.generationRolloverIsolationSHA256(
+        jobID: fixture.jobID
+      ),
+      repositoryID: predecessorBinding.repositoryID,
+      jobID: fixture.jobID,
+      predecessorGeneration: 1,
+      successorGeneration: 2,
+      predecessorRunID: fixture.runID,
+      predecessorLaunches: predecessorLaunches.map {
+        JobCanaryGenerationRolloverLaunchEvidence(
+          launchAttemptID: $0.launchAttemptID,
+          queueSequence: $0.queueSequence,
+          descriptorSHA256: $0.descriptorSHA256,
+          failureCode: $0.failureCode ?? "",
+          childProcess: $0.childProcess
+        )
+      },
+      hosts: hostPairs,
+      workspaceID: predecessorBinding.workspaceID,
+      socket: JobCanaryGenerationRolloverSocketEvidence(
+        device: repositoryBinding.socketIdentity.device,
+        inode: repositoryBinding.socketIdentity.inode,
+        owner: repositoryBinding.socketIdentity.owner,
+        permissions: repositoryBinding.socketIdentity.permissions,
+        peerEvidenceSHA256: String(repeating: "f", count: 64)
+      ),
+      successorRunID: successorRunID
+    )
+    try rolloverAuthorization.validate()
+    let q4Authorization = JobCanaryGenerationRolloverQ4Authorization(
+      rolloverAuthorizationSHA256: rolloverAuthorization.authorizationSHA256,
+      q4EvidenceSHA256: String(repeating: "0", count: 64),
+      successorRunID: successorRunID,
+      plannedLaunchAttemptID: q4LaunchAttemptID,
+      runNonce: String(repeating: "a", count: 64),
+      requestSHA256: String(repeating: "b", count: 64),
+      resourceVersion: "1",
+      resourceHash: String(repeating: "c", count: 64),
+      model: "fixture/model:max",
+      sessionPath: fixture.root.appendingPathComponent("successor-session").path,
+      channelPath: fixture.root.appendingPathComponent("successor-channel").path,
+      q4Binding: replacementQ4Binding()
+    )
+    try q4Authorization.validate()
+    _ = try await fixture.database.execute(
+      "UPDATE jobs SET updated_at = 999 WHERE id = 'unrelated-job-001'"
+    )
+    await #expect(throws: PiRunStoreError.invalidTransition) {
+      _ = try await fixture.store.persistGenerationRolloverAuthorization(
+        rolloverAuthorization,
+        now: Date(timeIntervalSince1970: 34.5)
+      )
+    }
+    _ = try await fixture.database.execute(
+      "UPDATE jobs SET updated_at = 21 WHERE id = 'unrelated-job-001'"
+    )
+    #expect(
+      try await fixture.store.persistGenerationRolloverAuthorization(
+        rolloverAuthorization,
+        now: Date(timeIntervalSince1970: 34.75)
+      ) == false
+    )
+
+    _ = try await fixture.store.prepareJobBinding(
+      jobID: fixture.jobID,
+      repositoryID: predecessorBinding.repositoryID,
+      generation: 2,
+      workspaceID: predecessorBinding.workspaceID,
+      now: Date(timeIntervalSince1970: 35)
+    )
+    var successorActivations: [HerdrRoleHostActivation] = []
+    for (index, definition) in successorDefinitions.enumerated() {
+      let (role, hostID, digestCharacter) = definition
+      _ = try await fixture.store.prepareRoleHost(
+        id: hostID,
+        jobID: fixture.jobID,
+        generation: 2,
+        role: role,
+        workspaceID: predecessorBinding.workspaceID,
+        bootstrapDescriptorSHA256: String(repeating: digestCharacter, count: 64),
+        hostExecutableSHA256: String(repeating: "d", count: 64),
+        now: Date(timeIntervalSince1970: 36 + Double(index))
+      )
+      successorActivations.append(
+        HerdrRoleHostActivation(
+          roleHostID: hostID,
+          workspaceID: predecessorBinding.workspaceID,
+          tabID: "tab-generation-two",
+          paneID: "pane-generation-two-\(index + 1)",
+          terminalID: "terminal-generation-two-\(index + 1)",
+          processIdentity: try HerdrHostProcessIdentity(
+            processID: Int32(700 + index),
+            startSeconds: UInt64(800 + index),
+            startMicroseconds: UInt64(900 + index)
+          )
+        )
+      )
+    }
+    try await fixture.store.activateTopology(
+      jobID: fixture.jobID,
+      tabID: "tab-generation-two",
+      hosts: successorActivations,
+      now: Date(timeIntervalSince1970: 40)
+    )
+
+    await #expect(throws: PiRunStoreError.invalidTransition) {
+      _ = try await fixture.store.prepareRun(
+        id: successorRunID,
+        jobID: fixture.jobID,
+        workflow: .pullRequestReview,
+        role: .architecture,
+        round: 1,
+        jobAttempt: 3,
+        topologyGeneration: 2,
+        jobStep: 0,
+        runNonce: String(repeating: "a", count: 64),
+        requestSHA256: String(repeating: "b", count: 64),
+        resourceVersion: "1",
+        resourceHash: String(repeating: "c", count: 64),
+        model: "fixture/model:max",
+        sessionPath: fixture.root.appendingPathComponent("successor-session"),
+        channelPath: fixture.root.appendingPathComponent("successor-channel"),
+        now: Date(timeIntervalSince1970: 40.5)
+      )
+    }
+    await #expect(throws: SQLiteStoreError.self) {
+      _ = try await fixture.database.execute(
+        """
+        INSERT INTO pi_runs(
+          id, job_id, runtime_kind, workflow, role, round, job_attempt,
+          topology_generation, job_step, resumes_run_id, run_nonce, request_sha256,
+          resource_version, resource_hash, model, session_path, channel_path,
+          accepted, settled, structured_result_digest, outcome, created_at, updated_at
+        ) VALUES (?, ?, 'herdr', 'pr-review', 'architecture', 1, 3, 2, 0, NULL,
+          ?, ?, '1', ?, 'fixture/model:max', ?, ?, 0, 0, NULL, 'prepared', 41, 41)
+        """,
+        bindings: [
+          .text(successorRunID), .text(fixture.jobID.uuidString.lowercased()),
+          .text(String(repeating: "a", count: 64)),
+          .text(String(repeating: "b", count: 64)),
+          .text(String(repeating: "c", count: 64)),
+          .text(fixture.root.appendingPathComponent("successor-session").path),
+          .text(fixture.root.appendingPathComponent("successor-channel").path),
+        ]
+      )
+    }
+    let successorRun = try await fixture.store.prepareGenerationRolloverSuccessorRun(
+      authorization: rolloverAuthorization,
+      q4Authorization: q4Authorization,
+      now: Date(timeIntervalSince1970: 41)
+    )
+    let successorLaunch = try await fixture.store.prepareGenerationRolloverQ4Launch(
+      authorization: rolloverAuthorization,
+      q4Authorization: q4Authorization,
+      now: Date(timeIntervalSince1970: 42)
+    )
+
+    #expect(successorRun.resumesRunID == nil)
+    #expect(successorLaunch.queueSequence == 4)
+    #expect(successorLaunch.launchAttemptID == q4LaunchAttemptID)
+    _ = try await fixture.database.execute(
+      "UPDATE jobs SET updated_at = 999 WHERE id = 'unrelated-job-001'"
+    )
+    await #expect(throws: PiRunStoreError.invalidTransition) {
+      try await fixture.store.validateGenerationRolloverQ4Publication(
+        authorization: rolloverAuthorization,
+        q4Authorization: q4Authorization,
+        roleHostID: successorDefinitions[0].1
+      )
+    }
+    _ = try await fixture.database.execute(
+      "UPDATE jobs SET updated_at = 21 WHERE id = 'unrelated-job-001'"
+    )
+    try await fixture.store.validateGenerationRolloverQ4Publication(
+      authorization: rolloverAuthorization,
+      q4Authorization: q4Authorization,
+      roleHostID: successorDefinitions[0].1
+    )
+    #expect(try await fixture.store.launches(runID: fixture.runID) == predecessorLaunches)
+    #expect(try await fixture.store.activeRuns().map(\.id) == [successorRunID])
+    #expect(
+      try await fixture.database.query(
+        "SELECT * FROM jobs WHERE id GLOB 'unrelated-job-*' ORDER BY id"
+      ) == unrelatedBefore
+    )
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    await #expect(throws: PiRunStoreError.invalidTransition) {
+      _ = try await fixture.store.prepareLaunch(
+        launchAttemptID: "launch-bbbbbbbb-0000-4000-8000-00000000000b",
+        runID: successorRun.id,
+        roleHostID: successorDefinitions[0].1,
+        launchMode: .fresh,
+        descriptorSHA256: String(repeating: "e", count: 64),
+        expectedSessionID: nil,
+        resumeBoundarySHA256: nil,
+        now: Date(timeIntervalSince1970: 43)
+      )
+    }
+    await #expect(throws: PiRunStoreError.self) {
+      _ = try await fixture.store.persistRoleHostReplacementAuthorization(
+        fixture.replacementAuthorization,
+        payload: fixture.authority.payload,
+        now: Date(timeIntervalSince1970: 44)
+      )
+    }
+    let rolloverConfiguration = ConfigurationStore(database: fixture.database)
+    await #expect(
+      throws: ConfigurationStoreError.generationRolloverRequiresAuthorization
+    ) {
+      try await rolloverConfiguration.setPaused(
+        false,
+        now: Date(timeIntervalSince1970: 44.5)
+      )
+    }
+    await #expect(
+      throws: ConfigurationStoreError.generationRolloverRequiresAuthorization
+    ) {
+      try await rolloverConfiguration.setOnboardingComplete(
+        true,
+        now: Date(timeIntervalSince1970: 44.5)
+      )
+    }
+    for statement in [
+      "UPDATE herdr_generation_rollover_authorizations SET created_at = 99",
+      "DELETE FROM herdr_generation_rollover_authorizations",
+      "UPDATE herdr_pi_run_rollovers SET created_at = 99",
+      "DELETE FROM herdr_pi_run_rollovers",
+      "UPDATE herdr_role_hosts SET last_queue_sequence = 2 WHERE id = '\(successorDefinitions[0].1)'",
+      "UPDATE pi_runs SET resumes_run_id = '\(fixture.runID)' WHERE id = '\(successorRunID)'",
+      "UPDATE app_settings SET paused = 0 WHERE singleton = 1",
+      "DELETE FROM app_settings WHERE singleton = 1",
+      "INSERT OR REPLACE INTO app_settings(singleton, max_concurrency, paused, updated_at) VALUES (1, 2, 0, 99)",
+      "UPDATE pi_runs SET outcome = 'failed' WHERE id = '\(fixture.runID)'",
+      "UPDATE pi_run_launches SET updated_at = 99 WHERE run_id = '\(fixture.runID)' AND queue_sequence = 1",
+      "UPDATE herdr_role_hosts SET last_queue_sequence = last_queue_sequence + 1 WHERE id = '\(fixture.predecessorRoleHostID)'",
+      "UPDATE herdr_job_bindings SET generation = 3, state = 'prepared', tab_id = NULL WHERE job_id = '\(fixture.jobID.uuidString.lowercased())'",
+    ] {
+      await #expect(throws: SQLiteStoreError.self) {
+        _ = try await fixture.database.execute(statement)
+      }
+    }
+    for (launchID, mode, expectedSessionID): (String, String, String?) in [
+      ("launch-bbbbbbbb-0000-4000-8000-00000000000b", "fresh", nil),
+      (
+        "launch-cccccccc-0000-4000-8000-00000000000c", "sameRunResume",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+      ),
+    ] {
+      await #expect(throws: SQLiteStoreError.self) {
+        _ = try await fixture.database.execute(
+          """
+          INSERT INTO pi_run_launches(
+            launch_attempt_id, run_id, role_host_id, execution_role_host_id,
+            queue_sequence, launch_mode, descriptor_sha256, expected_session_id,
+            resume_boundary_sha256, state, failure_code, created_at, updated_at
+          ) VALUES (?, ?, ?, NULL, 5, ?, ?, ?, NULL, 'prepared', NULL, 45, 45)
+          """,
+          bindings: [
+            .text(launchID), .text(successorRunID), .text(successorDefinitions[0].1),
+            .text(mode), .text(String(repeating: "e", count: 64)),
+            expectedSessionID.map(SQLiteValue.text) ?? .null,
+          ]
+        )
+      }
+    }
+    #expect(
+      try await fixture.database.scalarInt(
+        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence > 4",
+        bindings: [.text(successorRunID)]
+      ) == 0
+    )
+    #expect(
+      try await fixture.database.scalarInt(
+        "SELECT COUNT(*) FROM herdr_role_host_replacement_authorizations WHERE job_id = ?",
+        bindings: [.text(fixture.jobID.uuidString.lowercased())]
+      ) == 0
+    )
+
+    await fixture.database.close()
+    let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let reopenedStore = PiRunStore(database: reopenedDatabase)
+    #expect(
+      try await reopenedStore.persistGenerationRolloverAuthorization(
+        rolloverAuthorization,
+        now: Date(timeIntervalSince1970: 46)
+      )
+    )
+    #expect(
+      try await reopenedStore.prepareGenerationRolloverSuccessorRun(
+        authorization: rolloverAuthorization,
+        q4Authorization: q4Authorization,
+        now: Date(timeIntervalSince1970: 47)
+      ) == successorRun
+    )
+    #expect(
+      try await reopenedStore.prepareGenerationRolloverQ4Launch(
+        authorization: rolloverAuthorization,
+        q4Authorization: q4Authorization,
+        now: Date(timeIntervalSince1970: 48)
+      ) == successorLaunch
+    )
+    #expect(try await reopenedStore.activeRuns().map(\.id) == [successorRunID])
+    #expect(try await reopenedStore.launches(runID: fixture.runID) == predecessorLaunches)
+    #expect(try await reopenedDatabase.scalarText("PRAGMA integrity_check") == "ok")
+    #expect(try await reopenedDatabase.scalarInt("PRAGMA foreign_key_check") == nil)
+    await reopenedDatabase.close()
+  }
+
   @Test("cold Herdr socket replacement preserves history and advances topology generation")
   func coldSocketReplacement() async throws {
     let fixture = try await StoreFixture.make()
@@ -4485,13 +4893,13 @@ private func insertRepositoryAndJob(
 private func handshake(workspaceID: String, inode: UInt64 = 20) -> HerdrHandshake {
   HerdrHandshake(
     pong: HerdrPong(
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       capabilities: HerdrCapabilities(liveHandoff: true, detachedServerDaemon: true)
     ),
     snapshot: HerdrSessionSnapshot(
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       focusedWorkspaceID: nil,
       focusedTabID: nil,
       focusedPaneID: nil,

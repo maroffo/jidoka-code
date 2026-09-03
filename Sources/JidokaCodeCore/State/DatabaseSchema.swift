@@ -1603,7 +1603,7 @@ public enum DatabaseSchema {
     ),
     SQLiteMigration(
       version: 9,
-      name: "authorized-architecture-role-host-replacement",
+      name: "authorized-architecture-role-host-replacement-and-generation-rollover",
       requiresBackup: true,
       statements: [
         "DROP TRIGGER herdr_topology_intent_identity_immutable",
@@ -1663,6 +1663,37 @@ public enum DatabaseSchema {
         herdrReplacementRoleHostStateTransitionV9,
         herdrReplacementRoleHostDeleteDeniedV9,
         herdrReplacedPredecessorImmutableV9,
+        "DROP INDEX herdr_repository_binding_history_repository_idx",
+        "ALTER TABLE herdr_repository_binding_history RENAME TO herdr_repository_binding_history_v8",
+        herdrRepositoryBindingHistoryTableV9,
+        """
+        INSERT INTO herdr_repository_binding_history
+        SELECT * FROM herdr_repository_binding_history_v8
+        """,
+        "DROP TABLE herdr_repository_binding_history_v8",
+        """
+        CREATE INDEX herdr_repository_binding_history_repository_idx
+        ON herdr_repository_binding_history(repository_id, invalidated_at)
+        """,
+        appendOnlyTrigger(table: "herdr_repository_binding_history", operation: "UPDATE"),
+        appendOnlyTrigger(table: "herdr_repository_binding_history", operation: "DELETE"),
+        herdrGenerationRolloverAuthorizationsTableV9,
+        herdrGenerationRolloverAuthorizationInsertAuthorityV9,
+        herdrGenerationRolloverAuthorizationUpdateDeniedV9,
+        herdrGenerationRolloverAuthorizationDeleteDeniedV9,
+        herdrPiRunRolloversTableV9,
+        herdrPiRunRolloverInsertAuthorityV9,
+        herdrPiRunRolloverUpdateDeniedV9,
+        herdrPiRunRolloverDeleteDeniedV9,
+        herdrRoleHostInitialQueueAuthorityV9,
+        piRunsGenerationRolloverInsertAuthorityV9,
+        herdrGenerationRolloverPredecessorRunImmutableV9,
+        herdrGenerationRolloverPredecessorLaunchImmutableV9,
+        herdrGenerationRolloverPredecessorHostImmutableV9,
+        herdrJobBindingGenerationRolloverAuthorityV9,
+        appSettingsGenerationRolloverResumeDeniedV9,
+        appSettingsGenerationRolloverInsertResumeDeniedV9,
+        appSettingsGenerationRolloverDeleteDeniedV9,
         "ALTER TABLE pi_run_launches ADD COLUMN execution_role_host_id TEXT REFERENCES herdr_replacement_role_hosts(id) ON DELETE RESTRICT",
         """
         CREATE UNIQUE INDEX pi_run_launches_one_active_execution_host_idx
@@ -2992,6 +3023,755 @@ public enum DatabaseSchema {
     END
     """
 
+  private static let herdrRepositoryBindingHistoryTableV9 = """
+    CREATE TABLE herdr_repository_binding_history (
+      id INTEGER PRIMARY KEY,
+      repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+      workspace_id TEXT NOT NULL,
+      identity_root TEXT NOT NULL,
+      herdr_version TEXT NOT NULL,
+      herdr_protocol INTEGER NOT NULL,
+      socket_device INTEGER NOT NULL,
+      socket_inode INTEGER NOT NULL,
+      socket_owner INTEGER NOT NULL,
+      socket_permissions INTEGER NOT NULL,
+      reason TEXT NOT NULL CHECK (reason IN ('SOCKET_CHANGED', 'RUNTIME_CHANGED')),
+      invalidated_at REAL NOT NULL
+    ) STRICT
+    """
+
+  private static let herdrGenerationRolloverAuthorizationsTableV9 = """
+    CREATE TABLE herdr_generation_rollover_authorizations (
+      rollover_authorization_sha256 TEXT PRIMARY KEY CHECK (
+        length(rollover_authorization_sha256) = 64
+        AND rollover_authorization_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      rollover_evidence_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(rollover_evidence_sha256) = 64
+        AND rollover_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      canary_authorization_sha256 TEXT NOT NULL CHECK (
+        length(canary_authorization_sha256) = 64
+        AND canary_authorization_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      lineage_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(lineage_sha256) = 64 AND lineage_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      isolation_sha256 TEXT NOT NULL CHECK (
+        length(isolation_sha256) = 64 AND isolation_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+      predecessor_generation INTEGER NOT NULL CHECK (predecessor_generation > 0),
+      successor_generation INTEGER NOT NULL CHECK (
+        successor_generation = predecessor_generation + 1
+        AND successor_generation <= 1000000
+      ),
+      predecessor_run_id TEXT NOT NULL UNIQUE REFERENCES pi_runs(id) ON DELETE RESTRICT,
+      q1_launch_attempt_id TEXT NOT NULL UNIQUE
+        REFERENCES pi_run_launches(launch_attempt_id) ON DELETE RESTRICT,
+      q1_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q1_descriptor_sha256) = 64 AND q1_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q1_failure_code TEXT NOT NULL CHECK (q1_failure_code = 'RUNTIME_TIMEOUT'),
+      q1_child_pid INTEGER NOT NULL CHECK (q1_child_pid > 0),
+      q1_child_process_group_id INTEGER NOT NULL CHECK (
+        q1_child_process_group_id = q1_child_pid
+      ),
+      q1_child_start_seconds INTEGER NOT NULL CHECK (q1_child_start_seconds >= 0),
+      q1_child_start_microseconds INTEGER NOT NULL CHECK (
+        q1_child_start_microseconds BETWEEN 0 AND 999999
+      ),
+      q2_launch_attempt_id TEXT NOT NULL UNIQUE
+        REFERENCES pi_run_launches(launch_attempt_id) ON DELETE RESTRICT,
+      q2_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q2_descriptor_sha256) = 64 AND q2_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q2_failure_code TEXT NOT NULL CHECK (q2_failure_code = 'HERDR_TRANSACTION_FAILED'),
+      q3_launch_attempt_id TEXT NOT NULL UNIQUE
+        REFERENCES pi_run_launches(launch_attempt_id) ON DELETE RESTRICT,
+      q3_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q3_descriptor_sha256) = 64 AND q3_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q3_failure_code TEXT NOT NULL CHECK (q3_failure_code = 'HERDR_TRANSACTION_FAILED'),
+      predecessor_architecture_host_id TEXT NOT NULL UNIQUE
+        REFERENCES herdr_role_hosts(id) ON DELETE RESTRICT,
+      predecessor_architecture_bootstrap_sha256 TEXT NOT NULL CHECK (
+        length(predecessor_architecture_bootstrap_sha256) = 64
+        AND predecessor_architecture_bootstrap_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_architecture_host_id TEXT NOT NULL UNIQUE CHECK (
+        successor_architecture_host_id GLOB 'rolehost-????????-????-????-????-????????????'
+        AND length(successor_architecture_host_id) = 45
+        AND successor_architecture_host_id NOT GLOB '*[^a-z0-9-]*'
+        AND substr(successor_architecture_host_id, 10) NOT GLOB '*[^0-9a-f-]*'
+      ),
+      successor_architecture_bootstrap_sha256 TEXT NOT NULL CHECK (
+        length(successor_architecture_bootstrap_sha256) = 64
+        AND successor_architecture_bootstrap_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      predecessor_architecture_host_executable_sha256 TEXT NOT NULL CHECK (
+        length(predecessor_architecture_host_executable_sha256) = 64
+        AND predecessor_architecture_host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_architecture_host_executable_sha256 TEXT NOT NULL CHECK (
+        length(successor_architecture_host_executable_sha256) = 64
+        AND successor_architecture_host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_architecture_executable_evidence_sha256 TEXT NOT NULL CHECK (
+        length(successor_architecture_executable_evidence_sha256) = 64
+        AND successor_architecture_executable_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      predecessor_security_host_id TEXT NOT NULL UNIQUE
+        REFERENCES herdr_role_hosts(id) ON DELETE RESTRICT,
+      predecessor_security_bootstrap_sha256 TEXT NOT NULL CHECK (
+        length(predecessor_security_bootstrap_sha256) = 64
+        AND predecessor_security_bootstrap_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_security_host_id TEXT NOT NULL UNIQUE CHECK (
+        successor_security_host_id GLOB 'rolehost-????????-????-????-????-????????????'
+        AND length(successor_security_host_id) = 45
+        AND successor_security_host_id NOT GLOB '*[^a-z0-9-]*'
+        AND substr(successor_security_host_id, 10) NOT GLOB '*[^0-9a-f-]*'
+      ),
+      successor_security_bootstrap_sha256 TEXT NOT NULL CHECK (
+        length(successor_security_bootstrap_sha256) = 64
+        AND successor_security_bootstrap_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      predecessor_security_host_executable_sha256 TEXT NOT NULL CHECK (
+        length(predecessor_security_host_executable_sha256) = 64
+        AND predecessor_security_host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_security_host_executable_sha256 TEXT NOT NULL CHECK (
+        length(successor_security_host_executable_sha256) = 64
+        AND successor_security_host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_security_executable_evidence_sha256 TEXT NOT NULL CHECK (
+        length(successor_security_executable_evidence_sha256) = 64
+        AND successor_security_executable_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      predecessor_test_host_id TEXT NOT NULL UNIQUE
+        REFERENCES herdr_role_hosts(id) ON DELETE RESTRICT,
+      predecessor_test_bootstrap_sha256 TEXT NOT NULL CHECK (
+        length(predecessor_test_bootstrap_sha256) = 64
+        AND predecessor_test_bootstrap_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_test_host_id TEXT NOT NULL UNIQUE CHECK (
+        successor_test_host_id GLOB 'rolehost-????????-????-????-????-????????????'
+        AND length(successor_test_host_id) = 45
+        AND successor_test_host_id NOT GLOB '*[^a-z0-9-]*'
+        AND substr(successor_test_host_id, 10) NOT GLOB '*[^0-9a-f-]*'
+      ),
+      successor_test_bootstrap_sha256 TEXT NOT NULL CHECK (
+        length(successor_test_bootstrap_sha256) = 64
+        AND successor_test_bootstrap_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      predecessor_test_host_executable_sha256 TEXT NOT NULL CHECK (
+        length(predecessor_test_host_executable_sha256) = 64
+        AND predecessor_test_host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_test_host_executable_sha256 TEXT NOT NULL CHECK (
+        length(successor_test_host_executable_sha256) = 64
+        AND successor_test_host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_test_executable_evidence_sha256 TEXT NOT NULL CHECK (
+        length(successor_test_executable_evidence_sha256) = 64
+        AND successor_test_executable_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      predecessor_synthesis_host_id TEXT NOT NULL UNIQUE
+        REFERENCES herdr_role_hosts(id) ON DELETE RESTRICT,
+      predecessor_synthesis_bootstrap_sha256 TEXT NOT NULL CHECK (
+        length(predecessor_synthesis_bootstrap_sha256) = 64
+        AND predecessor_synthesis_bootstrap_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_synthesis_host_id TEXT NOT NULL UNIQUE CHECK (
+        successor_synthesis_host_id GLOB 'rolehost-????????-????-????-????-????????????'
+        AND length(successor_synthesis_host_id) = 45
+        AND successor_synthesis_host_id NOT GLOB '*[^a-z0-9-]*'
+        AND substr(successor_synthesis_host_id, 10) NOT GLOB '*[^0-9a-f-]*'
+      ),
+      successor_synthesis_bootstrap_sha256 TEXT NOT NULL CHECK (
+        length(successor_synthesis_bootstrap_sha256) = 64
+        AND successor_synthesis_bootstrap_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      predecessor_synthesis_host_executable_sha256 TEXT NOT NULL CHECK (
+        length(predecessor_synthesis_host_executable_sha256) = 64
+        AND predecessor_synthesis_host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_synthesis_host_executable_sha256 TEXT NOT NULL CHECK (
+        length(successor_synthesis_host_executable_sha256) = 64
+        AND successor_synthesis_host_executable_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_synthesis_executable_evidence_sha256 TEXT NOT NULL CHECK (
+        length(successor_synthesis_executable_evidence_sha256) = 64
+        AND successor_synthesis_executable_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      workspace_id TEXT NOT NULL,
+      socket_device INTEGER NOT NULL CHECK (socket_device >= 0),
+      socket_inode INTEGER NOT NULL CHECK (socket_inode > 0),
+      socket_owner INTEGER NOT NULL CHECK (socket_owner >= 0),
+      socket_permissions INTEGER NOT NULL CHECK (socket_permissions BETWEEN 0 AND 511),
+      socket_peer_evidence_sha256 TEXT NOT NULL CHECK (
+        length(socket_peer_evidence_sha256) = 64
+        AND socket_peer_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_run_id TEXT NOT NULL UNIQUE CHECK (
+        length(successor_run_id) BETWEEN 8 AND 64
+        AND successor_run_id NOT GLOB '*[^a-z0-9-]*'
+      ),
+      prior_attempt_count INTEGER NOT NULL CHECK (prior_attempt_count = 3),
+      created_at REAL NOT NULL,
+      UNIQUE(repository_id, job_id, predecessor_generation, successor_generation),
+      CHECK (
+        successor_architecture_host_id != successor_security_host_id
+        AND successor_architecture_host_id != successor_test_host_id
+        AND successor_architecture_host_id != successor_synthesis_host_id
+        AND successor_security_host_id != successor_test_host_id
+        AND successor_security_host_id != successor_synthesis_host_id
+        AND successor_test_host_id != successor_synthesis_host_id
+      )
+    ) STRICT
+    """
+
+  private static let herdrGenerationRolloverAuthorizationInsertAuthorityV9 = """
+    CREATE TRIGGER herdr_generation_rollover_authorization_insert_authority
+    BEFORE INSERT ON herdr_generation_rollover_authorizations
+    WHEN (SELECT paused FROM app_settings WHERE singleton = 1) != 1
+      OR EXISTS (
+        SELECT 1 FROM herdr_generation_rollover_authorizations WHERE job_id = NEW.job_id
+      )
+      OR EXISTS (
+        SELECT 1 FROM herdr_role_host_replacement_authorizations WHERE job_id = NEW.job_id
+      )
+      OR EXISTS (
+        SELECT 1 FROM herdr_replacement_role_hosts WHERE job_id = NEW.job_id
+      )
+      OR EXISTS (
+        SELECT 1 FROM pi_runs WHERE id = NEW.successor_run_id
+      )
+      OR EXISTS (
+        SELECT 1 FROM herdr_role_hosts
+        WHERE id IN (
+          NEW.successor_architecture_host_id, NEW.successor_security_host_id,
+          NEW.successor_test_host_id, NEW.successor_synthesis_host_id
+        )
+      )
+      OR NOT EXISTS (
+        SELECT 1
+        FROM jobs AS job
+        JOIN herdr_job_bindings AS binding ON binding.job_id = job.id
+        JOIN herdr_repository_bindings AS repository
+          ON repository.repository_id = job.repository_id
+        JOIN pi_runs AS run ON run.id = NEW.predecessor_run_id
+        JOIN pi_run_launches AS q1
+          ON q1.run_id = run.id AND q1.queue_sequence = 1
+        JOIN pi_run_launches AS q2
+          ON q2.run_id = run.id AND q2.queue_sequence = 2
+        JOIN pi_run_launches AS q3
+          ON q3.run_id = run.id AND q3.queue_sequence = 3
+        WHERE job.id = NEW.job_id
+          AND job.repository_id = NEW.repository_id
+          AND job.kind = 'prReview'
+          AND job.state = 'runningPi'
+          AND binding.repository_id = NEW.repository_id
+          AND binding.generation = NEW.predecessor_generation
+          AND binding.workspace_id = NEW.workspace_id
+          AND binding.state = 'lost'
+          AND repository.state = 'active'
+          AND repository.workspace_id = NEW.workspace_id
+          AND repository.socket_device = NEW.socket_device
+          AND repository.socket_inode = NEW.socket_inode
+          AND repository.socket_owner = NEW.socket_owner
+          AND repository.socket_permissions = NEW.socket_permissions
+          AND run.job_id = NEW.job_id
+          AND run.runtime_kind = 'herdr'
+          AND run.workflow = 'pr-review'
+          AND run.role = 'architecture'
+          AND run.topology_generation = NEW.predecessor_generation
+          AND run.resumes_run_id IS NULL
+          AND run.accepted = 0 AND run.settled = 0 AND run.outcome = 'running'
+          AND q1.launch_attempt_id = NEW.q1_launch_attempt_id
+          AND q1.role_host_id = NEW.predecessor_architecture_host_id
+          AND q1.descriptor_sha256 = NEW.q1_descriptor_sha256
+          AND q1.launch_mode = 'fresh' AND q1.state = 'failed'
+          AND q1.failure_code = NEW.q1_failure_code
+          AND q1.child_pid = NEW.q1_child_pid
+          AND q1.child_process_group_id = NEW.q1_child_process_group_id
+          AND q1.child_start_seconds = NEW.q1_child_start_seconds
+          AND q1.child_start_microseconds = NEW.q1_child_start_microseconds
+          AND q2.launch_attempt_id = NEW.q2_launch_attempt_id
+          AND q2.role_host_id = NEW.predecessor_architecture_host_id
+          AND q2.descriptor_sha256 = NEW.q2_descriptor_sha256
+          AND q2.launch_mode = 'fresh' AND q2.state = 'failed'
+          AND q2.failure_code = NEW.q2_failure_code AND q2.child_pid IS NULL
+          AND q3.launch_attempt_id = NEW.q3_launch_attempt_id
+          AND q3.role_host_id = NEW.predecessor_architecture_host_id
+          AND q3.descriptor_sha256 = NEW.q3_descriptor_sha256
+          AND q3.launch_mode = 'fresh' AND q3.state = 'failed'
+          AND q3.failure_code = NEW.q3_failure_code AND q3.child_pid IS NULL
+          AND (SELECT COUNT(*) FROM pi_run_launches WHERE run_id = run.id) = 3
+          AND (SELECT COUNT(*) FROM pi_run_results WHERE run_id = run.id) = 0
+          AND (SELECT COUNT(*) FROM pi_run_session_origins WHERE run_id = run.id) = 0
+          AND (
+            SELECT COUNT(*) FROM herdr_role_hosts
+            WHERE job_id = NEW.job_id AND generation = NEW.predecessor_generation
+              AND state = 'lost'
+          ) = 4
+          AND EXISTS (
+            SELECT 1 FROM herdr_role_hosts
+            WHERE id = NEW.predecessor_architecture_host_id
+              AND job_id = NEW.job_id AND generation = NEW.predecessor_generation
+              AND role = 'architecture' AND state = 'lost'
+              AND bootstrap_descriptor_sha256
+                = NEW.predecessor_architecture_bootstrap_sha256
+              AND host_executable_sha256
+                = NEW.predecessor_architecture_host_executable_sha256
+          )
+          AND EXISTS (
+            SELECT 1 FROM herdr_role_hosts
+            WHERE id = NEW.predecessor_security_host_id
+              AND job_id = NEW.job_id AND generation = NEW.predecessor_generation
+              AND role = 'security' AND state = 'lost'
+              AND bootstrap_descriptor_sha256 = NEW.predecessor_security_bootstrap_sha256
+              AND host_executable_sha256
+                = NEW.predecessor_security_host_executable_sha256
+          )
+          AND EXISTS (
+            SELECT 1 FROM herdr_role_hosts
+            WHERE id = NEW.predecessor_test_host_id
+              AND job_id = NEW.job_id AND generation = NEW.predecessor_generation
+              AND role = 'test' AND state = 'lost'
+              AND bootstrap_descriptor_sha256 = NEW.predecessor_test_bootstrap_sha256
+              AND host_executable_sha256
+                = NEW.predecessor_test_host_executable_sha256
+          )
+          AND EXISTS (
+            SELECT 1 FROM herdr_role_hosts
+            WHERE id = NEW.predecessor_synthesis_host_id
+              AND job_id = NEW.job_id AND generation = NEW.predecessor_generation
+              AND role = 'synthesis' AND state = 'lost'
+              AND bootstrap_descriptor_sha256
+                = NEW.predecessor_synthesis_bootstrap_sha256
+              AND host_executable_sha256
+                = NEW.predecessor_synthesis_host_executable_sha256
+          )
+          AND (
+            SELECT COUNT(*) FROM job_transitions
+            WHERE job_id = NEW.job_id
+              AND event_key = (
+                'canary:' || NEW.canary_authorization_sha256 || ':m8:admit:' || NEW.job_id
+              )
+          ) = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM job_transitions
+            WHERE job_id = NEW.job_id
+              AND event_key = (
+                'canary:' || NEW.canary_authorization_sha256 || ':m8:close:' || NEW.job_id
+              )
+          )
+          AND (
+            SELECT COUNT(*) FROM job_transitions
+            WHERE job_id = NEW.job_id
+              AND event_key GLOB (
+                'canary:' || NEW.canary_authorization_sha256 || ':m8:pi-fresh-retry:'
+                || run.id || ':' || q1.launch_attempt_id || ':*'
+              )
+          ) = 1
+          AND (
+            SELECT COUNT(*) FROM job_transitions
+            WHERE job_id = NEW.job_id
+              AND event_key GLOB (
+                'canary:' || NEW.canary_authorization_sha256 || ':m8:pi-fresh-retry:'
+                || run.id || ':' || q2.launch_attempt_id || ':*'
+              )
+          ) = 1
+          AND (
+            SELECT COUNT(*) FROM job_transitions
+            WHERE job_id = NEW.job_id
+              AND event_key GLOB (
+                'canary:' || NEW.canary_authorization_sha256 || ':m8:pi-fresh-retry:'
+                || run.id || ':' || q3.launch_attempt_id || ':*'
+              )
+          ) = 2
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'generation rollover lacks exact lost-lineage authority');
+    END
+    """
+
+  private static let herdrGenerationRolloverAuthorizationUpdateDeniedV9 = """
+    CREATE TRIGGER herdr_generation_rollover_authorization_update_denied
+    BEFORE UPDATE ON herdr_generation_rollover_authorizations
+    BEGIN
+      SELECT RAISE(ABORT, 'generation rollover authorization is immutable');
+    END
+    """
+
+  private static let herdrGenerationRolloverAuthorizationDeleteDeniedV9 = """
+    CREATE TRIGGER herdr_generation_rollover_authorization_delete_denied
+    BEFORE DELETE ON herdr_generation_rollover_authorizations
+    BEGIN
+      SELECT RAISE(ABORT, 'generation rollover authorization is append-only');
+    END
+    """
+
+  private static let herdrPiRunRolloversTableV9 = """
+    CREATE TABLE herdr_pi_run_rollovers (
+      rollover_authorization_sha256 TEXT PRIMARY KEY
+        REFERENCES herdr_generation_rollover_authorizations(
+          rollover_authorization_sha256
+        ) ON DELETE RESTRICT,
+      q4_authorization_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(q4_authorization_sha256) = 64
+        AND q4_authorization_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_evidence_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(q4_evidence_sha256) = 64
+        AND q4_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      predecessor_run_id TEXT NOT NULL UNIQUE REFERENCES pi_runs(id) ON DELETE RESTRICT,
+      successor_run_id TEXT NOT NULL UNIQUE
+        REFERENCES pi_runs(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+      successor_architecture_host_id TEXT NOT NULL UNIQUE
+        REFERENCES herdr_role_hosts(id) ON DELETE RESTRICT,
+      planned_q4_launch_attempt_id TEXT NOT NULL UNIQUE CHECK (
+        planned_q4_launch_attempt_id GLOB 'launch-????????-????-????-????-????????????'
+        AND length(planned_q4_launch_attempt_id) = 43
+        AND planned_q4_launch_attempt_id NOT GLOB '*[^a-z0-9-]*'
+        AND substr(planned_q4_launch_attempt_id, 8) NOT GLOB '*[^0-9a-f-]*'
+      ),
+      prior_attempt_count INTEGER NOT NULL CHECK (prior_attempt_count = 3),
+      lineage_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(lineage_sha256) = 64 AND lineage_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_run_nonce TEXT NOT NULL CHECK (
+        length(successor_run_nonce) = 64 AND successor_run_nonce NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_request_sha256 TEXT NOT NULL CHECK (
+        length(successor_request_sha256) = 64
+        AND successor_request_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_resource_version TEXT NOT NULL,
+      successor_resource_hash TEXT NOT NULL CHECK (
+        length(successor_resource_hash) = 64
+        AND successor_resource_hash NOT GLOB '*[^0-9a-f]*'
+      ),
+      successor_model TEXT NOT NULL,
+      successor_session_path TEXT NOT NULL,
+      successor_channel_path TEXT NOT NULL,
+      q4_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q4_descriptor_sha256) = 64 AND q4_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_configuration_sha256) = 64
+        AND q4_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prompt_sha256 TEXT NOT NULL CHECK (
+        length(q4_prompt_sha256) = 64 AND q4_prompt_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_workflow_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_workflow_configuration_sha256) = 64
+        AND q4_workflow_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prior_launch_descriptor_sha256 TEXT NOT NULL CHECK (
+        length(q4_prior_launch_descriptor_sha256) = 64
+        AND q4_prior_launch_descriptor_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_prior_launch_configuration_sha256 TEXT NOT NULL CHECK (
+        length(q4_prior_launch_configuration_sha256) = 64
+        AND q4_prior_launch_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      q4_resource_tree_sha256 TEXT NOT NULL CHECK (
+        length(q4_resource_tree_sha256) = 64
+        AND q4_resource_tree_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      created_at REAL NOT NULL
+    ) STRICT
+    """
+
+  private static let herdrPiRunRolloverInsertAuthorityV9 = """
+    CREATE TRIGGER herdr_pi_run_rollover_insert_authority
+    BEFORE INSERT ON herdr_pi_run_rollovers
+    WHEN (SELECT paused FROM app_settings WHERE singleton = 1) != 1
+      OR EXISTS (SELECT 1 FROM pi_runs WHERE id = NEW.successor_run_id)
+      OR EXISTS (
+        SELECT 1 FROM pi_run_launches
+        WHERE launch_attempt_id = NEW.planned_q4_launch_attempt_id
+      )
+      OR NOT EXISTS (
+        SELECT 1
+        FROM herdr_generation_rollover_authorizations AS authorization
+        JOIN pi_runs AS predecessor ON predecessor.id = authorization.predecessor_run_id
+        JOIN herdr_job_bindings AS binding ON binding.job_id = authorization.job_id
+        WHERE authorization.rollover_authorization_sha256
+            = NEW.rollover_authorization_sha256
+          AND authorization.predecessor_run_id = NEW.predecessor_run_id
+          AND authorization.successor_run_id = NEW.successor_run_id
+          AND authorization.successor_architecture_host_id
+            = NEW.successor_architecture_host_id
+          AND authorization.prior_attempt_count = NEW.prior_attempt_count
+          AND authorization.lineage_sha256 = NEW.lineage_sha256
+          AND predecessor.job_id = authorization.job_id
+          AND predecessor.topology_generation = authorization.predecessor_generation
+          AND predecessor.accepted = 0 AND predecessor.settled = 0
+          AND predecessor.outcome = 'running'
+          AND binding.generation = authorization.successor_generation
+          AND binding.workspace_id = authorization.workspace_id
+          AND binding.state = 'active'
+          AND (
+            SELECT COUNT(*) FROM pi_runs
+            WHERE job_id = authorization.job_id
+              AND topology_generation = authorization.successor_generation
+          ) = 0
+          AND (
+            SELECT COUNT(*) FROM herdr_role_hosts
+            WHERE job_id = authorization.job_id
+              AND generation = authorization.successor_generation
+              AND state = 'waiting' AND last_queue_sequence = 0
+          ) = 4
+          AND EXISTS (
+            SELECT 1 FROM herdr_role_hosts
+            WHERE id = authorization.successor_architecture_host_id
+              AND role = 'architecture' AND state = 'waiting' AND last_queue_sequence = 0
+              AND bootstrap_descriptor_sha256
+                = authorization.successor_architecture_bootstrap_sha256
+              AND host_executable_sha256
+                = authorization.successor_architecture_host_executable_sha256
+          )
+          AND EXISTS (
+            SELECT 1 FROM herdr_role_hosts
+            WHERE id = authorization.successor_security_host_id
+              AND role = 'security' AND state = 'waiting' AND last_queue_sequence = 0
+              AND bootstrap_descriptor_sha256
+                = authorization.successor_security_bootstrap_sha256
+              AND host_executable_sha256
+                = authorization.successor_security_host_executable_sha256
+          )
+          AND EXISTS (
+            SELECT 1 FROM herdr_role_hosts
+            WHERE id = authorization.successor_test_host_id
+              AND role = 'test' AND state = 'waiting' AND last_queue_sequence = 0
+              AND bootstrap_descriptor_sha256 = authorization.successor_test_bootstrap_sha256
+              AND host_executable_sha256
+                = authorization.successor_test_host_executable_sha256
+          )
+          AND EXISTS (
+            SELECT 1 FROM herdr_role_hosts
+            WHERE id = authorization.successor_synthesis_host_id
+              AND role = 'synthesis' AND state = 'waiting' AND last_queue_sequence = 0
+              AND bootstrap_descriptor_sha256
+                = authorization.successor_synthesis_bootstrap_sha256
+              AND host_executable_sha256
+                = authorization.successor_synthesis_host_executable_sha256
+          )
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'successor run lacks exact generation rollover authority');
+    END
+    """
+
+  private static let herdrPiRunRolloverUpdateDeniedV9 = """
+    CREATE TRIGGER herdr_pi_run_rollover_update_denied
+    BEFORE UPDATE ON herdr_pi_run_rollovers
+    BEGIN
+      SELECT RAISE(ABORT, 'successor run rollover is immutable');
+    END
+    """
+
+  private static let herdrPiRunRolloverDeleteDeniedV9 = """
+    CREATE TRIGGER herdr_pi_run_rollover_delete_denied
+    BEFORE DELETE ON herdr_pi_run_rollovers
+    BEGIN
+      SELECT RAISE(ABORT, 'successor run rollover is append-only');
+    END
+    """
+
+  private static let herdrRoleHostInitialQueueAuthorityV9 = """
+    CREATE TRIGGER herdr_role_host_initial_queue_authority
+    BEFORE UPDATE OF last_queue_sequence ON herdr_role_hosts
+    WHEN NEW.last_queue_sequence IS NOT OLD.last_queue_sequence
+      AND NEW.last_queue_sequence != OLD.last_queue_sequence + 1
+      AND NOT (
+        OLD.last_queue_sequence = 0 AND NEW.last_queue_sequence = 3
+        AND OLD.state = 'waiting' AND NEW.state = OLD.state
+        AND NEW.id IS OLD.id AND NEW.job_id IS OLD.job_id
+        AND NEW.generation IS OLD.generation AND NEW.role IS OLD.role
+        AND NEW.workspace_id IS OLD.workspace_id AND NEW.tab_id IS OLD.tab_id
+        AND NEW.pane_id IS OLD.pane_id AND NEW.terminal_id IS OLD.terminal_id
+        AND NEW.bootstrap_descriptor_sha256 IS OLD.bootstrap_descriptor_sha256
+        AND NEW.host_executable_sha256 IS OLD.host_executable_sha256
+        AND NEW.host_pid IS OLD.host_pid
+        AND NEW.host_start_seconds IS OLD.host_start_seconds
+        AND NEW.host_start_microseconds IS OLD.host_start_microseconds
+        AND NEW.lifecycle_sequence IS OLD.lifecycle_sequence
+        AND NEW.created_at IS OLD.created_at AND NEW.updated_at >= OLD.updated_at
+        AND EXISTS (
+          SELECT 1
+          FROM herdr_pi_run_rollovers AS rollover
+          JOIN herdr_generation_rollover_authorizations AS authorization
+            ON authorization.rollover_authorization_sha256
+              = rollover.rollover_authorization_sha256
+          WHERE rollover.successor_architecture_host_id = OLD.id
+            AND authorization.job_id = OLD.job_id
+            AND authorization.successor_generation = OLD.generation
+            AND authorization.successor_architecture_host_id = OLD.id
+        )
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'role host queue offset lacks exact rollover authority');
+    END
+    """
+
+  private static let piRunsGenerationRolloverInsertAuthorityV9 = """
+    CREATE TRIGGER pi_runs_generation_rollover_insert_authority
+    BEFORE INSERT ON pi_runs
+    WHEN NEW.runtime_kind = 'herdr'
+      AND EXISTS (
+        SELECT 1 FROM herdr_generation_rollover_authorizations AS authorization
+        WHERE authorization.job_id = NEW.job_id
+          AND authorization.successor_generation = NEW.topology_generation
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM herdr_generation_rollover_authorizations AS authorization
+        JOIN pi_runs AS predecessor ON predecessor.id = authorization.predecessor_run_id
+        JOIN herdr_pi_run_rollovers AS rollover
+          ON rollover.rollover_authorization_sha256
+            = authorization.rollover_authorization_sha256
+          AND rollover.predecessor_run_id = predecessor.id
+          AND rollover.successor_run_id = authorization.successor_run_id
+        JOIN herdr_job_bindings AS binding ON binding.job_id = authorization.job_id
+        WHERE authorization.job_id = NEW.job_id
+          AND authorization.successor_generation = NEW.topology_generation
+          AND authorization.successor_run_id = NEW.id
+          AND NEW.workflow = predecessor.workflow
+          AND NEW.role = 'architecture' AND NEW.round = predecessor.round
+          AND NEW.job_attempt = predecessor.job_attempt
+          AND NEW.job_step = predecessor.job_step
+          AND NEW.resumes_run_id IS NULL
+          AND NEW.run_nonce = rollover.successor_run_nonce
+          AND NEW.request_sha256 = rollover.successor_request_sha256
+          AND NEW.resource_version = rollover.successor_resource_version
+          AND NEW.resource_hash = rollover.successor_resource_hash
+          AND NEW.model = rollover.successor_model
+          AND NEW.session_path = rollover.successor_session_path
+          AND NEW.channel_path = rollover.successor_channel_path
+          AND NEW.accepted = 0 AND NEW.settled = 0
+          AND NEW.structured_result_digest IS NULL AND NEW.outcome = 'prepared'
+          AND binding.generation = authorization.successor_generation
+          AND binding.workspace_id = authorization.workspace_id
+          AND binding.state = 'active'
+          AND (SELECT COUNT(*) FROM pi_runs
+            WHERE job_id = NEW.job_id
+              AND topology_generation = NEW.topology_generation) = 0
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'Pi run lacks exact generation rollover identity');
+    END
+    """
+
+  private static let herdrGenerationRolloverPredecessorRunImmutableV9 = """
+    CREATE TRIGGER herdr_generation_rollover_predecessor_run_immutable
+    BEFORE UPDATE ON pi_runs
+    WHEN EXISTS (
+      SELECT 1 FROM herdr_generation_rollover_authorizations AS authorization
+      WHERE authorization.predecessor_run_id = OLD.id
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'generation rollover predecessor run is immutable');
+    END
+    """
+
+  private static let herdrGenerationRolloverPredecessorLaunchImmutableV9 = """
+    CREATE TRIGGER herdr_generation_rollover_predecessor_launch_immutable
+    BEFORE UPDATE ON pi_run_launches
+    WHEN EXISTS (
+      SELECT 1 FROM herdr_generation_rollover_authorizations AS authorization
+      WHERE OLD.launch_attempt_id IN (
+        authorization.q1_launch_attempt_id,
+        authorization.q2_launch_attempt_id,
+        authorization.q3_launch_attempt_id
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'generation rollover predecessor launches are immutable');
+    END
+    """
+
+  private static let herdrGenerationRolloverPredecessorHostImmutableV9 = """
+    CREATE TRIGGER herdr_generation_rollover_predecessor_host_immutable
+    BEFORE UPDATE ON herdr_role_hosts
+    WHEN EXISTS (
+      SELECT 1 FROM herdr_generation_rollover_authorizations AS authorization
+      WHERE OLD.id IN (
+        authorization.predecessor_architecture_host_id,
+        authorization.predecessor_security_host_id,
+        authorization.predecessor_test_host_id,
+        authorization.predecessor_synthesis_host_id
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'generation rollover predecessor hosts are immutable');
+    END
+    """
+
+  private static let herdrJobBindingGenerationRolloverAuthorityV9 = """
+    CREATE TRIGGER herdr_job_binding_generation_rollover_authority
+    BEFORE UPDATE ON herdr_job_bindings
+    WHEN EXISTS (
+      SELECT 1 FROM herdr_generation_rollover_authorizations AS authorization
+      WHERE authorization.job_id = OLD.job_id
+    ) AND NOT EXISTS (
+      SELECT 1 FROM herdr_generation_rollover_authorizations AS authorization
+      WHERE authorization.job_id = OLD.job_id
+        AND NEW.job_id IS OLD.job_id
+        AND NEW.repository_id IS OLD.repository_id
+        AND NEW.workspace_id = authorization.workspace_id
+        AND NEW.created_at IS OLD.created_at
+        AND NEW.updated_at >= OLD.updated_at
+        AND (
+          OLD.generation = authorization.predecessor_generation
+            AND OLD.state = 'lost'
+            AND NEW.generation = authorization.successor_generation
+            AND NEW.tab_id IS NULL AND NEW.state = 'prepared'
+          OR OLD.generation = authorization.successor_generation
+            AND NEW.generation = OLD.generation
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'job binding lacks exact generation rollover authority');
+    END
+    """
+
+  private static let appSettingsGenerationRolloverResumeDeniedV9 = """
+    CREATE TRIGGER app_settings_generation_rollover_resume_denied
+    BEFORE UPDATE OF paused ON app_settings
+    WHEN OLD.paused = 1 AND NEW.paused = 0
+      AND EXISTS (SELECT 1 FROM herdr_generation_rollover_authorizations)
+    BEGIN
+      SELECT RAISE(ABORT, 'Resume requires separate generation rollover authorization');
+    END
+    """
+
+  private static let appSettingsGenerationRolloverInsertResumeDeniedV9 = """
+    CREATE TRIGGER app_settings_generation_rollover_insert_resume_denied
+    BEFORE INSERT ON app_settings
+    WHEN NEW.paused = 0
+      AND EXISTS (SELECT 1 FROM herdr_generation_rollover_authorizations)
+    BEGIN
+      SELECT RAISE(ABORT, 'Resume requires separate generation rollover authorization');
+    END
+    """
+
+  private static let appSettingsGenerationRolloverDeleteDeniedV9 = """
+    CREATE TRIGGER app_settings_generation_rollover_delete_denied
+    BEFORE DELETE ON app_settings
+    WHEN EXISTS (SELECT 1 FROM herdr_generation_rollover_authorizations)
+    BEGIN
+      SELECT RAISE(ABORT, 'generation rollover pause authority is immutable');
+    END
+    """
+
   private static let herdrPrimeIntentDeleteDeniedV7 = """
     CREATE TRIGGER herdr_prime_intent_delete_denied
     BEFORE DELETE ON herdr_topology_intents
@@ -3406,13 +4186,36 @@ public enum DatabaseSchema {
   private static let piRunLaunchInsertAuthorityV9: String = {
     let prefix = "WHEN NOT EXISTS ("
     let suffix = "\n)\nBEGIN"
-    guard let prefixRange = piRunLaunchInsertAuthorityV8.range(of: prefix),
-      piRunLaunchInsertAuthorityV8.range(
-        of: suffix,
-        options: .backwards
-      ) != nil
-    else { preconditionFailure("schema-8 launch authority shape changed") }
+    let settledNeedle = "AND run.settled = 0"
+    let hostSequenceNeedle = "AND host.state IN ('waiting', 'running')"
     var value = piRunLaunchInsertAuthorityV8
+    guard value.contains(settledNeedle), value.contains(hostSequenceNeedle) else {
+      preconditionFailure("schema-8 launch authority predicates changed")
+    }
+    value = value.replacingOccurrences(
+      of: settledNeedle,
+      with: """
+        AND run.settled = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM herdr_pi_run_rollovers AS rollover
+            WHERE rollover.successor_run_id = run.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM herdr_generation_rollover_authorizations AS authorization
+            WHERE authorization.successor_run_id = run.id
+          )
+        """
+    )
+    value = value.replacingOccurrences(
+      of: hostSequenceNeedle,
+      with: """
+        AND host.state IN ('waiting', 'running')
+          AND NEW.queue_sequence = host.last_queue_sequence + 1
+        """
+    )
+    guard let prefixRange = value.range(of: prefix),
+      value.range(of: suffix, options: .backwards) != nil
+    else { preconditionFailure("schema-8 launch authority shape changed") }
     value.replaceSubrange(
       prefixRange,
       with: "WHEN NOT (\n      (NEW.execution_role_host_id IS NULL AND EXISTS ("
@@ -3424,6 +4227,89 @@ public enum DatabaseSchema {
       adjustedSuffixRange,
       with: """
 
+            )
+          )
+          OR (
+            NEW.execution_role_host_id IS NULL
+            AND EXISTS (
+              SELECT 1
+              FROM herdr_pi_run_rollovers AS rollover
+              JOIN herdr_generation_rollover_authorizations AS authorization
+                ON authorization.rollover_authorization_sha256
+                  = rollover.rollover_authorization_sha256
+              JOIN pi_runs AS successor ON successor.id = rollover.successor_run_id
+              JOIN pi_runs AS predecessor ON predecessor.id = rollover.predecessor_run_id
+              JOIN herdr_job_bindings AS binding ON binding.job_id = successor.job_id
+              JOIN herdr_role_hosts AS host ON host.id = NEW.role_host_id
+              JOIN pi_run_launches AS q1
+                ON q1.run_id = predecessor.id AND q1.queue_sequence = 1
+              JOIN pi_run_launches AS q2
+                ON q2.run_id = predecessor.id AND q2.queue_sequence = 2
+              JOIN pi_run_launches AS q3
+                ON q3.run_id = predecessor.id AND q3.queue_sequence = 3
+              WHERE successor.id = NEW.run_id
+                AND successor.runtime_kind = 'herdr'
+                AND successor.workflow = 'pr-review'
+                AND successor.role = 'architecture'
+                AND successor.resumes_run_id IS NULL
+                AND successor.accepted = 0 AND successor.settled = 0
+                AND successor.outcome IN ('prepared', 'running')
+                AND successor.topology_generation = authorization.successor_generation
+                AND predecessor.id = authorization.predecessor_run_id
+                AND predecessor.job_id = successor.job_id
+                AND predecessor.topology_generation
+                  = authorization.predecessor_generation
+                AND predecessor.accepted = 0 AND predecessor.settled = 0
+                AND host.id = rollover.successor_architecture_host_id
+                AND host.id = authorization.successor_architecture_host_id
+                AND host.job_id = successor.job_id
+                AND host.generation = successor.topology_generation
+                AND host.role = 'architecture'
+                AND host.state IN ('waiting', 'running')
+                AND host.last_queue_sequence = 3
+                AND host.bootstrap_descriptor_sha256
+                  = authorization.successor_architecture_bootstrap_sha256
+                AND host.host_executable_sha256
+                  = authorization.successor_architecture_host_executable_sha256
+                AND binding.generation = successor.topology_generation
+                AND binding.workspace_id = authorization.workspace_id
+                AND binding.state = 'active'
+                AND rollover.planned_q4_launch_attempt_id = NEW.launch_attempt_id
+                AND rollover.q4_descriptor_sha256 = NEW.descriptor_sha256
+                AND rollover.prior_attempt_count = 3
+                AND rollover.lineage_sha256 = authorization.lineage_sha256
+                AND NEW.queue_sequence = 4
+                AND NEW.queue_sequence = host.last_queue_sequence + 1
+                AND NEW.launch_mode = 'fresh'
+                AND NEW.expected_session_id IS NULL
+                AND NEW.resume_boundary_sha256 IS NULL
+                AND (SELECT paused FROM app_settings WHERE singleton = 1) = 1
+                AND (SELECT COUNT(*) FROM pi_run_launches
+                  WHERE run_id = successor.id) = 0
+                AND (SELECT COUNT(*) FROM pi_run_results
+                  WHERE run_id = successor.id) = 0
+                AND (SELECT COUNT(*) FROM pi_run_session_origins
+                  WHERE run_id = successor.id) = 0
+                AND q1.launch_attempt_id = authorization.q1_launch_attempt_id
+                AND q1.descriptor_sha256 = authorization.q1_descriptor_sha256
+                AND q1.launch_mode = 'fresh' AND q1.state = 'failed'
+                AND q1.failure_code = 'RUNTIME_TIMEOUT' AND q1.child_pid IS NOT NULL
+                AND q2.launch_attempt_id = authorization.q2_launch_attempt_id
+                AND q2.descriptor_sha256 = authorization.q2_descriptor_sha256
+                AND q2.launch_mode = 'fresh' AND q2.state = 'failed'
+                AND q2.failure_code = 'HERDR_TRANSACTION_FAILED' AND q2.child_pid IS NULL
+                AND q3.launch_attempt_id = authorization.q3_launch_attempt_id
+                AND q3.descriptor_sha256 = authorization.q3_descriptor_sha256
+                AND q3.launch_mode = 'fresh' AND q3.state = 'failed'
+                AND q3.failure_code = 'HERDR_TRANSACTION_FAILED' AND q3.child_pid IS NULL
+                AND (SELECT COUNT(*) FROM pi_run_launches
+                  WHERE run_id = predecessor.id) = 3
+                AND (SELECT COUNT(*) FROM pi_run_results
+                  WHERE run_id = predecessor.id) = 0
+                AND NOT EXISTS (
+                  SELECT 1 FROM herdr_role_host_replacement_authorizations
+                  WHERE job_id = successor.job_id
+                )
             )
           )
           OR (

@@ -371,8 +371,8 @@ private struct ReadyHerdrReadiness: HerdrRuntimeReadinessChecking {
   func preflight() -> EngineHerdrStatus {
     EngineHerdrStatus(
       state: .ready,
-      version: "0.8.0",
-      protocolVersion: 19,
+      version: "0.8.2",
+      protocolVersion: 20,
       executableSHA256: String(repeating: "e", count: 64),
       schemaSHA256: String(repeating: "d", count: 64),
       policySHA256: String(repeating: "c", count: 64)

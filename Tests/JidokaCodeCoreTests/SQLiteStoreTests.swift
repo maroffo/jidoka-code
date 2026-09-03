@@ -173,6 +173,28 @@ struct SQLiteStoreTests {
         "SELECT COUNT(*) FROM herdr_topology_intents WHERE state = 'unknown'"
       ) == 2
     )
+    let migratedRunStore = PiRunStore(database: upgraded)
+    try await migratedRunStore.invalidateRepositoryBinding(
+      repositoryID: UUID(uuidString: "51000000-0000-4000-8000-000000000001")!,
+      observedHandshake: schemaNineHandshake(),
+      now: Date(timeIntervalSince1970: 99)
+    )
+    #expect(
+      try await upgraded.scalarText(
+        "SELECT reason FROM herdr_repository_binding_history ORDER BY id DESC LIMIT 1"
+      ) == "RUNTIME_CHANGED"
+    )
+    #expect(
+      try await upgraded.scalarInt(
+        "SELECT COUNT(*) FROM herdr_role_hosts WHERE state = 'lost'"
+      ) == 4
+    )
+    #expect(
+      try await upgraded.scalarText(
+        "SELECT state FROM herdr_job_bindings WHERE job_id = (SELECT job_id FROM pi_runs WHERE id = ?)",
+        bindings: [.text(schemaEightRunID)]
+      ) == "lost"
+    )
     try await assertDatabaseIntegrity(upgraded)
 
     let upgradedObjectNames = try await schemaObjectNames(in: upgraded)
@@ -197,7 +219,7 @@ struct SQLiteStoreTests {
 
   @Test(
     "production schema 8 to 9 rolls back after every exact migration statement",
-    arguments: Array(1...51)
+    arguments: Array(1...76)
   )
   func productionArchitectureReplacementMigrationRollsBack(
     afterStatement completedStatementCount: Int
@@ -416,10 +438,20 @@ private let schemaEightMigrations = Array(DatabaseSchema.migrations.prefix(8))
 private let schemaEightRunID = "run-schema8-architecture"
 private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
 private let expectedSchemaNineMigrationDigest =
-  "5e8b3b5d76399b933405c211a42f6ea796cea0e2f376dcfe18c9644d9c1e33f4"
+  "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
 private let expectedPopulatedSchemaEightDigest =
   "a8ceef8e29c5b2bed740a52be3912457543a176ca299538ae3714685b8233992"
 private let v9AddedObjects: Set<String> = [
+  "app_settings_generation_rollover_delete_denied",
+  "app_settings_generation_rollover_insert_resume_denied",
+  "herdr_generation_rollover_authorization_delete_denied",
+  "herdr_generation_rollover_authorization_insert_authority",
+  "herdr_generation_rollover_authorization_update_denied",
+  "herdr_generation_rollover_authorizations",
+  "herdr_generation_rollover_predecessor_host_immutable",
+  "herdr_generation_rollover_predecessor_launch_immutable",
+  "herdr_generation_rollover_predecessor_run_immutable",
+  "herdr_job_binding_generation_rollover_authority",
   "herdr_ordinary_role_host_replacement_insert_collision_denied",
   "herdr_ordinary_role_host_replacement_physical_collision_denied",
   "herdr_replaced_predecessor_immutable",
@@ -438,8 +470,15 @@ private let v9AddedObjects: Set<String> = [
   "herdr_replacement_role_hosts_active_pane_idx",
   "herdr_replacement_role_hosts_active_process_idx",
   "herdr_replacement_role_hosts_active_terminal_idx",
+  "herdr_role_host_initial_queue_authority",
   "herdr_role_host_replacement_candidates",
+  "herdr_pi_run_rollover_delete_denied",
+  "herdr_pi_run_rollover_insert_authority",
+  "herdr_pi_run_rollover_update_denied",
+  "herdr_pi_run_rollovers",
   "pi_run_launches_one_active_execution_host_idx",
+  "pi_runs_generation_rollover_insert_authority",
+  "app_settings_generation_rollover_resume_denied",
 ]
 
 private struct SchemaEightSnapshot: Equatable {
@@ -847,9 +886,12 @@ private func productionSchemaNineMigration() throws -> SQLiteMigration {
   )
   #expect(DatabaseSchema.migrations.firstIndex(of: migration) == 8)
   #expect(migration.version == 9)
-  #expect(migration.name == "authorized-architecture-role-host-replacement")
+  #expect(
+    migration.name
+      == "authorized-architecture-role-host-replacement-and-generation-rollover"
+  )
   #expect(migration.requiresBackup)
-  #expect(migration.statements.count == 51)
+  #expect(migration.statements.count == 76)
   #expect(migrationDigest(migration) == expectedSchemaNineMigrationDigest)
   return migration
 }
@@ -1126,6 +1168,33 @@ private func schemaEightHandshake() -> HerdrHandshake {
     snapshot: HerdrSessionSnapshot(
       version: "0.8.0",
       protocolVersion: 19,
+      focusedWorkspaceID: nil,
+      focusedTabID: nil,
+      focusedPaneID: nil,
+      workspaces: [],
+      tabs: [],
+      panes: [],
+      agents: []
+    ),
+    socketIdentity: HerdrSocketIdentity(
+      device: 10,
+      inode: 20,
+      owner: 501,
+      permissions: 0o600
+    )
+  )
+}
+
+private func schemaNineHandshake() -> HerdrHandshake {
+  HerdrHandshake(
+    pong: HerdrPong(
+      version: "0.8.2",
+      protocolVersion: 20,
+      capabilities: HerdrCapabilities(liveHandoff: true, detachedServerDaemon: true)
+    ),
+    snapshot: HerdrSessionSnapshot(
+      version: "0.8.2",
+      protocolVersion: 20,
       focusedWorkspaceID: nil,
       focusedTabID: nil,
       focusedPaneID: nil,

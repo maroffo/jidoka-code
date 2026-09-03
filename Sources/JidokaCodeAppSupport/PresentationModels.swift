@@ -61,6 +61,13 @@ public enum PresentationCopy {
         title: "Credential not accepted",
         detail: "Validate a GitHub token with the required repository permissions."
       )
+    case .credentialAccessFailed:
+      PresentationMessage(
+        title: "Keychain access needs attention",
+        detail:
+          "Jidoka Code could not authorize its signed engine helper. "
+          + "Reconnect GitHub, then retry once."
+      )
     case .credentialInUse:
       PresentationMessage(
         title: "Credential is in use",

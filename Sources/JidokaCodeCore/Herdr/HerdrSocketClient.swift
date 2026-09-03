@@ -1016,7 +1016,7 @@ public actor HerdrSocketClient {
         params: HerdrAgentRenameParameters(target: paneID, name: $0)
       )
     }
-    let manifest = HerdrCompatibilityManifest.herdr080
+    let manifest = HerdrCompatibilityManifest.approved
     var steps = [
       HerdrSocketExchangeStep(request: ping.data) { exchange in
         let response: HerdrResponse<HerdrPong> = try Self.decode(
@@ -1471,7 +1471,7 @@ public actor HerdrSocketClient {
   private func handshake(
     expectedAuthority: HerdrConnectionAuthority?
   ) async throws -> HerdrHandshake {
-    let manifest = HerdrCompatibilityManifest.herdr080
+    let manifest = HerdrCompatibilityManifest.approved
     let pongResponse: HerdrResponse<HerdrPong> = try await request(
       method: .ping,
       params: HerdrEmptyParameters(),
