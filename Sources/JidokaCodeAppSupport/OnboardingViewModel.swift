@@ -10,11 +10,6 @@ public final class OnboardingViewModel {
   public var message: PresentationMessage?
 
   public var token = ""
-  public var repositoryOwner = ""
-  public var repositoryName = ""
-  public var reviewEnabled = true
-  public var triageEnabled = true
-  public var implementationEnabled = true
   public var loginItemSelected = true
 
   @ObservationIgnored private let client: any EngineClient
@@ -32,10 +27,6 @@ public final class OnboardingViewModel {
     !isWorking && (20...2_048).contains(token.utf8.count)
   }
 
-  public var canAddRepository: Bool {
-    !isWorking && !repositoryOwner.isEmpty && !repositoryName.isEmpty
-  }
-
   public var canComplete: Bool {
     guard let onboarding = state?.onboarding else { return false }
     return !isWorking
@@ -45,7 +36,6 @@ public final class OnboardingViewModel {
       && onboarding.pi.state == .ready
       && onboarding.herdr.state == .ready
       && onboarding.credential.state == .valid
-      && onboarding.repositoryCount > 0
       && Set(onboarding.configuredProfileRoles) == Set(ModelProfileRole.allCases)
       && loginItemSelected
   }
@@ -82,20 +72,6 @@ public final class OnboardingViewModel {
     let valueCount = value.count
     defer { value.resetBytes(in: 0..<valueCount) }
     _ = await execute(.replaceCredential(value))
-  }
-
-  public func validateAndAddRepository() async {
-    guard canAddRepository else { return }
-    let draft = EngineRepositoryDraft(
-      owner: repositoryOwner.trimmingCharacters(in: .whitespacesAndNewlines),
-      name: repositoryName.trimmingCharacters(in: .whitespacesAndNewlines),
-      reviewEnabled: reviewEnabled,
-      triageEnabled: triageEnabled,
-      implementationEnabled: implementationEnabled
-    )
-    guard await execute(.addRepository(draft)) != nil else { return }
-    repositoryOwner = ""
-    repositoryName = ""
   }
 
   @discardableResult

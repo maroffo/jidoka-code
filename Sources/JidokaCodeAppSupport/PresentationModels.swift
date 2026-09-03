@@ -14,6 +14,15 @@ public struct PresentationMessage: Equatable, Identifiable, Sendable {
 }
 
 public enum PresentationCopy {
+  public static func modelCatalogUnavailable() -> PresentationMessage {
+    PresentationMessage(
+      title: "Pi model catalog unavailable",
+      detail:
+        "Jidoka Code could not load Pi's offline model catalog. Existing profiles remain "
+        + "available as Custom. Verify the installed app and Pi runtime, then retry."
+    )
+  }
+
   public static func message(for error: Error) -> PresentationMessage {
     let code = (error as? EngineClientError)?.code ?? .internalFailure
     return switch code {
@@ -51,6 +60,13 @@ public enum PresentationCopy {
       PresentationMessage(
         title: "Credential not accepted",
         detail: "Validate a GitHub token with the required repository permissions."
+      )
+    case .credentialAccessFailed:
+      PresentationMessage(
+        title: "Keychain access needs attention",
+        detail:
+          "Jidoka Code could not authorize its signed engine helper. "
+          + "Reconnect GitHub, then retry once."
       )
     case .credentialInUse:
       PresentationMessage(
@@ -107,14 +123,20 @@ public enum JidokaAccessibilityID {
   public static let tokenField = "jidoka.onboarding.token"
   public static let tokenImport = "jidoka.onboarding.token-import"
   public static let providerDisclosure = "jidoka.onboarding.provider-disclosure"
-  public static let repositoryOwner = "jidoka.onboarding.repository-owner"
-  public static let repositoryName = "jidoka.onboarding.repository-name"
-  public static let repositoryAdd = "jidoka.onboarding.repository-add"
+  public static let providerDisclosureProfile =
+    "jidoka.onboarding.provider-disclosure-profile"
   public static let loginItem = "jidoka.onboarding.login-item"
   public static let onboardingComplete = "jidoka.onboarding.complete"
   public static let settingsWindow = "jidoka.settings.window"
   public static let settingsHerdrPreflight = "jidoka.settings.herdr-preflight"
   public static let settingsFocusInHerdr = "jidoka.settings.focus-in-herdr"
+  public static let settingsRepositoryReference = "jidoka.settings.repository-reference"
+  public static let settingsRepositoryAdd = "jidoka.settings.repository-add"
+  public static let settingsModelCatalogRefresh = "jidoka.settings.model-catalog-refresh"
+  public static let settingsModelCatalogNotice = "jidoka.settings.model-catalog-notice"
+  public static let settingsModelSelector = "jidoka.settings.model-selector"
+  public static let settingsCustomModel = "jidoka.settings.custom-model"
+  public static let credentialConnect = "jidoka.settings.credential-connect"
   public static let credentialReplacement = "jidoka.settings.credential-replacement"
   public static let credentialDeletion = "jidoka.settings.credential-deletion"
   public static let ambiguousRecheck = "jidoka.ambiguous.recheck"

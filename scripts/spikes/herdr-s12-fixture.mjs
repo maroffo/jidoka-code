@@ -40,6 +40,16 @@ function privateDirectory(value, name) {
   return directory;
 }
 
+function safeDirectory(value, name) {
+  const directory = absolute(value, name);
+  const status = fs.lstatSync(directory);
+  if (!status.isDirectory() || status.isSymbolicLink() || status.uid !== process.getuid()
+      || (status.mode & 0o022) !== 0 || fs.realpathSync(directory) !== directory) {
+    fail(`unsafe ${name}`);
+  }
+  return directory;
+}
+
 function regularFile(value, name) {
   const file = absolute(value, name);
   const status = fs.lstatSync(file);
@@ -84,10 +94,17 @@ async function request(socketPath, method, params) {
 }
 
 function pane(host, runRoot, cwd, runID) {
+  const runtimeRoot = safeDirectory(
+    process.env.JIDOKA_RELEASE_RUNTIME_ROOT,
+    "release runtime root",
+  );
   return {
     command: [absolute(host, "host"), "--launch-attempt-id", runID],
     cwd: privateDirectory(cwd, "pane cwd"),
-    env: { JIDOKA_CODE_HERDR_RUN_ROOT: privateDirectory(runRoot, "run root") },
+    env: {
+      JIDOKA_CODE_DEBUG_RELEASE_RUNTIME_ROOT: runtimeRoot,
+      JIDOKA_CODE_HERDR_RUN_ROOT: privateDirectory(runRoot, "run root"),
+    },
     label: "triage",
     type: "pane",
   };
@@ -133,7 +150,7 @@ function assertObserver(fileValue) {
 function assertScreen(fileValue) {
   const value = fs.readFileSync(privateFile(fileValue, "screen"), "utf8");
   for (const required of [
-    "pi v0.84.1", "jidoka-tui-runtime.ts", "fixture", "interactive input is locked",
+    "pi v0.84.2", "jidoka-tui-runtime.ts", "fixture", "interactive input is locked",
   ]) {
     if (!value.includes(required)) fail(`screen missing ${required}`);
   }
@@ -141,7 +158,7 @@ function assertScreen(fileValue) {
 
 function assertResumeScreen(fileValue) {
   const value = fs.readFileSync(privateFile(fileValue, "resume screen"), "utf8");
-  for (const required of ["pi v0.84.1", "fixture"]) {
+  for (const required of ["pi v0.84.2", "fixture"]) {
     if (!value.includes(required)) fail(`resume screen missing ${required}`);
   }
 }

@@ -214,6 +214,21 @@ public protocol PullRequestReviewExecuting: Sendable {
     prepared: PreparedPullRequestReviewJob,
     artifactSHA256: String
   ) async throws -> PiPullRequestReviewOutput
+  func reviewCanaryArchitecture(
+    job: JobRecord,
+    prepared: PreparedPullRequestReviewJob,
+    artifactSHA256: String
+  ) async throws -> PiWorkflowRoleResult
+}
+
+extension PullRequestReviewExecuting {
+  public func reviewCanaryArchitecture(
+    job _: JobRecord,
+    prepared _: PreparedPullRequestReviewJob,
+    artifactSHA256 _: String
+  ) async throws -> PiWorkflowRoleResult {
+    throw PullRequestReviewJobError.invalidJob
+  }
 }
 
 public struct PiPullRequestReviewJobExecutor: PullRequestReviewExecuting, Sendable {
@@ -255,16 +270,46 @@ public struct PiPullRequestReviewJobExecutor: PullRequestReviewExecuting, Sendab
       preparer: PiJobWorkflowPreparer(context: context)
     )
     return try await PiPullRequestReviewRouter(executor: executor).run(
-      PiPullRequestReviewInput(
-        jobID: "job-\(job.id.uuidString.lowercased())",
-        artifactSHA256: artifactSHA256,
-        baseSHA: prepared.pullRequest.base.sha,
-        restHeadSHA: prepared.pullRequest.head.sha,
-        fetchedHeadSHA: prepared.fetched.headSHA,
-        restCommitSHAs: prepared.restCommitSHAs,
-        fetchedCommitSHAs: prepared.fetched.commitSHAs,
-        commits: prepared.fetched.narrative
-      )
+      Self.input(job: job, prepared: prepared, artifactSHA256: artifactSHA256)
+    )
+  }
+
+  public func reviewCanaryArchitecture(
+    job: JobRecord,
+    prepared: PreparedPullRequestReviewJob,
+    artifactSHA256: String
+  ) async throws -> PiWorkflowRoleResult {
+    let context = PiJobWorkflowContext(
+      artifact: prepared.artifact,
+      workspaceRoot: prepared.workspaceURL,
+      sessionRoot: sessionRoot,
+      profiles: profiles,
+      allowedWritePaths: [],
+      offline: offline,
+      timeoutSeconds: timeoutSeconds
+    )
+    let executor = executorFactory.makeExecutor(
+      preparer: PiJobWorkflowPreparer(context: context)
+    )
+    return try await PiPullRequestReviewRouter(executor: executor).runCanaryArchitecture(
+      Self.input(job: job, prepared: prepared, artifactSHA256: artifactSHA256)
+    )
+  }
+
+  private static func input(
+    job: JobRecord,
+    prepared: PreparedPullRequestReviewJob,
+    artifactSHA256: String
+  ) -> PiPullRequestReviewInput {
+    PiPullRequestReviewInput(
+      jobID: "job-\(job.id.uuidString.lowercased())",
+      artifactSHA256: artifactSHA256,
+      baseSHA: prepared.pullRequest.base.sha,
+      restHeadSHA: prepared.pullRequest.head.sha,
+      fetchedHeadSHA: prepared.fetched.headSHA,
+      restCommitSHAs: prepared.restCommitSHAs,
+      fetchedCommitSHAs: prepared.fetched.commitSHAs,
+      commits: prepared.fetched.narrative
     )
   }
 }
@@ -340,6 +385,127 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
     }
   }
 
+  public func runRecoveredCanary(
+    jobID: UUID,
+    recoveryEvidenceSHA256: String
+  ) async throws {
+    guard GitHubInputValidation.validSHA256(recoveryEvidenceSHA256) else {
+      throw PullRequestReviewJobError.invalidJob
+    }
+    let recovered = try await jobs.resumedCanaryTopologyRecoveryJob(
+      jobID: jobID,
+      recoveryEvidenceSHA256: recoveryEvidenceSHA256
+    )
+    guard recovered.identity.kind == .prReview,
+      [.preparing, .runningPi].contains(recovered.state),
+      recovered.currentStep == 0,
+      recovered.currentStepKind == .review
+    else { throw PullRequestReviewJobError.unexpectedState(recovered.state) }
+    let prepared = try await inputs.prepare(job: recovered)
+    let inputArtifact = try await reusableInputArtifact(
+      jobID: recovered.id,
+      data: prepared.artifact
+    )
+    let selected = try await jobs.selectCanaryReviewAfterTopologyRecovery(
+      jobID: recovered.id,
+      recoveryEvidenceSHA256: recoveryEvidenceSHA256,
+      now: now()
+    )
+    try await completeReview(
+      job: selected,
+      prepared: prepared,
+      inputArtifact: inputArtifact
+    )
+  }
+
+  public func runCanaryPiFreshRetry(
+    jobID: UUID,
+    recoveryEvidenceSHA256: String,
+    retryEvidenceSHA256: String
+  ) async throws {
+    guard GitHubInputValidation.validSHA256(recoveryEvidenceSHA256),
+      GitHubInputValidation.validSHA256(retryEvidenceSHA256)
+    else {
+      throw PullRequestReviewJobError.invalidJob
+    }
+    let state = try await jobs.canaryPiFreshRetryState(
+      jobID: jobID,
+      recoveryEvidenceSHA256: recoveryEvidenceSHA256,
+      authorizedRetryEvidenceSHA256: retryEvidenceSHA256
+    )
+    let prepared = try await inputs.prepare(job: state.job)
+    let inputArtifact = try await reusableInputArtifact(
+      jobID: state.job.id,
+      data: prepared.artifact
+    )
+    try await completeReview(
+      job: state.job,
+      prepared: prepared,
+      inputArtifact: inputArtifact
+    )
+  }
+
+  public func runCanaryRoleHostReplacement(
+    request: JobCanaryRoleHostReplacementRequest
+  ) async throws {
+    try request.validate()
+    let state = try await jobs.canaryRoleHostReplacementState(request: request)
+    let prepared = try await inputs.prepare(job: state.retry.job)
+    let inputArtifact = try await requiredInputArtifact(
+      jobID: state.retry.job.id,
+      data: prepared.artifact
+    )
+    _ = try await reviewer.reviewCanaryArchitecture(
+      job: state.retry.job,
+      prepared: prepared,
+      artifactSHA256: inputArtifact.sha256
+    )
+  }
+
+  private func requiredInputArtifact(
+    jobID: UUID,
+    data: Data
+  ) async throws -> ArtifactRecord {
+    let digest = GitHubMarkerCodec.sha256(data)
+    let matches = try await artifacts.records(jobID: jobID).filter {
+      $0.kind == .input
+        && $0.sha256 == digest
+        && $0.classification == .sensitiveMetadata
+        && $0.producerRunID == nil
+    }
+    guard matches.count == 1, let existing = matches.first,
+      try await artifacts.read(id: existing.id) == data
+    else { throw PullRequestReviewJobError.invalidArtifact }
+    return existing
+  }
+
+  private func reusableInputArtifact(
+    jobID: UUID,
+    data: Data
+  ) async throws -> ArtifactRecord {
+    let digest = GitHubMarkerCodec.sha256(data)
+    let matches = try await artifacts.records(jobID: jobID).filter {
+      $0.kind == .input
+        && $0.sha256 == digest
+        && $0.classification == .sensitiveMetadata
+        && $0.producerRunID == nil
+    }
+    if let existing = matches.last {
+      guard try await artifacts.read(id: existing.id) == data else {
+        throw PullRequestReviewJobError.invalidArtifact
+      }
+      return existing
+    }
+    return try await artifacts.write(
+      jobID: jobID,
+      kind: .input,
+      data: data,
+      classification: .sensitiveMetadata,
+      producerRunID: nil,
+      now: now()
+    )
+  }
+
   private func resumeCompletedReview(_ job: JobRecord) async throws {
     guard
       let step = try await jobs.completedStep(
@@ -394,6 +560,18 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
       event: .selectPiStep,
       context: JobTransitionContext(now: now(), reason: "validated PR inputs selected")
     )
+    try await completeReview(
+      job: job,
+      prepared: prepared,
+      inputArtifact: inputArtifact
+    )
+  }
+
+  private func completeReview(
+    job: JobRecord,
+    prepared: PreparedPullRequestReviewJob,
+    inputArtifact: ArtifactRecord
+  ) async throws {
     let output = try await reviewer.review(
       job: job,
       prepared: prepared,

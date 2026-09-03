@@ -12,7 +12,7 @@ struct EngineXPCPeerValidatorTests {
       EngineXPCPeerValidator.expectedClientURL(
         for: URL(
           fileURLWithPath: "/Applications/Jidoka Code.app/Contents/Helpers/JidokaCodeEngineProbe")
-      ).path == "/Applications/Jidoka Code.app/Contents/MacOS/JidokaCodeApp"
+      ).path == "/Applications/Jidoka Code.app/Contents/MacOS/Jidoka Code"
     )
     #expect(
       EngineXPCPeerValidator.expectedClientURL(
@@ -31,6 +31,15 @@ struct EngineXPCPeerValidatorTests {
     #expect(!accepted.accepts(processID: 0, effectiveUserID: geteuid()))
     #expect(!accepted.accepts(processID: 43, effectiveUserID: geteuid()))
     #expect(!accepted.accepts(processID: 42, effectiveUserID: geteuid() &+ 1))
+
+    let acceptedHelper = EngineXPCPeerValidator(
+      expectedPeerExecutableURL: helper,
+      pathForProcess: { processID in
+        processID == 84 ? helper : nil
+      }
+    )
+    #expect(acceptedHelper.accepts(processID: 84, effectiveUserID: geteuid()))
+    #expect(!acceptedHelper.accepts(processID: 42, effectiveUserID: geteuid()))
 
     let wrongPath = EngineXPCPeerValidator(helperExecutableURL: helper) { _ in
       URL(fileURLWithPath: "/tmp/attacker/JidokaCodeApp")

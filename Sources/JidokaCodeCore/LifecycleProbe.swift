@@ -8,6 +8,28 @@ public enum LifecycleProbeConstants {
   public static let mainQuitNotification = "com.maroffo.JidokaCode.lifecycle.quit"
 }
 
+package final class EngineServiceLifetime: @unchecked Sendable {
+  private let retainedObjects: [AnyObject]
+  private let stream: AsyncStream<Void>
+  private let continuation: AsyncStream<Void>.Continuation
+
+  package init(retaining retainedObjects: [AnyObject]) {
+    let pair = AsyncStream<Void>.makeStream()
+    self.retainedObjects = retainedObjects
+    stream = pair.stream
+    continuation = pair.continuation
+  }
+
+  package func wait() async {
+    await withTaskCancellationHandler {
+      for await _ in stream {}
+    } onCancel: {
+      continuation.finish()
+    }
+    withExtendedLifetime(retainedObjects) {}
+  }
+}
+
 public enum EngineTopology: String, Codable, Sendable {
   case direct
   case helper
@@ -274,7 +296,7 @@ public struct EngineProbeXPCRequest: Codable, Equatable, Sendable {
   public let roundTrip: EngineRoundTripRequest?
 
   public init(
-    protocolVersion: Int = EngineProtocolVersion.current,
+    protocolVersion: Int = LifecycleProbeProtocolVersion.current,
     operation: EngineProbeXPCOperation,
     roundTrip: EngineRoundTripRequest? = nil
   ) {
@@ -284,7 +306,7 @@ public struct EngineProbeXPCRequest: Codable, Equatable, Sendable {
   }
 
   public func validate() throws {
-    guard protocolVersion == EngineProtocolVersion.current else {
+    guard protocolVersion == LifecycleProbeProtocolVersion.current else {
       throw LifecycleProbeError.invalidRequest
     }
     switch operation {
@@ -311,7 +333,7 @@ public struct EngineProbeXPCResponse: Codable, Equatable, Sendable {
   public let snapshot: EngineSnapshot
 
   public init(
-    protocolVersion: Int = EngineProtocolVersion.current,
+    protocolVersion: Int = LifecycleProbeProtocolVersion.current,
     operation: EngineProbeXPCOperation,
     keychainSHA256: String? = nil,
     roundTrip: EngineRoundTripResponse? = nil,
@@ -326,7 +348,7 @@ public struct EngineProbeXPCResponse: Codable, Equatable, Sendable {
 
   public func validate(for request: EngineProbeXPCRequest) throws {
     guard protocolVersion == request.protocolVersion,
-      protocolVersion == EngineProtocolVersion.current,
+      protocolVersion == LifecycleProbeProtocolVersion.current,
       operation == request.operation,
       snapshot.reconciled,
       snapshot.topology == .helper

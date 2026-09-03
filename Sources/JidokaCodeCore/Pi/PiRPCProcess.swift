@@ -165,7 +165,9 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
       posix_spawnattr_destroy(&attributes)
     }
 
-    let flags = Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
+    let flags = Int16(
+      POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_START_SUSPENDED
+    )
     let setupStatuses = [
       posix_spawn_file_actions_adddup2(&actions, inputPipe[0], STDIN_FILENO),
       posix_spawn_file_actions_adddup2(&actions, outputPipe[1], STDOUT_FILENO),
@@ -240,6 +242,23 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
       closePair(errorPipe)
       throw PiRPCProcessError.descriptorConfigurationFailed(descriptorFailure)
     }
+    guard let processTracker = SupervisedProcessTracker(rootProcessID: processID) else {
+      _ = Darwin.kill(processID, SIGKILL)
+      _ = Darwin.waitpid(processID, nil, 0)
+      closePair(inputPipe)
+      closePair(outputPipe)
+      closePair(errorPipe)
+      throw PiRPCProcessError.spawnFailed(ESRCH)
+    }
+    guard Darwin.kill(-processID, SIGCONT) == 0 else {
+      let signalError = errno
+      processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: processID)
+      _ = Darwin.waitpid(processID, nil, 0)
+      closePair(inputPipe)
+      closePair(outputPipe)
+      closePair(errorPipe)
+      throw PiRPCProcessError.spawnFailed(signalError)
+    }
     let startedAt = monotonicSeconds()
     let deadline = startedAt + request.timeoutSeconds
     var parser = try PiRPCJSONLParser(maximumRecordBytes: request.maximumRecordBytes)
@@ -255,8 +274,6 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
     var childStatus: Int32 = 0
     var childExited = false
     var cleanupSignal: Int32?
-    var observedProcesses: Set<ProcessIdentity> = []
-    if let identity = processIdentity(processID) { observedProcesses.insert(identity) }
     var cleanupComplete = false
 
     defer {
@@ -264,18 +281,18 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
       if outputPipe[0] >= 0 { Darwin.close(outputPipe[0]) }
       if errorPipe[0] >= 0 { Darwin.close(errorPipe[0]) }
       if !cleanupComplete {
-        _ = Darwin.kill(-processID, SIGKILL)
-        terminateProcessTree(processID, observedProcesses: observedProcesses, signal: SIGKILL)
+        processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: processID)
         if !childExited { _ = Darwin.waitpid(processID, &childStatus, 0) }
       }
     }
 
     func checkChild() throws {
-      observedProcesses.formUnion(descendantProcesses(of: processID))
+      _ = processTracker.observeDescendants()
       guard !childExited else { return }
       let waited = Darwin.waitpid(processID, &childStatus, WNOHANG)
       if waited == processID {
         childExited = true
+        _ = processTracker.observeDescendants()
       } else if waited == -1, errno != EINTR {
         throw PiRPCProcessError.waitFailed(errno)
       }
@@ -469,6 +486,10 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
       }
     }
 
+    if operationError != nil, !childExited {
+      cleanupSignal = SIGTERM
+      processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: processID)
+    }
     if inputOpen {
       Darwin.close(inputPipe[1])
       inputPipe[1] = -1
@@ -489,7 +510,7 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
     }
     if !childExited {
       cleanupSignal = SIGTERM
-      terminateProcessTree(processID, observedProcesses: observedProcesses, signal: SIGTERM)
+      processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: processID)
       gracefulDeadline = monotonicSeconds() + 0.5
       while !childExited, monotonicSeconds() < gracefulDeadline {
         recordCleanupError { try drainOutput() }
@@ -503,7 +524,7 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
     }
     if !childExited {
       cleanupSignal = SIGKILL
-      terminateProcessTree(processID, observedProcesses: observedProcesses, signal: SIGKILL)
+      processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: processID)
       var waited: pid_t
       repeat {
         waited = Darwin.waitpid(processID, &childStatus, 0)
@@ -519,23 +540,22 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
     {
       operationError = PiRPCProcessError.unexpectedExit(decodedExitCode(childStatus))
     }
-    if processGroupExists(processID) {
-      _ = Darwin.kill(-processID, SIGTERM)
-      let groupDeadline = monotonicSeconds() + 0.25
-      while processGroupExists(processID), monotonicSeconds() < groupDeadline {
-        usleep(10_000)
+    if !processTracker.cleanupVerified(originalProcessGroup: processID) {
+      processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: processID)
+      if !processTracker.waitForCleanup(
+        originalProcessGroup: processID,
+        until: monotonicSeconds() + 0.25
+      ) {
+        processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: processID)
+        guard
+          processTracker.waitForCleanup(
+            originalProcessGroup: processID,
+            until: monotonicSeconds() + 2
+          )
+        else {
+          throw PiRPCProcessError.cleanupFailed
+        }
       }
-      if processGroupExists(processID) {
-        _ = Darwin.kill(-processID, SIGKILL)
-        usleep(50_000)
-      }
-    }
-    let descendants = observedProcesses.filter {
-      $0.pid != processID && processIdentity($0.pid) == $0
-    }
-    if !descendants.isEmpty {
-      terminateProcessTree(processID, observedProcesses: Set(descendants), signal: SIGKILL)
-      usleep(50_000)
     }
     let pipeDeadline = monotonicSeconds() + 0.5
     while outputOpen || errorOpen, monotonicSeconds() < pipeDeadline {
@@ -556,9 +576,7 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
       if operationError == nil { operationError = PiRPCProcessError.cleanupFailed }
     }
     recordCleanupError { try parser.finish() }
-    let cleanupVerified =
-      !processGroupExists(processID)
-      && observedProcesses.allSatisfy { processIdentity($0.pid) != $0 }
+    let cleanupVerified = processTracker.cleanupVerified(originalProcessGroup: processID)
     cleanupComplete = cleanupVerified
     guard cleanupVerified else { throw PiRPCProcessError.cleanupFailed }
 
@@ -800,72 +818,6 @@ public final class PiRPCProcessRunner: PiRPCProcessRunning, @unchecked Sendable 
       }
       return try body(baseAddress)
     }
-  }
-
-  private struct ProcessIdentity: Hashable {
-    let pid: pid_t
-    let processGroup: pid_t
-    let startSeconds: UInt64
-    let startMicroseconds: UInt64
-  }
-
-  private static func processIdentity(_ pid: pid_t) -> ProcessIdentity? {
-    var information = proc_bsdinfo()
-    let size = proc_pidinfo(
-      pid,
-      PROC_PIDTBSDINFO,
-      0,
-      &information,
-      Int32(MemoryLayout<proc_bsdinfo>.size)
-    )
-    guard size == MemoryLayout<proc_bsdinfo>.size,
-      information.pbi_pid == UInt32(pid),
-      information.pbi_status != UInt32(SZOMB)
-    else {
-      return nil
-    }
-    return ProcessIdentity(
-      pid: pid,
-      processGroup: pid_t(information.pbi_pgid),
-      startSeconds: information.pbi_start_tvsec,
-      startMicroseconds: information.pbi_start_tvusec
-    )
-  }
-
-  private static func descendantProcesses(of root: pid_t) -> Set<ProcessIdentity> {
-    var discovered: Set<ProcessIdentity> = []
-    var pending = [root]
-    while let parent = pending.popLast() {
-      var children = [pid_t](repeating: 0, count: 1_024)
-      let count = proc_listchildpids(
-        parent,
-        &children,
-        Int32(children.count * MemoryLayout<pid_t>.size)
-      )
-      guard count > 0 else { continue }
-      for child in children.prefix(min(Int(count), children.count)) where child > 0 {
-        guard let identity = processIdentity(child) else { continue }
-        if discovered.insert(identity).inserted { pending.append(child) }
-      }
-    }
-    return discovered
-  }
-
-  private static func terminateProcessTree(
-    _ processID: pid_t,
-    observedProcesses: Set<ProcessIdentity>,
-    signal: Int32
-  ) {
-    let current = observedProcesses.filter { processIdentity($0.pid) == $0 }
-    if current.contains(where: { $0.processGroup == processID }) {
-      _ = Darwin.kill(-processID, signal)
-    }
-    for process in current { _ = Darwin.kill(process.pid, signal) }
-  }
-
-  private static func processGroupExists(_ processID: pid_t) -> Bool {
-    if Darwin.kill(-processID, 0) == 0 { return true }
-    return errno != ESRCH
   }
 
   private static func decodedExitCode(_ status: Int32) -> Int32? {

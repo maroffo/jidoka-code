@@ -30,6 +30,54 @@ public struct HerdrRuntimeAttestation: Equatable, Sendable {
   }
 }
 
+public struct HerdrRuntimeProbeAttestation: Codable, Equatable, Sendable {
+  public let version: String
+  public let protocolVersion: Int
+  public let architecture: String
+  public let executablePath: String
+  public let executableSHA256: String
+  public let apiSchemaSHA256: String
+  public let policySHA256: String
+}
+
+public struct HerdrRuntimeProbeSocketEvidence: Codable, Equatable, Sendable {
+  public let device: UInt64
+  public let inode: UInt64
+  public let owner: UInt32
+  public let permissions: UInt16
+}
+
+public struct HerdrRuntimeProbeCodeEvidence: Codable, Equatable, Sendable {
+  public let identifier: String
+  public let teamIdentifier: String?
+  public let codeDirectoryHashSHA256: String
+  public let designatedRequirementSHA256: String
+}
+
+public struct HerdrRuntimeProbePeerEvidence: Codable, Equatable, Sendable {
+  public let processID: Int32
+  public let startSeconds: UInt64
+  public let startMicroseconds: UInt64
+  public let effectiveUserID: UInt32
+  public let executablePath: String
+  public let executableDevice: UInt64
+  public let executableInode: UInt64
+  public let executableSHA256: String
+  public let code: HerdrRuntimeProbeCodeEvidence
+}
+
+public struct HerdrRuntimeReadinessProbeReport: Codable, Equatable, Sendable {
+  public let schemaVersion: Int
+  public let releaseRuntime: PiReleaseRuntimeIdentity
+  public let herdr: HerdrRuntimeProbeAttestation
+  public let socket: HerdrRuntimeProbeSocketEvidence
+  public let peer: HerdrRuntimeProbePeerEvidence
+  public let capabilities: HerdrCapabilities
+  public let snapshotWorkspaceCount: Int
+  public let snapshotTabCount: Int
+  public let snapshotPaneCount: Int
+}
+
 public enum HerdrRuntimeResolutionError: Error, Equatable, Sendable {
   case invalidConfiguration
   case policyMissing
@@ -302,9 +350,9 @@ public struct HerdrRuntimeResolver: HerdrRuntimeResolving, Sendable {
       let executableSHA256 = build["executableSHA256"] as? String,
       executableSHA256.wholeMatch(of: /^[0-9a-f]{64}$/) != nil,
       let protocolVersion = build["protocolVersion"] as? Int,
-      protocolVersion == HerdrCompatibilityManifest.herdr080.protocolVersion,
+      protocolVersion == HerdrCompatibilityManifest.approved.protocolVersion,
       let version = build["version"] as? String,
-      version == HerdrCompatibilityManifest.herdr080.version
+      version == HerdrCompatibilityManifest.approved.version
     else {
       if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
         let schema = object["schemaVersion"] as? Int,
@@ -376,6 +424,160 @@ public protocol HerdrRuntimeHandshaking: Sendable {
 
 extension HerdrSocketClient: HerdrRuntimeHandshaking {}
 
+public struct HerdrRuntimeReadinessProbe: Sendable {
+  private let resolveReleaseRuntime: @Sendable () throws -> PiReleaseRuntimeIdentity
+  private let resolver: any HerdrRuntimeResolving
+  private let handshaker: any HerdrRuntimeHandshaking
+
+  public init(
+    releaseRuntimeRoot: URL,
+    containingApplicationURL: URL,
+    herdrResourceRoot: URL,
+    socketURL: URL
+  ) throws {
+    let releaseResolver = ReleaseOwnedPiRuntimeResolver(
+      runtimeRoot: releaseRuntimeRoot,
+      containingApplicationURL: containingApplicationURL
+    )
+    resolveReleaseRuntime = {
+      let runtime = try releaseResolver.resolve(at: .applicationStartup)
+      guard let identity = runtime.releaseIdentity else {
+        throw PiRuntimeResolutionError(
+          code: .releaseRuntimeDrift,
+          detail: "release runtime identity is unavailable"
+        )
+      }
+      return identity
+    }
+    resolver = HerdrRuntimeResolver(
+      configuration: try .standard(resourceRoot: herdrResourceRoot)
+    )
+    handshaker = HerdrSocketClient(
+      configuration: try HerdrSocketClientConfiguration(endpoint: socketURL)
+    )
+  }
+
+  init(
+    resolveReleaseRuntime: @escaping @Sendable () throws -> PiReleaseRuntimeIdentity,
+    resolver: any HerdrRuntimeResolving,
+    handshaker: any HerdrRuntimeHandshaking
+  ) {
+    self.resolveReleaseRuntime = resolveReleaseRuntime
+    self.resolver = resolver
+    self.handshaker = handshaker
+  }
+
+  public func inspect() async throws -> HerdrRuntimeReadinessProbeReport {
+    let initialReleaseRuntime = try resolveReleaseRuntime()
+    let initialHerdr = try await resolver.resolve()
+    let initialHandshake = try await handshaker.handshake()
+    try Self.validate(handshake: initialHandshake, attestation: initialHerdr)
+
+    let finalReleaseRuntime = try resolveReleaseRuntime()
+    guard finalReleaseRuntime == initialReleaseRuntime else {
+      throw PiRuntimeResolutionError(
+        code: .releaseRuntimeDrift,
+        detail: "release runtime changed during readiness inspection"
+      )
+    }
+    let finalHerdr = try await resolver.resolve()
+    guard finalHerdr == initialHerdr else {
+      throw HerdrRuntimeResolutionError.executableDigestMismatch
+    }
+    let finalHandshake = try await handshaker.handshake()
+    try Self.validate(handshake: finalHandshake, attestation: finalHerdr)
+    guard
+      try initialHandshake.requiredConnectionAuthority()
+        == finalHandshake.requiredConnectionAuthority()
+    else {
+      throw HerdrSocketClientError.socketChanged
+    }
+
+    let peer = try finalHandshake.requiredConnectionAuthority().peer
+    let executable = peer.executable
+    let code = executable.codeIdentity
+    return HerdrRuntimeReadinessProbeReport(
+      schemaVersion: 1,
+      releaseRuntime: finalReleaseRuntime,
+      herdr: HerdrRuntimeProbeAttestation(
+        version: finalHerdr.version,
+        protocolVersion: finalHerdr.protocolVersion,
+        architecture: finalHerdr.architecture,
+        executablePath: finalHerdr.executable.path,
+        executableSHA256: finalHerdr.executableSHA256,
+        apiSchemaSHA256: finalHerdr.apiSchemaSHA256,
+        policySHA256: finalHerdr.policySHA256
+      ),
+      socket: HerdrRuntimeProbeSocketEvidence(
+        device: finalHandshake.socketIdentity.device,
+        inode: finalHandshake.socketIdentity.inode,
+        owner: finalHandshake.socketIdentity.owner,
+        permissions: finalHandshake.socketIdentity.permissions
+      ),
+      peer: HerdrRuntimeProbePeerEvidence(
+        processID: peer.processID,
+        startSeconds: peer.startSeconds,
+        startMicroseconds: peer.startMicroseconds,
+        effectiveUserID: peer.effectiveUserID,
+        executablePath: executable.path,
+        executableDevice: executable.device,
+        executableInode: executable.inode,
+        executableSHA256: executable.contentSHA256,
+        code: HerdrRuntimeProbeCodeEvidence(
+          identifier: code.identifier,
+          teamIdentifier: code.teamIdentifier,
+          codeDirectoryHashSHA256: code.codeDirectoryHashSHA256,
+          designatedRequirementSHA256: Self.sha256(
+            Data(code.designatedRequirement.utf8)
+          )
+        )
+      ),
+      capabilities: finalHandshake.pong.capabilities,
+      snapshotWorkspaceCount: finalHandshake.snapshot.workspaces.count,
+      snapshotTabCount: finalHandshake.snapshot.tabs.count,
+      snapshotPaneCount: finalHandshake.snapshot.panes.count
+    )
+  }
+
+  private static func validate(
+    handshake: HerdrHandshake,
+    attestation: HerdrRuntimeAttestation
+  ) throws {
+    guard handshake.pong.type == "pong" else {
+      throw HerdrCompatibilityError.invalidPong
+    }
+    guard handshake.pong.version == attestation.version else {
+      throw HerdrCompatibilityError.versionMismatch
+    }
+    guard handshake.pong.protocolVersion == attestation.protocolVersion else {
+      throw HerdrCompatibilityError.protocolMismatch
+    }
+    guard handshake.pong.capabilities.liveHandoff else {
+      throw HerdrCompatibilityError.missingLiveHandoff
+    }
+    guard handshake.pong.capabilities.detachedServerDaemon else {
+      throw HerdrCompatibilityError.missingDetachedServerDaemon
+    }
+    guard handshake.snapshot.version == handshake.pong.version,
+      handshake.snapshot.protocolVersion == handshake.pong.protocolVersion
+    else {
+      throw HerdrCompatibilityError.snapshotMismatch
+    }
+    let authority = try handshake.requiredConnectionAuthority()
+    guard authority.socketIdentity.owner == authority.peer.effectiveUserID,
+      authority.socketIdentity.permissions == 0o600,
+      authority.peer.executable.path == attestation.executable.path,
+      authority.peer.executable.contentSHA256 == attestation.executableSHA256
+    else {
+      throw HerdrSocketClientError.unsafePeer
+    }
+  }
+
+  private static func sha256(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+  }
+}
+
 public protocol HerdrRuntimeReadinessChecking: Sendable {
   func preflight() async -> EngineHerdrStatus
 }
@@ -411,6 +613,12 @@ public actor HerdrRuntimeReadinessChecker: HerdrRuntimeReadinessChecking {
 
     do {
       let handshake = try await handshaker.handshake()
+      guard let peerExecutable = handshake.socketIdentity.peerEvidence?.executable,
+        peerExecutable.path == attestation.executable.path,
+        peerExecutable.contentSHA256 == attestation.executableSHA256
+      else {
+        throw HerdrSocketClientError.unsafePeer
+      }
       guard handshake.pong.version == attestation.version else {
         return Self.blocked(for: HerdrCompatibilityError.versionMismatch)
       }
@@ -438,13 +646,13 @@ public actor HerdrRuntimeReadinessChecker: HerdrRuntimeReadinessChecking {
     case HerdrRuntimeResolutionError.executableUnavailable:
       issue = .executableUnavailable
       summary = "The required Herdr executable is unavailable."
-      recovery = "Install Herdr 0.8.0 with Homebrew, then run the Herdr preflight again."
+      recovery = "Install the approved Herdr 0.8.2 build, then run the Herdr preflight again."
     case HerdrRuntimeResolutionError.executableUnsafe,
       HerdrRuntimeResolutionError.executableDigestMismatch,
       HerdrRuntimeResolutionError.versionOutputMismatch:
       issue = .executableMismatch
       summary = "The installed Herdr executable is not an attested build."
-      recovery = "Restore the approved Herdr 0.8.0 build, then run the Herdr preflight again."
+      recovery = "Restore the approved Herdr 0.8.2 build, then run the Herdr preflight again."
     case HerdrRuntimeResolutionError.policyMissing,
       HerdrRuntimeResolutionError.policyInvalid,
       HerdrRuntimeResolutionError.unsupportedPolicySchema,
@@ -459,16 +667,16 @@ public actor HerdrRuntimeReadinessChecker: HerdrRuntimeReadinessChecking {
       HerdrRuntimeResolutionError.schemaOutputMismatch:
       issue = .schemaMismatch
       summary = "The Herdr API schema does not match the approved protocol."
-      recovery = "Restore Herdr 0.8.0 and reinstall Jidoka Code, then rerun preflight."
+      recovery = "Restore Herdr 0.8.2 and reinstall Jidoka Code, then rerun preflight."
     case HerdrCompatibilityError.versionMismatch:
       issue = .versionMismatch
       summary = "The running Herdr version is incompatible."
-      recovery = "Run the approved Herdr 0.8.0 server, then rerun preflight."
+      recovery = "Run the approved Herdr 0.8.2 server, then rerun preflight."
     case HerdrCompatibilityError.protocolMismatch, HerdrCompatibilityError.snapshotMismatch,
       HerdrCompatibilityError.invalidPong:
       issue = .protocolMismatch
       summary = "The running Herdr protocol is incompatible."
-      recovery = "Run Herdr protocol 19, then rerun preflight."
+      recovery = "Run Herdr protocol 20, then rerun preflight."
     case HerdrCompatibilityError.missingLiveHandoff,
       HerdrCompatibilityError.missingDetachedServerDaemon:
       issue = .capabilityMismatch

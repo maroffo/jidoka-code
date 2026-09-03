@@ -119,7 +119,7 @@ public actor GitHubGitCredentialProvider: GitCredentialSessionProviding {
     var directory = stat()
     let address = sockaddr_un()
     let pathCapacity = MemoryLayout.size(ofValue: address.sun_path)
-    let socketNameBytes = "/askpass-".utf8.count + 36 + ".sock".utf8.count
+    let socketNameBytes = "/a-".utf8.count + 32 + ".s".utf8.count
     guard lstat(socketDirectory.path, &directory) == 0,
       (directory.st_mode & S_IFMT) == S_IFDIR,
       (directory.st_mode & 0o077) == 0,

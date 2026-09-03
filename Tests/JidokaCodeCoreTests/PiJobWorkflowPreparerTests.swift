@@ -55,6 +55,7 @@ struct PiJobWorkflowPreparerTests {
       JSONSerialization.jsonObject(with: promptData) as? [String: Any]
     )
     #expect(object["artifactSHA256"] as? String == digest)
+    #expect(object["commitNarrativeSHA256"] == nil)
     #expect(
       object["applicationArtifactUTF8"] as? String == String(decoding: artifact, as: UTF8.self))
     #expect(object["engineFailures"] as? [String] == ["verification-failed"])
@@ -68,6 +69,7 @@ struct PiJobWorkflowPreparerTests {
     let fixture = try PiJobPreparerFixture()
     defer { fixture.remove() }
     let artifact = Data("review\n".utf8)
+    let narrativeDigest = String(repeating: "c", count: 64)
     let preparation = try await PiJobWorkflowPreparer(
       context: fixture.context(artifact: artifact)
     ).prepare(
@@ -77,11 +79,17 @@ struct PiJobWorkflowPreparerTests {
         role: .security,
         round: 1,
         artifactSHA256: sha256(artifact),
+        commitNarrativeSHA256: narrativeDigest,
         sessionDirective: .fresh
       )
     )
     #expect(preparation.profile.role == .review)
     #expect(preparation.allowedWritePaths.isEmpty)
+    let promptData = try #require(preparation.prompt.data(using: .utf8))
+    let prompt = try #require(
+      JSONSerialization.jsonObject(with: promptData) as? [String: Any]
+    )
+    #expect(prompt["commitNarrativeSHA256"] as? String == narrativeDigest)
 
     for workflow in [PiWorkflowKind.planning, .orchestration] {
       let independent = try await PiJobWorkflowPreparer(

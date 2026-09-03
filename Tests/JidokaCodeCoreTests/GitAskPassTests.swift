@@ -4,7 +4,7 @@ import Testing
 
 @testable import JidokaCodeCore
 
-@Suite("One-shot Git askpass capability")
+@Suite("One-shot Git askpass capability", .serialized)
 struct GitAskPassTests {
   @Test("brokered credential is host-bound, one-shot, and absent from disk and environment")
   func oneShotRoundTrip() async throws {
@@ -76,7 +76,7 @@ struct GitAskPassTests {
     let session = try await broker.makeGitCredentialSession(
       remoteURL: remote,
       socketDirectory: socketDirectory,
-      timeoutSeconds: 5
+      timeoutSeconds: 30
     )
     let executable = try builtProduct(named: "JidokaCodeAskPass")
     let environment = try session.environment(
@@ -92,7 +92,7 @@ struct GitAskPassTests {
         arguments: ["Password for 'https://x-access-token@github.com':"],
         workingDirectory: fixture.root,
         environment: environment,
-        timeoutSeconds: 5
+        timeoutSeconds: 30
       ))
     #expect(result.succeeded)
     #expect(result.stdout == token + Data([0x0A]))
@@ -165,6 +165,104 @@ struct GitAskPassTests {
     }
   }
 
+  @Test("production-length Application Support paths fit one-shot askpass sockets")
+  func productionLengthSocketPath() async throws {
+    let fixture = try GitTestRoot(prefix: "jc-ap-production-path")
+    defer { fixture.remove() }
+    let parent = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: parent) }
+    let targetDirectoryByteCount = 57
+    let paddingCount = targetDirectoryByteCount - parent.path.utf8.count - 1
+    guard paddingCount > 0 else {
+      Issue.record("temporary socket path cannot reproduce the production boundary")
+      return
+    }
+    let socketDirectory = parent.appendingPathComponent(
+      String(repeating: "p", count: paddingCount), isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: socketDirectory,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    let executable = fixture.root.appendingPathComponent("askpass")
+    try writeExecutable(executable, "#!/bin/sh\nexit 0\n")
+    let token = Data(repeating: 0x75, count: 32)
+    let provider = try GitHubGitCredentialProvider(
+      broker: GitHubBroker(
+        tokenProvider: AskPassTokenProvider(token: token),
+        transport: UnusedAskPassHTTPTransport()
+      ),
+      socketDirectory: socketDirectory,
+      askPassExecutable: executable
+    )
+    let remote = try #require(
+      URL(string: "https://x-access-token@github.com/owner/repo.git"))
+    let session = try await provider.makeSession(remoteURL: remote)
+    #expect(
+      session.socketURL.path.utf8.count + 1
+        <= MemoryLayout.size(ofValue: sockaddr_un().sun_path)
+    )
+    let environment = try session.environment(
+      askPassExecutable: executable,
+      base: try CredentiallessEnvironment.make(
+        homeDirectory: fixture.root.path,
+        temporaryDirectory: fixture.root.path
+      )
+    )
+    #expect(
+      try GitAskPassClient.credential(
+        prompt: "Password for 'https://x-access-token@github.com':",
+        environment: environment
+      ) == token
+    )
+    try await session.wait()
+  }
+
+  @Test("occupied socket names are preserved while a fresh name is bound")
+  func occupiedSocketNameRetriesWithoutUnlink() async throws {
+    let fixture = try GitTestRoot(prefix: "jc-ap-collision")
+    defer { fixture.remove() }
+    let socketDirectory = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: socketDirectory) }
+    let occupiedID = String(repeating: "a", count: 32)
+    let availableID = String(repeating: "b", count: 32)
+    let occupiedURL = socketDirectory.appendingPathComponent("a-\(occupiedID).s")
+    let occupiedContents = Data("occupied".utf8)
+    try occupiedContents.write(to: occupiedURL, options: .withoutOverwriting)
+    let executable = fixture.root.appendingPathComponent("askpass")
+    try writeExecutable(executable, "#!/bin/sh\nexit 0\n")
+    let token = Data(repeating: 0x75, count: 32)
+    let remote = try #require(
+      URL(string: "https://x-access-token@github.com/owner/repo.git"))
+    let socketIDs = SocketIDSequence([occupiedID, availableID])
+    let session = try OneShotGitCredentialServer.start(
+      token: token,
+      remoteURL: remote,
+      socketDirectory: socketDirectory,
+      timeoutSeconds: 5,
+      now: Date(),
+      socketIDGenerator: { socketIDs.next() }
+    )
+    #expect(session.socketURL.lastPathComponent == "a-\(availableID).s")
+    #expect(try Data(contentsOf: occupiedURL) == occupiedContents)
+    let environment = try session.environment(
+      askPassExecutable: executable,
+      base: try CredentiallessEnvironment.make(
+        homeDirectory: fixture.root.path,
+        temporaryDirectory: fixture.root.path
+      )
+    )
+    #expect(
+      try GitAskPassClient.credential(
+        prompt: "Password for 'https://x-access-token@github.com':",
+        environment: environment
+      ) == token
+    )
+    try await session.wait()
+    #expect(try Data(contentsOf: occupiedURL) == occupiedContents)
+    #expect(!FileManager.default.fileExists(atPath: session.socketURL.path))
+  }
+
   @Test("unsafe socket directories and remote identities fail before token release")
   func unsafeInputs() async throws {
     let fixture = try GitTestRoot(prefix: "jc-ap-unsafe")
@@ -193,6 +291,21 @@ struct GitAskPassTests {
         socketDirectory: safeDirectory
       )
     }
+  }
+}
+
+private final class SocketIDSequence: @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [String]
+
+  init(_ values: [String]) {
+    self.values = values
+  }
+
+  func next() -> String {
+    lock.lock()
+    defer { lock.unlock() }
+    return values.removeFirst()
   }
 }
 

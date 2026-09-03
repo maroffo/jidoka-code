@@ -56,6 +56,113 @@ struct JidokaCodeApp: App {
   }
 
   private static func dispatchCLIIfRequested(arguments: [String]) {
+    #if DEBUG || JIDOKA_ADHOC_RUNTIME_TESTING
+      if arguments.first == "--release-runtime-verify-input" {
+        do {
+          PiProbeCLI.write(
+            try ReleaseRuntimeProbeCLI.verifyStaged(arguments: Array(arguments.dropFirst()))
+          )
+          exit(EXIT_SUCCESS)
+        } catch let error as PiRuntimeResolutionError {
+          FileHandle.standardError.write(
+            Data(
+              "release runtime input failed validation: \(error.code.rawValue): \(error.detail)\n"
+                .utf8
+            )
+          )
+          exit(EXIT_FAILURE)
+        } catch {
+          FileHandle.standardError.write(Data("release runtime input failed validation\n".utf8))
+          exit(EXIT_FAILURE)
+        }
+      }
+    #endif
+
+    if arguments == ["--release-runtime-verify-production"] {
+      do {
+        PiProbeCLI.write(try ReleaseRuntimeProbeCLI.verifyProductionBundle())
+        exit(EXIT_SUCCESS)
+      } catch let error as PiRuntimeResolutionError {
+        FileHandle.standardError.write(
+          Data(
+            "release runtime bundle failed validation: \(error.code.rawValue): \(error.detail)\n"
+              .utf8
+          )
+        )
+        exit(EXIT_FAILURE)
+      } catch {
+        FileHandle.standardError.write(Data("release runtime bundle failed validation\n".utf8))
+        exit(EXIT_FAILURE)
+      }
+    }
+
+    #if DEBUG || JIDOKA_ADHOC_RUNTIME_TESTING
+      if arguments.first == "--release-runtime-verify-developer-id" {
+        do {
+          PiProbeCLI.write(
+            try ReleaseRuntimeProbeCLI.verifyDeveloperIDBundle(
+              arguments: Array(arguments.dropFirst())
+            )
+          )
+          exit(EXIT_SUCCESS)
+        } catch let error as PiRuntimeResolutionError {
+          FileHandle.standardError.write(
+            Data(
+              "release runtime bundle failed validation: \(error.code.rawValue): \(error.detail)\n"
+                .utf8
+            )
+          )
+          exit(EXIT_FAILURE)
+        } catch {
+          FileHandle.standardError.write(Data("release runtime bundle failed validation\n".utf8))
+          exit(EXIT_FAILURE)
+        }
+      }
+
+      if arguments == ["--release-runtime-verify-adhoc"] {
+        do {
+          PiProbeCLI.write(try ReleaseRuntimeProbeCLI.verifyAdHocBundle())
+          exit(EXIT_SUCCESS)
+        } catch let error as PiRuntimeResolutionError {
+          FileHandle.standardError.write(
+            Data(
+              "release runtime bundle failed validation: \(error.code.rawValue): \(error.detail)\n"
+                .utf8
+            )
+          )
+          exit(EXIT_FAILURE)
+        } catch {
+          FileHandle.standardError.write(Data("release runtime bundle failed validation\n".utf8))
+          exit(EXIT_FAILURE)
+        }
+      }
+    #endif
+
+    if arguments.first?.hasPrefix("--release-runtime-verify-") == true {
+      FileHandle.standardError.write(
+        Data("unsupported release runtime verification command\n".utf8)
+      )
+      exit(EXIT_FAILURE)
+    }
+
+    if arguments.first == "--herdr-readiness-probe" {
+      guard arguments == ["--herdr-readiness-probe"] else {
+        FileHandle.standardError.write(
+          Data("Herdr readiness probe failed: INVALID_ARGUMENTS\n".utf8)
+        )
+        exit(EXIT_FAILURE)
+      }
+      do {
+        try HerdrReadinessProbeCLI.write(HerdrReadinessProbeCLI.run())
+        exit(EXIT_SUCCESS)
+      } catch {
+        FileHandle.standardError.write(
+          Data("Herdr readiness probe failed: \(error)\n".utf8)
+        )
+        exit(EXIT_FAILURE)
+      }
+    }
+
     if arguments.first == "--pi-probe" {
       do {
         PiProbeCLI.write(try PiProbeCLI.run(arguments: Array(arguments.dropFirst())))
@@ -102,6 +209,30 @@ struct JidokaCodeApp: App {
         exit(EXIT_SUCCESS)
       } catch {
         FileHandle.standardError.write(Data("lifecycle probe failed: \(error)\n".utf8))
+        exit(EXIT_FAILURE)
+      }
+    }
+
+    if arguments.first == "--job-maintenance" {
+      do {
+        try JobMaintenanceCLI.write(
+          JobMaintenanceCLI.run(arguments: Array(arguments.dropFirst()))
+        )
+        exit(EXIT_SUCCESS)
+      } catch {
+        FileHandle.standardError.write(Data("job maintenance failed: \(error)\n".utf8))
+        exit(EXIT_FAILURE)
+      }
+    }
+
+    if arguments.first == "--job-canary" {
+      do {
+        try JobCanaryCLI.write(
+          JobCanaryCLI.run(arguments: Array(arguments.dropFirst()))
+        )
+        exit(EXIT_SUCCESS)
+      } catch {
+        FileHandle.standardError.write(Data("job canary failed: \(error)\n".utf8))
         exit(EXIT_FAILURE)
       }
     }

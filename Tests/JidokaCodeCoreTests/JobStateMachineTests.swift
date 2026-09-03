@@ -294,7 +294,13 @@ private let allowedTransitions: [ExpectedTransition] = [
     .awaitingResolution, .humanRetryAuthorized, .queued, attemptDelta: 1,
     disposition: .humanRetryAuthorized, mutationGenerationDelta: 1),
   .init(.awaitingResolution, .humanAbort, .blocked, disposition: .ambiguous),
+  .init(.queued, .operatorRetire, .blocked, disposition: .superseded),
+  .init(.blocked, .operatorRetire, .blocked, disposition: .superseded),
+  .init(
+    .blocked, .operatorRetryConfigurationRepair, .queued, attemptDelta: 1,
+    disposition: .humanRetryAuthorized),
   .init(.reconciliationQueued, .acquireRecoveryLease, .reconciling, lease: .acquireRecovery),
+  .init(.reconciliationQueued, .canaryTopologyRecovered, .preparing, lease: .acquireRecovery),
 ]
 
 private func transitionContext(now: Date) -> JobTransitionContext {

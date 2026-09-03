@@ -3,19 +3,22 @@ import Foundation
 import Security
 
 public struct EngineXPCPeerValidator: Sendable {
-  private let expectedClientURL: URL
+  private let expectedPeerURL: URL
   private let pathForProcess: @Sendable (pid_t) -> URL?
   private let codeIsValid: @Sendable (pid_t) -> Bool
 
   public init(helperExecutableURL: URL) {
-    let expectedClientURL = Self.expectedClientURL(for: helperExecutableURL)
+    self.init(expectedPeerExecutableURL: Self.expectedClientURL(for: helperExecutableURL))
+  }
+
+  public init(expectedPeerExecutableURL: URL) {
     self.init(
-      helperExecutableURL: helperExecutableURL,
+      expectedPeerExecutableURL: expectedPeerExecutableURL,
       pathForProcess: Self.systemPath(for:),
       codeIsValid: { processID in
         Self.systemCodeIsValid(
           processID: processID,
-          expectedClientURL: expectedClientURL
+          expectedPeerURL: expectedPeerExecutableURL
         )
       }
     )
@@ -26,8 +29,20 @@ public struct EngineXPCPeerValidator: Sendable {
     pathForProcess: @escaping @Sendable (pid_t) -> URL?,
     codeIsValid: @escaping @Sendable (pid_t) -> Bool = { _ in true }
   ) {
-    expectedClientURL =
-      Self.expectedClientURL(for: helperExecutableURL)
+    self.init(
+      expectedPeerExecutableURL: Self.expectedClientURL(for: helperExecutableURL),
+      pathForProcess: pathForProcess,
+      codeIsValid: codeIsValid
+    )
+  }
+
+  init(
+    expectedPeerExecutableURL: URL,
+    pathForProcess: @escaping @Sendable (pid_t) -> URL?,
+    codeIsValid: @escaping @Sendable (pid_t) -> Bool = { _ in true }
+  ) {
+    expectedPeerURL =
+      expectedPeerExecutableURL
       .resolvingSymlinksInPath().standardizedFileURL
     self.pathForProcess = pathForProcess
     self.codeIsValid = codeIsValid
@@ -39,7 +54,7 @@ public struct EngineXPCPeerValidator: Sendable {
     else {
       return false
     }
-    return observed == expectedClientURL
+    return observed == expectedPeerURL
   }
 
   public static func expectedClientURL(for helperExecutableURL: URL) -> URL {
@@ -47,19 +62,19 @@ public struct EngineXPCPeerValidator: Sendable {
     let directory = helper.deletingLastPathComponent()
     if directory.lastPathComponent == "Helpers" {
       return directory.deletingLastPathComponent()
-        .appendingPathComponent("MacOS/JidokaCodeApp", isDirectory: false)
+        .appendingPathComponent("MacOS/Jidoka Code", isDirectory: false)
     }
     return directory.appendingPathComponent("JidokaCodeApp", isDirectory: false)
   }
 
   private static func systemCodeIsValid(
     processID: pid_t,
-    expectedClientURL: URL
+    expectedPeerURL: URL
   ) -> Bool {
     var expectedCode: SecStaticCode?
     guard
       SecStaticCodeCreateWithPath(
-        expectedClientURL as CFURL,
+        expectedPeerURL as CFURL,
         SecCSFlags(),
         &expectedCode
       ) == errSecSuccess,

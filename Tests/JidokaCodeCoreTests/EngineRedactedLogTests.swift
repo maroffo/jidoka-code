@@ -25,7 +25,25 @@ struct EngineRedactedLogTests {
     let decoded = try JSONDecoder().decode(EngineLogRecord.self, from: Data(line))
     #expect(decoded.command == .replaceCredential)
     #expect(decoded.error == .credentialRejected)
+    #expect(decoded.phase == nil)
     #expect(try fileMode(logger.fileURL) == 0o600)
+
+    await logger.record(
+      EngineLogRecord(
+        timestamp: Date(timeIntervalSince1970: 500_000.5),
+        event: .startupFailed,
+        phase: .runtimeReload,
+        command: nil,
+        error: .internalFailure
+      )
+    )
+    let startupLine = try #require(
+      Data(contentsOf: logger.fileURL).split(separator: 0x0A).last)
+    let startup = try JSONDecoder().decode(EngineLogRecord.self, from: Data(startupLine))
+    #expect(startup.event == .startupFailed)
+    #expect(startup.phase == .runtimeReload)
+    #expect(startup.command == nil)
+    #expect(startup.error == .internalFailure)
 
     try Data(repeating: 0, count: EngineRedactedLogger.maximumBytes).write(to: logger.fileURL)
     try FileManager.default.setAttributes(
@@ -53,6 +71,22 @@ struct EngineRedactedLogTests {
       )
     )
     #expect(try Data(contentsOf: logger.fileURL).count == sizeBeforeRejectedAppend)
+  }
+
+  @Test("historical records without a phase remain decodable")
+  func historicalRecordCompatibility() throws {
+    let data = Data(
+      """
+      {"command":"snapshot","error":null,"event":"commandSucceeded","timestamp":500000}
+      """.utf8
+    )
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .secondsSince1970
+    let decoded = try decoder.decode(EngineLogRecord.self, from: data)
+    #expect(decoded.event == .commandSucceeded)
+    #expect(decoded.phase == nil)
+    #expect(decoded.command == .snapshot)
+    #expect(decoded.error == nil)
   }
 
   @Test("unsafe directory and filename fail closed")

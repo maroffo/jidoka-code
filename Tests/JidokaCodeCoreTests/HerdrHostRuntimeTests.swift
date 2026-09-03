@@ -85,6 +85,22 @@ struct HerdrHostRuntimeTests {
     }
   }
 
+  @Test("first queue sequence rejects a forged reused-alias marker")
+  func firstSequenceRejectsReuseAlias() async throws {
+    let fixture = try HerdrHostFixture()
+    var environment = fixture.hostEnvironment(
+      socketURL: fixture.root.appendingPathComponent("absent.sock")
+    )
+    environment["JIDOKA_CODE_HERDR_REUSE_ALIAS"] = "1"
+    await #expect(throws: HerdrHostError.invalidEnvironment) {
+      _ = try await HerdrHostRuntime.run(
+        arguments: ["--launch-attempt-id", "attempt-0001"],
+        environment: environment,
+        launchOperation: { _ in 0 }
+      )
+    }
+  }
+
   @Test("host reports only its pane launches exact child and strips every Herdr capability")
   func exactHostLifecycle() async throws {
     let fixture = try HerdrHostFixture()
@@ -92,12 +108,13 @@ struct HerdrHostRuntimeTests {
     _ = try HerdrHostDescriptorStore.prepare(descriptor, in: fixture.runRoot)
     let responder = HerdrHostWireResponder(fixture: fixture, descriptor: descriptor)
     let server = try HerdrFakeSocketServer(
-      replies: (0..<9).map { _ in
+      replies: (0..<8).map { _ in
         HerdrFakeReply(dynamicResponse: { responder.response(to: $0) })
       }
     )
     var environment = fixture.hostEnvironment(socketURL: server.socketURL)
     environment["JIDOKA_CODE_HERDR_SEQUENCE_BASE"] = "3"
+    environment["JIDOKA_CODE_HERDR_REUSE_ALIAS"] = "1"
 
     let status = try await HerdrHostRuntime.run(
       arguments: ["--launch-attempt-id", descriptor.launchAttemptID],
@@ -115,8 +132,7 @@ struct HerdrHostRuntimeTests {
     #expect(
       try requests.map(Self.method) == [
         "ping", "session.snapshot", "pane.report_agent", "pane.report_metadata",
-        "agent.rename", "ping", "session.snapshot", "pane.report_agent",
-        "pane.report_metadata",
+        "ping", "session.snapshot", "pane.report_agent", "pane.report_metadata",
       ]
     )
     let objects = try requests.map(Self.object)
@@ -166,6 +182,11 @@ struct HerdrHostRuntimeTests {
     _ = try channel.acknowledgePreparedResult()
     let descriptor = try fixture.descriptor(settlement: settlement)
     _ = try fixture.prepare(descriptor)
+    let projectedCredential = fixture.agentDirectory.appendingPathComponent("auth.json")
+    try PiTUIFileProtocol.createPrivateFile(
+      data: Data("{}\n".utf8),
+      at: projectedCredential
+    )
     let responder = HerdrHostWireResponder(
       fixture: fixture,
       descriptor: descriptor,
@@ -238,7 +259,45 @@ struct HerdrHostRuntimeTests {
       return (value["params"] as? [String: Any])?["pane_id"] as? String
     }
     #expect(reportPaneIDs == ["w-repo:p2", "w-moved:p9"])
-    #expect(descriptor.schemaVersion == 3)
+    #expect(!FileManager.default.fileExists(atPath: projectedCredential.path))
+    #expect(descriptor.schemaVersion == 4)
+  }
+
+  @Test("accepted settlement cannot mask process-group cleanup failure")
+  func acceptedSettlementCleanupFailure() async throws {
+    let fixture = try HerdrHostFixture()
+    let settlement = try fixture.settlement()
+    let channel = try settlement.resultChannel()
+    let descriptor = try fixture.descriptor(settlement: settlement)
+    _ = try fixture.prepare(descriptor)
+    let projectedCredential = fixture.agentDirectory.appendingPathComponent("auth.json")
+    try PiTUIFileProtocol.createPrivateFile(
+      data: Data("{}\n".utf8),
+      at: projectedCredential
+    )
+    let responder = HerdrHostWireResponder(fixture: fixture, descriptor: descriptor)
+    let server = try HerdrFakeSocketServer(
+      replies: (0..<9).map { _ in
+        HerdrFakeReply(dynamicResponse: { responder.response(to: $0) })
+      }
+    )
+
+    await #expect(throws: HerdrHostError.processGroupCleanupFailed) {
+      _ = try await HerdrHostRuntime.run(
+        arguments: ["--launch-attempt-id", descriptor.launchAttemptID],
+        environment: fixture.hostEnvironment(socketURL: server.socketURL),
+        descriptorLoader: { _, _ in descriptor },
+        launchOperation: { _ in
+          try fixture.writeSettlementResult(settlement)
+          _ = try channel.acknowledgePreparedResult()
+          try channel.releaseAcceptedResult()
+          throw HerdrHostError.processGroupCleanupFailed
+        }
+      )
+    }
+    await server.finish()
+    #expect(try Self.reportedStates(await server.requests.snapshot()) == ["working", "blocked"])
+    #expect(!FileManager.default.fileExists(atPath: projectedCredential.path))
   }
 
   @Test(
@@ -418,7 +477,38 @@ struct HerdrHostRuntimeTests {
     #expect(await reportServer.requests.snapshot().count == 8)
   }
 
-  @Test("schema 3 binds logical run, nonce, role, workflow, channel, and TUI configuration")
+  @Test("a failed initial Herdr transaction removes projected provider credentials")
+  func initialTransactionFailureRemovesCredential() async throws {
+    let fixture = try HerdrHostFixture()
+    let settlement = try fixture.settlement()
+    let descriptor = try fixture.descriptor(settlement: settlement)
+    _ = try fixture.prepare(descriptor)
+    let credential = fixture.agentDirectory.appendingPathComponent("auth.json")
+    try PiTUIFileProtocol.createPrivateFile(data: Data("{}\n".utf8), at: credential)
+    let server = try HerdrFakeSocketServer(
+      replies: [HerdrFakeReply(dynamicResponse: { Self.errorResponse(to: $0) })]
+    )
+    let launches = HostInvocationCounter()
+
+    await #expect(throws: HerdrHostError.herdrTransactionFailed) {
+      _ = try await HerdrHostRuntime.run(
+        arguments: ["--launch-attempt-id", descriptor.launchAttemptID],
+        environment: fixture.hostEnvironment(socketURL: server.socketURL),
+        descriptorLoader: { _, _ in descriptor },
+        launchOperation: { _ in
+          await launches.record()
+          return 0
+        }
+      )
+    }
+    await server.finish()
+
+    #expect(await launches.count == 0)
+    #expect(!FileManager.default.fileExists(atPath: credential.path))
+  }
+
+  @Test(
+    "schema 4 binds logical run, runtime, nonce, role, workflow, channel, and TUI configuration")
   func settlementIdentityBinding() throws {
     let fixture = try HerdrHostFixture()
     let mismatched = try HerdrHostSettlementDescriptor(
@@ -447,8 +537,8 @@ struct HerdrHostRuntimeTests {
     }
   }
 
-  @Test("schema 3 rejects every derived launch-family mutation after decode")
-  func schema3DerivedLaunchMutation() throws {
+  @Test("schema 4 rejects every derived launch-family mutation after decode")
+  func schema4DerivedLaunchMutation() throws {
     let fixture = try HerdrHostFixture()
     let settlement = try fixture.settlement()
     let descriptor = try fixture.descriptor(settlement: settlement)
@@ -493,6 +583,40 @@ struct HerdrHostRuntimeTests {
           $0["piTUIInvocation"] = value
         }
       ),
+      (
+        "release-runtime-root",
+        {
+          var value = $0["piTUIInvocation"] as? [String: Any] ?? [:]
+          value["releaseRuntimeRoot"] = "/tmp/drift-runtime"
+          $0["piTUIInvocation"] = value
+        }
+      ),
+      (
+        "release-runtime-identity-digest",
+        {
+          var value = $0["piTUIInvocation"] as? [String: Any] ?? [:]
+          value["releaseRuntimeIdentitySHA256"] = String(repeating: "e", count: 64)
+          $0["piTUIInvocation"] = value
+        }
+      ),
+      (
+        "release-runtime-ID",
+        {
+          var value = $0["piTUIInvocation"] as? [String: Any] ?? [:]
+          var identity = value["releaseRuntimeIdentity"] as? [String: Any] ?? [:]
+          identity["runtimeID"] = "node-26.7.0-pi-0.84.2-host-test-v2"
+          value["releaseRuntimeIdentity"] = identity
+          $0["piTUIInvocation"] = value
+        }
+      ),
+      (
+        "legacy-external-runtime-schema",
+        {
+          var value = $0["piTUIInvocation"] as? [String: Any] ?? [:]
+          value["schemaVersion"] = 1
+          $0["piTUIInvocation"] = value
+        }
+      ),
     ]
     for (index, mutation) in mutations.enumerated() {
       var object = base
@@ -500,7 +624,7 @@ struct HerdrHostRuntimeTests {
       var data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
       data.append(0x0A)
       let root = fixture.root.appendingPathComponent(
-        "schema3-mutation-\(index)",
+        "schema4-mutation-\(index)",
         isDirectory: true
       )
       let run = root.appendingPathComponent(descriptor.launchAttemptID, isDirectory: true)
@@ -525,14 +649,32 @@ struct HerdrHostRuntimeTests {
           launchAttemptID: descriptor.launchAttemptID,
           from: root
         )
-        Issue.record("schema-3 mutation passed: \(mutation.0)")
+        Issue.record("schema-4 mutation passed: \(mutation.0)")
       } catch let error as HerdrHostError {
         #expect(error == .invalidDescriptor)
       }
     }
   }
 
-  @Test("topology launch attempt resolves the schema 3 descriptor for one logical run")
+  @Test("release B cannot reconstruct an in-flight release A descriptor")
+  func crossReleaseDescriptorReplayDenied() throws {
+    let fixture = try HerdrHostFixture()
+    let descriptor = try fixture.descriptor(settlement: fixture.settlement())
+    _ = try fixture.prepare(descriptor)
+    let releaseB = try fixture.alternateResolvedRuntime(
+      runtimeID: "node-26.7.0-pi-0.84.2-host-test-v2"
+    )
+
+    #expect(throws: HerdrHostError.invalidDescriptor) {
+      _ = try HerdrHostDescriptorStore.load(
+        launchAttemptID: descriptor.launchAttemptID,
+        from: fixture.runRoot,
+        resolvedRuntime: releaseB
+      )
+    }
+  }
+
+  @Test("topology launch attempt resolves the schema 4 descriptor for one logical run")
   func topologyLaunchIdentity() throws {
     let fixture = try HerdrHostFixture()
     let settlement = try fixture.settlement()
@@ -557,6 +699,111 @@ struct HerdrHostRuntimeTests {
     #expect(
       try fixture.load(launchAttemptID: launch.command[2]).runID == launch.runID
     )
+  }
+
+  @Test("same-second PID reuse is absent and never authorizes group signaling")
+  func reusedChildProcessIdentityIsNeverSignaled() async throws {
+    let record = HerdrChildProcessRecord(
+      launchAttemptID: "attempt-reuse-0001",
+      processID: 41_101,
+      processGroupID: 41_101,
+      startSeconds: 1_000,
+      startMicroseconds: 200
+    )
+    let reusedIdentity = try HerdrHostProcessIdentity(
+      processID: record.processID,
+      startSeconds: record.startSeconds,
+      startMicroseconds: record.startMicroseconds + 1
+    )
+    let probe = HostPIDReuseProbe()
+
+    #expect(
+      HerdrHostRuntime.childProcessIdentityState(
+        record,
+        identityLookup: { _ in reusedIdentity }
+      ) == .mismatched
+    )
+    #expect(
+      HerdrHostRuntime.childProcessIsAbsent(
+        record,
+        identityLookup: { _ in reusedIdentity },
+        processGroupExists: { processGroup in
+          probe.recordGroupProbe(processGroup)
+          return true
+        }
+      )
+    )
+    #expect(probe.groupProbeCount == 0)
+
+    await #expect(throws: HerdrHostError.processGroupCleanupFailed) {
+      try await HerdrHostRuntime.terminateChildProcess(
+        record,
+        graceMilliseconds: 10,
+        identityLookup: { _ in reusedIdentity },
+        processGroupExists: { processGroup in
+          probe.recordGroupProbe(processGroup)
+          return true
+        },
+        terminateMatchingIdentity: { _, processGroup, _ in
+          probe.recordSignal(processGroup)
+        }
+      )
+    }
+    #expect(probe.groupProbeCount == 1)
+    #expect(probe.signaledProcessGroups.isEmpty)
+
+    let absentProbe = HostPIDReuseProbe()
+    #expect(
+      HerdrHostRuntime.childProcessIdentityState(
+        record,
+        identityLookup: { _ in nil }
+      ) == .absent
+    )
+    #expect(
+      !HerdrHostRuntime.childProcessIsAbsent(
+        record,
+        identityLookup: { _ in nil },
+        processGroupExists: { processGroup in
+          absentProbe.recordGroupProbe(processGroup)
+          return true
+        }
+      )
+    )
+    await #expect(throws: HerdrHostError.processGroupCleanupFailed) {
+      try await HerdrHostRuntime.terminateChildProcess(
+        record,
+        graceMilliseconds: 10,
+        identityLookup: { _ in nil },
+        processGroupExists: { processGroup in
+          absentProbe.recordGroupProbe(processGroup)
+          return true
+        },
+        terminateMatchingIdentity: { _, processGroup, _ in
+          absentProbe.recordSignal(processGroup)
+        }
+      )
+    }
+    #expect(absentProbe.groupProbeCount == 2)
+    #expect(absentProbe.signaledProcessGroups.isEmpty)
+  }
+
+  @Test(
+    "observed escaped descendants preserve exact normal and error leader status",
+    arguments: [Int32(0), Int32(37)]
+  )
+  func escapedDescendantNormalAndError(exitCode: Int32) async throws {
+    let fixture = try HerdrHostFixture()
+    let descriptor = try fixture.descriptor(escapingExitCode: exitCode)
+    let task = Task { try await HerdrHostRuntime.launchForTesting(descriptor) }
+    let identity = try await fixture.recordedEscapedIdentity()
+    defer {
+      if SupervisedProcessTracker.matches(identity) {
+        _ = Darwin.kill(identity.processID, SIGKILL)
+      }
+    }
+    let status = try await task.value
+    #expect(status == exitCode)
+    #expect(!SupervisedProcessTracker.matches(identity))
   }
 
   @Test("execution timeout kills the exact process group and records a typed failure")
@@ -682,6 +929,36 @@ struct HerdrHostRuntimeTests {
   }
 }
 
+private final class HostPIDReuseProbe: @unchecked Sendable {
+  private let lock = NSLock()
+  private var groupProbes: [pid_t] = []
+  private var signals: [pid_t] = []
+
+  var groupProbeCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return groupProbes.count
+  }
+
+  var signaledProcessGroups: [pid_t] {
+    lock.lock()
+    defer { lock.unlock() }
+    return signals
+  }
+
+  func recordGroupProbe(_ processGroup: pid_t) {
+    lock.lock()
+    groupProbes.append(processGroup)
+    lock.unlock()
+  }
+
+  func recordSignal(_ processGroup: pid_t) {
+    lock.lock()
+    signals.append(processGroup)
+    lock.unlock()
+  }
+}
+
 private actor HostCompletionFlag {
   private(set) var isFinished = false
 
@@ -732,18 +1009,13 @@ private final class HostLaunchSignal: Sendable {
 }
 
 private final class HerdrHostFixture: @unchecked Sendable {
-  private static let resolvedRuntime = Result {
-    try PiRuntimeResolver(
-      configuration: .standard(resourceRoot: sourceResourceRoot())
-    ).resolve()
-  }
-
   let root: URL
   let runRoot: URL
   let workingDirectory: URL
   let childExecutable: URL
   let childEnvironmentLog: URL
   let longRunningExecutable: URL
+  let escapingExecutable: URL
   let processLog: URL
   let settlementDirectory: URL
   let homeDirectory: URL
@@ -753,6 +1025,7 @@ private final class HerdrHostFixture: @unchecked Sendable {
   let promptURL: URL
   let workflowConfigurationURL: URL
   let tuiConfigurationURL: URL
+  let resolvedRuntime: PiResolvedRuntime
 
   init() throws {
     root = URL(
@@ -764,6 +1037,7 @@ private final class HerdrHostFixture: @unchecked Sendable {
     childExecutable = root.appendingPathComponent("fixture-child")
     childEnvironmentLog = root.appendingPathComponent("child-environment.txt")
     longRunningExecutable = root.appendingPathComponent("long-running-child")
+    escapingExecutable = root.appendingPathComponent("escaping-child")
     processLog = root.appendingPathComponent("processes.txt")
     settlementDirectory = root.appendingPathComponent("settlement", isDirectory: true)
     homeDirectory = root.appendingPathComponent("home", isDirectory: true)
@@ -792,6 +1066,7 @@ private final class HerdrHostFixture: @unchecked Sendable {
         attributes: [.posixPermissions: 0o700]
       )
     }
+    resolvedRuntime = try Self.makeResolvedRuntime(root: root)
     let script = """
       #!/bin/sh
       /usr/bin/env > "$1"
@@ -803,9 +1078,27 @@ private final class HerdrHostFixture: @unchecked Sendable {
       root_pid="$$"
       root_pgid="$(/bin/ps -o pgid= -p "$$" | /usr/bin/tr -d ' ')"
       printf '%s %s\n' "$root_pid" "$root_pgid" > "$1"
-      /bin/sleep 30 &
-      printf '%s\n' "$!" >> "$1"
+      /usr/bin/python3 -c 'import os,sys,time; os.setsid(); open(sys.argv[1], "a").write(str(os.getpid()) + "\\n"); os.close(0); os.close(1); os.close(2); time.sleep(30)' "$1" &
+      attempt=0
+      while [ "$(/usr/bin/wc -l < "$1")" -lt 2 ] && [ "$attempt" -lt 100 ]; do
+        /bin/sleep 0.01
+        attempt=$((attempt + 1))
+      done
       wait
+      """
+    let escapingScript = """
+      #!/bin/sh
+      root_pid="$$"
+      root_pgid="$(/bin/ps -o pgid= -p "$$" | /usr/bin/tr -d ' ')"
+      printf '%s %s\n' "$root_pid" "$root_pgid" > "$1"
+      /usr/bin/python3 -c 'import os,sys,time; os.setsid(); open(sys.argv[1], "a").write(str(os.getpid()) + "\\n"); os.close(0); os.close(1); os.close(2); time.sleep(30)' "$1" &
+      attempt=0
+      while [ "$(/usr/bin/wc -l < "$1")" -lt 2 ] && [ "$attempt" -lt 100 ]; do
+        /bin/sleep 0.01
+        attempt=$((attempt + 1))
+      done
+      /bin/sleep 0.2
+      exit "$2"
       """
     guard
       FileManager.default.createFile(
@@ -818,8 +1111,14 @@ private final class HerdrHostFixture: @unchecked Sendable {
         contents: Data(longRunningScript.utf8),
         attributes: [.posixPermissions: 0o700]
       ),
+      FileManager.default.createFile(
+        atPath: escapingExecutable.path,
+        contents: Data(escapingScript.utf8),
+        attributes: [.posixPermissions: 0o700]
+      ),
       Darwin.chmod(childExecutable.path, 0o700) == 0,
-      Darwin.chmod(longRunningExecutable.path, 0o700) == 0
+      Darwin.chmod(longRunningExecutable.path, 0o700) == 0,
+      Darwin.chmod(escapingExecutable.path, 0o700) == 0
     else {
       throw HerdrHostError.invalidDescriptor
     }
@@ -870,11 +1169,87 @@ private final class HerdrHostFixture: @unchecked Sendable {
     try? FileManager.default.removeItem(at: root)
   }
 
+  private static func makeResolvedRuntime(root: URL) throws -> PiResolvedRuntime {
+    let package = root.appendingPathComponent("release-pi", isDirectory: true)
+    let dist = package.appendingPathComponent("dist", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: dist,
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700]
+    )
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o700],
+      ofItemAtPath: package.path
+    )
+    let cli = dist.appendingPathComponent("cli.js")
+    let cliData = Data("process.exit(0);\n".utf8)
+    try writeHostPrivate(cliData, to: cli)
+    let node = URL(fileURLWithPath: "/usr/bin/true")
+    let nodeData = try Data(contentsOf: node, options: [.mappedIfSafe])
+    let tree = try PiRuntimeResolver.attestPackageTree(package)
+    var metadata = stat()
+    guard lstat(root.path, &metadata) == 0 else { throw HerdrHostError.invalidDescriptor }
+    let identity = try PiReleaseRuntimeIdentity(
+      runtimeID: "node-26.7.0-pi-0.84.2-host-test-v1",
+      manifestSHA256: String(repeating: "d", count: 64),
+      canonicalRoot: try PiTUIFileProtocol.canonicalExistingURL(root).path,
+      rootDevice: UInt64(metadata.st_dev),
+      rootInode: metadata.st_ino,
+      nodeCodeDirectorySHA256: PiTUIFileProtocol.sha256(nodeData),
+      piPackageTreeSHA256: tree.sha256
+    )
+    return PiResolvedRuntime(
+      nodeURL: node,
+      nodeVersion: try PiSemanticVersion("26.7.0"),
+      nodeSHA256: PiTUIFileProtocol.sha256(nodeData),
+      piCLIURL: cli,
+      piPackageRootURL: package,
+      piVersion: try PiSemanticVersion("0.84.2"),
+      piRuntimeSHA256: ["package-tree-v1": tree.sha256],
+      compatibility: PiRuntimeCompatibility(
+        minimumVersion: try PiSemanticVersion("0.84.2"),
+        maximumVersionExclusive: try PiSemanticVersion("0.84.3"),
+        policySHA256: String(repeating: "d", count: 64)
+      ),
+      provenance: .releaseOwned(identity)
+    )
+  }
+
+  func alternateResolvedRuntime(runtimeID: String) throws -> PiResolvedRuntime {
+    guard let currentIdentity = resolvedRuntime.releaseIdentity else {
+      throw HerdrHostError.invalidDescriptor
+    }
+    let identity = try PiReleaseRuntimeIdentity(
+      runtimeID: runtimeID,
+      manifestSHA256: String(repeating: "e", count: 64),
+      canonicalRoot: currentIdentity.canonicalRoot,
+      rootDevice: currentIdentity.rootDevice,
+      rootInode: currentIdentity.rootInode,
+      nodeCodeDirectorySHA256: currentIdentity.nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: currentIdentity.piPackageTreeSHA256
+    )
+    return PiResolvedRuntime(
+      nodeURL: resolvedRuntime.nodeURL,
+      nodeVersion: resolvedRuntime.nodeVersion,
+      nodeSHA256: resolvedRuntime.nodeSHA256,
+      piCLIURL: resolvedRuntime.piCLIURL,
+      piPackageRootURL: resolvedRuntime.piPackageRootURL,
+      piVersion: resolvedRuntime.piVersion,
+      piRuntimeSHA256: resolvedRuntime.piRuntimeSHA256,
+      compatibility: PiRuntimeCompatibility(
+        minimumVersion: resolvedRuntime.compatibility.minimumVersion,
+        maximumVersionExclusive: resolvedRuntime.compatibility.maximumVersionExclusive,
+        policySHA256: identity.manifestSHA256
+      ),
+      provenance: .releaseOwned(identity)
+    )
+  }
+
   func prepare(_ descriptor: HerdrHostDescriptor) throws -> String {
     try HerdrHostDescriptorStore.prepare(
       descriptor,
       in: runRoot,
-      resolvedRuntime: Self.resolvedRuntime.get()
+      resolvedRuntime: resolvedRuntime
     )
   }
 
@@ -885,7 +1260,7 @@ private final class HerdrHostFixture: @unchecked Sendable {
     try HerdrHostDescriptorStore.load(
       launchAttemptID: launchAttemptID,
       from: root ?? runRoot,
-      resolvedRuntime: Self.resolvedRuntime.get()
+      resolvedRuntime: resolvedRuntime
     )
   }
 
@@ -906,12 +1281,14 @@ private final class HerdrHostFixture: @unchecked Sendable {
     environment: [String: String] = ["SAFE_VALUE": "fixture"],
     settlement: HerdrHostSettlementDescriptor? = nil,
     longRunning: Bool = false,
+    escapingExitCode: Int32? = nil,
     executionTimeoutMilliseconds: Int = 3_600_000,
     abortGraceMilliseconds: Int = 5_000
   ) throws -> HerdrHostDescriptor {
     if let settlement {
       let invocation = try PiTUIHostInvocationDescriptor(
         resourceRoot: sourceResourceRoot(),
+        runtime: resolvedRuntime,
         homeDirectory: homeDirectory,
         agentDirectory: agentDirectory,
         temporaryDirectory: temporaryDirectory,
@@ -935,7 +1312,7 @@ private final class HerdrHostFixture: @unchecked Sendable {
         expectedWorkspaceID: "w-repo",
         piTUIInvocation: invocation,
         settlement: settlement,
-        resolvedRuntime: try Self.resolvedRuntime.get()
+        resolvedRuntime: resolvedRuntime
       )
     }
     return try HerdrHostDescriptor(
@@ -949,13 +1326,31 @@ private final class HerdrHostFixture: @unchecked Sendable {
       title: "Synthetic plan role",
       displayAgent: "Jidoka | plan",
       expectedWorkspaceID: "w-repo",
-      childExecutable: longRunning ? longRunningExecutable.path : childExecutable.path,
-      childArguments: [longRunning ? processLog.path : childEnvironmentLog.path],
+      childExecutable: escapingExitCode != nil
+        ? escapingExecutable.path
+        : (longRunning ? longRunningExecutable.path : childExecutable.path),
+      childArguments: escapingExitCode.map { [processLog.path, String($0)] }
+        ?? [longRunning ? processLog.path : childEnvironmentLog.path],
       childWorkingDirectory: workingDirectory.path,
       childEnvironment: environment,
       executionTimeoutMilliseconds: executionTimeoutMilliseconds,
       abortGraceMilliseconds: abortGraceMilliseconds
     )
+  }
+
+  func recordedEscapedIdentity() async throws -> SupervisedProcessIdentity {
+    for _ in 0..<300 {
+      if let lines = try? String(contentsOf: processLog, encoding: .utf8)
+        .split(separator: "\n"),
+        lines.count >= 2,
+        let processID = pid_t(lines[1]),
+        let identity = SupervisedProcessTracker.identity(processID)
+      {
+        return identity
+      }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    throw HerdrHostError.processGroupCleanupFailed
   }
 
   func settlement(channelDirectory: URL? = nil) throws -> HerdrHostSettlementDescriptor {
@@ -1076,7 +1471,7 @@ private final class HerdrHostWireResponder: @unchecked Sendable {
     switch method {
     case "ping":
       result = """
-        {"type":"pong","version":"0.8.0","protocol":19,"capabilities":{"live_handoff":true,"detached_server_daemon":true}}
+        {"type":"pong","version":"0.8.2","protocol":20,"capabilities":{"live_handoff":true,"detached_server_daemon":true}}
         """
     case "session.snapshot":
       let moved = nextSnapshotIsMoved()
@@ -1084,7 +1479,7 @@ private final class HerdrHostWireResponder: @unchecked Sendable {
       let workspaceID = moved ? "w-moved" : "w-repo"
       let tabID = moved ? "w-moved:t9" : "w-repo:t2"
       result = """
-        {"type":"session_snapshot","snapshot":{"version":"0.8.0","protocol":19,"focused_workspace_id":null,"focused_tab_id":null,"focused_pane_id":null,"workspaces":[{"workspace_id":"\(workspaceID)","active_tab_id":"\(tabID)","label":"maroffo/jidoka-code","number":1,"pane_count":1,"tab_count":1,"focused":false,"agent_status":"working"}],"tabs":[{"tab_id":"\(tabID)","workspace_id":"\(workspaceID)","label":"j/h2/g1","number":1,"pane_count":1,"focused":false,"agent_status":"working"}],"panes":[{"pane_id":"\(paneID)","terminal_id":"term-host","workspace_id":"\(workspaceID)","tab_id":"\(tabID)","revision":1,"focused":false,"agent_status":"working","cwd":"\(escaped(fixture.workingDirectory.path))","foreground_cwd":"\(escaped(fixture.workingDirectory.path))"}],"agents":[]}}
+        {"type":"session_snapshot","snapshot":{"version":"0.8.2","protocol":20,"focused_workspace_id":null,"focused_tab_id":null,"focused_pane_id":null,"workspaces":[{"workspace_id":"\(workspaceID)","active_tab_id":"\(tabID)","label":"maroffo/jidoka-code","number":1,"pane_count":1,"tab_count":1,"focused":false,"agent_status":"working"}],"tabs":[{"tab_id":"\(tabID)","workspace_id":"\(workspaceID)","label":"j/h2/g1","number":1,"pane_count":1,"focused":false,"agent_status":"working"}],"panes":[{"pane_id":"\(paneID)","terminal_id":"term-host","workspace_id":"\(workspaceID)","tab_id":"\(tabID)","revision":1,"focused":false,"agent_status":"working","cwd":"\(escaped(fixture.workingDirectory.path))","foreground_cwd":"\(escaped(fixture.workingDirectory.path))"}],"agents":[]}}
         """
     case "agent.rename":
       result = """

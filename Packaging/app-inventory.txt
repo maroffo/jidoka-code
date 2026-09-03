@@ -14,7 +14,7 @@
 ./Contents/MacOS/Jidoka Code
 ./Contents/Resources
 ./Contents/Resources/Herdr
-./Contents/Resources/Herdr/api-schema-0.8.0.json
+./Contents/Resources/Herdr/api-schema-0.8.2.json
 ./Contents/Resources/Herdr/runtime-builds.json
 ./Contents/Resources/Pi
 ./Contents/Resources/Pi/extensions
@@ -25,6 +25,7 @@
 ./Contents/Resources/Pi/manifest.json
 ./Contents/Resources/Pi/runtime
 ./Contents/Resources/Pi/runtime/jidoka-extension-contract.mjs
+./Contents/Resources/Pi/runtime/jidoka-model-catalog.mjs
 ./Contents/Resources/Pi/runtime/jidoka-tui-contract.mjs
 ./Contents/Resources/Pi/runtime/node-runtime-builds.json
 ./Contents/Resources/Pi/runtime/pi-rpc-profile-probe.mjs

@@ -21,6 +21,11 @@ struct PiRPCWorkflowExecutorTests {
     let execution = try await executor.execute(request)
 
     #expect(execution.sessionID == "typed-session")
+    #expect(fixture.runtimeResolver.boundaryCounts == [.rpcProcess: 1])
+    #expect(
+      fixture.runtimeResolver.releaseIdentities[.rpcProcess]
+        == [try #require(fixture.runtime.releaseIdentity)]
+    )
     #expect(execution.agentSettledCount == 1)
     #expect(execution.extensionErrorCount == 0)
     guard case .issueTriage(let payload) = execution.result.payload else {
@@ -167,10 +172,17 @@ private final class RPCExecutorFixture {
   let root: URL
   let resourceRoot: URL
   let runtime: PiResolvedRuntime
+  let runtimeResolver: CountingReleaseOwnedRuntimeResolver
   let sessionRoot: URL
+  private let releaseRuntimeFixture: ReleaseOwnedRuntimeFixture
   let workspace: URL
 
   init() throws {
+    releaseRuntimeFixture = try ReleaseOwnedRuntimeFixture()
+    runtimeResolver = try CountingReleaseOwnedRuntimeResolver(
+      resolver: releaseRuntimeFixture.resolver()
+    )
+    runtime = try releaseRuntimeFixture.resolver().resolve()
     resourceRoot = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
       .deletingLastPathComponent()
@@ -190,20 +202,6 @@ private final class RPCExecutorFixture {
         ofItemAtPath: directory.path
       )
     }
-    runtime = PiResolvedRuntime(
-      nodeURL: URL(fileURLWithPath: "/usr/bin/false"),
-      nodeVersion: try PiSemanticVersion("26.6.0"),
-      nodeSHA256: String(repeating: "a", count: 64),
-      piCLIURL: URL(fileURLWithPath: "/attested/pi-cli.js"),
-      piPackageRootURL: URL(fileURLWithPath: "/attested/pi-package", isDirectory: true),
-      piVersion: try PiSemanticVersion("0.84.0"),
-      piRuntimeSHA256: [:],
-      compatibility: PiRuntimeCompatibility(
-        minimumVersion: try PiSemanticVersion("0.84.0"),
-        maximumVersionExclusive: try PiSemanticVersion("0.90.0"),
-        policySHA256: String(repeating: "b", count: 64)
-      )
-    )
   }
 
   func profile(role: ModelProfileRole) -> ModelProfileConfiguration {
@@ -236,7 +234,7 @@ private final class RPCExecutorFixture {
   ) -> PiRPCWorkflowExecutor {
     PiRPCWorkflowExecutor(
       preparer: FixedRPCPreparer(preparation: preparation),
-      runtimeResolver: FixedRuntimeResolver(runtime: runtime),
+      runtimeResolver: runtimeResolver,
       resourceRoot: resourceRoot,
       runner: runner,
       nonce: { "nonce-adapter-1" }
@@ -245,13 +243,8 @@ private final class RPCExecutorFixture {
 
   func remove() {
     try? FileManager.default.removeItem(at: root)
+    releaseRuntimeFixture.remove()
   }
-}
-
-private struct FixedRuntimeResolver: PiRuntimeResolving {
-  let runtime: PiResolvedRuntime
-
-  func resolve() throws -> PiResolvedRuntime { runtime }
 }
 
 private struct FixedRPCPreparer: PiRPCWorkflowPreparing {

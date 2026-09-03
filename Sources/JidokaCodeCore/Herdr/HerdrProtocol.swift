@@ -58,9 +58,9 @@ public struct HerdrCompatibilityManifest: Equatable, Sendable {
     self.protocolVersion = protocolVersion
   }
 
-  public static let herdr080 = HerdrCompatibilityManifest(
-    version: "0.8.0",
-    protocolVersion: 19
+  public static let approved = HerdrCompatibilityManifest(
+    version: "0.8.2",
+    protocolVersion: 20
   )
 }
 

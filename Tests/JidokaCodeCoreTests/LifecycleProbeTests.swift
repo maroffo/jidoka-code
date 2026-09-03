@@ -158,6 +158,116 @@ struct LifecycleProbeTests {
     }
   }
 
+  @Test("service lifetime suspends without blocking the main executor")
+  @MainActor
+  func asynchronousServiceLifetime() async throws {
+    var retained: LifecycleLifetimeSentinel? = LifecycleLifetimeSentinel()
+    weak let weakRetained = retained
+    var lifetime: EngineServiceLifetime? = EngineServiceLifetime(
+      retaining: [try #require(retained)]
+    )
+    let completion = LifecycleLifetimeCompletion()
+    let task = Task { [weak lifetime] in
+      guard let lifetime else { return }
+      await completion.start()
+      await lifetime.wait()
+      await completion.finish()
+    }
+    for _ in 0..<100 {
+      if await completion.startedValue() { break }
+      await Task.yield()
+    }
+    retained = nil
+    lifetime = nil
+
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(weakRetained != nil)
+    #expect(!(await completion.finishedValue()))
+
+    task.cancel()
+    await task.value
+    #expect(await completion.finishedValue())
+    #expect(weakRetained == nil)
+  }
+
+  @Test("service lifetime handles cancellation before entering its wait")
+  func precancelledServiceLifetime() async {
+    let gate = LifecycleLifetimeEntryGate()
+    let completion = LifecycleLifetimeCompletion()
+    let lifetime = EngineServiceLifetime(retaining: [])
+    let task = Task {
+      await gate.wait()
+      await lifetime.wait()
+      await completion.finish()
+    }
+    for _ in 0..<100 {
+      if await gate.isWaiting() { break }
+      await Task.yield()
+    }
+    #expect(await gate.isWaiting())
+
+    task.cancel()
+    await gate.open()
+    await task.value
+    #expect(await completion.finishedValue())
+  }
+
+  @Test("packaged probe resolves resources when launchd supplies a basename argv zero")
+  func launchdBasenameExecutablePath() throws {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("jidoka-launchd-argv-zero-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let contents = root.appendingPathComponent("Jidoka Code.app/Contents", isDirectory: true)
+    let helperDirectory = contents.appendingPathComponent("Helpers", isDirectory: true)
+    let resources = contents.appendingPathComponent("Resources", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: helperDirectory,
+      withIntermediateDirectories: true
+    )
+    try FileManager.default.createDirectory(
+      at: resources.appendingPathComponent("Pi", isDirectory: true),
+      withIntermediateDirectories: true
+    )
+    try FileManager.default.createDirectory(
+      at: resources.appendingPathComponent("Herdr", isDirectory: true),
+      withIntermediateDirectories: true
+    )
+    try FileManager.default.createDirectory(
+      at: resources.appendingPathComponent("PiRuntime", isDirectory: true),
+      withIntermediateDirectories: true
+    )
+    let helper = helperDirectory.appendingPathComponent("JidokaCodeEngineProbe")
+    try FileManager.default.copyItem(
+      at: builtProduct(named: "JidokaCodeEngineProbe"),
+      to: helper
+    )
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = [
+      "-c",
+      "exec -a JidokaCodeEngineProbe \"$1\" --path-probe",
+      "jidoka-launchd-test",
+      helper.path,
+    ]
+    process.currentDirectoryURL = URL(fileURLWithPath: "/", isDirectory: true)
+    let standardOutput = Pipe()
+    let standardError = Pipe()
+    process.standardOutput = standardOutput
+    process.standardError = standardError
+    try process.run()
+    process.waitUntilExit()
+    let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
+    let error = standardError.fileHandleForReading.readDataToEndOfFile()
+
+    #expect(process.terminationStatus == 0)
+    #expect(error.isEmpty)
+    let report = try #require(
+      JSONSerialization.jsonObject(with: output) as? [String: Any])
+    #expect(report["identifier"] as? String == LifecycleProbeConstants.helperIdentifier)
+    #expect(report["status"] as? String == "ok")
+  }
+
   @Test("service generation arguments are exact")
   func serviceArguments() throws {
     #expect(
@@ -200,6 +310,50 @@ struct LifecycleProbeTests {
       reconciled: true,
       topology: .helper
     )
+  }
+}
+
+private final class LifecycleLifetimeSentinel {}
+
+private actor LifecycleLifetimeCompletion {
+  private var started = false
+  private var finished = false
+
+  func start() {
+    started = true
+  }
+
+  func finish() {
+    finished = true
+  }
+
+  func startedValue() -> Bool {
+    started
+  }
+
+  func finishedValue() -> Bool {
+    finished
+  }
+}
+
+private actor LifecycleLifetimeEntryGate {
+  private var continuation: CheckedContinuation<Void, Never>?
+  private var waiting = false
+
+  func wait() async {
+    waiting = true
+    await withCheckedContinuation { continuation in
+      self.continuation = continuation
+    }
+  }
+
+  func isWaiting() -> Bool {
+    waiting
+  }
+
+  func open() {
+    continuation?.resume()
+    continuation = nil
   }
 }
 

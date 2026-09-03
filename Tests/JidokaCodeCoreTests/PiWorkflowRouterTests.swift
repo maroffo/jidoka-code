@@ -17,6 +17,7 @@ struct PiWorkflowRouterTests {
       baseSHA: base
     )
     let executor = ScriptedWorkflowExecutor { request in
+      #expect(request.commitNarrativeSHA256 == digest)
       if request.role == .synthesis {
         #expect(request.normalizedRoleInputs.map(\.role) == [.architecture, .security, .test])
       } else {
@@ -49,6 +50,64 @@ struct PiWorkflowRouterTests {
       await executor.recordedRequests().allSatisfy {
         $0.sessionDirective == .fresh
       })
+  }
+
+  @Test("replacement review executes only the existing architecture launch")
+  func replacementArchitectureOnly() async throws {
+    let commits = commitNarrative()
+    let digest = try PiPullRequestReviewRouter.commitNarrativeDigest(
+      commits,
+      baseSHA: base
+    )
+    let executor = ScriptedWorkflowExecutor { request in
+      #expect(request.role == .architecture)
+      #expect(request.commitNarrativeSHA256 == digest)
+      #expect(request.normalizedRoleInputs.isEmpty)
+      return PiWorkflowExecution(
+        sessionID: "replacement-architecture-session",
+        result: self.prResult(role: request.role, narrativeDigest: digest)
+      )
+    }
+    let input = PiPullRequestReviewInput(
+      jobID: "pr-replacement-1",
+      artifactSHA256: artifact,
+      baseSHA: base,
+      restHeadSHA: commits.last!.sha,
+      fetchedHeadSHA: commits.last!.sha,
+      restCommitSHAs: commits.map(\.sha),
+      fetchedCommitSHAs: commits.map(\.sha),
+      commits: commits
+    )
+
+    let result = try await PiPullRequestReviewRouter(executor: executor)
+      .runCanaryArchitecture(input)
+
+    #expect(result.role == .architecture)
+    #expect(await executor.recordedRequests().map(\.role) == [.architecture])
+  }
+
+  @Test("replacement architecture failure propagates before later roles or effects")
+  func replacementArchitectureFailurePropagates() async throws {
+    let commits = commitNarrative()
+    let executor = ScriptedWorkflowExecutor { _ in
+      throw ReplacementArchitectureFailure.denied
+    }
+    let input = PiPullRequestReviewInput(
+      jobID: "pr-replacement-failure",
+      artifactSHA256: artifact,
+      baseSHA: base,
+      restHeadSHA: commits.last!.sha,
+      fetchedHeadSHA: commits.last!.sha,
+      restCommitSHAs: commits.map(\.sha),
+      fetchedCommitSHAs: commits.map(\.sha),
+      commits: commits
+    )
+
+    await #expect(throws: ReplacementArchitectureFailure.denied) {
+      _ = try await PiPullRequestReviewRouter(executor: executor)
+        .runCanaryArchitecture(input)
+    }
+    #expect(await executor.recordedRequests().count == 1)
   }
 
   @Test("PR narrative accepts a connected oldest-first fork and merge topology")
@@ -965,6 +1024,10 @@ struct PiWorkflowRouterTests {
       gitConfigurationDigest: nil
     )
   }
+}
+
+private enum ReplacementArchitectureFailure: Error {
+  case denied
 }
 
 private actor ScriptedWorkflowExecutor: PiWorkflowExecuting {

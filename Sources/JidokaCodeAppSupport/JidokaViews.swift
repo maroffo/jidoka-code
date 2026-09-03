@@ -75,6 +75,13 @@ public struct MenuBarContentView: View {
       .keyboardShortcut("p", modifiers: [.command])
       .accessibilityIdentifier(JidokaAccessibilityID.pollNow)
 
+      if let reason = model.pollingUnavailableReason {
+        Text(reason)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .accessibilityLabel("Polling unavailable: \(reason)")
+      }
+
       Button(
         model.state?.paused == true ? "Resume" : "Pause",
         systemImage: model.state?.paused == true ? "play.fill" : "pause.fill"
@@ -222,10 +229,42 @@ public struct OnboardingView: View {
 
       Section("Provider and source disclosure") {
         Text(
-          "Configured workflow profiles: \(profileDisclosure). "
-            + "Repository content, issues, pull requests, diffs, plans, and verification evidence "
-            + "may be sent only when a workflow is enabled."
+          "When a workflow is enabled, Jidoka Code may send repository content, issues, "
+            + "pull requests, diffs, plans, and verification evidence to its configured model."
         )
+        .foregroundStyle(.secondary)
+
+        VStack(alignment: .leading, spacing: 12) {
+          ForEach(disclosureProfiles, id: \.role) { profile in
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+              Text(onboardingRoleName(profile.role))
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 110, alignment: .leading)
+              Text("\(profile.provider)/\(profile.model)")
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+              Spacer(minLength: 8)
+              Text("Thinking: \(profile.thinking.rawValue.capitalized)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+              "\(onboardingRoleName(profile.role)): \(profile.provider)/\(profile.model), "
+                + "thinking \(profile.thinking.rawValue)"
+            )
+            .accessibilityIdentifier(
+              "\(JidokaAccessibilityID.providerDisclosureProfile).\(profile.role.rawValue)"
+            )
+          }
+        }
+        .padding(12)
+        .background(
+          Color.secondary.opacity(0.08),
+          in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+
         Toggle(
           "I understand the provider, model, and source categories.",
           isOn: Binding(
@@ -236,23 +275,6 @@ public struct OnboardingView: View {
           )
         )
         .accessibilityIdentifier(JidokaAccessibilityID.providerDisclosure)
-      }
-
-      Section("Repository") {
-        TextField("Owner", text: $model.repositoryOwner)
-          .accessibilityIdentifier(JidokaAccessibilityID.repositoryOwner)
-        TextField("Repository", text: $model.repositoryName)
-          .accessibilityIdentifier(JidokaAccessibilityID.repositoryName)
-        Toggle("Pull request reviews", isOn: $model.reviewEnabled)
-        Toggle("Issue triage", isOn: $model.triageEnabled)
-        Toggle("Issue implementation", isOn: $model.implementationEnabled)
-        Button("Validate and Add Repository", systemImage: "plus") {
-          Task { await model.validateAndAddRepository() }
-        }
-        .disabled(!model.canAddRepository)
-        .accessibilityIdentifier(JidokaAccessibilityID.repositoryAdd)
-        Text("Configured repositories: \(model.state?.onboarding.repositoryCount ?? 0)")
-          .foregroundStyle(.secondary)
       }
 
       Section("Login item") {
@@ -277,7 +299,7 @@ public struct OnboardingView: View {
       }
     }
     .formStyle(.grouped)
-    .frame(minWidth: 620, minHeight: 760)
+    .frame(minWidth: 620, minHeight: 680)
     .accessibilityIdentifier(JidokaAccessibilityID.onboardingWindow)
     .task {
       if model.state == nil {
@@ -293,11 +315,17 @@ public struct OnboardingView: View {
     }
   }
 
-  private var profileDisclosure: String {
-    let profiles = model.state?.settings.profiles ?? []
-    return profiles.sorted { $0.role.rawValue < $1.role.rawValue }.map {
-      "\($0.role.rawValue)=\($0.provider)/\($0.model):\($0.thinking.rawValue)"
-    }.joined(separator: ", ")
+  private var disclosureProfiles: [ModelProfileConfiguration] {
+    (model.state?.settings.profiles ?? []).sorted { $0.role.rawValue < $1.role.rawValue }
+  }
+
+  private func onboardingRoleName(_ role: ModelProfileRole) -> String {
+    switch role {
+    case .review: "Review"
+    case .triage: "Triage"
+    case .planning: "Planning"
+    case .orchestration: "Orchestration"
+    }
   }
 
   @ViewBuilder
@@ -367,142 +395,21 @@ public struct SettingsView: View {
   }
 
   public var body: some View {
-    Form {
-      Section("Repositories") {
-        GroupBox("Add repository") {
-          TextField("Owner", text: $model.repositoryOwner)
-          TextField("Repository", text: $model.repositoryName)
-          Toggle("Pull request reviews", isOn: $model.newRepositoryReviewEnabled)
-          Toggle("Issue triage", isOn: $model.newRepositoryTriageEnabled)
-          Toggle("Issue implementation", isOn: $model.newRepositoryImplementationEnabled)
-          Button("Validate and Add Repository", systemImage: "plus") {
-            Task { await model.addRepository() }
-          }
-          .disabled(model.repositoryOwner.isEmpty || model.repositoryName.isEmpty)
-        }
-        if model.repositories.isEmpty {
-          Text("No repositories configured.")
-            .foregroundStyle(.secondary)
-        }
-        ForEach(model.repositories) { repository in
-          GroupBox("\(repository.owner)/\(repository.name)") {
-            Toggle(
-              "Repository enabled",
-              isOn: repositoryBinding(repository, keyPath: \.enabled)
-            )
-            Toggle(
-              "Pull request reviews",
-              isOn: repositoryBinding(repository, keyPath: \.reviewEnabled)
-            )
-            Toggle(
-              "Issue triage",
-              isOn: repositoryBinding(repository, keyPath: \.triageEnabled)
-            )
-            Toggle(
-              "Issue implementation",
-              isOn: repositoryBinding(repository, keyPath: \.implementationEnabled)
-            )
-            Button("Remove Repository", role: .destructive) {
-              repositoryPendingRemoval = repository
-            }
-          }
-        }
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        settingsHeader
+        repositoriesSection
+        modelsSection
+        credentialSection
+        automationSection
+        runtimeSection
+        diagnosticsSection
       }
-
-      Section("Model profiles") {
-        ForEach(ModelProfileRole.allCases, id: \.self) { role in
-          GroupBox(role.rawValue.capitalized) {
-            TextField("Provider", text: providerBinding(role))
-            TextField("Model", text: modelBinding(role))
-            Picker("Thinking", selection: thinkingBinding(role)) {
-              ForEach(ModelThinkingLevel.allCases, id: \.self) { level in
-                Text(level.rawValue).tag(level)
-              }
-            }
-            Button("Save \(role.rawValue.capitalized) Profile") {
-              Task { await model.saveProfile(role: role) }
-            }
-          }
-        }
-      }
-
-      Section("Concurrency") {
-        Stepper(value: $model.maxConcurrency, in: 1...8) {
-          Text("Maximum concurrent jobs: \(model.maxConcurrency)")
-        }
-        Button("Save Concurrency") {
-          Task { await model.saveMaxConcurrency() }
-        }
-      }
-
-      Section("Login item") {
-        Toggle(
-          "Start at login",
-          isOn: Binding(
-            get: { model.loginItemSelected },
-            set: { value in Task { await model.setLoginItemEnabled(value) } }
-          )
-        )
-        Text("Status: \(model.state?.settings.loginItemStatus.rawValue ?? "unknown")")
-          .foregroundStyle(.secondary)
-      }
-
-      Section("Herdr runtime") {
-        Text(
-          "Herdr is an external shared-session prerequisite. Its visible panes may include "
-            + "Jidoka Code transcripts and user-owned terminals."
-        )
-        .foregroundStyle(.secondary)
-        settingsHerdrStatus
-        Button("Run Herdr Preflight") {
-          Task { await model.runHerdrPreflight() }
-        }
-        .disabled(model.isWorking)
-        .accessibilityIdentifier(JidokaAccessibilityID.settingsHerdrPreflight)
-        Button("Open Most Recent Jidoka Pane in Herdr") {
-          Task { await model.focusInHerdr() }
-        }
-        .disabled(model.isWorking || model.herdrStatus.state != .ready)
-        .accessibilityIdentifier(JidokaAccessibilityID.settingsFocusInHerdr)
-      }
-
-      Section("GitHub credential") {
-        Text("Status: \(model.credentialStatus.state.rawValue)")
-        SecureField("Replacement token", text: $model.replacementToken)
-          .textContentType(.password)
-          .accessibilityIdentifier(JidokaAccessibilityID.credentialReplacement)
-        Button("Validate and Replace") {
-          Task { await model.replaceCredential() }
-        }
-        .disabled(!(20...2_048).contains(model.replacementToken.utf8.count))
-        Button("Delete Credential…", role: .destructive) {
-          confirmCredentialDeletion = true
-        }
-        .accessibilityIdentifier(JidokaAccessibilityID.credentialDeletion)
-      }
-
-      if let mutations = model.state?.ambiguousMutations, !mutations.isEmpty {
-        Section("Ambiguous mutations") {
-          ForEach(mutations) { mutation in
-            Text(
-              "\(mutation.repositoryOwner)/\(mutation.repositoryName), "
-                + "\(mutation.kind.displayName), revision \(mutation.revisionKey), "
-                + "evidence \(mutation.evidenceDigest)"
-            )
-            .textSelection(.enabled)
-          }
-        }
-      }
-
-      Section("Redacted diagnostics") {
-        ForEach(model.diagnostics, id: \.self) { diagnostic in
-          Text(diagnostic)
-            .textSelection(.enabled)
-        }
-      }
+      .padding(28)
+      .frame(maxWidth: 860, alignment: .leading)
     }
-    .formStyle(.grouped)
-    .frame(minWidth: 680, minHeight: 820)
+    .background(Color(nsColor: .windowBackgroundColor))
+    .frame(minWidth: 760, minHeight: 720)
     .accessibilityIdentifier(JidokaAccessibilityID.settingsWindow)
     .task { await model.refresh() }
     .alert(item: $model.message) { message in
@@ -526,7 +433,7 @@ public struct SettingsView: View {
         Task { await model.removeRepository(repository) }
       }
       Button("Cancel", role: .cancel) { repositoryPendingRemoval = nil }
-    } message: { repository in
+    } message: { _ in
       Text("Active or ambiguous jobs prevent removal. No local mirror is deleted here.")
     }
     .confirmationDialog(
@@ -540,6 +447,334 @@ public struct SettingsView: View {
       Button("Cancel", role: .cancel) {}
     } message: {
       Text("Deletion is blocked while active or ambiguous jobs still require reconciliation.")
+    }
+  }
+
+  private var settingsHeader: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text("Settings")
+        .font(.largeTitle.bold())
+      Text("Connect GitHub, choose Pi models, and control Jidoka Code automation.")
+        .font(.body)
+        .foregroundStyle(.secondary)
+    }
+  }
+
+  private var repositoriesSection: some View {
+    settingsCard(title: "Repositories", systemImage: "shippingbox") {
+      VStack(alignment: .leading, spacing: 14) {
+        Text("Paste a GitHub URL or enter owner/repository.")
+          .foregroundStyle(.secondary)
+
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+          TextField(
+            "https://github.com/owner/repository or owner/repository",
+            text: $model.repositoryReference
+          )
+          .textFieldStyle(.roundedBorder)
+          .accessibilityLabel("GitHub repository URL or owner and repository")
+          .accessibilityIdentifier(JidokaAccessibilityID.settingsRepositoryReference)
+
+          Button("Validate and Add", systemImage: "plus") {
+            Task { await model.addRepository() }
+          }
+          .buttonStyle(.borderedProminent)
+          .disabled(!model.canAddRepository || model.isWorking)
+          .accessibilityIdentifier(JidokaAccessibilityID.settingsRepositoryAdd)
+        }
+
+        if model.credentialStatus.state != .valid {
+          Label(
+            "Connect GitHub before adding a repository.",
+            systemImage: "info.circle"
+          )
+          .font(.callout)
+          .foregroundStyle(.secondary)
+        }
+
+        HStack(spacing: 18) {
+          Toggle("Pull request reviews", isOn: $model.newRepositoryReviewEnabled)
+          Toggle("Issue triage", isOn: $model.newRepositoryTriageEnabled)
+          Toggle("Issue implementation", isOn: $model.newRepositoryImplementationEnabled)
+        }
+        .toggleStyle(.checkbox)
+
+        Divider()
+
+        if model.repositories.isEmpty {
+          ContentUnavailableView(
+            "No Repositories",
+            systemImage: "shippingbox",
+            description: Text("Add a repository to enable workflow automation.")
+          )
+          .frame(maxWidth: .infinity, minHeight: 100)
+        } else {
+          ForEach(model.repositories) { repository in
+            repositoryRow(repository)
+            if repository.id != model.repositories.last?.id { Divider() }
+          }
+        }
+      }
+    }
+  }
+
+  private func repositoryRow(_ repository: RepositoryConfiguration) -> some View {
+    HStack(alignment: .top, spacing: 14) {
+      VStack(alignment: .leading, spacing: 5) {
+        Text("\(repository.owner)/\(repository.name)")
+          .font(.headline)
+        Text("Default branch: \(repository.defaultBranch)")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        HStack(spacing: 14) {
+          Toggle("Reviews", isOn: repositoryBinding(repository, keyPath: \.reviewEnabled))
+          Toggle("Triage", isOn: repositoryBinding(repository, keyPath: \.triageEnabled))
+          Toggle(
+            "Implementation",
+            isOn: repositoryBinding(repository, keyPath: \.implementationEnabled)
+          )
+        }
+        .toggleStyle(.checkbox)
+      }
+      Spacer(minLength: 20)
+      Toggle(
+        "Enabled",
+        isOn: repositoryBinding(repository, keyPath: \.enabled)
+      )
+      .labelsHidden()
+      Button(role: .destructive) {
+        repositoryPendingRemoval = repository
+      } label: {
+        Label("Remove repository", systemImage: "trash")
+      }
+      .labelStyle(.iconOnly)
+      .buttonStyle(.borderless)
+    }
+  }
+
+  private var modelsSection: some View {
+    settingsCard(title: "Model Profiles", systemImage: "brain.head.profile") {
+      VStack(alignment: .leading, spacing: 14) {
+        HStack(alignment: .center) {
+          if let notice = model.modelCatalogNotice {
+            Text(notice)
+              .foregroundStyle(Color.orange)
+              .accessibilityIdentifier(JidokaAccessibilityID.settingsModelCatalogNotice)
+          } else {
+            Text(
+              model.modelCatalog.isEmpty
+                ? "No authenticated Pi models are available. Existing profiles remain editable as Custom."
+                : "Choose among the models currently available to Pi, or use Custom for an advanced identifier."
+            )
+            .foregroundStyle(.secondary)
+          }
+          Spacer(minLength: 12)
+          Button("Refresh Pi Models", systemImage: "arrow.clockwise") {
+            Task { await model.refreshModelCatalog() }
+          }
+          .disabled(model.isWorking)
+          .accessibilityIdentifier(JidokaAccessibilityID.settingsModelCatalogRefresh)
+        }
+
+        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+          GridRow {
+            Text("Workflow").font(.caption.bold()).foregroundStyle(.secondary)
+            Text("Model").font(.caption.bold()).foregroundStyle(.secondary)
+            Text("Thinking").font(.caption.bold()).foregroundStyle(.secondary)
+            Text("")
+          }
+          Divider().gridCellColumns(4)
+          ForEach(ModelProfileRole.allCases, id: \.self) { role in
+            profileRow(role)
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func profileRow(_ role: ModelProfileRole) -> some View {
+    let source = model.profileDrafts[role]?.source ?? .custom
+    GridRow(alignment: .firstTextBaseline) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text(roleDisplayName(role)).fontWeight(.medium)
+        Text(roleHelp(role)).font(.caption).foregroundStyle(.secondary)
+      }
+      .frame(minWidth: 140, alignment: .leading)
+
+      VStack(alignment: .leading, spacing: 8) {
+        Picker("Model for \(roleDisplayName(role))", selection: profileSelectionBinding(role)) {
+          if !model.modelCatalog.isEmpty {
+            ForEach(groupedProviders, id: \.provider) { group in
+              Section(group.provider) {
+                ForEach(group.models) { entry in
+                  Text("\(entry.name) · \(entry.id)")
+                    .tag(entry.selectionID)
+                }
+              }
+            }
+          }
+          Divider()
+          Text("Custom…").tag(customSelectionID)
+        }
+        .labelsHidden()
+        .frame(minWidth: 300)
+        .accessibilityIdentifier("\(JidokaAccessibilityID.settingsModelSelector).\(role.rawValue)")
+
+        if source == .custom {
+          HStack(spacing: 8) {
+            TextField("Provider", text: providerBinding(role))
+              .textFieldStyle(.roundedBorder)
+            TextField("Model ID", text: modelBinding(role))
+              .textFieldStyle(.roundedBorder)
+          }
+          .accessibilityElement(children: .contain)
+          .accessibilityLabel("Custom provider and model for \(roleDisplayName(role))")
+          .accessibilityIdentifier("\(JidokaAccessibilityID.settingsCustomModel).\(role.rawValue)")
+        } else if let entry = model.catalogEntry(role: role) {
+          Text(modelMetadata(entry))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+
+      Picker("Thinking for \(roleDisplayName(role))", selection: thinkingBinding(role)) {
+        ForEach(model.availableThinkingLevels(role: role), id: \.self) { level in
+          Text(level.rawValue.capitalized).tag(level)
+        }
+      }
+      .labelsHidden()
+      .frame(minWidth: 110)
+
+      Button("Save") {
+        Task { await model.saveProfile(role: role) }
+      }
+      .disabled(!model.profileIsDirty(role) || model.isWorking)
+    }
+  }
+
+  private var credentialSection: some View {
+    settingsCard(title: "GitHub Connection", systemImage: "key") {
+      VStack(alignment: .leading, spacing: 14) {
+        credentialStatus
+        Text(
+          "Jidoka Code validates the token against GitHub, stores it only in Keychain, "
+            + "and never sends it to Pi. Use a fine-grained personal access token with "
+            + "access to the repositories you automate."
+        )
+        .foregroundStyle(.secondary)
+
+        Link(
+          "Create a fine-grained token on GitHub",
+          destination: URL(string: "https://github.com/settings/personal-access-tokens/new")!
+        )
+
+        Text("Required repository permissions")
+          .font(.subheadline.bold())
+        Text(
+          "Metadata: read; Issues: read and write; Pull requests: read and write; Contents: read and write."
+        )
+        .font(.callout)
+        .foregroundStyle(.secondary)
+
+        SecureField(
+          model.credentialStatus.state == .valid ? "New token" : "GitHub token",
+          text: $model.replacementToken
+        )
+        .textFieldStyle(.roundedBorder)
+        .textContentType(.password)
+        .accessibilityIdentifier(JidokaAccessibilityID.credentialReplacement)
+
+        HStack {
+          Button(
+            model.credentialStatus.state == .valid
+              ? "Validate and Replace" : "Connect GitHub",
+            systemImage: "checkmark.shield"
+          ) {
+            Task { await model.replaceCredential() }
+          }
+          .buttonStyle(.borderedProminent)
+          .disabled(!model.canSubmitCredential || model.isWorking)
+          .accessibilityIdentifier(JidokaAccessibilityID.credentialConnect)
+
+          if model.credentialStatus.state == .valid {
+            Button("Delete Credential…", role: .destructive) {
+              confirmCredentialDeletion = true
+            }
+            .disabled(model.isWorking)
+            .accessibilityIdentifier(JidokaAccessibilityID.credentialDeletion)
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var credentialStatus: some View {
+    switch model.credentialStatus.state {
+    case .missing:
+      Label("GitHub is not connected.", systemImage: "key.slash")
+    case .valid:
+      Label(
+        "Connected as \(model.credentialStatus.account ?? "GitHub account").",
+        systemImage: "checkmark.circle.fill"
+      )
+      .foregroundStyle(.green)
+    case .unavailable:
+      Label("Keychain status is unavailable.", systemImage: "exclamationmark.triangle.fill")
+        .foregroundStyle(.orange)
+    }
+  }
+
+  private var automationSection: some View {
+    settingsCard(title: "Automation", systemImage: "gearshape.2") {
+      VStack(alignment: .leading, spacing: 14) {
+        Stepper(value: $model.maxConcurrency, in: 1...8) {
+          Text("Maximum concurrent jobs: \(model.maxConcurrency)")
+        }
+        Button("Save Concurrency") {
+          Task { await model.saveMaxConcurrency() }
+        }
+        .disabled(model.isWorking)
+
+        Divider()
+
+        Toggle(
+          "Start Jidoka Code at login",
+          isOn: Binding(
+            get: { model.loginItemSelected },
+            set: { value in Task { await model.setLoginItemEnabled(value) } }
+          )
+        )
+        Text("Login item status: \(model.state?.settings.loginItemStatus.rawValue ?? "unknown")")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+    }
+  }
+
+  private var runtimeSection: some View {
+    settingsCard(title: "Herdr Runtime", systemImage: "rectangle.connected.to.line.below") {
+      VStack(alignment: .leading, spacing: 12) {
+        Text(
+          "Herdr is an external shared-session prerequisite. Visible panes may include "
+            + "Jidoka Code transcripts and user-owned terminals."
+        )
+        .foregroundStyle(.secondary)
+        settingsHerdrStatus
+        HStack {
+          Button("Run Herdr Preflight") {
+            Task { await model.runHerdrPreflight() }
+          }
+          .disabled(model.isWorking)
+          .accessibilityIdentifier(JidokaAccessibilityID.settingsHerdrPreflight)
+          Button("Open Most Recent Jidoka Pane") {
+            Task { await model.focusInHerdr() }
+          }
+          .disabled(model.isWorking || model.herdrStatus.state != .ready)
+          .accessibilityIdentifier(JidokaAccessibilityID.settingsFocusInHerdr)
+        }
+      }
     }
   }
 
@@ -562,6 +797,72 @@ public struct SettingsView: View {
       Text(model.herdrStatus.recovery ?? "Run preflight again after recovery.")
         .foregroundStyle(.secondary)
     }
+  }
+
+  @ViewBuilder
+  private var diagnosticsSection: some View {
+    if let mutations = model.state?.ambiguousMutations, !mutations.isEmpty {
+      settingsCard(title: "Ambiguous Mutations", systemImage: "exclamationmark.triangle") {
+        ForEach(mutations) { mutation in
+          Text(
+            "\(mutation.repositoryOwner)/\(mutation.repositoryName), "
+              + "\(mutation.kind.displayName), revision \(mutation.revisionKey), "
+              + "evidence \(mutation.evidenceDigest)"
+          )
+          .textSelection(.enabled)
+        }
+      }
+    }
+
+    DisclosureGroup("Redacted diagnostics") {
+      VStack(alignment: .leading, spacing: 4) {
+        ForEach(model.diagnostics, id: \.self) { diagnostic in
+          Text(diagnostic)
+            .textSelection(.enabled)
+        }
+      }
+      .padding(.top, 8)
+    }
+    .foregroundStyle(.secondary)
+  }
+
+  private func settingsCard<Content: View>(
+    title: String,
+    systemImage: String,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    GroupBox {
+      content()
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    } label: {
+      Label(title, systemImage: systemImage)
+        .font(.title3.bold())
+    }
+  }
+
+  private var groupedProviders: [(provider: String, models: [PiModelCatalogEntry])] {
+    Dictionary(grouping: model.modelCatalog, by: \.provider).keys.sorted().map { provider in
+      (provider, model.modelCatalog.filter { $0.provider == provider })
+    }
+  }
+
+  private var customSelectionID: String { "__jidoka_custom__" }
+
+  private func profileSelectionBinding(_ role: ModelProfileRole) -> Binding<String> {
+    Binding(
+      get: {
+        guard let draft = model.profileDrafts[role] else { return customSelectionID }
+        return draft.source == .catalog ? draft.selectionID : customSelectionID
+      },
+      set: { value in
+        if value == customSelectionID {
+          model.setProfileSource(.custom, role: role)
+        } else {
+          model.selectCatalogModel(value, role: role)
+        }
+      }
+    )
   }
 
   private func repositoryBinding(
@@ -608,8 +909,32 @@ public struct SettingsView: View {
 
   private func thinkingBinding(_ role: ModelProfileRole) -> Binding<ModelThinkingLevel> {
     Binding(
-      get: { model.profileDrafts[role]?.thinking ?? .max },
+      get: { model.profileDrafts[role]?.thinking ?? .off },
       set: { model.setProfileThinking($0, role: role) }
     )
+  }
+
+  private func roleDisplayName(_ role: ModelProfileRole) -> String {
+    switch role {
+    case .review: "Review"
+    case .triage: "Triage"
+    case .planning: "Planning"
+    case .orchestration: "Orchestration"
+    }
+  }
+
+  private func roleHelp(_ role: ModelProfileRole) -> String {
+    switch role {
+    case .review: "Pull request analysis"
+    case .triage: "Issue classification"
+    case .planning: "Implementation plans"
+    case .orchestration: "Code changes"
+    }
+  }
+
+  private func modelMetadata(_ entry: PiModelCatalogEntry) -> String {
+    let context = entry.contextWindow.formatted(.number.notation(.compactName))
+    let modalities = entry.input.map(\.rawValue).joined(separator: ", ")
+    return "\(entry.provider) · \(context) context · \(modalities)"
   }
 }

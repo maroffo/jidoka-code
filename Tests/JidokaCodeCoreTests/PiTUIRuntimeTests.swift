@@ -6,6 +6,23 @@ import Testing
 
 @Suite("Exact Pi TUI invocation and structured settlement channel")
 struct PiTUIRuntimeTests {
+  @Test("catalog model identifiers with slashes remain exact Pi arguments")
+  func slashBearingModelIdentity() throws {
+    let identity = try PiTUIModelIdentity(
+      provider: "huggingface",
+      modelID: "deepseek-ai/DeepSeek-V4-Flash",
+      thinkingLevel: "medium"
+    )
+    #expect(identity.argument == "huggingface/deepseek-ai/DeepSeek-V4-Flash:medium")
+    #expect(throws: PiTUIRuntimeError.invalidConfiguration) {
+      _ = try PiTUIModelIdentity(
+        provider: "huggingface",
+        modelID: "/deepseek-ai/DeepSeek-V4-Flash",
+        thinkingLevel: "medium"
+      )
+    }
+  }
+
   @Test("configuration pins private prompt, model, session, and directories")
   func configurationContract() throws {
     let fixture = try PiTUIFixture()
@@ -409,37 +426,82 @@ struct PiTUIRuntimeTests {
     )
   }
 
-  @Test("locked settings bind the exact admitted Pi version")
+  @Test("locked settings admit only exact Pi-owned persisted version and terminal theme shapes")
   func lockedSettingsVersion() throws {
-    for version in ["0.84.0", "0.84.1"] {
-      let fixture = try PiTUIFixture()
-      defer { fixture.remove() }
-      let object: [String: Any] = [
-        "compaction": ["enabled": false],
-        "defaultProjectTrust": "never",
-        "enableInstallTelemetry": false,
-        "lastChangelogVersion": version,
-        "retry": ["enabled": false, "provider": ["maxRetries": 0]],
-        "transport": "sse",
-      ]
-      let data =
-        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    let fixture = try PiTUIFixture()
+    defer { fixture.remove() }
+    let version = "0.84.2"
+    let object: [String: Any] = [
+      "compaction": ["enabled": false],
+      "defaultProjectTrust": "never",
+      "enableInstallTelemetry": false,
+      "lastChangelogVersion": version,
+      "retry": ["enabled": false, "provider": ["maxRetries": 0]],
+      "transport": "sse",
+    ]
+    let data =
+      try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+      + Data([0x0A])
+    let settings = fixture.agent.appendingPathComponent("settings.json")
+    try writePrivate(data, to: settings)
+    #expect(
+      try PiTUIInvocationBuilder.validateLockedSettings(
+        in: fixture.agent,
+        piVersion: PiSemanticVersion(version)
+      )
+    )
+    #expect(
+      try !PiTUIInvocationBuilder.validateLockedSettings(
+        in: fixture.agent,
+        piVersion: PiSemanticVersion("0.84.1")
+      )
+    )
+
+    for theme in ["dark", "light"] {
+      var detectedTheme = object
+      detectedTheme["theme"] = theme
+      let detectedThemeData =
+        try JSONSerialization.data(withJSONObject: detectedTheme, options: [.sortedKeys])
         + Data([0x0A])
-      try writePrivate(data, to: fixture.agent.appendingPathComponent("settings.json"))
+      try FileManager.default.removeItem(at: settings)
+      try writePrivate(detectedThemeData, to: settings)
       #expect(
         try PiTUIInvocationBuilder.validateLockedSettings(
           in: fixture.agent,
           piVersion: PiSemanticVersion(version)
         )
       )
-      let other = version == "0.84.0" ? "0.84.1" : "0.84.0"
+    }
+
+    for theme in ["operator-theme", "../dark", ""] {
+      var customTheme = object
+      customTheme["theme"] = theme
+      let customThemeData =
+        try JSONSerialization.data(withJSONObject: customTheme, options: [.sortedKeys])
+        + Data([0x0A])
+      try FileManager.default.removeItem(at: settings)
+      try writePrivate(customThemeData, to: settings)
       #expect(
         try !PiTUIInvocationBuilder.validateLockedSettings(
           in: fixture.agent,
-          piVersion: PiSemanticVersion(other)
+          piVersion: PiSemanticVersion(version)
         )
       )
     }
+
+    var extra = object
+    extra["provider"] = "openai-codex"
+    let extraData =
+      try JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys])
+      + Data([0x0A])
+    try FileManager.default.removeItem(at: settings)
+    try writePrivate(extraData, to: settings)
+    #expect(
+      try !PiTUIInvocationBuilder.validateLockedSettings(
+        in: fixture.agent,
+        piVersion: PiSemanticVersion(version)
+      )
+    )
   }
 
   @Test("TUI capability roots reject allow ACLs and accept deny-only ACLs")

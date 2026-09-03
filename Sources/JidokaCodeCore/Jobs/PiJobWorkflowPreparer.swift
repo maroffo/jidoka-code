@@ -87,7 +87,7 @@ public struct PiJobWorkflowPreparer: PiRPCWorkflowPreparing, Sendable {
     request: PiWorkflowExecutionRequest,
     artifactText: String
   ) throws -> String {
-    let object: [String: Any] = [
+    var object: [String: Any] = [
       "applicationArtifactUTF8": artifactText,
       "artifactSHA256": request.artifactSHA256,
       "canonicalCommandDigests": request.canonicalCommandDigests,
@@ -101,6 +101,9 @@ public struct PiJobWorkflowPreparer: PiRPCWorkflowPreparing, Sendable {
       "schemaVersion": 1,
       "workflow": request.workflow.rawValue,
     ]
+    if let commitNarrativeSHA256 = request.commitNarrativeSHA256 {
+      object["commitNarrativeSHA256"] = commitNarrativeSHA256
+    }
     guard JSONSerialization.isValidJSONObject(object) else {
       throw PiJobWorkflowPreparerError.promptEncodingFailed
     }

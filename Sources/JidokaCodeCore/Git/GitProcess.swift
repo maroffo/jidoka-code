@@ -9,6 +9,7 @@ public struct GitProcessRequest: Sendable {
   public let environment: [String: String]
   public let timeoutSeconds: TimeInterval
   public let maximumOutputBytes: Int
+  public let maximumStandardErrorBytes: Int
 
   public init(
     executable: URL,
@@ -16,7 +17,8 @@ public struct GitProcessRequest: Sendable {
     workingDirectory: URL,
     environment: [String: String],
     timeoutSeconds: TimeInterval,
-    maximumOutputBytes: Int = 1_048_576
+    maximumOutputBytes: Int = 1_048_576,
+    maximumStandardErrorBytes: Int? = nil
   ) {
     self.executable = executable
     self.arguments = arguments
@@ -24,6 +26,7 @@ public struct GitProcessRequest: Sendable {
     self.environment = environment
     self.timeoutSeconds = timeoutSeconds
     self.maximumOutputBytes = maximumOutputBytes
+    self.maximumStandardErrorBytes = maximumStandardErrorBytes ?? maximumOutputBytes
   }
 }
 
@@ -32,9 +35,33 @@ public struct GitProcessResult: Equatable, Sendable {
   public let terminationSignal: Int32?
   public let timedOut: Bool
   public let outputLimitExceeded: Bool
+  public let stdoutLimitExceeded: Bool
+  public let stderrLimitExceeded: Bool
   public let stdout: Data
   public let stderr: Data
   public let durationSeconds: TimeInterval
+
+  public init(
+    exitCode: Int32?,
+    terminationSignal: Int32?,
+    timedOut: Bool,
+    outputLimitExceeded: Bool,
+    stdout: Data,
+    stderr: Data,
+    durationSeconds: TimeInterval,
+    stdoutLimitExceeded: Bool = false,
+    stderrLimitExceeded: Bool = false
+  ) {
+    self.exitCode = exitCode
+    self.terminationSignal = terminationSignal
+    self.timedOut = timedOut
+    self.outputLimitExceeded = outputLimitExceeded
+    self.stdoutLimitExceeded = stdoutLimitExceeded
+    self.stderrLimitExceeded = stderrLimitExceeded
+    self.stdout = stdout
+    self.stderr = stderr
+    self.durationSeconds = durationSeconds
+  }
 
   public var succeeded: Bool {
     exitCode == 0 && terminationSignal == nil && !timedOut && !outputLimitExceeded
@@ -56,6 +83,7 @@ public enum GitProcessError: Error, Equatable, Sendable {
   case pipeFailed(Int32)
   case spawnFailed(Int32)
   case waitFailed(Int32)
+  case cleanupFailed
   case allocationFailed
 }
 
@@ -129,7 +157,7 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
 
   public func run(_ request: GitProcessRequest) async throws -> GitProcessResult {
     let task = Task.detached(priority: nil) {
-      try Self.runSynchronously(request)
+      try Self.executeSynchronously(request)
     }
     return try await withTaskCancellationHandler {
       try await task.value
@@ -138,7 +166,11 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
     }
   }
 
-  private static func runSynchronously(
+  public func runSynchronously(_ request: GitProcessRequest) throws -> GitProcessResult {
+    try Self.executeSynchronously(request)
+  }
+
+  private static func executeSynchronously(
     _ request: GitProcessRequest
   ) throws -> GitProcessResult {
     try validate(request)
@@ -179,7 +211,9 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
       Darwin.close(nullDescriptor)
     }
 
-    let flags = Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
+    let flags = Int16(
+      POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_START_SUSPENDED
+    )
     let setupStatuses = [
       posix_spawn_file_actions_adddup2(&actions, nullDescriptor, STDIN_FILENO),
       posix_spawn_file_actions_adddup2(&actions, stdoutPipe[1], STDOUT_FILENO),
@@ -232,8 +266,24 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
       throw GitProcessError.spawnFailed(spawnStatus)
     }
 
+    guard let processTracker = SupervisedProcessTracker(rootProcessID: processID) else {
+      _ = Darwin.kill(processID, SIGKILL)
+      _ = Darwin.waitpid(processID, nil, 0)
+      closePair(stdoutPipe)
+      closePair(stderrPipe)
+      throw GitProcessError.spawnFailed(ESRCH)
+    }
     setNonBlocking(stdoutPipe[0])
     setNonBlocking(stderrPipe[0])
+    guard Darwin.kill(-processID, SIGCONT) == 0 else {
+      let signalError = errno
+      processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: processID)
+      _ = Darwin.waitpid(processID, nil, 0)
+      closePair(stdoutPipe)
+      closePair(stderrPipe)
+      throw GitProcessError.spawnFailed(signalError)
+    }
+
     let startedAt = monotonicSeconds()
     let deadline = startedAt + request.timeoutSeconds
     var stdout = Data()
@@ -244,34 +294,26 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
     var childExited = false
     var timedOut = false
     var outputLimitExceeded = false
+    var stdoutLimitExceeded = false
+    var stderrLimitExceeded = false
     var terminationSent = false
     var forceKillAt: TimeInterval?
     var abandonPipesAt: TimeInterval?
-    var observedProcesses: Set<ProcessIdentity> = []
-    if let identity = processIdentity(processID) { observedProcesses.insert(identity) }
 
     defer {
       if stdoutPipe[0] >= 0 { Darwin.close(stdoutPipe[0]) }
       if stderrPipe[0] >= 0 { Darwin.close(stderrPipe[0]) }
-      if !childExited {
-        terminateProcessTree(
-          processID,
-          observedProcesses: observedProcesses,
-          signal: SIGKILL
-        )
-        _ = Darwin.waitpid(processID, &childStatus, 0)
+      if !processTracker.cleanupVerified(originalProcessGroup: processID) {
+        processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: processID)
       }
+      if !childExited { _ = Darwin.waitpid(processID, &childStatus, 0) }
     }
 
     while !childExited || stdoutOpen || stderrOpen {
-      observedProcesses.formUnion(descendantProcesses(of: processID))
+      _ = processTracker.observeDescendants()
       if Task.isCancelled && !terminationSent {
         timedOut = true
-        terminateProcessTree(
-          processID,
-          observedProcesses: observedProcesses,
-          signal: SIGTERM
-        )
+        processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: processID)
         terminationSent = true
         let now = monotonicSeconds()
         forceKillAt = now + 0.25
@@ -280,49 +322,51 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
       let now = monotonicSeconds()
       if now >= deadline, !terminationSent {
         timedOut = true
-        terminateProcessTree(
-          processID,
-          observedProcesses: observedProcesses,
-          signal: SIGTERM
-        )
+        processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: processID)
         terminationSent = true
         forceKillAt = now + 0.25
         abandonPipesAt = now + 0.5
       }
 
-      if stdoutOpen {
+      if stdoutOpen, !outputLimitExceeded {
         stdoutOpen = try drain(
           descriptor: stdoutPipe[0],
           into: &stdout,
           maximumBytes: request.maximumOutputBytes,
-          exceeded: &outputLimitExceeded
+          exceeded: &stdoutLimitExceeded
         )
+        outputLimitExceeded = stdoutLimitExceeded
       }
-      if stderrOpen {
+      if stderrOpen, !outputLimitExceeded {
         stderrOpen = try drain(
           descriptor: stderrPipe[0],
           into: &stderr,
-          maximumBytes: request.maximumOutputBytes,
-          exceeded: &outputLimitExceeded
+          maximumBytes: request.maximumStandardErrorBytes,
+          exceeded: &stderrLimitExceeded
         )
+        outputLimitExceeded = stderrLimitExceeded
       }
-      if outputLimitExceeded, !terminationSent {
-        terminateProcessTree(
-          processID,
-          observedProcesses: observedProcesses,
-          signal: SIGTERM
-        )
-        terminationSent = true
-        let now = monotonicSeconds()
-        forceKillAt = now + 0.25
-        abandonPipesAt = now + 0.5
+      if outputLimitExceeded {
+        if !terminationSent {
+          processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: processID)
+          terminationSent = true
+          let now = monotonicSeconds()
+          forceKillAt = now + 0.25
+          abandonPipesAt = now + 0.5
+        }
+        if stdoutOpen {
+          Darwin.close(stdoutPipe[0])
+          stdoutPipe[0] = -1
+          stdoutOpen = false
+        }
+        if stderrOpen {
+          Darwin.close(stderrPipe[0])
+          stderrPipe[0] = -1
+          stderrOpen = false
+        }
       }
       if let forceKillAt, monotonicSeconds() >= forceKillAt {
-        terminateProcessTree(
-          processID,
-          observedProcesses: observedProcesses,
-          signal: SIGKILL
-        )
+        processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: processID)
       }
       if let abandonPipesAt, monotonicSeconds() >= abandonPipesAt {
         if stdoutOpen {
@@ -341,9 +385,19 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
         let waited = Darwin.waitpid(processID, &childStatus, WNOHANG)
         if waited == processID {
           childExited = true
+          _ = processTracker.observeDescendants()
         } else if waited == -1, errno != EINTR {
           throw GitProcessError.waitFailed(errno)
         }
+      }
+      if childExited, !terminationSent,
+        processTracker.matchingEvidence().contains(where: { $0.identity.processID != processID })
+      {
+        processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: processID)
+        terminationSent = true
+        let now = monotonicSeconds()
+        forceKillAt = now + 0.25
+        abandonPipesAt = now + 0.5
       }
       if !childExited || stdoutOpen || stderrOpen {
         var descriptors: [pollfd] = []
@@ -354,36 +408,34 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
           descriptors.append(pollfd(fd: stderrPipe[0], events: Int16(POLLIN), revents: 0))
         }
         if descriptors.isEmpty {
-          usleep(10_000)
+          usleep(5_000)
         } else {
-          _ = Darwin.poll(&descriptors, nfds_t(descriptors.count), 20)
+          _ = Darwin.poll(&descriptors, nfds_t(descriptors.count), 10)
         }
       }
     }
 
-    let descendantExitDeadline = monotonicSeconds() + 0.25
-    var survivingProcesses = observedProcesses.filter { processIdentity($0.pid) == $0 }
-    while survivingProcesses.contains(where: { $0.pid != processID }),
-      monotonicSeconds() < descendantExitDeadline
-    {
-      usleep(10_000)
-      survivingProcesses = observedProcesses.filter { processIdentity($0.pid) == $0 }
+    if !processTracker.cleanupVerified(originalProcessGroup: processID) {
+      processTracker.signalOwnedProcesses(SIGTERM, originalProcessGroup: processID)
+      if !processTracker.waitForCleanup(
+        originalProcessGroup: processID,
+        until: monotonicSeconds() + 0.25
+      ) {
+        processTracker.signalOwnedProcesses(SIGKILL, originalProcessGroup: processID)
+        guard
+          processTracker.waitForCleanup(
+            originalProcessGroup: processID,
+            until: monotonicSeconds() + 2
+          )
+        else {
+          throw GitProcessError.cleanupFailed
+        }
+      }
     }
-    if survivingProcesses.contains(where: { $0.pid != processID }) {
-      timedOut = true
-      let survivors = Set(survivingProcesses)
-      terminateProcessTree(
-        processID,
-        observedProcesses: survivors,
-        signal: SIGTERM
-      )
-      usleep(100_000)
-      terminateProcessTree(
-        processID,
-        observedProcesses: survivors,
-        signal: SIGKILL
-      )
+    guard processTracker.cleanupVerified(originalProcessGroup: processID) else {
+      throw GitProcessError.cleanupFailed
     }
+
     let duration = max(0, monotonicSeconds() - startedAt)
     let status = decodedStatus(childStatus)
     return GitProcessResult(
@@ -393,7 +445,9 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
       outputLimitExceeded: outputLimitExceeded,
       stdout: stdout,
       stderr: stderr,
-      durationSeconds: duration
+      durationSeconds: duration,
+      stdoutLimitExceeded: stdoutLimitExceeded,
+      stderrLimitExceeded: stderrLimitExceeded
     )
   }
 
@@ -422,7 +476,8 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
       throw GitProcessError.unsafeWorkingDirectory
     }
     guard request.timeoutSeconds.isFinite, (0.05...3_600).contains(request.timeoutSeconds),
-      (1...16 * 1_024 * 1_024).contains(request.maximumOutputBytes)
+      (1...64 * 1_024 * 1_024).contains(request.maximumOutputBytes),
+      (1...64 * 1_024 * 1_024).contains(request.maximumStandardErrorBytes)
     else {
       throw GitProcessError.invalidLimits
     }
@@ -460,10 +515,14 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
     maximumBytes: Int,
     exceeded: inout Bool
   ) throws -> Bool {
+    let byteBudget = 64 * 1_024
+    var bytesRead = 0
     var buffer = [UInt8](repeating: 0, count: 16_384)
-    while true {
-      let count = Darwin.read(descriptor, &buffer, buffer.count)
+    while bytesRead < byteBudget, !exceeded {
+      let requested = min(buffer.count, byteBudget - bytesRead)
+      let count = Darwin.read(descriptor, &buffer, requested)
       if count > 0 {
+        bytesRead += count
         let remaining = max(0, maximumBytes - output.count)
         if remaining > 0 {
           output.append(contentsOf: buffer.prefix(min(remaining, count)))
@@ -476,86 +535,12 @@ public final class BoundedProcessRunner: GitProcessExecuting, @unchecked Sendabl
       if errno == EAGAIN || errno == EWOULDBLOCK { return true }
       throw GitProcessError.pipeFailed(errno)
     }
+    return true
   }
 
   private static func setNonBlocking(_ descriptor: Int32) {
     let flags = fcntl(descriptor, F_GETFL)
     if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
-  }
-
-  private struct ProcessIdentity: Hashable {
-    let pid: pid_t
-    let processGroup: pid_t
-    let startSeconds: UInt64
-    let startMicroseconds: UInt64
-
-    static func == (lhs: ProcessIdentity, rhs: ProcessIdentity) -> Bool {
-      lhs.pid == rhs.pid
-        && lhs.startSeconds == rhs.startSeconds
-        && lhs.startMicroseconds == rhs.startMicroseconds
-    }
-
-    func hash(into hasher: inout Hasher) {
-      hasher.combine(pid)
-      hasher.combine(startSeconds)
-      hasher.combine(startMicroseconds)
-    }
-  }
-
-  private static func processIdentity(_ pid: pid_t) -> ProcessIdentity? {
-    var information = proc_bsdinfo()
-    let size = proc_pidinfo(
-      pid,
-      PROC_PIDTBSDINFO,
-      0,
-      &information,
-      Int32(MemoryLayout<proc_bsdinfo>.size)
-    )
-    guard size == MemoryLayout<proc_bsdinfo>.size,
-      information.pbi_pid == UInt32(pid),
-      information.pbi_status != UInt32(SZOMB)
-    else {
-      return nil
-    }
-    return ProcessIdentity(
-      pid: pid,
-      processGroup: pid_t(information.pbi_pgid),
-      startSeconds: information.pbi_start_tvsec,
-      startMicroseconds: information.pbi_start_tvusec
-    )
-  }
-
-  private static func descendantProcesses(of root: pid_t) -> Set<ProcessIdentity> {
-    var discovered: Set<ProcessIdentity> = []
-    var pending = [root]
-    while let parent = pending.popLast() {
-      var children = [pid_t](repeating: 0, count: 1_024)
-      let count = proc_listchildpids(
-        parent,
-        &children,
-        Int32(children.count * MemoryLayout<pid_t>.size)
-      )
-      guard count > 0 else { continue }
-      for child in children.prefix(min(Int(count), children.count)) where child > 0 {
-        guard let identity = processIdentity(child) else { continue }
-        if discovered.insert(identity).inserted { pending.append(child) }
-      }
-    }
-    return discovered
-  }
-
-  private static func terminateProcessTree(
-    _ processID: pid_t,
-    observedProcesses: Set<ProcessIdentity>,
-    signal: Int32
-  ) {
-    let current = observedProcesses.filter { processIdentity($0.pid) == $0 }
-    if current.contains(where: { $0.processGroup == processID }) {
-      _ = Darwin.kill(-processID, signal)
-    }
-    for process in current {
-      _ = Darwin.kill(process.pid, signal)
-    }
   }
 
   private static func decodedStatus(_ status: Int32) -> (exitCode: Int32?, signal: Int32?) {

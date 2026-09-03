@@ -19,6 +19,7 @@ struct JobCoordinatorTests {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
     _ = try await fixture.addRepository()
+    try await fixture.configuration.setMaxConcurrency(1, now: fixture.now)
     await fixture.api.configure(
       pullRequests: [pullRequest(number: 4)],
       issues: [
@@ -42,6 +43,91 @@ struct JobCoordinatorTests {
     )
     #expect((try await fixture.jobs.claims(issueNodeID: "issue-node-11")).isEmpty)
     #expect((await coordinator.snapshot()).failures.isEmpty)
+  }
+
+  @Test("direct canary runs exactly one leased job and never walks the queue")
+  func directCanaryDoesNotWalkQueue() async throws {
+    let fixture = try await JobCoordinatorFixture()
+    defer { fixture.remove() }
+    let repository = try await fixture.addRepository()
+    var jobs: [JobRecord] = []
+    for number in 1...2 {
+      let creation = try await fixture.jobs.createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repository.id,
+          kind: .prReview,
+          objectNodeID: "canary-pr-\(number)",
+          revisionKey: String(repeating: String(number), count: 40)
+        ),
+        objectNumber: number,
+        contractVersionUsed: "w7-canary-test",
+        priority: .prReview,
+        firstStep: .review,
+        now: fixture.now.addingTimeInterval(TimeInterval(number))
+      )
+      guard case .created(let job) = creation else {
+        Issue.record("canary queue fixture was suppressed")
+        return
+      }
+      jobs.append(job)
+    }
+    _ = try await fixture.jobs.transition(
+      jobID: jobs[0].id,
+      eventKey: "direct-canary:lease",
+      event: .acquireLease,
+      context: JobTransitionContext(now: fixture.now, reason: "exact canary lease")
+    )
+
+    try await fixture.coordinator().runCanary(jobID: jobs[0].id)
+
+    #expect((await fixture.workflows.order()) == [.prReview])
+    #expect(try await fixture.jobs.job(id: jobs[0].id)?.state == .blocked)
+    #expect(try await fixture.jobs.job(id: jobs[1].id)?.state == .queued)
+  }
+
+  @Test("repository disable is not a selector for an already queued job")
+  func disabledRepositoryDoesNotFilterQueue() async throws {
+    let fixture = try await JobCoordinatorFixture()
+    defer { fixture.remove() }
+    let repository = try await fixture.addRepository()
+    let creation = try await fixture.jobs.createJob(
+      identity: LogicalJobIdentity(
+        repositoryID: repository.id,
+        kind: .prReview,
+        objectNodeID: "already-queued-pr",
+        revisionKey: String(repeating: "9", count: 40)
+      ),
+      objectNumber: 9,
+      contractVersionUsed: "w7-canary-reproduction",
+      priority: .prReview,
+      firstStep: .review,
+      now: fixture.now
+    )
+    guard case .created(let job) = creation else {
+      Issue.record("queued reproduction job was suppressed")
+      return
+    }
+    try await fixture.configuration.upsertRepository(
+      RepositoryConfiguration(
+        id: repository.id,
+        nodeID: repository.nodeID,
+        owner: repository.owner,
+        name: repository.name,
+        defaultBranch: repository.defaultBranch,
+        reviewEnabled: repository.reviewEnabled,
+        triageEnabled: repository.triageEnabled,
+        implementationEnabled: repository.implementationEnabled,
+        enabled: false
+      ),
+      now: fixture.now
+    )
+
+    await fixture.coordinator().run(
+      pass: SchedulerPass(reasons: [.manual], startedAt: fixture.now)
+    )
+
+    #expect((await fixture.workflows.order()) == [.prReview])
+    #expect(try await fixture.jobs.job(id: job.id)?.state == .blocked)
   }
 
   @Test("reconciliation dispatch runs before any new discovery read")

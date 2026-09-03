@@ -8,7 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 readonly ROOT
-readonly NODE="/opt/homebrew/Cellar/node/26.6.0/bin/node"
+JIDOKA_RELEASE_RUNTIME_ROOT="${JIDOKA_RELEASE_RUNTIME_ROOT:-$ROOT/build/runtime-input/qualified-runtime}"
+readonly JIDOKA_RELEASE_RUNTIME_ROOT
+export JIDOKA_RELEASE_RUNTIME_ROOT
+NODE="$("$ROOT/scripts/qualified-runtime-node.sh")"
+readonly NODE
 readonly FIXTURE="$SCRIPT_DIR/herdr-s11-fixture.mjs"
 
 fail() {
@@ -33,8 +37,8 @@ json_value() {
 "$ROOT/scripts/verify-toolchain.sh"
 "$NODE" --check "$FIXTURE"
 command -v herdr >/dev/null 2>&1 || fail "Herdr is unavailable"
-[[ "$(herdr --version | /usr/bin/awk '{print $2}')" == "0.8.0" ]] || \
-    fail "Herdr 0.8.0 is required"
+[[ "$(herdr --version | /usr/bin/awk '{print $2}')" == "0.8.2" ]] || \
+    fail "Herdr 0.8.2 is required"
 
 cd "$ROOT"
 /usr/bin/xcrun swift build --configuration release --product JidokaCodeHerdrHost
@@ -154,8 +158,8 @@ done
 [[ -S "$SOCKET" ]] || fail "named session socket did not start"
 [[ "$(/usr/bin/stat -f '%Sp' "$SOCKET")" == "srw-------" ]] || fail "unsafe named socket mode"
 "$NODE" "$FIXTURE" ping "$SOCKET" >"$TMP/ping.json"
-[[ "$(json_value "$TMP/ping.json" 'version')" == "0.8.0" ]] || fail "version mismatch"
-[[ "$(json_value "$TMP/ping.json" 'protocol')" == "19" ]] || fail "protocol mismatch"
+[[ "$(json_value "$TMP/ping.json" 'version')" == "0.8.2" ]] || fail "version mismatch"
+[[ "$(json_value "$TMP/ping.json" 'protocol')" == "20" ]] || fail "protocol mismatch"
 [[ "$(json_value "$TMP/ping.json" 'capabilities.live_handoff')" == "true" ]] || \
     fail "live handoff unavailable"
 [[ "$(json_value "$TMP/ping.json" 'capabilities.detached_server_daemon')" == "true" ]] || \

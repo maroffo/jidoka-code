@@ -18,10 +18,15 @@ import {
 import { createServer } from "node:http";
 import { basename, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 
 const developerDirectory = process.env.DEVELOPER_DIR;
 const gitPath = "/usr/bin/git";
-const nodePath = "/opt/homebrew/Cellar/node/26.6.0/bin/node";
+const releaseRuntimeRoot = realpathSync(process.env.JIDOKA_RELEASE_RUNTIME_ROOT ?? "");
+const nodePath = realpathSync(process.execPath);
+if (nodePath !== `${releaseRuntimeRoot}/node/bin/node`) {
+  fail("Node is outside the attested release runtime");
+}
 if (typeof developerDirectory !== "string" || developerDirectory.length === 0) {
   fail("DEVELOPER_DIR is required");
 }
@@ -44,21 +49,24 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function attestSystemRuntime() {
-  const expected = {
-    [gitPath]: "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818",
+export function attestSystemRuntime(options = {}) {
+  const expected = options.expected ?? {
+    [gitPath]: "1685f2c90307faa05ef5ae8f707d3a18a519c9dad75882768f66abb475f1b3d7",
     [gitHTTPBackendPath]:
       "4026051f87a437197a913d4ca5d3196f1d749bf6060f84c74cc374263988110a",
-    [nodePath]: "1ef99ea25fe70c9b67e7efe768ef8ee22148d3cabc703db6131b57aeb617d040",
   };
+  const inspectedNodePath = options.nodePath ?? nodePath;
+  const inspect = options.lstat ?? lstatSync;
+  const read = options.readFile ?? readFileSync;
   const observed = {};
   for (const [path, expectedSHA256] of Object.entries(expected)) {
-    const stat = lstatSync(path);
+    const stat = inspect(path);
     if (!stat.isFile() || stat.isSymbolicLink()) fail(`unsafe system runtime: ${path}`);
-    const digest = sha256(readFileSync(path));
+    const digest = sha256(read(path));
     if (digest !== expectedSHA256) fail(`system runtime digest drift: ${path}`);
     observed[path] = digest;
   }
+  observed[inspectedNodePath] = sha256(read(inspectedNodePath));
   return observed;
 }
 
@@ -851,6 +859,20 @@ function runMutationRecovery() {
   };
 }
 
+export async function buildLocalSpikeReport(mode, workspace, dependencies = {}) {
+  const inspectRuntime = dependencies.attestSystemRuntime ?? attestSystemRuntime;
+  const security = dependencies.runSecurityComposition ?? runSecurityComposition;
+  const gitTransport = dependencies.runGitTransport ?? runGitTransport;
+  const mutationRecovery = dependencies.runMutationRecovery ?? runMutationRecovery;
+  const systemRuntimeSHA256 = inspectRuntime();
+  let report;
+  if (mode === "security") report = security(workspace);
+  if (mode === "git-transport") report = await gitTransport(workspace);
+  if (mode === "mutation-recovery") report = mutationRecovery();
+  report.systemRuntimeSHA256 = systemRuntimeSHA256;
+  return report;
+}
+
 async function main() {
   const mode = process.argv[2];
   if (!['security', 'git-transport', 'mutation-recovery'].includes(mode)) {
@@ -858,16 +880,13 @@ async function main() {
   }
   if (process.argv.length !== 4) fail("local spike requires one app-owned workspace");
   const workspace = verifyWorkspace(process.argv[3]);
-  const systemRuntimeSHA256 = attestSystemRuntime();
-  let report;
-  if (mode === "security") report = runSecurityComposition(workspace);
-  if (mode === "git-transport") report = await runGitTransport(workspace);
-  if (mode === "mutation-recovery") report = runMutationRecovery();
-  report.systemRuntimeSHA256 = systemRuntimeSHA256;
+  const report = await buildLocalSpikeReport(mode, workspace);
   process.stdout.write(`${JSON.stringify(report)}\n`);
 }
 
-main().catch((error) => {
-  process.stderr.write(`local spike failed: ${error.message}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`local spike failed: ${error.message}\n`);
+    process.exitCode = 1;
+  });
+}

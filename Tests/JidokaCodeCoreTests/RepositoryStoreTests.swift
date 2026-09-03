@@ -187,6 +187,127 @@ struct RepositoryStoreTests {
     #expect(FileManager.default.fileExists(atPath: orphan.path))
   }
 
+  @Test("operator retirement cleans only an exact clean evidence-bound workspace")
+  func operatorRetirementCleanup() async throws {
+    let fixture = try GitTestRoot(prefix: "jidoka-repository-retirement")
+    defer { fixture.remove() }
+    let source = try await fixture.initializeRepository()
+    let baseSHA = try await fixture.commit(
+      repository: source,
+      path: "README.md",
+      contents: "base\n",
+      message: "chore: add base"
+    )
+    let remoteURL = try await fixture.bareRemote(from: source)
+    let database = try SQLiteStore(
+      databaseURL: fixture.root.appendingPathComponent("state.sqlite3")
+    )
+    let repository = RepositoryConfiguration(
+      id: UUID(),
+      nodeID: "R_retirement",
+      owner: "owner",
+      name: "repository",
+      defaultBranch: "main",
+      reviewEnabled: true,
+      triageEnabled: true,
+      implementationEnabled: true,
+      enabled: true
+    )
+    try await ConfigurationStore(database: database).upsertRepository(
+      repository,
+      now: Date(timeIntervalSince1970: 1)
+    )
+    let jobs = DurableJobStore(database: database)
+    let creation = try await jobs.createJob(
+      identity: LogicalJobIdentity(
+        repositoryID: repository.id,
+        kind: .prReview,
+        objectNodeID: "PR_retirement",
+        revisionKey: "head"
+      ),
+      contractVersionUsed: "v1",
+      priority: .prReview,
+      firstStep: .review,
+      now: Date(
+        timeIntervalSince1970: TimeInterval(
+          JobMaintenanceScope.authorizedBoundaryEpochSeconds - 1
+        )
+      )
+    )
+    guard case .created(let job) = creation else {
+      Issue.record("retirement fixture job was suppressed")
+      return
+    }
+    let remote = try GitRemoteRepository(
+      repositoryID: repository.id,
+      nodeID: repository.nodeID,
+      owner: repository.owner,
+      name: repository.name,
+      defaultBranch: repository.defaultBranch,
+      localFixtureURL: remoteURL
+    )
+    let store = try RepositoryStore(
+      rootURL: fixture.root.appendingPathComponent("ApplicationSupport", isDirectory: true),
+      database: database,
+      transport: fixture.git
+    )
+    _ = try await store.ensureMirror(remote: remote)
+    let materialized = try await store.materializeWorkspace(
+      jobID: job.id,
+      remote: remote,
+      baseSHA: baseSHA,
+      branch: "agent/issue-1-retirement",
+      now: Date(timeIntervalSince1970: 2)
+    )
+    #expect(try await store.workspaceIsCleanAtRecordedHead(jobID: job.id))
+
+    try await database.execute("UPDATE app_settings SET paused = 1 WHERE singleton = 1")
+    let scope = JobMaintenanceScope(
+      operation: .retireBefore,
+      boundaryEpochSeconds: JobMaintenanceScope.authorizedBoundaryEpochSeconds
+    )
+    let stalePreview = try await jobs.previewMaintenance(scope: scope)
+    let staleAuthorization = JobMaintenanceAuthorization(
+      scope: scope,
+      expectedCount: stalePreview.candidateCount,
+      evidenceSHA256: stalePreview.evidenceSHA256
+    )
+    try await database.execute(
+      "UPDATE workspaces SET updated_at = ? WHERE job_id = ?",
+      bindings: [
+        .real(2.5),
+        .text(job.id.uuidString.lowercased()),
+      ]
+    )
+    await #expect(throws: DurableJobStoreError.maintenanceEvidenceMismatch) {
+      _ = try await jobs.applyMaintenance(
+        staleAuthorization,
+        now: Date(timeIntervalSince1970: 3)
+      )
+    }
+    let preview = try await jobs.previewMaintenance(scope: scope)
+    let authorization = JobMaintenanceAuthorization(
+      scope: scope,
+      expectedCount: preview.candidateCount,
+      evidenceSHA256: preview.evidenceSHA256
+    )
+    _ = try await jobs.applyMaintenance(authorization, now: Date(timeIntervalSince1970: 3))
+    await #expect(throws: RepositoryStoreError.cleanupNotAuthorized) {
+      try await store.authorizeOperatorRetirementCleanup(
+        jobID: job.id,
+        evidenceSHA256: String(repeating: "b", count: 64)
+      )
+    }
+    try await store.authorizeOperatorRetirementCleanup(
+      jobID: job.id,
+      evidenceSHA256: authorization.evidenceSHA256,
+      now: Date(timeIntervalSince1970: 4)
+    )
+    try await store.cleanupWorkspace(jobID: job.id, now: Date(timeIntervalSince1970: 5))
+    #expect(try await store.workspaceRecord(jobID: job.id)?.cleanupState == .removed)
+    #expect(!FileManager.default.fileExists(atPath: materialized.workspaceURL.path))
+  }
+
   @Test("unsafe roots, branches, collisions, and missing jobs fail closed")
   func invalidInputs() async throws {
     let fixture = try GitTestRoot(prefix: "jidoka-repository-invalid")

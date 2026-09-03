@@ -374,7 +374,7 @@ private final class ApprovedCommandStoreFixture: @unchecked Sendable {
         repository_id, workspace_id, identity_root, herdr_version, herdr_protocol,
         socket_device, socket_inode, socket_owner, socket_permissions,
         state, created_at, updated_at
-      ) VALUES (?, 'w1', ?, '0.8.0', 19, 1, 2, 501, 384, 'active', 1, 1)
+      ) VALUES (?, 'w1', ?, '0.8.2', 20, 1, 2, 501, 384, 'active', 1, 1)
       """,
       bindings: [
         .text(repository),

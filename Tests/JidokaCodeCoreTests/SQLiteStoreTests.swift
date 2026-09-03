@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 
@@ -122,6 +123,156 @@ struct SQLiteStoreTests {
     #expect(try await backup.scalarText("SELECT value FROM fixture") == "kept")
     await backup.close()
     await upgraded.close()
+  }
+
+  @Test("production schema upgrades through architecture role-host replacement authority")
+  func productionFreshRetryMigration() async throws {
+    let migration = try productionSchemaNineMigration()
+    let fixture = try await PopulatedSchemaEightFixture.make()
+    defer { fixture.remove() }
+
+    let upgraded = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: DatabaseSchema.migrations
+    )
+    #expect(try await upgraded.schemaVersion() == 9)
+    #expect(
+      try await upgraded.scalarText(
+        "SELECT name FROM schema_migrations WHERE version = 9"
+      ) == migration.name
+    )
+    #expect(upgraded.migrationBackups.count == 1)
+    let backupURLs = try migrationBackupURLs(in: fixture.root)
+    #expect(backupURLs.count == 1)
+    #expect(
+      backupURLs.first?.lastPathComponent == upgraded.migrationBackups.first?.lastPathComponent
+    )
+
+    let preservedRows = try await applicationRows(
+      in: upgraded,
+      tableColumns: fixture.snapshot.tableColumns
+    )
+    #expect(preservedRows == fixture.snapshot.applicationRows)
+    #expect(
+      try await upgraded.scalarInt(
+        """
+        SELECT COUNT(*)
+        FROM pi_run_launches AS launch
+        JOIN pi_runs AS run ON run.id = launch.run_id
+        JOIN herdr_role_hosts AS host ON host.id = launch.role_host_id
+        WHERE run.id = ?
+          AND host.id = ?
+          AND launch.execution_role_host_id IS NULL
+          AND launch.queue_sequence BETWEEN 1 AND 3
+        """,
+        bindings: [.text(schemaEightRunID), .text(schemaEightArchitectureHostID)]
+      ) == 3
+    )
+    #expect(
+      try await upgraded.scalarInt(
+        "SELECT COUNT(*) FROM herdr_topology_intents WHERE state = 'unknown'"
+      ) == 2
+    )
+    let migratedRunStore = PiRunStore(database: upgraded)
+    try await migratedRunStore.invalidateRepositoryBinding(
+      repositoryID: UUID(uuidString: "51000000-0000-4000-8000-000000000001")!,
+      observedHandshake: schemaNineHandshake(),
+      now: Date(timeIntervalSince1970: 99)
+    )
+    #expect(
+      try await upgraded.scalarText(
+        "SELECT reason FROM herdr_repository_binding_history ORDER BY id DESC LIMIT 1"
+      ) == "RUNTIME_CHANGED"
+    )
+    #expect(
+      try await upgraded.scalarInt(
+        "SELECT COUNT(*) FROM herdr_role_hosts WHERE state = 'lost'"
+      ) == 4
+    )
+    #expect(
+      try await upgraded.scalarText(
+        "SELECT state FROM herdr_job_bindings WHERE job_id = (SELECT job_id FROM pi_runs WHERE id = ?)",
+        bindings: [.text(schemaEightRunID)]
+      ) == "lost"
+    )
+    try await assertDatabaseIntegrity(upgraded)
+
+    let upgradedObjectNames = try await schemaObjectNames(in: upgraded)
+    #expect(upgradedObjectNames.subtracting(fixture.snapshot.schemaObjectNames) == v9AddedObjects)
+    #expect(fixture.snapshot.schemaObjectNames.subtracting(upgradedObjectNames).isEmpty)
+    for expectedObject in v9AddedObjects {
+      #expect(upgradedObjectNames.contains(expectedObject))
+    }
+
+    let backupURL = try #require(backupURLs.first)
+    #expect(try fileMode(backupURL) == 0o600)
+    let backup = try SQLiteStore(
+      databaseURL: backupURL,
+      migrations: schemaEightMigrations
+    )
+    #expect(try await backup.schemaVersion() == 8)
+    #expect(try await schemaEightSnapshot(of: backup) == fixture.snapshot)
+    try await assertDatabaseIntegrity(backup)
+    await backup.close()
+    await upgraded.close()
+  }
+
+  @Test(
+    "production schema 8 to 9 rolls back after every exact migration statement",
+    arguments: Array(1...76)
+  )
+  func productionArchitectureReplacementMigrationRollsBack(
+    afterStatement completedStatementCount: Int
+  ) async throws {
+    let migration = try productionSchemaNineMigration()
+    let fixture = try await PopulatedSchemaEightFixture.make()
+    defer { fixture.remove() }
+    let failingMigration = SQLiteMigration(
+      version: migration.version,
+      name: migration.name,
+      requiresBackup: migration.requiresBackup,
+      statements: Array(migration.statements.prefix(completedStatementCount)) + [
+        "THIS IS THE TEST-ONLY SCHEMA 8 TO 9 FAILURE"
+      ]
+    )
+
+    do {
+      _ = try SQLiteStore(
+        databaseURL: fixture.databaseURL,
+        migrations: schemaEightMigrations + [failingMigration]
+      )
+      Issue.record("migration unexpectedly passed after statement \(completedStatementCount)")
+    } catch let error as SQLiteStoreError {
+      guard case .statementFailed = error else {
+        Issue.record(
+          "unexpected migration error after statement \(completedStatementCount): \(error)")
+        return
+      }
+    }
+
+    let backupURLs = try migrationBackupURLs(in: fixture.root)
+    #expect(backupURLs.count == 1)
+    let original = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaEightMigrations
+    )
+    #expect(try await original.schemaVersion() == 8)
+    #expect(try await schemaEightSnapshot(of: original) == fixture.snapshot)
+    #expect(try await schemaObjectNames(in: original).isDisjoint(with: v9AddedObjects))
+    try await assertDatabaseIntegrity(original)
+    await original.close()
+
+    let backupURL = try #require(backupURLs.first)
+    #expect(try fileMode(backupURL) == 0o600)
+    let backup = try SQLiteStore(
+      databaseURL: backupURL,
+      migrations: schemaEightMigrations
+    )
+    #expect(try await backup.schemaVersion() == 8)
+    #expect(try await schemaEightSnapshot(of: backup) == fixture.snapshot)
+    #expect(try await schemaObjectNames(in: backup).isDisjoint(with: v9AddedObjects))
+    try await assertDatabaseIntegrity(backup)
+    await backup.close()
   }
 
   @Test("failed migration rolls back schema and migration version")
@@ -281,6 +432,788 @@ struct SQLiteStoreTests {
       _ = try SQLiteStore(databaseURL: linkedParent.appendingPathComponent("db.sqlite3"))
     }
   }
+}
+
+private let schemaEightMigrations = Array(DatabaseSchema.migrations.prefix(8))
+private let schemaEightRunID = "run-schema8-architecture"
+private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
+private let expectedSchemaNineMigrationDigest =
+  "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
+private let expectedPopulatedSchemaEightDigest =
+  "a8ceef8e29c5b2bed740a52be3912457543a176ca299538ae3714685b8233992"
+private let v9AddedObjects: Set<String> = [
+  "app_settings_generation_rollover_delete_denied",
+  "app_settings_generation_rollover_insert_resume_denied",
+  "herdr_generation_rollover_authorization_delete_denied",
+  "herdr_generation_rollover_authorization_insert_authority",
+  "herdr_generation_rollover_authorization_update_denied",
+  "herdr_generation_rollover_authorizations",
+  "herdr_generation_rollover_predecessor_host_immutable",
+  "herdr_generation_rollover_predecessor_launch_immutable",
+  "herdr_generation_rollover_predecessor_run_immutable",
+  "herdr_job_binding_generation_rollover_authority",
+  "herdr_ordinary_role_host_replacement_insert_collision_denied",
+  "herdr_ordinary_role_host_replacement_physical_collision_denied",
+  "herdr_replaced_predecessor_immutable",
+  "herdr_replacement_intent_attribution_authority",
+  "herdr_replacement_intent_insert_authority",
+  "herdr_replacement_intent_send_authority",
+  "herdr_role_host_replacement_authorization_delete_denied",
+  "herdr_role_host_replacement_authorization_insert_authority",
+  "herdr_role_host_replacement_authorization_update_denied",
+  "herdr_role_host_replacement_authorizations",
+  "herdr_replacement_role_host_delete_denied",
+  "herdr_replacement_role_host_identity_immutable",
+  "herdr_replacement_role_host_insert_authority",
+  "herdr_replacement_role_host_state_transition",
+  "herdr_replacement_role_hosts",
+  "herdr_replacement_role_hosts_active_pane_idx",
+  "herdr_replacement_role_hosts_active_process_idx",
+  "herdr_replacement_role_hosts_active_terminal_idx",
+  "herdr_role_host_initial_queue_authority",
+  "herdr_role_host_replacement_candidates",
+  "herdr_pi_run_rollover_delete_denied",
+  "herdr_pi_run_rollover_insert_authority",
+  "herdr_pi_run_rollover_update_denied",
+  "herdr_pi_run_rollovers",
+  "pi_run_launches_one_active_execution_host_idx",
+  "pi_runs_generation_rollover_insert_authority",
+  "app_settings_generation_rollover_resume_denied",
+]
+
+private struct SchemaEightSnapshot: Equatable {
+  let schemaObjects: [String]
+  let schemaObjectNames: Set<String>
+  let tableColumns: [String: [String]]
+  let applicationRows: [String: [String]]
+  let digest: String
+}
+
+private struct PopulatedSchemaEightFixture {
+  let root: URL
+  let databaseURL: URL
+  let snapshot: SchemaEightSnapshot
+
+  static func make() async throws -> Self {
+    let fixture = try DatabaseFixture()
+    let database = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaEightMigrations
+    )
+    #expect(try await database.schemaVersion() == 8)
+    #expect(database.migrationBackups.isEmpty)
+
+    let repositoryID = UUID(uuidString: "51000000-0000-4000-8000-000000000001")!
+    let jobID = UUID(uuidString: "52000000-0000-4000-8000-000000000002")!
+    let unrelatedRepositoryID = "53000000-0000-4000-8000-000000000003"
+    let unrelatedJobID = "54000000-0000-4000-8000-000000000004"
+    let repository = repositoryID.uuidString.lowercased()
+    let job = jobID.uuidString.lowercased()
+
+    for (id, nodeID, name) in [
+      (repository, "node-schema8-canary", "schema8-canary"),
+      (unrelatedRepositoryID, "node-schema8-unrelated", "schema8-unrelated"),
+    ] {
+      _ = try await database.execute(
+        """
+        INSERT INTO repositories(
+          id, node_id, owner, name, default_branch,
+          review_enabled, triage_enabled, implementation_enabled, enabled,
+          created_at, updated_at
+        ) VALUES (?, ?, 'fixture-owner', ?, 'main', 1, 1, 1, 1, 100, 100)
+        """,
+        bindings: [.text(id), .text(nodeID), .text(name)]
+      )
+    }
+    _ = try await database.execute(
+      """
+      INSERT INTO jobs(
+        id, repository_id, kind, object_node_id, object_number, revision_key,
+        contract_version_used, priority, state, current_step, current_step_kind,
+        attempt, created_at, updated_at
+      ) VALUES (?, ?, 'prReview', 'pr-node-schema8', 834, 'schema8-head',
+        'schema8-contract', 4, 'runningPi', 0, 'review', 3, 101, 101)
+      """,
+      bindings: [.text(job), .text(repository)]
+    )
+    _ = try await database.execute(
+      """
+      INSERT INTO jobs(
+        id, repository_id, kind, object_node_id, object_number, revision_key,
+        contract_version_used, priority, state, current_step, current_step_kind,
+        attempt, created_at, updated_at
+      ) VALUES (?, ?, 'issueTriage', 'issue-node-unrelated', 99, 'unrelated-revision',
+        'schema8-contract', 1, 'queued', 0, 'triage', 0, 102, 102)
+      """,
+      bindings: [.text(unrelatedJobID), .text(unrelatedRepositoryID)]
+    )
+    _ = try await database.execute(
+      "UPDATE app_settings SET paused = 1, updated_at = 100 WHERE singleton = 1"
+    )
+    _ = try await database.execute("UPDATE model_profiles SET updated_at = 100")
+    _ = try await database.execute(
+      """
+      INSERT INTO repository_leases(
+        repository_id, job_id, generation, heartbeat, active
+      ) VALUES (?, ?, 1, 103, 1)
+      """,
+      bindings: [.text(repository), .text(job)]
+    )
+    for (eventKey, fromState, toState) in [
+      (
+        "canary:\(String(repeating: "d", count: 64)):m8:admit:\(job)",
+        "queued",
+        "leased"
+      ),
+      (
+        "canary:\(String(repeating: "d", count: 64)):m8:pi:architecture:r1",
+        "runningPi",
+        "runningPi"
+      ),
+    ] {
+      _ = try await database.execute(
+        """
+        INSERT INTO job_transitions(
+          job_id, event_key, from_state, to_state, reason,
+          attempt_before, attempt_after, step_before, step_after, created_at
+        ) VALUES (?, ?, ?, ?, 'schema8 paused canary authority', 3, 3, 0, 0, 104)
+        """,
+        bindings: [.text(job), .text(eventKey), .text(fromState), .text(toState)]
+      )
+    }
+    _ = try await database.execute(
+      """
+      INSERT INTO repository_backoff(
+        repository_id, failure_count, not_before, reason, updated_at
+      ) VALUES (?, 2, 500, 'unrelated fixture backoff', 104)
+      """,
+      bindings: [.text(unrelatedRepositoryID)]
+    )
+    _ = try await database.execute(
+      """
+      INSERT INTO artifacts(
+        id, job_id, kind, relative_path, sha256,
+        redaction_classification, producer_run_id, created_at
+      ) VALUES (
+        'artifact-schema8-unrelated', ?, 'fixture', 'unrelated/fixture.json', ?,
+        'synthetic', NULL, 105
+      )
+      """,
+      bindings: [.text(unrelatedJobID), .text(String(repeating: "9", count: 64))]
+    )
+    _ = try await database.execute(
+      """
+      INSERT INTO job_transitions(
+        job_id, event_key, from_state, to_state, reason,
+        attempt_before, attempt_after, step_before, step_after, created_at
+      ) VALUES (
+        ?, 'unrelated:queued', 'discovered', 'queued', 'unrelated fixture transition',
+        0, 0, 0, 0, 106
+      )
+      """,
+      bindings: [.text(unrelatedJobID)]
+    )
+
+    let store = PiRunStore(database: database)
+    let handshake = schemaEightHandshake()
+    _ = try await store.bindRepository(
+      repositoryID: repositoryID,
+      workspaceID: "workspace-schema8",
+      identityRoot: URL(fileURLWithPath: "/private/tmp/jidoka-schema8-migration/worktree"),
+      handshake: handshake,
+      now: Date(timeIntervalSince1970: 110)
+    )
+    _ = try await store.prepareJobBinding(
+      jobID: jobID,
+      repositoryID: repositoryID,
+      generation: 1,
+      workspaceID: "workspace-schema8",
+      now: Date(timeIntervalSince1970: 111)
+    )
+
+    let roles: [PiWorkflowRole] = [.architecture, .security, .test, .synthesis]
+    var activations: [HerdrRoleHostActivation] = []
+    for (index, role) in roles.enumerated() {
+      let hostID = "rolehost-schema8-\(role.rawValue)"
+      _ = try await store.prepareRoleHost(
+        id: hostID,
+        jobID: jobID,
+        generation: 1,
+        role: role,
+        workspaceID: "workspace-schema8",
+        bootstrapDescriptorSHA256: String(repeating: Character(String(index + 1)), count: 64),
+        hostExecutableSHA256: String(repeating: "e", count: 64),
+        now: Date(timeIntervalSince1970: 112)
+      )
+      activations.append(
+        HerdrRoleHostActivation(
+          roleHostID: hostID,
+          workspaceID: "workspace-schema8",
+          tabID: "tab-schema8",
+          paneID: "wM:p\(index + 2)",
+          terminalID: "terminal-schema8-\(role.rawValue)",
+          processIdentity: try HerdrHostProcessIdentity(
+            processID: Int32(54_262 + index),
+            startSeconds: UInt64(1_000 + index),
+            startMicroseconds: UInt64(2_000 + index)
+          )
+        )
+      )
+    }
+    try await store.activateTopology(
+      jobID: jobID,
+      tabID: "tab-schema8",
+      hosts: activations,
+      now: Date(timeIntervalSince1970: 113)
+    )
+
+    let run = try await store.prepareRun(
+      id: schemaEightRunID,
+      jobID: jobID,
+      workflow: .pullRequestReview,
+      role: .architecture,
+      round: 1,
+      jobAttempt: 3,
+      topologyGeneration: 1,
+      jobStep: 0,
+      runNonce: String(repeating: "a", count: 64),
+      requestSHA256: String(repeating: "b", count: 64),
+      resourceVersion: "schema8-fixture",
+      resourceHash: String(repeating: "c", count: 64),
+      model: "fixture/model:max",
+      sessionPath: URL(fileURLWithPath: "/private/tmp/jidoka-schema8-migration/session"),
+      channelPath: URL(fileURLWithPath: "/private/tmp/jidoka-schema8-migration/channel"),
+      now: Date(timeIntervalSince1970: 114)
+    )
+    let authorizationPrefix = "canary:\(String(repeating: "d", count: 64)):m8:"
+    func authorize(
+      _ launchAttemptID: String,
+      evidence: Character,
+      at instant: Double
+    ) async throws {
+      _ = try await database.execute(
+        """
+        INSERT INTO job_transitions(
+          job_id, event_key, from_state, to_state, reason,
+          attempt_before, attempt_after, step_before, step_after, created_at
+        ) VALUES (?, ?, 'runningPi', 'runningPi', 'schema8 exact retry authority',
+          3, 3, 0, 0, ?)
+        """,
+        bindings: [
+          .text(job),
+          .text(
+            authorizationPrefix + "pi-fresh-retry:" + run.id + ":"
+              + launchAttemptID + ":" + String(repeating: evidence, count: 64)
+          ),
+          .real(instant),
+        ]
+      )
+    }
+    func insertFailedLaunch(
+      id: String,
+      queueSequence: Int,
+      descriptor: Character,
+      failureCode: String,
+      childProcess: Bool,
+      createdAt: Double,
+      updatedAt: Double,
+      firstEventSequence: Int
+    ) async throws {
+      _ = try await database.execute(
+        """
+        INSERT INTO pi_run_launches(
+          launch_attempt_id, run_id, role_host_id, queue_sequence, launch_mode,
+          descriptor_sha256, expected_session_id, resume_boundary_sha256,
+          state, failure_code,
+          child_pid, child_process_group_id, child_start_seconds, child_start_microseconds,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'fresh', ?, NULL, NULL, 'failed', ?,
+          ?, ?, ?, ?, ?, ?)
+        """,
+        bindings: [
+          .text(id),
+          .text(run.id),
+          .text(schemaEightArchitectureHostID),
+          .integer(Int64(queueSequence)),
+          .text(String(repeating: descriptor, count: 64)),
+          .text(failureCode),
+          childProcess ? .integer(60_001) : .null,
+          childProcess ? .integer(60_001) : .null,
+          childProcess ? .integer(123) : .null,
+          childProcess ? .integer(1) : .null,
+          .real(createdAt),
+          .real(updatedAt),
+        ]
+      )
+      var events: [(String, String?, Double)] = [
+        ("prepared", nil, createdAt),
+        ("enqueued", nil, createdAt + 1),
+        ("running", nil, createdAt + 2),
+      ]
+      if childProcess {
+        events.append(("childProcessRecorded", String(repeating: "1", count: 64), createdAt + 3))
+      }
+      events.append(("failed", nil, updatedAt))
+      for (offset, event) in events.enumerated() {
+        _ = try await database.execute(
+          """
+          INSERT INTO pi_run_events(
+            run_id, launch_attempt_id, sequence, kind,
+            record_sha256, detail_code, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          """,
+          bindings: [
+            .text(run.id),
+            .text(id),
+            .integer(Int64(firstEventSequence + offset)),
+            .text(event.0),
+            event.1.map(SQLiteValue.text) ?? .null,
+            event.0 == "failed" ? .text(failureCode) : .null,
+            .real(event.2),
+          ]
+        )
+      }
+    }
+
+    let firstLaunchID = "launch-schema8-q1"
+    try await insertFailedLaunch(
+      id: firstLaunchID,
+      queueSequence: 1,
+      descriptor: "4",
+      failureCode: "RUNTIME_TIMEOUT",
+      childProcess: true,
+      createdAt: 120,
+      updatedAt: 124,
+      firstEventSequence: 2
+    )
+    _ = try await database.execute(
+      "UPDATE pi_runs SET outcome = 'running', updated_at = 124 WHERE id = ?",
+      bindings: [.text(run.id)]
+    )
+    try await authorize(firstLaunchID, evidence: "5", at: 125)
+
+    let secondLaunchID = "launch-schema8-q2"
+    try await insertFailedLaunch(
+      id: secondLaunchID,
+      queueSequence: 2,
+      descriptor: "5",
+      failureCode: "HERDR_TRANSACTION_FAILED",
+      childProcess: false,
+      createdAt: 126,
+      updatedAt: 129,
+      firstEventSequence: 7
+    )
+    try await authorize(secondLaunchID, evidence: "6", at: 130)
+
+    let thirdLaunchID = "launch-schema8-q3"
+    try await insertFailedLaunch(
+      id: thirdLaunchID,
+      queueSequence: 3,
+      descriptor: "6",
+      failureCode: "HERDR_TRANSACTION_FAILED",
+      childProcess: false,
+      createdAt: 131,
+      updatedAt: 134,
+      firstEventSequence: 11
+    )
+    _ = try await database.execute(
+      """
+      UPDATE herdr_role_hosts
+      SET last_queue_sequence = 3, updated_at = 134
+      WHERE id = ?
+      """,
+      bindings: [.text(schemaEightArchitectureHostID)]
+    )
+    try await authorize(thirdLaunchID, evidence: "7", at: 135)
+
+    let intentStore = SQLiteHerdrTopologyIntentStore(
+      database: database,
+      now: { Date(timeIntervalSince1970: 140) }
+    )
+    let socketIdentity = HerdrSocketIdentityRecord(handshake.socketIdentity)
+    let primeReceipt = try await intentStore.prepare(
+      HerdrTopologyMutationIntent(
+        mutationID: "prime-schema8-unknown",
+        kind: .primeAgentAuthority,
+        repositoryID: repository,
+        jobID: job,
+        generation: 1,
+        payloadSHA256: String(repeating: "7", count: 64),
+        socketIdentity: socketIdentity
+      )
+    )
+    try await intentStore.markSendStarted(primeReceipt)
+    try await intentStore.markUnknown(primeReceipt)
+    try await authorize(thirdLaunchID, evidence: "8", at: 141)
+
+    let resetReceipt = try await intentStore.prepare(
+      HerdrTopologyMutationIntent(
+        mutationID: "reset-schema8-unknown",
+        kind: .resetAgentAuthority,
+        repositoryID: repository,
+        jobID: job,
+        generation: 1,
+        payloadSHA256: String(repeating: "8", count: 64),
+        socketIdentity: socketIdentity
+      )
+    )
+    try await intentStore.markSendStarted(resetReceipt)
+    try await intentStore.markUnknown(resetReceipt)
+
+    try await assertSchemaEightIncidentShape(
+      database,
+      repositoryID: repository,
+      jobID: job,
+      runID: run.id
+    )
+    try await assertDatabaseIntegrity(database)
+    let snapshot = try await schemaEightSnapshot(of: database)
+    #expect(snapshot.digest == expectedPopulatedSchemaEightDigest)
+    _ = try await database.checkpoint()
+    await database.close()
+    return Self(root: fixture.root, databaseURL: fixture.databaseURL, snapshot: snapshot)
+  }
+
+  func remove() {
+    try? FileManager.default.removeItem(at: root)
+  }
+}
+
+private func productionSchemaNineMigration() throws -> SQLiteMigration {
+  #expect(DatabaseSchema.migrations.count == 9)
+  let migration = try #require(
+    DatabaseSchema.migrations.first(where: { $0.version == 9 })
+  )
+  #expect(DatabaseSchema.migrations.firstIndex(of: migration) == 8)
+  #expect(migration.version == 9)
+  #expect(
+    migration.name
+      == "authorized-architecture-role-host-replacement-and-generation-rollover"
+  )
+  #expect(migration.requiresBackup)
+  #expect(migration.statements.count == 76)
+  #expect(migrationDigest(migration) == expectedSchemaNineMigrationDigest)
+  return migration
+}
+
+private func migrationDigest(_ migration: SQLiteMigration) -> String {
+  var components = [
+    "version:\(migration.version)",
+    "name:\(Data(migration.name.utf8).base64EncodedString())",
+    "backup:\(migration.requiresBackup ? 1 : 0)",
+  ]
+  components.append(
+    contentsOf: migration.statements.enumerated().map { index, statement in
+      "statement:\(index + 1):\(Data(statement.utf8).base64EncodedString())"
+    }
+  )
+  return sha256(components.joined(separator: "\n"))
+}
+
+private func schemaEightSnapshot(of database: SQLiteStore) async throws -> SchemaEightSnapshot {
+  let schemaRows = try await database.query(
+    """
+    SELECT type, name, tbl_name, sql
+    FROM sqlite_schema
+    WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
+    ORDER BY type, name
+    """
+  )
+  let schemaObjects = schemaRows.map {
+    canonicalRow($0, columns: ["type", "name", "tbl_name", "sql"])
+  }.sorted()
+  let names = Set(
+    schemaRows.compactMap { row -> String? in
+      guard case .text(let name)? = row["name"] else { return nil }
+      return name
+    }
+  )
+  let tableRows = try await database.query(
+    """
+    SELECT name FROM sqlite_schema
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+    """
+  )
+  var tableColumns: [String: [String]] = [:]
+  for row in tableRows {
+    guard case .text(let table)? = row["name"] else {
+      throw SQLiteStoreError.unexpectedResult("schema table name is not text")
+    }
+    let columns = try await database.query("PRAGMA table_info(\(quotedIdentifier(table)))")
+      .compactMap { column -> (Int, String)? in
+        guard case .integer(let identifier)? = column["cid"],
+          case .text(let name)? = column["name"]
+        else { return nil }
+        return (Int(identifier), name)
+      }
+      .sorted { $0.0 < $1.0 }
+      .map(\.1)
+    tableColumns[table] = columns
+  }
+  let rows = try await applicationRows(in: database, tableColumns: tableColumns)
+  var digestComponents = ["schema8-snapshot-v1"]
+  digestComponents.append(contentsOf: schemaObjects.map { "schema:\($0)" })
+  for table in tableColumns.keys.sorted() {
+    let columns = tableColumns[table] ?? []
+    digestComponents.append(
+      "columns:\(Data(table.utf8).base64EncodedString()):"
+        + columns.map { Data($0.utf8).base64EncodedString() }.joined(separator: ",")
+    )
+    digestComponents.append(contentsOf: (rows[table] ?? []).map { "row:\($0)" })
+  }
+  return SchemaEightSnapshot(
+    schemaObjects: schemaObjects,
+    schemaObjectNames: names,
+    tableColumns: tableColumns,
+    applicationRows: rows,
+    digest: sha256(digestComponents.joined(separator: "\n"))
+  )
+}
+
+private func applicationRows(
+  in database: SQLiteStore,
+  tableColumns: [String: [String]]
+) async throws -> [String: [String]] {
+  var result: [String: [String]] = [:]
+  for table in tableColumns.keys.sorted() {
+    let columns = tableColumns[table] ?? []
+    guard !columns.isEmpty else {
+      result[table] = []
+      continue
+    }
+    let projection = columns.map(quotedIdentifier).joined(separator: ", ")
+    let schemaVersionFilter = table == "schema_migrations" ? " WHERE version <= 8" : ""
+    let rows = try await database.query(
+      "SELECT \(projection) FROM \(quotedIdentifier(table))\(schemaVersionFilter)"
+    )
+    result[table] = rows.map {
+      canonicalRow($0, columns: columns, table: table)
+    }.sorted()
+  }
+  return result
+}
+
+private func canonicalRow(
+  _ row: SQLiteRow,
+  columns: [String],
+  table: String? = nil
+) -> String {
+  columns.map { column in
+    let name = Data(column.utf8).base64EncodedString()
+    if table == "schema_migrations", column == "applied_at" {
+      return "\(name)=normalized-schema-migration-time"
+    }
+    return "\(name)=\(canonicalValue(row[column]))"
+  }.joined(separator: "|")
+}
+
+private func canonicalValue(_ value: SQLiteValue?) -> String {
+  switch value {
+  case .integer(let value):
+    return "integer:\(value)"
+  case .real(let value):
+    return "real:\(String(format: "%016llx", value.bitPattern))"
+  case .text(let value):
+    return "text:\(Data(value.utf8).base64EncodedString())"
+  case .blob(let value):
+    return "blob:\(value.base64EncodedString())"
+  case .null:
+    return "null"
+  case nil:
+    return "missing"
+  }
+}
+
+private func quotedIdentifier(_ value: String) -> String {
+  "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+}
+
+private func schemaObjectNames(in database: SQLiteStore) async throws -> Set<String> {
+  Set(
+    try await database.query(
+      "SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
+    ).compactMap { row -> String? in
+      guard case .text(let name)? = row["name"] else { return nil }
+      return name
+    }
+  )
+}
+
+private func assertSchemaEightIncidentShape(
+  _ database: SQLiteStore,
+  repositoryID: String,
+  jobID: String,
+  runID: String
+) async throws {
+  #expect(try await database.scalarInt("SELECT paused FROM app_settings WHERE singleton = 1") == 1)
+  #expect(
+    try await database.scalarInt(
+      "SELECT COUNT(*) FROM jobs WHERE id = ? AND kind = 'prReview' AND state = 'runningPi'",
+      bindings: [.text(jobID)]
+    ) == 1
+  )
+  #expect(
+    try await database.scalarInt(
+      """
+      SELECT COUNT(*) FROM repository_leases
+      WHERE repository_id = ? AND job_id = ? AND active = 1
+      """,
+      bindings: [.text(repositoryID), .text(jobID)]
+    ) == 1
+  )
+  #expect(
+    try await database.scalarInt(
+      """
+      SELECT COUNT(*) FROM herdr_repository_bindings AS repository_binding
+      JOIN herdr_job_bindings AS job_binding
+        ON job_binding.repository_id = repository_binding.repository_id
+      WHERE repository_binding.repository_id = ?
+        AND repository_binding.state = 'active'
+        AND job_binding.job_id = ?
+        AND job_binding.state = 'active'
+      """,
+      bindings: [.text(repositoryID), .text(jobID)]
+    ) == 1
+  )
+  #expect(
+    try await database.scalarInt(
+      """
+      SELECT COUNT(*) FROM herdr_role_hosts
+      WHERE job_id = ? AND generation = 1 AND state = 'waiting'
+        AND role IN ('architecture', 'security', 'test', 'synthesis')
+      """,
+      bindings: [.text(jobID)]
+    ) == 4
+  )
+  #expect(
+    try await database.scalarInt(
+      """
+      SELECT COUNT(*) FROM pi_run_launches
+      WHERE run_id = ? AND queue_sequence = 1 AND state = 'failed'
+        AND failure_code = 'RUNTIME_TIMEOUT' AND child_pid IS NOT NULL
+      """,
+      bindings: [.text(runID)]
+    ) == 1
+  )
+  #expect(
+    try await database.scalarInt(
+      """
+      SELECT COUNT(*) FROM pi_run_launches
+      WHERE run_id = ? AND queue_sequence IN (2, 3) AND state = 'failed'
+        AND failure_code = 'HERDR_TRANSACTION_FAILED' AND child_pid IS NULL
+      """,
+      bindings: [.text(runID)]
+    ) == 2
+  )
+  #expect(
+    try await database.scalarInt(
+      "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence >= 4",
+      bindings: [.text(runID)]
+    ) == 0
+  )
+  #expect(
+    try await database.scalarInt(
+      "SELECT COUNT(*) FROM job_transitions WHERE event_key GLOB 'canary:*:pi-fresh-retry:*'"
+    ) == 4
+  )
+  #expect(
+    try await database.scalarInt(
+      """
+      SELECT COUNT(*) FROM herdr_topology_intents
+      WHERE job_id = ? AND state = 'unknown'
+        AND kind IN ('primeAgentAuthority', 'resetAgentAuthority')
+      """,
+      bindings: [.text(jobID)]
+    ) == 2
+  )
+  #expect(
+    try await database.scalarInt(
+      """
+      SELECT
+        (SELECT COUNT(*) FROM repositories WHERE id = '53000000-0000-4000-8000-000000000003')
+        + (SELECT COUNT(*) FROM jobs WHERE id = '54000000-0000-4000-8000-000000000004')
+        + (SELECT COUNT(*) FROM repository_backoff
+          WHERE repository_id = '53000000-0000-4000-8000-000000000003')
+        + (SELECT COUNT(*) FROM artifacts WHERE id = 'artifact-schema8-unrelated')
+        + (SELECT COUNT(*) FROM job_transitions WHERE event_key = 'unrelated:queued')
+      """
+    ) == 5
+  )
+}
+
+private func assertDatabaseIntegrity(_ database: SQLiteStore) async throws {
+  #expect(try await database.scalarText("PRAGMA integrity_check") == "ok")
+  #expect(try await database.query("PRAGMA foreign_key_check").isEmpty)
+}
+
+private func migrationBackupURLs(in root: URL) throws -> [URL] {
+  try FileManager.default.contentsOfDirectory(
+    at: root,
+    includingPropertiesForKeys: nil,
+    options: [.skipsHiddenFiles]
+  ).filter {
+    $0.lastPathComponent.hasPrefix("jidoka-code.sqlite3.before-v9-")
+      && $0.pathExtension == "sqlite3"
+  }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+}
+
+private func schemaEightHandshake() -> HerdrHandshake {
+  HerdrHandshake(
+    pong: HerdrPong(
+      version: "0.8.0",
+      protocolVersion: 19,
+      capabilities: HerdrCapabilities(liveHandoff: true, detachedServerDaemon: true)
+    ),
+    snapshot: HerdrSessionSnapshot(
+      version: "0.8.0",
+      protocolVersion: 19,
+      focusedWorkspaceID: nil,
+      focusedTabID: nil,
+      focusedPaneID: nil,
+      workspaces: [],
+      tabs: [],
+      panes: [],
+      agents: []
+    ),
+    socketIdentity: HerdrSocketIdentity(
+      device: 10,
+      inode: 20,
+      owner: 501,
+      permissions: 0o600
+    )
+  )
+}
+
+private func schemaNineHandshake() -> HerdrHandshake {
+  HerdrHandshake(
+    pong: HerdrPong(
+      version: "0.8.2",
+      protocolVersion: 20,
+      capabilities: HerdrCapabilities(liveHandoff: true, detachedServerDaemon: true)
+    ),
+    snapshot: HerdrSessionSnapshot(
+      version: "0.8.2",
+      protocolVersion: 20,
+      focusedWorkspaceID: nil,
+      focusedTabID: nil,
+      focusedPaneID: nil,
+      workspaces: [],
+      tabs: [],
+      panes: [],
+      agents: []
+    ),
+    socketIdentity: HerdrSocketIdentity(
+      device: 10,
+      inode: 20,
+      owner: 501,
+      permissions: 0o600
+    )
+  )
+}
+
+private func sha256(_ value: String) -> String {
+  SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
 }
 
 private enum TransactionFixtureError: Error {

@@ -6,12 +6,37 @@ public struct HerdrSocketIdentity: Equatable, Sendable {
   public let inode: UInt64
   public let owner: UInt32
   public let permissions: UInt16
+  let peerEvidence: HerdrConnectedPeerEvidence?
 
   public init(device: UInt64, inode: UInt64, owner: UInt32, permissions: UInt16) {
+    self.init(
+      device: device,
+      inode: inode,
+      owner: owner,
+      permissions: permissions,
+      peerEvidence: nil
+    )
+  }
+
+  init(
+    device: UInt64,
+    inode: UInt64,
+    owner: UInt32,
+    permissions: UInt16,
+    peerEvidence: HerdrConnectedPeerEvidence?
+  ) {
     self.device = device
     self.inode = inode
     self.owner = owner
     self.permissions = permissions
+    self.peerEvidence = peerEvidence
+  }
+
+  public static func == (left: Self, right: Self) -> Bool {
+    left.device == right.device
+      && left.inode == right.inode
+      && left.owner == right.owner
+      && left.permissions == right.permissions
   }
 }
 
@@ -118,9 +143,61 @@ public struct HerdrNDJSONParser: Sendable {
   }
 }
 
+struct HerdrConnectedPeerEvidence: Codable, Equatable, Sendable {
+  let processID: Int32
+  let startSeconds: UInt64
+  let startMicroseconds: UInt64
+  let effectiveUserID: UInt32
+  let executable: HerdrProcessExecutableIdentity
+
+  init(
+    processID: Int32,
+    startSeconds: UInt64,
+    startMicroseconds: UInt64,
+    effectiveUserID: UInt32,
+    executable: HerdrProcessExecutableIdentity
+  ) throws {
+    guard processID > 0, startMicroseconds < 1_000_000 else {
+      throw HerdrSocketClientError.unsafePeer
+    }
+    self.processID = processID
+    self.startSeconds = startSeconds
+    self.startMicroseconds = startMicroseconds
+    self.effectiveUserID = effectiveUserID
+    self.executable = executable
+  }
+}
+
+struct HerdrConnectionAuthority: Equatable, Sendable {
+  let socketIdentity: HerdrSocketIdentity
+  let peer: HerdrConnectedPeerEvidence
+
+  var handshakeSocketIdentity: HerdrSocketIdentity {
+    HerdrSocketIdentity(
+      device: socketIdentity.device,
+      inode: socketIdentity.inode,
+      owner: socketIdentity.owner,
+      permissions: socketIdentity.permissions,
+      peerEvidence: peer
+    )
+  }
+}
+
+extension HerdrHandshake {
+  func requiredConnectionAuthority() throws -> HerdrConnectionAuthority {
+    guard let peerEvidence = socketIdentity.peerEvidence else {
+      throw HerdrSocketClientError.unsafePeer
+    }
+    return HerdrConnectionAuthority(socketIdentity: socketIdentity, peer: peerEvidence)
+  }
+}
+
 struct HerdrSocketExchange: Sendable {
   let record: Data
-  let socketIdentity: HerdrSocketIdentity
+  let authority: HerdrConnectionAuthority
+
+  var socketIdentity: HerdrSocketIdentity { authority.socketIdentity }
+  var peer: HerdrConnectedPeerEvidence { authority.peer }
 }
 
 struct HerdrSocketExchangeStep: Sendable {
@@ -137,12 +214,13 @@ protocol HerdrSocketExchanging: Sendable {
   func exchange(
     configuration: HerdrSocketClientConfiguration,
     request: Data,
-    expectedSocketIdentity: HerdrSocketIdentity
+    expectedAuthority: HerdrConnectionAuthority
   ) async throws -> HerdrSocketExchange
 
   func exchangeValidatedSequence(
     configuration: HerdrSocketClientConfiguration,
-    steps: [HerdrSocketExchangeStep]
+    steps: [HerdrSocketExchangeStep],
+    expectedAuthority: HerdrConnectionAuthority?
   ) async throws -> [HerdrSocketExchange]
 }
 
@@ -150,10 +228,10 @@ extension HerdrSocketExchanging {
   func exchange(
     configuration: HerdrSocketClientConfiguration,
     request: Data,
-    expectedSocketIdentity: HerdrSocketIdentity
+    expectedAuthority: HerdrConnectionAuthority
   ) async throws -> HerdrSocketExchange {
     let result = try await exchange(configuration: configuration, request: request)
-    guard result.socketIdentity == expectedSocketIdentity else {
+    guard result.authority == expectedAuthority else {
       throw HerdrSocketClientError.socketChanged
     }
     return result
@@ -161,24 +239,25 @@ extension HerdrSocketExchanging {
 
   func exchangeValidatedSequence(
     configuration: HerdrSocketClientConfiguration,
-    steps: [HerdrSocketExchangeStep]
+    steps: [HerdrSocketExchangeStep],
+    expectedAuthority initialAuthority: HerdrConnectionAuthority? = nil
   ) async throws -> [HerdrSocketExchange] {
     guard (1...16).contains(steps.count) else {
       throw HerdrSocketClientError.invalidConfiguration
     }
     var exchanges: [HerdrSocketExchange] = []
-    var expectedSocketIdentity: HerdrSocketIdentity?
+    var expectedAuthority = initialAuthority
     for step in steps {
       let result: HerdrSocketExchange
-      if let expectedSocketIdentity {
+      if let expectedAuthority {
         result = try await exchange(
           configuration: configuration,
           request: step.request,
-          expectedSocketIdentity: expectedSocketIdentity
+          expectedAuthority: expectedAuthority
         )
       } else {
         result = try await exchange(configuration: configuration, request: step.request)
-        expectedSocketIdentity = result.socketIdentity
+        expectedAuthority = result.authority
       }
       try step.validate(result)
       exchanges.append(result)
@@ -189,13 +268,26 @@ extension HerdrSocketExchanging {
 
 struct SystemHerdrSocketExchange: HerdrSocketExchanging {
   private let connectionObserver: @Sendable (URL) -> Void
+  private let peerEvidence: @Sendable (Int32, UInt32) throws -> HerdrConnectedPeerEvidence
 
   init() {
     connectionObserver = { _ in }
+    peerEvidence = Self.connectedPeerEvidence
   }
 
   init(connectionObserver: @escaping @Sendable (URL) -> Void) {
     self.connectionObserver = connectionObserver
+    peerEvidence = Self.connectedPeerEvidence
+  }
+
+  init(
+    connectionObserver: @escaping @Sendable (URL) -> Void = { _ in },
+    peerEvidence:
+      @escaping @Sendable (Int32, UInt32) throws
+      -> HerdrConnectedPeerEvidence
+  ) {
+    self.connectionObserver = connectionObserver
+    self.peerEvidence = peerEvidence
   }
 
   func exchange(
@@ -203,12 +295,14 @@ struct SystemHerdrSocketExchange: HerdrSocketExchanging {
     request: Data
   ) async throws -> HerdrSocketExchange {
     let connectionObserver = connectionObserver
+    let peerEvidence = peerEvidence
     let operation = Task.detached(priority: nil) {
       try Self.exchangeSynchronously(
         configuration: configuration,
         request: request,
-        expectedSocketIdentity: nil,
-        connectionObserver: connectionObserver
+        expectedAuthority: nil,
+        connectionObserver: connectionObserver,
+        peerEvidence: peerEvidence
       )
     }
     return try await withTaskCancellationHandler {
@@ -221,15 +315,17 @@ struct SystemHerdrSocketExchange: HerdrSocketExchanging {
   func exchange(
     configuration: HerdrSocketClientConfiguration,
     request: Data,
-    expectedSocketIdentity: HerdrSocketIdentity
+    expectedAuthority: HerdrConnectionAuthority
   ) async throws -> HerdrSocketExchange {
     let connectionObserver = connectionObserver
+    let peerEvidence = peerEvidence
     let operation = Task.detached(priority: nil) {
       try Self.exchangeSynchronously(
         configuration: configuration,
         request: request,
-        expectedSocketIdentity: expectedSocketIdentity,
-        connectionObserver: connectionObserver
+        expectedAuthority: expectedAuthority,
+        connectionObserver: connectionObserver,
+        peerEvidence: peerEvidence
       )
     }
     return try await withTaskCancellationHandler {
@@ -242,35 +338,37 @@ struct SystemHerdrSocketExchange: HerdrSocketExchanging {
   private static func exchangeSynchronously(
     configuration: HerdrSocketClientConfiguration,
     request: Data,
-    expectedSocketIdentity: HerdrSocketIdentity?,
-    connectionObserver: @Sendable (URL) -> Void
+    expectedAuthority: HerdrConnectionAuthority?,
+    connectionObserver: @Sendable (URL) -> Void,
+    peerEvidence: @Sendable (Int32, UInt32) throws -> HerdrConnectedPeerEvidence
   ) throws -> HerdrSocketExchange {
     try withConnectedSocket(
       configuration: configuration,
-      expectedSocketIdentity: expectedSocketIdentity,
-      connectionObserver: connectionObserver
-    ) { descriptor, identity in
+      expectedAuthority: expectedAuthority,
+      connectionObserver: connectionObserver,
+      peerEvidence: peerEvidence
+    ) { descriptor, authority in
       let deadline = monotonicSeconds() + configuration.timeoutSeconds
       try writeAll(descriptor: descriptor, data: request, deadline: deadline)
-      return HerdrSocketExchange(
-        record: try readFirstRecord(
-          descriptor: descriptor,
-          maximumRecordBytes: configuration.maximumRecordBytes,
-          deadline: deadline
-        ),
-        socketIdentity: identity
+      let record = try readFirstRecord(
+        descriptor: descriptor,
+        maximumRecordBytes: configuration.maximumRecordBytes,
+        deadline: deadline
       )
+      try revalidatePeer(authority.peer)
+      return HerdrSocketExchange(record: record, authority: authority)
     }
   }
 
   private static func withConnectedSocket<Result>(
     configuration: HerdrSocketClientConfiguration,
-    expectedSocketIdentity: HerdrSocketIdentity?,
+    expectedAuthority: HerdrConnectionAuthority?,
     connectionObserver: @Sendable (URL) -> Void,
-    operation: (Int32, HerdrSocketIdentity) throws -> Result
+    peerEvidence: @Sendable (Int32, UInt32) throws -> HerdrConnectedPeerEvidence,
+    operation: (Int32, HerdrConnectionAuthority) throws -> Result
   ) throws -> Result {
     let before = try socketIdentity(configuration: configuration)
-    guard expectedSocketIdentity == nil || before == expectedSocketIdentity else {
+    guard expectedAuthority == nil || before == expectedAuthority?.socketIdentity else {
       throw HerdrSocketClientError.socketChanged
     }
     connectionObserver(configuration.endpoint)
@@ -299,10 +397,14 @@ struct SystemHerdrSocketExchange: HerdrSocketExchanging {
       path: configuration.endpoint.path,
       deadline: monotonicSeconds() + configuration.timeoutSeconds
     )
-    try validatePeer(descriptor: descriptor, expectedOwner: configuration.expectedOwner)
+    let peer = try peerEvidence(descriptor, configuration.expectedOwner)
+    let authority = HerdrConnectionAuthority(socketIdentity: before, peer: peer)
+    guard expectedAuthority == nil || authority == expectedAuthority else {
+      throw HerdrSocketClientError.socketChanged
+    }
     let after = try socketIdentity(configuration: configuration)
     guard before == after else { throw HerdrSocketClientError.socketChanged }
-    return try operation(descriptor, before)
+    return try operation(descriptor, authority)
   }
 
   private static func socketIdentity(
@@ -341,13 +443,54 @@ struct SystemHerdrSocketExchange: HerdrSocketExchanging {
     }
   }
 
-  private static func validatePeer(descriptor: Int32, expectedOwner: UInt32) throws {
+  private static func connectedPeerEvidence(
+    descriptor: Int32,
+    expectedOwner: UInt32
+  ) throws -> HerdrConnectedPeerEvidence {
     var effectiveUser: uid_t = 0
     var effectiveGroup: gid_t = 0
+    var processID: pid_t = 0
+    var length = socklen_t(MemoryLayout<pid_t>.size)
     guard getpeereid(descriptor, &effectiveUser, &effectiveGroup) == 0 else {
       throw HerdrSocketClientError.socketFailure(errno)
     }
     guard effectiveUser == expectedOwner else { throw HerdrSocketClientError.unsafePeer }
+    guard getsockopt(descriptor, SOL_LOCAL, LOCAL_PEERPID, &processID, &length) == 0 else {
+      throw HerdrSocketClientError.socketFailure(errno)
+    }
+    guard length == MemoryLayout<pid_t>.size, processID > 0 else {
+      throw HerdrSocketClientError.unsafePeer
+    }
+    let authority: HerdrInspectedProcessAuthority
+    do {
+      authority = try HerdrProcessAuthorityInspector.inspect(processID: processID)
+    } catch {
+      throw HerdrSocketClientError.unsafePeer
+    }
+    guard authority.process.processID == processID else {
+      throw HerdrSocketClientError.unsafePeer
+    }
+    return try HerdrConnectedPeerEvidence(
+      processID: processID,
+      startSeconds: authority.process.startSeconds,
+      startMicroseconds: authority.process.startMicroseconds,
+      effectiveUserID: effectiveUser,
+      executable: authority.executable
+    )
+  }
+
+  private static func revalidatePeer(_ expected: HerdrConnectedPeerEvidence) throws {
+    let observed: HerdrInspectedProcessAuthority
+    do {
+      observed = try HerdrProcessAuthorityInspector.inspect(processID: expected.processID)
+    } catch {
+      throw HerdrSocketClientError.unsafePeer
+    }
+    guard observed.process.processID == expected.processID,
+      observed.process.startSeconds == expected.startSeconds,
+      observed.process.startMicroseconds == expected.startMicroseconds,
+      observed.executable == expected.executable
+    else { throw HerdrSocketClientError.socketChanged }
   }
 
   private static func setCloseOnExec(_ descriptor: Int32) throws {
@@ -492,11 +635,13 @@ public actor HerdrSocketClient {
   private let configuration: HerdrSocketClientConfiguration
   private let requestID: @Sendable () -> String
   private let exchanger: any HerdrSocketExchanging
+  private var authorizedAuthority: HerdrConnectionAuthority?
 
   public init(configuration: HerdrSocketClientConfiguration) {
     self.configuration = configuration
     self.requestID = { UUID().uuidString.lowercased() }
     self.exchanger = SystemHerdrSocketExchange()
+    authorizedAuthority = nil
   }
 
   init(
@@ -507,6 +652,7 @@ public actor HerdrSocketClient {
     self.configuration = configuration
     self.requestID = requestID
     self.exchanger = exchanger
+    authorizedAuthority = nil
   }
 
   func ping() async throws -> HerdrPong {
@@ -538,7 +684,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrWorkspaceInfoResult> = try await request(
       method: .workspaceFocus,
       params: HerdrWorkspaceTargetParameters(workspaceID: workspaceID),
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "workspace_info",
@@ -559,7 +705,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrTabInfoResult> = try await request(
       method: .tabFocus,
       params: HerdrTabTargetParameters(tabID: tabID),
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "tab_info",
@@ -580,7 +726,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrPaneInfoResult> = try await request(
       method: .paneFocus,
       params: HerdrPaneTargetParameters(paneID: paneID),
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "pane_info",
@@ -598,7 +744,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrWorkspaceCreatedResult> = try await request(
       method: .workspaceCreate,
       params: parameters,
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "workspace_created" else {
@@ -614,7 +760,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrLayoutApplyResult> = try await request(
       method: .layoutApply,
       params: parameters,
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "layout_apply" else {
@@ -630,7 +776,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrLayoutExportResult> = try await request(
       method: .layoutExport,
       params: HerdrLayoutExportParameters(tabID: tabID),
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "layout_export",
@@ -648,7 +794,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrPaneProcessInfoResult> = try await request(
       method: .paneProcessInfo,
       params: HerdrPaneProcessInfoParameters(paneID: paneID),
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "pane_process_info",
@@ -658,6 +804,118 @@ public actor HerdrSocketClient {
       throw HerdrTopologyError.invalidResponse
     }
     return response.result.processInfo
+  }
+
+  func launchReplacementRoleHost(
+    _ launch: HerdrReplacementRoleHostLaunch,
+    attestedBy handshake: HerdrHandshake
+  ) async throws -> HerdrPaneSnapshot {
+    let priorPanes = handshake.snapshot.panes
+    let priorPaneIDs = Set(priorPanes.map(\.paneID))
+    let priorTerminalIDs = Set(priorPanes.map(\.terminalID))
+    let priorMappings = Set(priorPanes.map { "\($0.paneID)\u{0}\($0.terminalID)" })
+    guard priorPaneIDs.count == priorPanes.count,
+      priorTerminalIDs.count == priorPanes.count,
+      let target = priorPanes.first(where: {
+        $0.paneID == launch.targetPaneID && $0.workspaceID == launch.workspaceID
+      }),
+      target.agentSession == nil
+    else { throw HerdrTopologyError.bindingLost }
+
+    func exactPaneSet(
+      _ current: HerdrHandshake,
+      created: HerdrPaneSnapshot
+    ) -> Bool {
+      let panes = current.snapshot.panes
+      let paneIDs = Set(panes.map(\.paneID))
+      let terminalIDs = Set(panes.map(\.terminalID))
+      let mappings = Set(panes.map { "\($0.paneID)\u{0}\($0.terminalID)" })
+      guard current.socketIdentity == handshake.socketIdentity,
+        panes.count == priorPanes.count + 1,
+        paneIDs.count == panes.count,
+        terminalIDs.count == panes.count,
+        paneIDs.subtracting(priorPaneIDs) == [created.paneID],
+        terminalIDs.subtracting(priorTerminalIDs) == [created.terminalID],
+        priorMappings.isSubset(of: mappings),
+        let observed = panes.first(where: {
+          $0.paneID == created.paneID && $0.terminalID == created.terminalID
+        }),
+        observed.workspaceID == launch.workspaceID,
+        observed.tabID == target.tabID,
+        observed.cwd == launch.workingDirectory.path,
+        observed.agent == nil,
+        observed.agentSession == nil
+      else { return false }
+      return true
+    }
+
+    let split: HerdrResponse<HerdrPaneCreatedResult> = try await request(
+      method: .paneSplit,
+      params: HerdrPaneSplitParameters(
+        direction: .right,
+        ratio: 0.5,
+        targetPaneID: launch.targetPaneID,
+        workspaceID: nil,
+        workingDirectory: launch.workingDirectory.path,
+        environment: [:],
+        focus: false
+      ),
+      expectedAuthority: try handshake.requiredConnectionAuthority()
+    )
+    try Self.validate(response: split, attestedBy: handshake)
+    let created = split.result.pane
+    guard split.result.type == "pane_created",
+      !priorPaneIDs.contains(created.paneID),
+      !priorTerminalIDs.contains(created.terminalID),
+      created.workspaceID == launch.workspaceID,
+      created.tabID == target.tabID,
+      created.cwd == launch.workingDirectory.path,
+      created.agent == nil,
+      created.agentSession == nil
+    else { throw HerdrTopologyError.invalidResponse }
+    let afterSplit = try await self.handshake(
+      expectedAuthority: try handshake.requiredConnectionAuthority()
+    )
+    guard exactPaneSet(afterSplit, created: created) else {
+      throw HerdrTopologyError.invalidResponse
+    }
+
+    let text: HerdrResponse<HerdrOKResult> = try await request(
+      method: .paneSendText,
+      params: HerdrPaneSendTextParameters(
+        paneID: created.paneID,
+        text: try launch.shellCommand(
+          pane: created,
+          socketPath: configuration.endpoint.path
+        )
+      ),
+      expectedAuthority: try afterSplit.requiredConnectionAuthority()
+    )
+    try Self.validate(response: text, attestedBy: afterSplit)
+    guard text.result.type == "ok" else { throw HerdrTopologyError.invalidResponse }
+    let afterText = try await self.handshake(
+      expectedAuthority: try handshake.requiredConnectionAuthority()
+    )
+    guard exactPaneSet(afterText, created: created) else {
+      throw HerdrTopologyError.invalidResponse
+    }
+
+    let enter: HerdrResponse<HerdrOKResult> = try await request(
+      method: .paneSendKeys,
+      params: HerdrPaneSendKeysParameters(paneID: created.paneID, keys: ["enter"]),
+      expectedAuthority: try afterText.requiredConnectionAuthority()
+    )
+    try Self.validate(response: enter, attestedBy: afterText)
+    guard enter.result.type == "ok" else { throw HerdrTopologyError.invalidResponse }
+    let afterEnter = try await self.handshake(
+      expectedAuthority: try handshake.requiredConnectionAuthority()
+    )
+    guard exactPaneSet(afterEnter, created: created),
+      let finalPane = afterEnter.snapshot.panes.first(where: {
+        $0.paneID == created.paneID && $0.terminalID == created.terminalID
+      })
+    else { throw HerdrTopologyError.invalidResponse }
+    return finalPane
   }
 
   func closePane(
@@ -675,13 +933,15 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrOKResult> = try await request(
       method: .paneClose,
       params: HerdrPaneTargetParameters(paneID: paneID),
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "ok" else {
       throw HerdrTopologyError.invalidResponse
     }
-    let post = try await self.handshake()
+    let post = try await self.handshake(
+      expectedAuthority: try handshake.requiredConnectionAuthority()
+    )
     guard post.socketIdentity == handshake.socketIdentity,
       !post.snapshot.panes.contains(where: { $0.terminalID == terminalID })
     else {
@@ -696,7 +956,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrOKResult> = try await request(
       method: .paneReportAgent,
       params: parameters,
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "ok" else { throw HerdrTopologyError.invalidResponse }
@@ -709,7 +969,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrOKResult> = try await request(
       method: .paneReportMetadata,
       params: parameters,
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "ok" else { throw HerdrTopologyError.invalidResponse }
@@ -722,7 +982,7 @@ public actor HerdrSocketClient {
     let response: HerdrResponse<HerdrAgentInfoResult> = try await request(
       method: .agentRename,
       params: parameters,
-      expectedSocketIdentity: handshake.socketIdentity
+      expectedAuthority: try handshake.requiredConnectionAuthority()
     )
     try Self.validate(response: response, attestedBy: handshake)
     guard response.result.type == "agent_info",
@@ -741,7 +1001,7 @@ public actor HerdrSocketClient {
     expectedTerminalID: String?,
     agent: HerdrPaneReportAgentParameters,
     metadata: HerdrPaneReportMetadataParameters,
-    alias: String
+    alias: String?
   ) async throws -> (handshake: HerdrHandshake, terminalID: String) {
     let ping = try prepareRequest(method: .ping, params: HerdrEmptyParameters())
     let snapshot = try prepareRequest(
@@ -750,12 +1010,14 @@ public actor HerdrSocketClient {
     )
     let report = try prepareRequest(method: .paneReportAgent, params: agent)
     let metadataReport = try prepareRequest(method: .paneReportMetadata, params: metadata)
-    let rename = try prepareRequest(
-      method: .agentRename,
-      params: HerdrAgentRenameParameters(target: paneID, name: alias)
-    )
-    let manifest = HerdrCompatibilityManifest.herdr080
-    let steps = [
+    let rename = try alias.map {
+      try prepareRequest(
+        method: .agentRename,
+        params: HerdrAgentRenameParameters(target: paneID, name: $0)
+      )
+    }
+    let manifest = HerdrCompatibilityManifest.approved
+    var steps = [
       HerdrSocketExchangeStep(request: ping.data) { exchange in
         let response: HerdrResponse<HerdrPong> = try Self.decode(
           exchange: exchange,
@@ -800,24 +1062,33 @@ public actor HerdrSocketClient {
           throw HerdrTopologyError.invalidResponse
         }
       },
-      HerdrSocketExchangeStep(request: rename.data) { exchange in
-        let response: HerdrResponse<HerdrAgentInfoResult> = try Self.decode(
-          exchange: exchange,
-          id: rename.id
-        )
-        guard response.result.type == "agent_info",
-          response.result.agent.paneID == paneID,
-          response.result.agent.name == alias
-        else {
-          throw HerdrTopologyError.invalidResponse
-        }
-      },
     ]
+    if let rename, let alias {
+      steps.append(
+        HerdrSocketExchangeStep(request: rename.data) { exchange in
+          let response: HerdrResponse<HerdrAgentInfoResult> = try Self.decode(
+            exchange: exchange,
+            id: rename.id
+          )
+          guard response.result.type == "agent_info",
+            response.result.agent.paneID == paneID,
+            response.result.agent.name == alias
+          else {
+            throw HerdrTopologyError.invalidResponse
+          }
+        }
+      )
+    }
     let exchanges = try await exchanger.exchangeValidatedSequence(
       configuration: configuration,
-      steps: steps
+      steps: steps,
+      expectedAuthority: authorizedAuthority
     )
-    guard exchanges.count == steps.count else { throw HerdrSocketClientError.invalidRecord }
+    guard exchanges.count == steps.count,
+      let authority = exchanges.first?.authority,
+      authorizedAuthority == nil || authorizedAuthority == authority
+    else { throw HerdrSocketClientError.invalidRecord }
+    authorizedAuthority = authority
     let pong: HerdrResponse<HerdrPong> = try Self.decode(exchange: exchanges[0], id: ping.id)
     let snapshotResponse: HerdrResponse<HerdrSessionSnapshotResult> = try Self.decode(
       exchange: exchanges[1],
@@ -838,6 +1109,313 @@ public actor HerdrSocketClient {
         socketIdentity: pong.socketIdentity
       ),
       pane.terminalID
+    )
+  }
+
+  func primeAgentAuthority(
+    _ prime: HerdrAgentAuthorityPrime,
+    attestedBy handshake: HerdrHandshake
+  ) async throws -> HerdrAgentAuthorityPrimeEvidence {
+    guard prime.agent.paneID == prime.paneID,
+      prime.metadata.paneID == prime.paneID,
+      prime.agent.agent == "pi",
+      prime.metadata.agent == prime.agent.agent,
+      prime.metadata.appliesToSource == prime.agent.source,
+      prime.agent.sequence == 1,
+      prime.metadata.sequence == 1,
+      prime.alias.wholeMatch(of: /^[a-z][a-z0-9_-]{0,31}$/) != nil
+    else {
+      throw HerdrTopologyError.invalidPlan
+    }
+    let snapshot = try prepareRequest(
+      method: .sessionSnapshot,
+      params: HerdrEmptyParameters()
+    )
+    let report = try prepareRequest(method: .paneReportAgent, params: prime.agent)
+    let metadata = try prepareRequest(method: .paneReportMetadata, params: prime.metadata)
+    let rename = try prepareRequest(
+      method: .agentRename,
+      params: HerdrAgentRenameParameters(target: prime.paneID, name: prime.alias)
+    )
+    let paneGet = try prepareRequest(
+      method: .paneGet,
+      params: HerdrPaneTargetParameters(paneID: prime.paneID)
+    )
+    let agentGet = try prepareRequest(
+      method: .agentGet,
+      params: HerdrAgentTargetParameters(target: prime.alias)
+    )
+    let steps = [
+      HerdrSocketExchangeStep(request: snapshot.data) { exchange in
+        let response: HerdrResponse<HerdrSessionSnapshotResult> = try Self.decode(
+          exchange: exchange,
+          id: snapshot.id
+        )
+        guard response.result.type == "session_snapshot",
+          response.result.snapshot.version == handshake.pong.version,
+          response.result.snapshot.protocolVersion == handshake.pong.protocolVersion,
+          response.result.snapshot.panes.contains(where: {
+            $0.paneID == prime.paneID
+              && $0.workspaceID == prime.workspaceID
+              && $0.tabID == prime.tabID
+              && $0.terminalID == prime.terminalID
+              && $0.agentSession == nil
+          })
+        else { throw HerdrHostError.incompatiblePane }
+      },
+      HerdrSocketExchangeStep(request: report.data) { exchange in
+        let response: HerdrResponse<HerdrOKResult> = try Self.decode(
+          exchange: exchange,
+          id: report.id
+        )
+        guard response.result.type == "ok" else {
+          throw HerdrTopologyError.invalidResponse
+        }
+      },
+      HerdrSocketExchangeStep(request: metadata.data) { exchange in
+        let response: HerdrResponse<HerdrOKResult> = try Self.decode(
+          exchange: exchange,
+          id: metadata.id
+        )
+        guard response.result.type == "ok" else {
+          throw HerdrTopologyError.invalidResponse
+        }
+      },
+      HerdrSocketExchangeStep(request: rename.data) { exchange in
+        let response: HerdrResponse<HerdrAgentInfoResult> = try Self.decode(
+          exchange: exchange,
+          id: rename.id
+        )
+        guard response.result.type == "agent_info",
+          response.result.agent.paneID == prime.paneID,
+          response.result.agent.terminalID == prime.terminalID,
+          response.result.agent.workspaceID == prime.workspaceID,
+          response.result.agent.tabID == prime.tabID,
+          response.result.agent.agent == prime.agent.agent,
+          response.result.agent.name == prime.alias,
+          response.result.agent.agentSession == nil
+        else { throw HerdrTopologyError.invalidResponse }
+      },
+      HerdrSocketExchangeStep(request: paneGet.data) { exchange in
+        let response: HerdrResponse<HerdrPaneInfoResult> = try Self.decode(
+          exchange: exchange,
+          id: paneGet.id
+        )
+        guard response.result.type == "pane_info",
+          response.result.pane.paneID == prime.paneID,
+          response.result.pane.terminalID == prime.terminalID,
+          response.result.pane.workspaceID == prime.workspaceID,
+          response.result.pane.tabID == prime.tabID,
+          response.result.pane.agent == prime.agent.agent,
+          response.result.pane.agentSession == nil,
+          response.result.pane.tokens == prime.metadata.tokens
+        else { throw HerdrTopologyError.invalidResponse }
+      },
+      HerdrSocketExchangeStep(request: agentGet.data) { exchange in
+        let response: HerdrResponse<HerdrAgentInfoResult> = try Self.decode(
+          exchange: exchange,
+          id: agentGet.id
+        )
+        guard response.result.type == "agent_info",
+          response.result.agent.paneID == prime.paneID,
+          response.result.agent.terminalID == prime.terminalID,
+          response.result.agent.workspaceID == prime.workspaceID,
+          response.result.agent.tabID == prime.tabID,
+          response.result.agent.agent == prime.agent.agent,
+          response.result.agent.name == prime.alias,
+          response.result.agent.agentSession == nil
+        else { throw HerdrTopologyError.invalidResponse }
+      },
+    ]
+    var exchanges: [HerdrSocketExchange] = []
+    let authority = try handshake.requiredConnectionAuthority()
+    for step in steps {
+      let exchange = try await exchanger.exchange(
+        configuration: configuration,
+        request: step.request,
+        expectedAuthority: authority
+      )
+      try step.validate(exchange)
+      exchanges.append(exchange)
+    }
+    guard exchanges.count == steps.count else {
+      throw HerdrSocketClientError.invalidRecord
+    }
+    let pane: HerdrResponse<HerdrPaneInfoResult> = try Self.decode(
+      exchange: exchanges[4],
+      id: paneGet.id
+    )
+    let agent: HerdrResponse<HerdrAgentInfoResult> = try Self.decode(
+      exchange: exchanges[5],
+      id: agentGet.id
+    )
+    return HerdrAgentAuthorityPrimeEvidence(
+      socketIdentity: handshake.socketIdentity,
+      pane: pane.result.pane,
+      agent: agent.result.agent
+    )
+  }
+
+  func resetAgentAuthority(
+    _ reset: HerdrAgentAuthorityReset,
+    attestedBy handshake: HerdrHandshake
+  ) async throws -> HerdrAgentAuthorityPrimeEvidence {
+    let prime = reset.prime
+    guard prime.agent.paneID == prime.paneID,
+      prime.metadata.paneID == prime.paneID,
+      prime.agent.agent == "pi",
+      prime.metadata.agent == prime.agent.agent,
+      prime.agent.source == "jidoka:host",
+      prime.metadata.source == "jidoka:coordination",
+      prime.metadata.appliesToSource == prime.agent.source,
+      prime.agent.sequence == 7,
+      prime.metadata.sequence == 7,
+      prime.alias.wholeMatch(of: /^[a-z][a-z0-9_-]{0,31}$/) != nil,
+      reset.expectedPaneRevision > 0
+    else { throw HerdrTopologyError.invalidPlan }
+    let snapshot = try prepareRequest(
+      method: .sessionSnapshot,
+      params: HerdrEmptyParameters()
+    )
+    let clear = try prepareRequest(
+      method: .paneClearAgentAuthority,
+      params: HerdrPaneClearAgentAuthorityParameters(paneID: prime.paneID)
+    )
+    let report = try prepareRequest(method: .paneReportAgent, params: prime.agent)
+    let metadata = try prepareRequest(method: .paneReportMetadata, params: prime.metadata)
+    let rename = try prepareRequest(
+      method: .agentRename,
+      params: HerdrAgentRenameParameters(target: prime.paneID, name: prime.alias)
+    )
+    let paneGet = try prepareRequest(
+      method: .paneGet,
+      params: HerdrPaneTargetParameters(paneID: prime.paneID)
+    )
+    let agentGet = try prepareRequest(
+      method: .agentGet,
+      params: HerdrAgentTargetParameters(target: prime.alias)
+    )
+    let steps = [
+      HerdrSocketExchangeStep(request: snapshot.data) { exchange in
+        let response: HerdrResponse<HerdrSessionSnapshotResult> = try Self.decode(
+          exchange: exchange,
+          id: snapshot.id
+        )
+        guard response.result.type == "session_snapshot",
+          response.result.snapshot.version == handshake.pong.version,
+          response.result.snapshot.protocolVersion == handshake.pong.protocolVersion,
+          response.result.snapshot.panes.contains(where: {
+            $0.paneID == prime.paneID
+              && $0.workspaceID == prime.workspaceID
+              && $0.tabID == prime.tabID
+              && $0.terminalID == prime.terminalID
+              && $0.revision == reset.expectedPaneRevision
+              && $0.agent == nil
+              && $0.agentSession == nil
+              && $0.tokens == reset.expectedTokens
+          })
+        else { throw HerdrHostError.incompatiblePane }
+      },
+      HerdrSocketExchangeStep(request: clear.data) { exchange in
+        let response: HerdrResponse<HerdrOKResult> = try Self.decode(
+          exchange: exchange,
+          id: clear.id
+        )
+        guard response.result.type == "ok" else {
+          throw HerdrTopologyError.invalidResponse
+        }
+      },
+      HerdrSocketExchangeStep(request: report.data) { exchange in
+        let response: HerdrResponse<HerdrOKResult> = try Self.decode(
+          exchange: exchange,
+          id: report.id
+        )
+        guard response.result.type == "ok" else {
+          throw HerdrTopologyError.invalidResponse
+        }
+      },
+      HerdrSocketExchangeStep(request: metadata.data) { exchange in
+        let response: HerdrResponse<HerdrOKResult> = try Self.decode(
+          exchange: exchange,
+          id: metadata.id
+        )
+        guard response.result.type == "ok" else {
+          throw HerdrTopologyError.invalidResponse
+        }
+      },
+      HerdrSocketExchangeStep(request: rename.data) { exchange in
+        let response: HerdrResponse<HerdrAgentInfoResult> = try Self.decode(
+          exchange: exchange,
+          id: rename.id
+        )
+        guard response.result.type == "agent_info",
+          response.result.agent.paneID == prime.paneID,
+          response.result.agent.terminalID == prime.terminalID,
+          response.result.agent.workspaceID == prime.workspaceID,
+          response.result.agent.tabID == prime.tabID,
+          response.result.agent.agent == prime.agent.agent,
+          response.result.agent.name == prime.alias,
+          response.result.agent.agentSession == nil
+        else { throw HerdrTopologyError.invalidResponse }
+      },
+      HerdrSocketExchangeStep(request: paneGet.data) { exchange in
+        let response: HerdrResponse<HerdrPaneInfoResult> = try Self.decode(
+          exchange: exchange,
+          id: paneGet.id
+        )
+        guard response.result.type == "pane_info",
+          response.result.pane.paneID == prime.paneID,
+          response.result.pane.terminalID == prime.terminalID,
+          response.result.pane.workspaceID == prime.workspaceID,
+          response.result.pane.tabID == prime.tabID,
+          response.result.pane.agent == prime.agent.agent,
+          response.result.pane.agentSession == nil,
+          response.result.pane.tokens == prime.metadata.tokens
+        else { throw HerdrTopologyError.invalidResponse }
+      },
+      HerdrSocketExchangeStep(request: agentGet.data) { exchange in
+        let response: HerdrResponse<HerdrAgentInfoResult> = try Self.decode(
+          exchange: exchange,
+          id: agentGet.id
+        )
+        guard response.result.type == "agent_info",
+          response.result.agent.paneID == prime.paneID,
+          response.result.agent.terminalID == prime.terminalID,
+          response.result.agent.workspaceID == prime.workspaceID,
+          response.result.agent.tabID == prime.tabID,
+          response.result.agent.agent == prime.agent.agent,
+          response.result.agent.name == prime.alias,
+          response.result.agent.agentSession == nil,
+          response.result.agent.tokens == prime.metadata.tokens
+        else { throw HerdrTopologyError.invalidResponse }
+      },
+    ]
+    var exchanges: [HerdrSocketExchange] = []
+    let authority = try handshake.requiredConnectionAuthority()
+    for step in steps {
+      let exchange = try await exchanger.exchange(
+        configuration: configuration,
+        request: step.request,
+        expectedAuthority: authority
+      )
+      try step.validate(exchange)
+      exchanges.append(exchange)
+    }
+    guard exchanges.count == steps.count else {
+      throw HerdrSocketClientError.invalidRecord
+    }
+    let pane: HerdrResponse<HerdrPaneInfoResult> = try Self.decode(
+      exchange: exchanges[5],
+      id: paneGet.id
+    )
+    let agent: HerdrResponse<HerdrAgentInfoResult> = try Self.decode(
+      exchange: exchanges[6],
+      id: agentGet.id
+    )
+    return HerdrAgentAuthorityPrimeEvidence(
+      socketIdentity: handshake.socketIdentity,
+      pane: pane.result.pane,
+      agent: agent.result.agent
     )
   }
 
@@ -881,17 +1459,30 @@ public actor HerdrSocketClient {
   }
 
   public func handshake() async throws -> HerdrHandshake {
-    let manifest = HerdrCompatibilityManifest.herdr080
+    let handshake = try await handshake(expectedAuthority: authorizedAuthority)
+    let authority = try handshake.requiredConnectionAuthority()
+    guard authorizedAuthority == nil || authorizedAuthority == authority else {
+      throw HerdrSocketClientError.socketChanged
+    }
+    authorizedAuthority = authority
+    return handshake
+  }
+
+  private func handshake(
+    expectedAuthority: HerdrConnectionAuthority?
+  ) async throws -> HerdrHandshake {
+    let manifest = HerdrCompatibilityManifest.approved
     let pongResponse: HerdrResponse<HerdrPong> = try await request(
       method: .ping,
-      params: HerdrEmptyParameters()
+      params: HerdrEmptyParameters(),
+      expectedAuthority: expectedAuthority
     )
     let pong = pongResponse.result
     try Self.validate(pong: pong, manifest: manifest)
     let snapshotResponse: HerdrResponse<HerdrSessionSnapshotResult> = try await request(
       method: .sessionSnapshot,
       params: HerdrEmptyParameters(),
-      expectedSocketIdentity: pongResponse.socketIdentity
+      expectedAuthority: pongResponse.authority
     )
     guard snapshotResponse.result.type == "session_snapshot",
       snapshotResponse.result.snapshot.version == pong.version,
@@ -899,13 +1490,13 @@ public actor HerdrSocketClient {
     else {
       throw HerdrCompatibilityError.snapshotMismatch
     }
-    guard pongResponse.socketIdentity == snapshotResponse.socketIdentity else {
+    guard pongResponse.authority == snapshotResponse.authority else {
       throw HerdrSocketClientError.socketChanged
     }
     return HerdrHandshake(
       pong: pong,
       snapshot: snapshotResponse.result.snapshot,
-      socketIdentity: pongResponse.socketIdentity
+      socketIdentity: pongResponse.authority.handshakeSocketIdentity
     )
   }
 
@@ -913,7 +1504,7 @@ public actor HerdrSocketClient {
     response: HerdrResponse<Result>,
     attestedBy handshake: HerdrHandshake
   ) throws {
-    guard response.socketIdentity == handshake.socketIdentity else {
+    guard response.authority == (try handshake.requiredConnectionAuthority()) else {
       throw HerdrSocketClientError.socketChanged
     }
   }
@@ -940,16 +1531,16 @@ public actor HerdrSocketClient {
   private func request<Parameters, Result>(
     method: HerdrMethod,
     params: Parameters,
-    expectedSocketIdentity: HerdrSocketIdentity? = nil
+    expectedAuthority: HerdrConnectionAuthority? = nil
   ) async throws -> HerdrResponse<Result>
   where Parameters: Encodable & Sendable, Result: Decodable & Sendable {
     let prepared = try prepareRequest(method: method, params: params)
     let exchange: HerdrSocketExchange
-    if let expectedSocketIdentity {
+    if let expectedAuthority = expectedAuthority ?? authorizedAuthority {
       exchange = try await exchanger.exchange(
         configuration: configuration,
         request: prepared.data,
-        expectedSocketIdentity: expectedSocketIdentity
+        expectedAuthority: expectedAuthority
       )
     } else {
       exchange = try await exchanger.exchange(
@@ -993,7 +1584,7 @@ public actor HerdrSocketClient {
     guard envelope.id == id else { throw HerdrSocketClientError.responseIDMismatch }
     switch (envelope.result, envelope.error) {
     case (.some(let value), .none):
-      return HerdrResponse(result: value, socketIdentity: exchange.socketIdentity)
+      return HerdrResponse(result: value, authority: exchange.authority)
     case (.none, .some(let remote)):
       guard remote.code.wholeMatch(of: /^[a-z][a-z0-9_]{0,63}$/) != nil,
         remote.message.utf8.count <= 4_096,
@@ -1018,9 +1609,15 @@ private enum HerdrMethod: String, Sendable {
   case layoutApply = "layout.apply"
   case layoutExport = "layout.export"
   case paneProcessInfo = "pane.process_info"
+  case paneGet = "pane.get"
+  case paneSplit = "pane.split"
+  case paneSendText = "pane.send_text"
+  case paneSendKeys = "pane.send_keys"
   case paneClose = "pane.close"
   case paneReportAgent = "pane.report_agent"
   case paneReportMetadata = "pane.report_metadata"
+  case paneClearAgentAuthority = "pane.clear_agent_authority"
+  case agentGet = "agent.get"
   case agentRename = "agent.rename"
 }
 
@@ -1045,5 +1642,7 @@ private struct HerdrWireResponse<Result: Decodable & Sendable>: Decodable, Senda
 
 private struct HerdrResponse<Result: Sendable>: Sendable {
   let result: Result
-  let socketIdentity: HerdrSocketIdentity
+  let authority: HerdrConnectionAuthority
+
+  var socketIdentity: HerdrSocketIdentity { authority.socketIdentity }
 }

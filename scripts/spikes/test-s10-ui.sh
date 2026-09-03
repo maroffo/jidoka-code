@@ -19,7 +19,11 @@ readonly STDOUT_LOG="$BUILD_ROOT/ui-flow.stdout.log"
 readonly STDERR_LOG="$BUILD_ROOT/ui-flow.stderr.log"
 readonly REPORT="$EVIDENCE/ui-flow-report.json"
 readonly SANDBOX_PROFILE="$BUILD_ROOT/ui-fixture.sb"
-readonly NODE="/opt/homebrew/Cellar/node/26.6.0/bin/node"
+JIDOKA_RELEASE_RUNTIME_ROOT="${JIDOKA_RELEASE_RUNTIME_ROOT:-$ROOT/build/runtime-input/qualified-runtime}"
+readonly JIDOKA_RELEASE_RUNTIME_ROOT
+export JIDOKA_RELEASE_RUNTIME_ROOT
+NODE="$("$ROOT/scripts/qualified-runtime-node.sh")"
+readonly NODE
 
 fail() {
     printf 'S10 UI fixture failed: %s\n' "$1" >&2
@@ -112,6 +116,7 @@ SANDBOX
 for screenshot in \
     onboarding-first-run.png \
     settings-accessibility-type.png \
+    settings-catalog-unavailable.png \
     menu-warning.png
 do
     path="$EVIDENCE/$screenshot"
@@ -135,15 +140,19 @@ for (const name of [
   'invalidCredentialRejected',
   'invalidRepositoryRejected',
   'tokenFieldCleared',
+  'catalogFailureInline',
+  'catalogFailureModalSuppressed',
   'pausePreservedInFlight',
   'quitCheckpointed',
 ]) assert(report[name] === true, `${name} was not proved`);
+assert(report.catalogFailureRefreshCount === 1, 'automatic catalog refresh count differs');
 assert(report.ambiguousLateRecheckCount === 1, 'late recheck count differs');
 assert(report.ambiguousAuthorizationCount === 1, 'authorization count differs');
 for (const name of ['keychainCalls', 'networkCalls', 'piProviderCalls', 'serviceManagementCalls']) {
   assert(report[name] === 0, `${name} was nonzero`);
 }
 for (const command of [
+  'refreshModelCatalog',
   'replaceCredential',
   'addRepository',
   'setLoginEnabled',
@@ -153,7 +162,7 @@ for (const command of [
   'authorizeRetry',
   'prepareForQuit',
 ]) assert(report.commandKinds.includes(command), `missing command ${command}`);
-assert(report.screenshots.length === 3, 'unexpected screenshot count');
+assert(report.screenshots.length === 4, 'unexpected screenshot count');
 for (const screenshot of report.screenshots) {
   assert(/^[0-9a-f]{64}$/.test(screenshot.sha256), 'invalid screenshot digest');
   const png = fs.readFileSync(path.join(path.dirname(reportPath), screenshot.filename));
@@ -183,6 +192,13 @@ for (const identifier of [
   'jidoka.onboarding.token',
   'jidoka.onboarding.complete',
   'jidoka.settings.window',
+  'jidoka.settings.repository-reference',
+  'jidoka.settings.repository-add',
+  'jidoka.settings.model-catalog-refresh',
+  'jidoka.settings.model-catalog-notice',
+  'jidoka.settings.model-selector.review',
+  'jidoka.settings.custom-model.review',
+  'jidoka.settings.credential-connect',
   'jidoka.settings.credential-deletion',
   'jidoka.menu.status',
   'jidoka.menu.poll-now',
@@ -212,6 +228,7 @@ printf 'ui_flow_report=%s\n' "$REPORT"
 for screenshot in \
     onboarding-first-run.png \
     settings-accessibility-type.png \
+    settings-catalog-unavailable.png \
     menu-warning.png
 do
     printf 'ui_screenshot_sha256=%s %s\n' \

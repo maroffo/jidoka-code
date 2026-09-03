@@ -193,6 +193,58 @@ public actor WorkspaceStateStore {
     }
   }
 
+  public func authorizeOperatorRetirementCleanup(
+    jobID: UUID,
+    evidenceSHA256: String,
+    now: Date
+  ) async throws -> WorkspaceRecord {
+    guard GitHubInputValidation.validSHA256(evidenceSHA256) else {
+      throw RepositoryStoreError.cleanupNotAuthorized
+    }
+    return try await database.transaction { database in
+      let current = try Self.require(jobID: jobID, database: database)
+      let eventKey =
+        "maintenance:retireBefore:"
+        + "\(JobMaintenanceScope.authorizedBoundaryEpochSeconds):"
+        + "\(evidenceSHA256):\(jobID.uuidString.lowercased())"
+      guard
+        try database.scalarInt(
+          """
+          SELECT COUNT(*)
+          FROM jobs
+          JOIN object_dispositions
+            ON object_dispositions.repository_id = jobs.repository_id
+            AND object_dispositions.kind = jobs.kind
+            AND object_dispositions.object_node_id = jobs.object_node_id
+            AND object_dispositions.revision_key = jobs.revision_key
+          JOIN job_transitions ON job_transitions.job_id = jobs.id
+          WHERE jobs.id = ?
+            AND jobs.state = 'blocked'
+            AND object_dispositions.state = 'superseded'
+            AND job_transitions.event_key = ?
+          """,
+          bindings: [
+            .text(jobID.uuidString.lowercased()),
+            .text(eventKey),
+          ]
+        ) == 1
+      else {
+        throw RepositoryStoreError.cleanupNotAuthorized
+      }
+      if current.cleanupState == .eligible || current.cleanupState == .removed {
+        return current
+      }
+      _ = try database.execute(
+        "UPDATE workspaces SET cleanup_state = 'eligible', updated_at = ? WHERE job_id = ?",
+        bindings: [
+          .real(now.timeIntervalSince1970),
+          .text(jobID.uuidString.lowercased()),
+        ]
+      )
+      return try Self.require(jobID: jobID, database: database)
+    }
+  }
+
   public func markRemoved(jobID: UUID, now: Date) async throws -> WorkspaceRecord {
     try await database.transaction { database in
       let current = try Self.require(jobID: jobID, database: database)
@@ -674,6 +726,18 @@ public actor RepositoryStore {
 
   public func authorizeCleanup(jobID: UUID, now: Date = Date()) async throws {
     _ = try await workspaceStates.authorizeCleanup(jobID: jobID, now: now)
+  }
+
+  public func authorizeOperatorRetirementCleanup(
+    jobID: UUID,
+    evidenceSHA256: String,
+    now: Date = Date()
+  ) async throws {
+    _ = try await workspaceStates.authorizeOperatorRetirementCleanup(
+      jobID: jobID,
+      evidenceSHA256: evidenceSHA256,
+      now: now
+    )
   }
 
   public func cleanupWorkspace(jobID: UUID, now: Date = Date()) async throws {

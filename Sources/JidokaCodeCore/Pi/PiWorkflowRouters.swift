@@ -107,6 +107,7 @@ public struct PiWorkflowExecutionRequest: Equatable, Sendable {
   public let role: PiWorkflowRole
   public let round: Int
   public let artifactSHA256: String
+  public let commitNarrativeSHA256: String?
   public let sessionDirective: PiWorkflowSessionDirective
   public let normalizedRoleInputs: [PiNormalizedRoleResult]
   public let canonicalCommandDigests: [String]
@@ -120,6 +121,7 @@ public struct PiWorkflowExecutionRequest: Equatable, Sendable {
     role: PiWorkflowRole,
     round: Int,
     artifactSHA256: String,
+    commitNarrativeSHA256: String? = nil,
     sessionDirective: PiWorkflowSessionDirective,
     normalizedRoleInputs: [PiNormalizedRoleResult] = [],
     canonicalCommandDigests: [String] = [],
@@ -132,6 +134,7 @@ public struct PiWorkflowExecutionRequest: Equatable, Sendable {
     self.role = role
     self.round = round
     self.artifactSHA256 = artifactSHA256
+    self.commitNarrativeSHA256 = commitNarrativeSHA256
     self.sessionDirective = sessionDirective
     self.normalizedRoleInputs = normalizedRoleInputs
     self.canonicalCommandDigests = canonicalCommandDigests
@@ -275,35 +278,7 @@ public struct PiPullRequestReviewRouter: Sendable {
   }
 
   public func run(_ input: PiPullRequestReviewInput) async throws -> PiPullRequestReviewOutput {
-    try validateCommon(jobID: input.jobID, artifactSHA256: input.artifactSHA256)
-    guard GitHubInputValidation.validGitSHA(input.baseSHA),
-      GitHubInputValidation.validGitSHA(input.restHeadSHA),
-      input.baseSHA != input.restHeadSHA,
-      input.restHeadSHA == input.fetchedHeadSHA
-    else {
-      throw PiWorkflowRouterError.headMismatch
-    }
-    let narrativeSHAs = input.commits.map(\.sha)
-    let narrativeSet = Set(narrativeSHAs)
-    guard input.commits.last?.sha == input.fetchedHeadSHA,
-      !narrativeSet.contains(input.baseSHA),
-      input.restCommitSHAs.count == input.commits.count,
-      input.fetchedCommitSHAs.count == input.commits.count,
-      Set(input.restCommitSHAs).count == input.restCommitSHAs.count,
-      Set(input.fetchedCommitSHAs).count == input.fetchedCommitSHAs.count,
-      input.restCommitSHAs.allSatisfy(GitHubInputValidation.validGitSHA),
-      input.fetchedCommitSHAs.allSatisfy(GitHubInputValidation.validGitSHA),
-      input.restCommitSHAs.last == input.restHeadSHA,
-      input.fetchedCommitSHAs.last == input.fetchedHeadSHA,
-      Set(input.restCommitSHAs) == narrativeSet,
-      Set(input.fetchedCommitSHAs) == narrativeSet
-    else {
-      throw PiWorkflowRouterError.invalidCommitNarrative
-    }
-    let narrativeDigest = try Self.commitNarrativeDigest(
-      input.commits,
-      baseSHA: input.baseSHA
-    )
+    let narrativeDigest = try Self.validatedNarrativeDigest(input)
     var sessions: Set<String> = []
     var results: [PiWorkflowRoleResult] = []
     for role in [PiWorkflowRole.architecture, .security, .test] {
@@ -314,6 +289,7 @@ public struct PiPullRequestReviewRouter: Sendable {
           role: role,
           round: 1,
           artifactSHA256: input.artifactSHA256,
+          commitNarrativeSHA256: narrativeDigest,
           sessionDirective: .fresh
         )
       )
@@ -339,6 +315,7 @@ public struct PiPullRequestReviewRouter: Sendable {
         role: .synthesis,
         round: 1,
         artifactSHA256: input.artifactSHA256,
+        commitNarrativeSHA256: narrativeDigest,
         sessionDirective: .fresh,
         normalizedRoleInputs: results.map(PiNormalizedRoleResult.make)
       )
@@ -410,6 +387,63 @@ public struct PiPullRequestReviewRouter: Sendable {
       effectiveVerdict: effectiveVerdict,
       effectiveSeverity: effectiveSeverity
     )
+  }
+
+  public func runCanaryArchitecture(
+    _ input: PiPullRequestReviewInput
+  ) async throws -> PiWorkflowRoleResult {
+    let narrativeDigest = try Self.validatedNarrativeDigest(input)
+    let execution = try await executor.execute(
+      PiWorkflowExecutionRequest(
+        jobID: input.jobID,
+        workflow: .pullRequestReview,
+        role: .architecture,
+        round: 1,
+        artifactSHA256: input.artifactSHA256,
+        commitNarrativeSHA256: narrativeDigest,
+        sessionDirective: .fresh
+      )
+    )
+    var sessions = Set<String>()
+    let result = try validateExecution(
+      execution,
+      workflow: .pullRequestReview,
+      role: .architecture,
+      artifactSHA256: input.artifactSHA256,
+      directive: .fresh,
+      sessions: &sessions
+    )
+    guard case .pullRequestReview(let payload) = result.payload,
+      payload.commitNarrativeSHA256 == narrativeDigest
+    else { throw PiWorkflowRouterError.narrativeDigestMismatch }
+    return result
+  }
+
+  private static func validatedNarrativeDigest(
+    _ input: PiPullRequestReviewInput
+  ) throws -> String {
+    try validateCommon(jobID: input.jobID, artifactSHA256: input.artifactSHA256)
+    guard GitHubInputValidation.validGitSHA(input.baseSHA),
+      GitHubInputValidation.validGitSHA(input.restHeadSHA),
+      input.baseSHA != input.restHeadSHA,
+      input.restHeadSHA == input.fetchedHeadSHA
+    else { throw PiWorkflowRouterError.headMismatch }
+    let narrativeSHAs = input.commits.map(\.sha)
+    let narrativeSet = Set(narrativeSHAs)
+    guard input.commits.last?.sha == input.fetchedHeadSHA,
+      !narrativeSet.contains(input.baseSHA),
+      input.restCommitSHAs.count == input.commits.count,
+      input.fetchedCommitSHAs.count == input.commits.count,
+      Set(input.restCommitSHAs).count == input.restCommitSHAs.count,
+      Set(input.fetchedCommitSHAs).count == input.fetchedCommitSHAs.count,
+      input.restCommitSHAs.allSatisfy(GitHubInputValidation.validGitSHA),
+      input.fetchedCommitSHAs.allSatisfy(GitHubInputValidation.validGitSHA),
+      input.restCommitSHAs.last == input.restHeadSHA,
+      input.fetchedCommitSHAs.last == input.fetchedHeadSHA,
+      Set(input.restCommitSHAs) == narrativeSet,
+      Set(input.fetchedCommitSHAs) == narrativeSet
+    else { throw PiWorkflowRouterError.invalidCommitNarrative }
+    return try commitNarrativeDigest(input.commits, baseSHA: input.baseSHA)
   }
 
   public static func commitNarrativeDigest(

@@ -21,10 +21,13 @@ import {
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { attestSystemRuntime } from "./pi-runtime-attestation.mjs";
+import { attestReleaseRuntime } from "./pi-runtime-attestation.mjs";
 
-const nodePath = "/opt/homebrew/Cellar/node/26.6.0/bin/node";
-const piPath = "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
+const releaseRuntimeRoot = process.env.JIDOKA_RELEASE_RUNTIME_ROOT;
+const nodePath = realpathSync(process.execPath);
+const piPath = typeof releaseRuntimeRoot === "string"
+  ? resolve(releaseRuntimeRoot, "pi/dist/cli.js")
+  : "";
 const modelPattern = "openai-codex/gpt-5.6-sol:max";
 const modelProvider = "openai-codex";
 const modelID = "gpt-5.6-sol";
@@ -34,13 +37,13 @@ const expectedSettingsSHA256 =
   "e7ec0ba10fa91967345d69c328a9fefbc65a7a89a7aa98a522cd1a9697e96da4";
 const piRuntimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs";
 const expectedPiRuntimeAttestationSHA256 =
-  "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e";
+  "d062dad354b15d8bc0dc377e8aa6835d0eaf884cf68925dad4b8aace5d0cd413";
 const piRuntimePolicyRelativePath = "runtime/pi-runtime-builds.json";
 const expectedPiRuntimePolicySHA256 =
-  "324d6a1738c08fd7dfbc1ca8fb324ed64d8fc3ac5bd1e2c293062cf4d4238248";
+  "a9fd4478272c9d368ce3b1f253cb63a4a936a9354f876c4c30eba64dc694a7f4";
 const nodeRuntimePolicyRelativePath = "runtime/node-runtime-builds.json";
 const expectedNodeRuntimePolicySHA256 =
-  "fd707070911b53f3930864c3ec6dcfabc7b4440bcf44c3012882751fb99bf906";
+  "cfe0b91f93c46d1c912085ac48a2bac31f8529bc2834c36f6e715ae7f272939d";
 const expectedFiles = Object.freeze({
   [nodeRuntimePolicyRelativePath]: expectedNodeRuntimePolicySHA256,
   [piRuntimeAttestationRelativePath]: expectedPiRuntimeAttestationSHA256,
@@ -482,7 +485,7 @@ class RPCClient {
     this.agentDirectory = createIsolatedAgentDirectory(providerGate !== undefined);
     this.environment = {
       HOME: homedir(),
-      PATH: "/opt/homebrew/bin:/usr/bin:/bin",
+      PATH: "/usr/bin:/bin",
       PI_CODING_AGENT_DIR: this.agentDirectory,
       PI_SKIP_VERSION_CHECK: "1",
       TMPDIR: tmpdir(),
@@ -518,11 +521,11 @@ class RPCClient {
     ];
     this.child = spawn(nodePath, this.argv, {
       cwd: "/",
-      detached: true,
+      detached: false,
       env: this.environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    this.processGroupID = this.child.pid;
+    this.childProcessID = this.child.pid;
     this.nextID = 1;
     this.pending = new Map();
     this.stdoutBuffer = "";
@@ -678,9 +681,10 @@ class RPCClient {
     }
   }
 
-  groupExists() {
+  childExists() {
+    if (this.childProcessID === undefined) return false;
     try {
-      process.kill(-this.processGroupID, 0);
+      process.kill(this.childProcessID, 0);
       return true;
     } catch (error) {
       if (error?.code === "ESRCH") return false;
@@ -689,9 +693,10 @@ class RPCClient {
     }
   }
 
-  signalGroup(signal) {
+  signalChild(signal) {
+    if (this.childProcessID === undefined) return;
     try {
-      process.kill(-this.processGroupID, signal);
+      process.kill(this.childProcessID, signal);
     } catch (error) {
       if (error?.code !== "ESRCH") throw error;
     }
@@ -700,10 +705,10 @@ class RPCClient {
   async waitForCleanup(timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (this.closed && !this.groupExists()) return true;
+      if (this.closed && !this.childExists()) return true;
       await sleep(50);
     }
-    return this.closed && !this.groupExists();
+    return this.closed && !this.childExists();
   }
 
   removeAgentDirectory() {
@@ -725,9 +730,9 @@ class RPCClient {
       let cleaned = false;
       try {
         if (!this.child.stdin.destroyed) this.child.stdin.end();
-        if (this.groupExists()) this.signalGroup("SIGTERM");
+        if (this.childExists()) this.signalChild("SIGTERM");
         cleaned = await this.waitForCleanup(2_000);
-        if (!cleaned && this.groupExists()) this.signalGroup("SIGKILL");
+        if (!cleaned && this.childExists()) this.signalChild("SIGKILL");
         if (!cleaned) cleaned = await this.waitForCleanup(3_000);
         return cleaned;
       } finally {
@@ -1209,12 +1214,10 @@ async function main() {
     fail("usage: pi-rpc-workflow-probe.mjs preflight|live RESOURCE_ROOT LEDGER");
   }
   const attestation = attestResources(process.argv[3]);
-  const systemRuntime = attestSystemRuntime({
-    attestation,
-    expectedNodePolicySHA256: expectedNodeRuntimePolicySHA256,
-    expectedPolicySHA256: expectedPiRuntimePolicySHA256,
-    nodePolicyRelativePath: nodeRuntimePolicyRelativePath,
-    policyRelativePath: piRuntimePolicyRelativePath,
+  const systemRuntime = attestReleaseRuntime({
+    expectedManifestSHA256: process.env.JIDOKA_RELEASE_MANIFEST_SHA256,
+    nodeExecutable: nodePath,
+    runtimeRoot: releaseRuntimeRoot,
   });
   const ledger = new ProviderLedger(process.argv[4]);
   const report =

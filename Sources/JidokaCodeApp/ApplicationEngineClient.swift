@@ -77,14 +77,22 @@ private struct XPCApplicationEngineClient: EngineClient {
 
   private func timeout(for command: EngineCommandKind) -> TimeInterval {
     switch command {
-    case .replaceCredential, .addRepository, .runPiPreflight, .focusInHerdr:
+    case .replaceCredential, .addRepository, .runPiPreflight, .refreshModelCatalog,
+      .focusInHerdr:
       90
+    case .executeJobCanary, .executeJobCanaryRecovery, .executeJobCanaryPiRetry,
+      .executeJobCanaryRoleHostReplacement, .executeJobCanaryGenerationRollover,
+      .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
+      3_500
     case .setProfile, .recheckAmbiguousMutation, .authorizeRetry, .runHerdrPreflight,
       .prepareForHandoff, .prepareForQuit:
       700
     case .snapshot, .acknowledgeExternalAutomation, .acknowledgeProviderDisclosure,
       .deleteCredential, .updateRepository, .removeRepository, .setMaxConcurrency,
-      .setPaused, .pollNow, .setLoginEnabled, .synchronizeLoginStatus,
+      .setPaused, .pollNow, .previewJobMaintenance, .applyJobMaintenance,
+      .previewJobCanary, .previewJobCanaryRecovery, .previewJobCanaryPiRetry,
+      .previewJobCanaryRoleHostReplacement, .previewJobCanaryGenerationRollover,
+      .setLoginEnabled, .synchronizeLoginStatus,
       .completeOnboarding, .rollbackOnboarding:
       30
     }
@@ -135,6 +143,26 @@ protocol LoginItemControlling: Sendable {
   func unregister() async throws
 }
 
+protocol BackgroundCredentialAccessPreparing: Sendable {
+  func prepare() async throws
+}
+
+private actor SystemBackgroundCredentialAccessPreparer: BackgroundCredentialAccessPreparing {
+  func prepare() throws {
+    try GitHubTokenBackgroundAccess().prepare()
+  }
+}
+
+private struct NoopBackgroundCredentialAccessPreparer: BackgroundCredentialAccessPreparing {
+  func prepare() {}
+}
+
+private enum BackgroundCredentialAccessState {
+  case unchecked
+  case prepared
+  case failed
+}
+
 private actor SystemLoginItemController: LoginItemControlling {
   private let service = SMAppService.agent(
     plistName: LifecycleProbeConstants.launchAgentPlistName
@@ -156,14 +184,29 @@ private actor SystemLoginItemController: LoginItemControlling {
 actor ProductionEngineClient: EngineClient {
   private let loginItems: any LoginItemControlling
   private let helper: any EngineClient
+  private let backgroundCredentialAccess: any BackgroundCredentialAccessPreparing
   private let bootstrapFactory: @Sendable () async throws -> any BootstrapEngineContaining
   private let engineLockFactory: @Sendable () async throws -> any EngineTopologyLocking
+  private let helperStartupAttemptLimit: Int
+  private let helperStartupRetryNanoseconds: UInt64
+  private let helperStartupWait: @Sendable (UInt64) async -> Void
   private var local: (any BootstrapEngineContaining)?
-  private var commandInProgress = false
+  private var backgroundCredentialAccessState = BackgroundCredentialAccessState.unchecked
+  private var activeCommand: EngineCommandKind?
+  private var snapshotCompletionWaiters: [CheckedContinuation<Void, Never>] = []
+
+  static let productionHelperStartupAttemptLimit = 240
+  static let productionHelperStartupRetryNanoseconds: UInt64 = 250_000_000
 
   init(duplicateInstanceCheckPassed: Bool) {
     loginItems = SystemLoginItemController()
     helper = XPCApplicationEngineClient()
+    backgroundCredentialAccess = SystemBackgroundCredentialAccessPreparer()
+    helperStartupAttemptLimit = Self.productionHelperStartupAttemptLimit
+    helperStartupRetryNanoseconds = Self.productionHelperStartupRetryNanoseconds
+    helperStartupWait = { nanoseconds in
+      try? await Task.sleep(nanoseconds: nanoseconds)
+    }
     engineLockFactory = {
       try await Self.acquireEngineLock()
     }
@@ -177,22 +220,37 @@ actor ProductionEngineClient: EngineClient {
   init(
     loginItems: any LoginItemControlling,
     helper: any EngineClient,
+    backgroundCredentialAccess: any BackgroundCredentialAccessPreparing =
+      NoopBackgroundCredentialAccessPreparer(),
     engineLockFactory: @escaping @Sendable () async throws -> any EngineTopologyLocking = {
       NoopEngineTopologyLock()
     },
+    helperStartupAttemptLimit: Int = ProductionEngineClient.productionHelperStartupAttemptLimit,
+    helperStartupRetryNanoseconds: UInt64 =
+      ProductionEngineClient.productionHelperStartupRetryNanoseconds,
+    helperStartupWait: @escaping @Sendable (UInt64) async -> Void = { _ in },
     bootstrapFactory: @escaping @Sendable () async throws -> any BootstrapEngineContaining
   ) {
     self.loginItems = loginItems
     self.helper = helper
+    precondition(helperStartupAttemptLimit > 0)
+    precondition(helperStartupRetryNanoseconds > 0)
+    self.backgroundCredentialAccess = backgroundCredentialAccess
     self.engineLockFactory = engineLockFactory
+    self.helperStartupAttemptLimit = helperStartupAttemptLimit
+    self.helperStartupRetryNanoseconds = helperStartupRetryNanoseconds
+    self.helperStartupWait = helperStartupWait
     self.bootstrapFactory = bootstrapFactory
   }
 
   func send(_ command: EngineCommand) async throws -> EngineCommandResponse {
     try command.validate()
-    guard !commandInProgress else { throw EngineClientError(.busy) }
-    commandInProgress = true
-    defer { commandInProgress = false }
+    while activeCommand == .snapshot, command.kind != .snapshot {
+      await waitForSnapshotCompletion()
+    }
+    guard activeCommand == nil else { throw EngineClientError(.busy) }
+    activeCommand = command.kind
+    defer { completeActiveCommand() }
     switch command {
     case .setLoginEnabled(let enabled):
       return try await setLoginEnabled(enabled)
@@ -201,18 +259,37 @@ actor ProductionEngineClient: EngineClient {
     default:
       let status = try await loginItems.status()
       let response = try await send(command, status: status)
-      guard command.kind != .synchronizeLoginStatus,
-        command.kind != .prepareForQuit,
-        command.kind != .prepareForHandoff
-      else {
-        return response
+      let result: EngineCommandResponse
+      if command.kind == .synchronizeLoginStatus
+        || command.kind == .prepareForQuit
+        || command.kind == .prepareForHandoff
+      {
+        result = response
+      } else {
+        result = try await synchronize(
+          response: response,
+          status: status,
+          selected: status == .enabled || status == .requiresApproval
+        )
       }
-      return try await synchronize(
-        response: response,
-        status: status,
-        selected: status == .enabled || status == .requiresApproval
-      )
+      if command.kind == .replaceCredential {
+        backgroundCredentialAccessState = .prepared
+      } else if command.kind == .deleteCredential {
+        backgroundCredentialAccessState = .unchecked
+      }
+      return result
     }
+  }
+
+  private func waitForSnapshotCompletion() async {
+    await withCheckedContinuation { snapshotCompletionWaiters.append($0) }
+  }
+
+  private func completeActiveCommand() {
+    activeCommand = nil
+    let waiters = snapshotCompletionWaiters
+    snapshotCompletionWaiters.removeAll(keepingCapacity: false)
+    for waiter in waiters { waiter.resume() }
   }
 
   private func setLoginEnabled(_ enabled: Bool) async throws -> EngineCommandResponse {
@@ -230,11 +307,11 @@ actor ProductionEngineClient: EngineClient {
         readiness.pi.state == .ready,
         readiness.herdr.state == .ready,
         readiness.credential.state == .valid,
-        readiness.repositoryCount > 0,
         Set(readiness.configuredProfileRoles) == Set(ModelProfileRole.allCases)
       else {
         throw EngineClientError(.onboardingIncomplete)
       }
+      try await prepareBackgroundCredentialAccess()
       _ = try await bootstrap.client.send(
         .synchronizeLoginStatus(selected: false, status: .notRegistered)
       )
@@ -244,17 +321,28 @@ actor ProductionEngineClient: EngineClient {
       }
       await bootstrap.close()
       local = nil
+      var registrationCompleted = false
+      var helperReachedControlPlane = false
       do {
         try await loginItems.register()
+        registrationCompleted = true
         let registered = try await loginItems.status()
         guard registered == .enabled || registered == .requiresApproval else {
           throw EngineClientError(.loginItemFailed)
         }
-        let response = try await send(.snapshot, status: registered)
+        let response = try await waitForHelperSnapshot(status: registered)
+        helperReachedControlPlane = registered == .enabled
         return try await synchronize(response: response, status: registered, selected: true)
       } catch {
+        guard registrationCompleted else {
+          _ = try? await localClient()
+          throw EngineClientError(.loginItemFailed)
+        }
+        guard helperReachedControlPlane else {
+          throw EngineClientError(.loginItemFailed)
+        }
         if (try? await loginItems.status()) == .enabled {
-          _ = try? await helper.send(.prepareForQuit)
+          _ = try? await send(.prepareForQuit, status: .enabled)
         }
         let quiescence = try await engineLockFactory()
         do {
@@ -271,7 +359,7 @@ actor ProductionEngineClient: EngineClient {
 
     switch current {
     case .enabled:
-      let quit = try await helper.send(.prepareForQuit)
+      let quit = try await send(.prepareForQuit, status: .enabled)
       guard quit.checkpoint?.databaseCheckpointed == true else {
         throw EngineClientError(.checkpointFailed)
       }
@@ -317,15 +405,16 @@ actor ProductionEngineClient: EngineClient {
   ) async throws -> EngineCommandResponse {
     switch status {
     case .enabled:
+      if requiresBackgroundCredentialAccess(for: command) {
+        try await prepareBackgroundCredentialAccess()
+      }
       if let local {
         await local.close()
         self.local = nil
       }
       return try await helper.send(command)
-    case .requiresApproval, .notRegistered:
+    case .requiresApproval, .notRegistered, .notFound:
       return try await localClient().client.send(command)
-    case .notFound:
-      throw EngineClientError(.loginItemFailed)
     }
   }
 
@@ -344,6 +433,51 @@ actor ProductionEngineClient: EngineClient {
       .synchronizeLoginStatus(selected: selected, status: status),
       status: status
     )
+  }
+
+  private func requiresBackgroundCredentialAccess(for command: EngineCommand) -> Bool {
+    switch command {
+    case .replaceCredential, .deleteCredential, .synchronizeLoginStatus,
+      .rollbackOnboarding, .prepareForHandoff, .prepareForQuit:
+      false
+    case .setPaused(let paused):
+      !paused
+    default:
+      true
+    }
+  }
+
+  private func waitForHelperSnapshot(
+    status: LifecycleServiceStatus
+  ) async throws -> EngineCommandResponse {
+    for attempt in 1...helperStartupAttemptLimit {
+      do {
+        return try await send(.snapshot, status: status)
+      } catch let error as EngineClientError
+        where error.code == .unavailable && attempt < helperStartupAttemptLimit
+      {
+        await helperStartupWait(helperStartupRetryNanoseconds)
+      }
+    }
+    throw EngineClientError(.unavailable)
+  }
+
+  private func prepareBackgroundCredentialAccess() async throws {
+    switch backgroundCredentialAccessState {
+    case .prepared:
+      return
+    case .failed:
+      throw EngineClientError(.credentialAccessFailed)
+    case .unchecked:
+      break
+    }
+    do {
+      try await backgroundCredentialAccess.prepare()
+      backgroundCredentialAccessState = .prepared
+    } catch {
+      backgroundCredentialAccessState = .failed
+      throw EngineClientError(.credentialAccessFailed)
+    }
   }
 
   private func localClient() async throws -> any BootstrapEngineContaining {
@@ -376,10 +510,26 @@ actor ProductionEngineClient: EngineClient {
       enforceApplicationDispatchGate: true
     )
     let intents = MutationIntentStore(database: database)
+    let runtimeResolver = ReleaseOwnedPiRuntimeResolver(
+      runtimeRoot: paths.releaseRuntime,
+      containingApplicationURL: paths.containingApplication
+    )
+    _ = try ReleaseOwnedPiRuntimeBoundaryAuthority.applicationStartup(
+      using: runtimeResolver
+    )
     let external = ProductionEngineExternalServices(
       configuration: configuration,
-      runtimeResolver: PiRuntimeResolver(
-        configuration: .standard(resourceRoot: paths.piResources)
+      runtimeResolver: runtimeResolver,
+      modelCatalogDiscovery: PiModelCatalogDiscovery(
+        runtimeResolver: runtimeResolver,
+        scriptURL: paths.modelCatalogScript,
+        expectedScriptSHA256: "6057a1a9be5bef7fc029504b1599fcdae4079c3b3eb5829bfa1580c319fb95ba",
+        piAgentDirectory: FileManager.default.homeDirectoryForCurrentUser
+          .appendingPathComponent(".pi/agent", isDirectory: true),
+        applicationSupportRoot: paths.applicationSupport,
+        privateRuntimeRoot: paths.applicationSupport.appendingPathComponent(
+          "ModelCatalog/Runtime", isDirectory: true
+        )
       ),
       herdrReadiness: try HerdrRuntimeReadinessChecker(
         resourceRoot: paths.herdrResources,
@@ -438,19 +588,40 @@ actor ProductionEngineClient: EngineClient {
   private struct Paths {
     let applicationSupport: URL
     let piResources: URL
+    let releaseRuntime: URL
+    let containingApplication: URL
+    let modelCatalogScript: URL
     let herdrResources: URL
     let herdrSocket: URL
   }
 
   private static func paths() throws -> Paths {
     let packaged = Bundle.main.resourceURL?.appendingPathComponent("Pi", isDirectory: true)
-    let source = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-      .appendingPathComponent("Resources/Pi", isDirectory: true)
-    let piResources =
-      packaged.flatMap {
-        FileManager.default.fileExists(atPath: $0.path) ? $0 : nil
-      } ?? source
-    guard FileManager.default.fileExists(atPath: piResources.path) else {
+    #if DEBUG
+      let development = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("Resources/Pi", isDirectory: true)
+      let piResources =
+        packaged.flatMap {
+          FileManager.default.fileExists(atPath: $0.path) ? $0 : nil
+        } ?? development
+    #else
+      guard
+        let piResources = packaged,
+        FileManager.default.fileExists(atPath: piResources.path)
+      else {
+        throw EngineClientError(.piBlocked)
+      }
+    #endif
+    guard FileManager.default.fileExists(atPath: piResources.path),
+      let bundleResources = Bundle.main.resourceURL
+    else {
+      throw EngineClientError(.piBlocked)
+    }
+    let releaseRuntime = bundleResources.appendingPathComponent(
+      ReleaseOwnedPiRuntimeResolver.runtimeDirectoryName,
+      isDirectory: true
+    )
+    guard FileManager.default.fileExists(atPath: releaseRuntime.path) else {
       throw EngineClientError(.piBlocked)
     }
     let packagedHerdr = Bundle.main.resourceURL?.appendingPathComponent(
@@ -467,6 +638,11 @@ actor ProductionEngineClient: EngineClient {
       applicationSupport: FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/JidokaCode", isDirectory: true),
       piResources: piResources,
+      releaseRuntime: releaseRuntime,
+      containingApplication: Bundle.main.bundleURL,
+      modelCatalogScript: piResources.appendingPathComponent(
+        "runtime/jidoka-model-catalog.mjs", isDirectory: false
+      ),
       herdrResources: herdrResources,
       herdrSocket: FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/herdr/herdr.sock", isDirectory: false)

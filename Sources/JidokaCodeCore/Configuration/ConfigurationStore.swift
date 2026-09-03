@@ -167,6 +167,7 @@ public enum ConfigurationStoreError: Error, Equatable, Sendable {
   case invalidCredentialIdentity
   case credentialReplacementMismatch
   case invalidLoginItemStatus
+  case generationRolloverRequiresAuthorization
   case decode(String)
 }
 
@@ -317,6 +318,9 @@ public actor ConfigurationStore {
   }
 
   public func setPaused(_ paused: Bool, now: Date) async throws {
+    if !paused, try await hasGenerationRollover() {
+      throw ConfigurationStoreError.generationRolloverRequiresAuthorization
+    }
     try await database.execute(
       "UPDATE app_settings SET paused = ?, updated_at = ? WHERE singleton = 1",
       bindings: [
@@ -342,9 +346,19 @@ public actor ConfigurationStore {
   }
 
   public func setOnboardingComplete(_ complete: Bool, now: Date) async throws {
+    if complete, try await hasGenerationRollover() {
+      throw ConfigurationStoreError.generationRolloverRequiresAuthorization
+    }
     try await database.execute(
-      "UPDATE app_settings SET onboarding_complete = ?, updated_at = ? WHERE singleton = 1",
+      """
+      UPDATE app_settings
+      SET onboarding_complete = ?,
+          paused = CASE WHEN ? = 1 THEN 0 ELSE paused END,
+          updated_at = ?
+      WHERE singleton = 1
+      """,
       bindings: [
+        .integer(complete ? 1 : 0),
         .integer(complete ? 1 : 0),
         .real(now.timeIntervalSince1970),
       ]
@@ -722,6 +736,17 @@ public actor ConfigurationStore {
       model: try text(row, "model"),
       thinking: thinking
     )
+  }
+
+  private func hasGenerationRollover() async throws -> Bool {
+    guard
+      try await database.scalarInt(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'herdr_generation_rollover_authorizations'"
+      ) == 1
+    else { return false }
+    return try await database.scalarInt(
+      "SELECT COUNT(*) FROM herdr_generation_rollover_authorizations"
+    ) != 0
   }
 
   private static func decodeAppConfiguration(_ row: SQLiteRow) throws -> AppConfiguration {

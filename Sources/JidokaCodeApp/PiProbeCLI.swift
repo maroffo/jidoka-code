@@ -1,15 +1,13 @@
 import CryptoKit
-import Darwin
 import Foundation
 import JidokaCodeCore
 
 private enum PiProbeCLIConstants {
-  static let nodeURL = URL(fileURLWithPath: "/opt/homebrew/Cellar/node/26.6.0/bin/node")
   static let runnerRelativePath = "runtime/pi-rpc-profile-probe.mjs"
-  static let runnerSHA256 = "83d081f9337bc1531e8c516e4248c324de26e325a4f8ef3895eb3df3417d45e9"
+  static let runnerSHA256 = "085fc4f44e77e051c05e2e68c4f755748ebfca227eb3b6782c1e0e3cce727b9d"
   static let runtimeAttestationRelativePath = "runtime/pi-runtime-attestation.mjs"
   static let runtimeAttestationSHA256 =
-    "a2187f46e1a5e97cf8f87be230382f4bbd235d7c47d31eb933c821d799bd5e9e"
+    "d062dad354b15d8bc0dc377e8aa6835d0eaf884cf68925dad4b8aace5d0cd413"
   static let maximumOutputBytes = 1_048_576
 }
 
@@ -22,11 +20,87 @@ enum PiProbeCLIError: Error, Equatable {
   case unsafeConsentDirectory
 }
 
+enum ReleaseRuntimeProbeCLI {
+  #if DEBUG || JIDOKA_ADHOC_RUNTIME_TESTING
+    static func verifyStaged(arguments: [String]) throws -> Data {
+      guard arguments.count == 1 else { throw PiProbeCLIError.invalidNodeRuntime }
+      let root = URL(fileURLWithPath: arguments[0], isDirectory: true).standardizedFileURL
+      let runtime = try ReleaseOwnedPiRuntimeVerifier.verifyStagedInput(runtimeRoot: root)
+      return try report(runtime)
+    }
+
+    static func verifyAdHocBundle() throws -> Data {
+      guard let resources = Bundle.main.resourceURL else {
+        throw PiProbeCLIError.invalidNodeRuntime
+      }
+      let runtime = try ReleaseOwnedPiRuntimeVerifier.verifyAdHocBundle(
+        runtimeRoot: resources.appendingPathComponent(
+          ReleaseOwnedPiRuntimeResolver.runtimeDirectoryName,
+          isDirectory: true
+        ),
+        containingApplicationURL: Bundle.main.bundleURL
+      )
+      return try report(runtime)
+    }
+
+    static func verifyDeveloperIDBundle(arguments: [String]) throws -> Data {
+      guard arguments.count == 1 else { throw PiProbeCLIError.invalidNodeRuntime }
+      let application = URL(
+        fileURLWithPath: arguments[0],
+        isDirectory: true
+      ).standardizedFileURL
+      let runtime = try ReleaseOwnedPiRuntimeVerifier.verifyDeveloperIDBundle(
+        runtimeRoot:
+          application
+          .appendingPathComponent("Contents", isDirectory: true)
+          .appendingPathComponent("Resources", isDirectory: true)
+          .appendingPathComponent(
+            ReleaseOwnedPiRuntimeResolver.runtimeDirectoryName,
+            isDirectory: true
+          ),
+        containingApplicationURL: application
+      )
+      return try report(runtime)
+    }
+  #endif
+
+  static func verifyProductionBundle() throws -> Data {
+    guard let resources = Bundle.main.resourceURL else {
+      throw PiProbeCLIError.invalidNodeRuntime
+    }
+    let resolver = ReleaseOwnedPiRuntimeResolver(
+      runtimeRoot: resources.appendingPathComponent(
+        ReleaseOwnedPiRuntimeResolver.runtimeDirectoryName,
+        isDirectory: true
+      ),
+      containingApplicationURL: Bundle.main.bundleURL
+    )
+    let runtime = try ReleaseOwnedPiRuntimeBoundaryAuthority.applicationStartup(using: resolver)
+    return try report(runtime)
+  }
+
+  private static func report(_ runtime: PiResolvedRuntime) throws -> Data {
+    guard let identity = runtime.releaseIdentity else {
+      throw PiProbeCLIError.invalidNodeRuntime
+    }
+    return try JSONSerialization.data(
+      withJSONObject: [
+        "manifestSHA256": identity.manifestSHA256,
+        "runtimeID": identity.runtimeID,
+        "runtimeIdentitySHA256": identity.authoritySHA256,
+        "schemaVersion": 1,
+      ],
+      options: [.sortedKeys, .withoutEscapingSlashes]
+    ) + Data([0x0A])
+  }
+}
+
 enum PiProbeCLI {
   static func run(arguments: [String]) throws -> Data {
     let command = try PiProbeCommand.parse(arguments)
     let resourceRoot = try packagedResourceRoot()
     let runnerURL = try packagedRunner(in: resourceRoot)
+    let runtime = try releaseRuntime()
     let workspaceURL = try createTemporaryWorkspace()
     let runnerArguments: [String]
 
@@ -49,8 +123,13 @@ enum PiProbeCLI {
     defer {
       try? removeTemporaryWorkspace(workspaceURL)
     }
+    let finalRuntime = try releaseRuntime()
+    guard finalRuntime.releaseIdentity == runtime.releaseIdentity else {
+      throw PiProbeCLIError.invalidNodeRuntime
+    }
     return try executeRunner(
       runnerURL: runnerURL,
+      runtime: finalRuntime,
       workspaceURL: workspaceURL,
       arguments: runnerArguments,
       timeout: commandTimeout(command)
@@ -87,6 +166,29 @@ enum PiProbeCLI {
       throw PiProbeCLIError.invalidOutput
     }
     try FileManager.default.removeItem(at: workspace)
+  }
+
+  private static func releaseRuntime() throws -> PiResolvedRuntime {
+    guard let resources = Bundle.main.resourceURL else {
+      throw PiProbeCLIError.invalidNodeRuntime
+    }
+    let runtimeRoot = resources.appendingPathComponent(
+      ReleaseOwnedPiRuntimeResolver.runtimeDirectoryName,
+      isDirectory: true
+    )
+    #if DEBUG || JIDOKA_ADHOC_RUNTIME_TESTING
+      return try ReleaseOwnedPiRuntimeVerifier.verifyAdHocBundle(
+        runtimeRoot: runtimeRoot,
+        containingApplicationURL: Bundle.main.bundleURL
+      )
+    #else
+      return try ReleaseOwnedPiRuntimeBoundaryAuthority.rpcProcess(
+        using: ReleaseOwnedPiRuntimeResolver(
+          runtimeRoot: runtimeRoot,
+          containingApplicationURL: Bundle.main.bundleURL
+        )
+      )
+    #endif
   }
 
   private static func packagedResourceRoot() throws -> URL {
@@ -174,22 +276,27 @@ enum PiProbeCLI {
     return current.appendingPathComponent("provider-call-ledger.json", isDirectory: false)
   }
 
-  private static func commandTimeout(_ command: PiProbeCommand) -> DispatchTimeInterval {
+  private static func commandTimeout(_ command: PiProbeCommand) -> TimeInterval {
     switch command {
     case .profile:
-      return .seconds(150)
+      return 150
     case .preflight, .timeout, .ledgerPreflight:
-      return .seconds(30)
+      return 30
     }
   }
 
   private static func executeRunner(
     runnerURL: URL,
+    runtime: PiResolvedRuntime,
     workspaceURL: URL,
     arguments: [String],
-    timeout: DispatchTimeInterval
+    timeout: TimeInterval
   ) throws -> Data {
-    let nodeValues = try PiProbeCLIConstants.nodeURL.resourceValues(forKeys: [
+    let nodeURL = runtime.nodeURL
+    guard let releaseIdentity = runtime.releaseIdentity else {
+      throw PiProbeCLIError.invalidNodeRuntime
+    }
+    let nodeValues = try nodeURL.resourceValues(forKeys: [
       .isExecutableKey,
       .isRegularFileKey,
       .isSymbolicLinkKey,
@@ -202,38 +309,32 @@ enum PiProbeCLI {
       throw PiProbeCLIError.invalidNodeRuntime
     }
 
-    let process = Process()
-    let standardOutput = Pipe()
-    let standardError = Pipe()
-    let termination = DispatchSemaphore(value: 0)
-    process.executableURL = PiProbeCLIConstants.nodeURL
-    process.arguments = [runnerURL.path] + arguments
-    process.currentDirectoryURL = URL(fileURLWithPath: "/", isDirectory: true)
-    process.environment = [
-      "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
-      "JIDOKA_PI_WORKSPACE": workspaceURL.path,
-      "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
-      "TMPDIR": FileManager.default.temporaryDirectory.path,
-    ]
-    process.standardOutput = standardOutput
-    process.standardError = standardError
-    process.terminationHandler = { _ in termination.signal() }
-    try process.run()
-
-    guard termination.wait(timeout: .now() + timeout) == .success else {
-      process.terminate()
-      if termination.wait(timeout: .now() + .seconds(8)) != .success {
-        kill(process.processIdentifier, SIGKILL)
-        _ = termination.wait(timeout: .now() + .seconds(2))
-      }
-      throw PiProbeCLIError.timeout
+    let result = try BoundedProcessRunner().runSynchronously(
+      GitProcessRequest(
+        executable: nodeURL,
+        arguments: [runnerURL.path] + arguments,
+        workingDirectory: URL(fileURLWithPath: "/", isDirectory: true),
+        environment: [
+          "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+          "JIDOKA_PI_WORKSPACE": workspaceURL.path,
+          "JIDOKA_RELEASE_MANIFEST_SHA256": releaseIdentity.manifestSHA256,
+          "JIDOKA_RELEASE_RUNTIME_ROOT": releaseIdentity.canonicalRoot,
+          "PATH": "/usr/bin:/bin",
+          "TMPDIR": FileManager.default.temporaryDirectory.path,
+        ],
+        timeoutSeconds: timeout,
+        maximumOutputBytes: PiProbeCLIConstants.maximumOutputBytes
+      )
+    )
+    guard !result.timedOut else { throw PiProbeCLIError.timeout }
+    guard !result.outputLimitExceeded else { throw PiProbeCLIError.invalidOutput }
+    guard result.exitCode == 0, result.terminationSignal == nil else {
+      throw PiProbeCLIError.runnerFailed(
+        result.exitCode ?? 128 + (result.terminationSignal ?? 0)
+      )
     }
-
-    let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
-    let errorOutput = standardError.fileHandleForReading.readDataToEndOfFile()
-    guard process.terminationStatus == 0 else {
-      throw PiProbeCLIError.runnerFailed(process.terminationStatus)
-    }
+    let output = result.stdout
+    let errorOutput = result.stderr
     guard
       errorOutput.isEmpty,
       !output.isEmpty,
