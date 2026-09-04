@@ -80,6 +80,7 @@ public actor GitHubWorkflowLabelBootstrapper {
   private let executor: GitHubMutationExecutor
   private let intents: MutationIntentStore
   private let reads: any GitHubMutationReadAPI
+  private let authority: any RolloutEffectAuthorizing
   private let sleeper: any MutationReconciliationSleeper
   private let now: @Sendable () -> Date
 
@@ -87,12 +88,14 @@ public actor GitHubWorkflowLabelBootstrapper {
     executor: GitHubMutationExecutor,
     intents: MutationIntentStore,
     reads: any GitHubMutationReadAPI,
+    authority: any RolloutEffectAuthorizing,
     sleeper: any MutationReconciliationSleeper = SystemMutationReconciliationSleeper(),
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.executor = executor
     self.intents = intents
     self.reads = reads
+    self.authority = authority
     self.sleeper = sleeper
     self.now = now
   }
@@ -111,11 +114,17 @@ public actor GitHubWorkflowLabelBootstrapper {
     var created: [String] = []
     var intentIDs: [UUID] = []
     for definition in Self.definitions {
-      if try await reads.repositoryLabel(
+      if let existing = try await reads.repositoryLabel(
         owner: repository.owner,
         repository: repository.repository,
         label: definition.name
-      ) != nil {
+      ) {
+        guard existing.name.caseInsensitiveCompare(definition.name) == .orderedSame,
+          existing.color.lowercased() == definition.color,
+          (existing.description ?? "") == definition.description
+        else {
+          throw GitHubWorkflowLabelBootstrapperError.invalidRequest
+        }
         preserved.append(definition.name)
         continue
       }
@@ -190,6 +199,7 @@ public actor GitHubWorkflowLabelBootstrapper {
       let settled = try await MutationReconciliationRunner(
         store: intents,
         reader: reader,
+        authority: authority,
         sleeper: sleeper,
         now: now
       ).reconcile(intentID: intent.id)

@@ -133,7 +133,7 @@ struct SQLiteStoreTests {
 
     let upgraded = try SQLiteStore(
       databaseURL: fixture.databaseURL,
-      migrations: DatabaseSchema.migrations
+      migrations: schemaNineMigrations
     )
     #expect(try await upgraded.schemaVersion() == 9)
     #expect(
@@ -271,6 +271,127 @@ struct SQLiteStoreTests {
     #expect(try await backup.schemaVersion() == 8)
     #expect(try await schemaEightSnapshot(of: backup) == fixture.snapshot)
     #expect(try await schemaObjectNames(in: backup).isDisjoint(with: v9AddedObjects))
+    try await assertDatabaseIntegrity(backup)
+    await backup.close()
+  }
+
+  @Test("production schema upgrades to rollout authority without manufacturing authority")
+  func productionRolloutAuthorityMigration() async throws {
+    _ = try productionSchemaTenMigration()
+    let fixture = try await PopulatedSchemaNineFixture.make()
+    defer { fixture.remove() }
+
+    let upgraded = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: DatabaseSchema.migrations
+    )
+    #expect(try await upgraded.schemaVersion() == 10)
+    #expect(upgraded.migrationBackups.count == 1)
+    let backupURL = try #require(upgraded.migrationBackups.first)
+    #expect(backupURL.lastPathComponent.contains(".before-v10-"))
+    #expect(try fileMode(backupURL) == 0o600)
+    #expect(
+      try await historicalRows(in: upgraded, snapshot: fixture.snapshot) == fixture.snapshot.rows)
+    #expect(try await upgraded.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(try await upgraded.scalarInt("SELECT max_concurrency FROM app_settings") == 1)
+    #expect(
+      try await upgraded.scalarText("SELECT active_rollout_authorization_id FROM app_settings")
+        == nil
+    )
+    #expect(
+      try await upgraded.scalarInt("SELECT COUNT(*) FROM rollout_authorizations") == 0
+    )
+    #expect(
+      try await upgraded.scalarInt("SELECT COUNT(*) FROM rollout_job_bindings") == 0
+    )
+    #expect(
+      try await upgraded.scalarInt("SELECT COUNT(*) FROM rollout_job_input_snapshots") == 0
+    )
+    #expect(
+      try await upgraded.scalarInt("SELECT COUNT(*) FROM rollout_effect_reservations") == 0
+    )
+    #expect(
+      try await upgraded.scalarInt(
+        "SELECT COUNT(*) FROM jobs WHERE rollout_generation != 0"
+      ) == 0
+    )
+    try await assertDatabaseIntegrity(upgraded)
+    await upgraded.close()
+
+    let backup = try SQLiteStore(databaseURL: backupURL, migrations: schemaNineMigrations)
+    #expect(try await backup.schemaVersion() == 9)
+    #expect(
+      try await historicalRows(in: backup, snapshot: fixture.snapshot) == fixture.snapshot.rows)
+    try await assertDatabaseIntegrity(backup)
+    await backup.close()
+
+    let reopened = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: DatabaseSchema.migrations
+    )
+    #expect(try await reopened.schemaVersion() == 10)
+    #expect(reopened.migrationBackups.isEmpty)
+    #expect(try await reopened.scalarInt("SELECT paused FROM app_settings") == 1)
+    await reopened.close()
+
+    #expect(throws: SQLiteStoreError.migrationTooNew(database: 10, supported: 9)) {
+      _ = try SQLiteStore(databaseURL: fixture.databaseURL, migrations: schemaNineMigrations)
+    }
+  }
+
+  @Test(
+    "production schema 9 to 10 rolls back after every exact migration statement",
+    arguments: schemaTenStatementCuts
+  )
+  func productionRolloutAuthorityMigrationRollsBack(
+    afterStatement completedStatementCount: Int
+  ) async throws {
+    let migration = try productionSchemaTenMigration()
+    let fixture = try await PopulatedSchemaNineFixture.make()
+    defer { fixture.remove() }
+    let failingMigration = SQLiteMigration(
+      version: migration.version,
+      name: migration.name,
+      requiresBackup: migration.requiresBackup,
+      statements: Array(migration.statements.prefix(completedStatementCount)) + [
+        "THIS IS THE TEST-ONLY SCHEMA 9 TO 10 FAILURE"
+      ]
+    )
+
+    do {
+      _ = try SQLiteStore(
+        databaseURL: fixture.databaseURL,
+        migrations: schemaNineMigrations + [failingMigration]
+      )
+      Issue.record("migration unexpectedly passed after statement \(completedStatementCount)")
+    } catch let error as SQLiteStoreError {
+      guard case .statementFailed = error else {
+        Issue.record(
+          "unexpected migration error after statement \(completedStatementCount): \(error)"
+        )
+        return
+      }
+    }
+
+    let original = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaNineMigrations
+    )
+    #expect(try await original.schemaVersion() == 9)
+    #expect(
+      try await historicalRows(in: original, snapshot: fixture.snapshot) == fixture.snapshot.rows)
+    try await assertDatabaseIntegrity(original)
+    await original.close()
+
+    let backupURLs = try migrationBackupURLs(in: fixture.root, beforeVersion: 10)
+    #expect(backupURLs.count == 1)
+    let backup = try SQLiteStore(
+      databaseURL: try #require(backupURLs.first),
+      migrations: schemaNineMigrations
+    )
+    #expect(try await backup.schemaVersion() == 9)
+    #expect(
+      try await historicalRows(in: backup, snapshot: fixture.snapshot) == fixture.snapshot.rows)
     try await assertDatabaseIntegrity(backup)
     await backup.close()
   }
@@ -435,10 +556,14 @@ struct SQLiteStoreTests {
 }
 
 private let schemaEightMigrations = Array(DatabaseSchema.migrations.prefix(8))
+private let schemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
+private let schemaTenStatementCuts = Array(1...74)
 private let schemaEightRunID = "run-schema8-architecture"
 private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
 private let expectedSchemaNineMigrationDigest =
   "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
+private let expectedSchemaTenMigrationDigest =
+  "0c411528a84fa412eeee2d359571fa6df21b2355b044620e3342def88ec95099"
 private let expectedPopulatedSchemaEightDigest =
   "a8ceef8e29c5b2bed740a52be3912457543a176ca299538ae3714685b8233992"
 private let v9AddedObjects: Set<String> = [
@@ -487,6 +612,44 @@ private struct SchemaEightSnapshot: Equatable {
   let tableColumns: [String: [String]]
   let applicationRows: [String: [String]]
   let digest: String
+}
+
+private struct HistoricalSchemaNineSnapshot: Equatable {
+  let columns: [String: [String]]
+  let rows: [String: [String]]
+}
+
+private struct PopulatedSchemaNineFixture {
+  let root: URL
+  let databaseURL: URL
+  let snapshot: HistoricalSchemaNineSnapshot
+
+  static func make() async throws -> Self {
+    let schemaEight = try await PopulatedSchemaEightFixture.make()
+    let database = try SQLiteStore(
+      databaseURL: schemaEight.databaseURL,
+      migrations: schemaNineMigrations
+    )
+    #expect(try await database.schemaVersion() == 9)
+    let allColumns = try await tableColumns(in: database)
+    var preservedColumns = allColumns
+    preservedColumns["app_settings"] = (allColumns["app_settings"] ?? []).filter {
+      !["max_concurrency", "paused", "updated_at"].contains($0)
+    }
+    let empty = HistoricalSchemaNineSnapshot(columns: preservedColumns, rows: [:])
+    let snapshot = HistoricalSchemaNineSnapshot(
+      columns: preservedColumns,
+      rows: try await historicalRows(in: database, snapshot: empty)
+    )
+    try await assertDatabaseIntegrity(database)
+    _ = try await database.checkpoint()
+    await database.close()
+    return Self(root: schemaEight.root, databaseURL: schemaEight.databaseURL, snapshot: snapshot)
+  }
+
+  func remove() {
+    try? FileManager.default.removeItem(at: root)
+  }
 }
 
 private struct PopulatedSchemaEightFixture {
@@ -880,7 +1043,7 @@ private struct PopulatedSchemaEightFixture {
 }
 
 private func productionSchemaNineMigration() throws -> SQLiteMigration {
-  #expect(DatabaseSchema.migrations.count == 9)
+  #expect(DatabaseSchema.migrations.count >= 9)
   let migration = try #require(
     DatabaseSchema.migrations.first(where: { $0.version == 9 })
   )
@@ -893,6 +1056,19 @@ private func productionSchemaNineMigration() throws -> SQLiteMigration {
   #expect(migration.requiresBackup)
   #expect(migration.statements.count == 76)
   #expect(migrationDigest(migration) == expectedSchemaNineMigrationDigest)
+  return migration
+}
+
+private func productionSchemaTenMigration() throws -> SQLiteMigration {
+  #expect(DatabaseSchema.migrations.count == 10)
+  let migration = try #require(
+    DatabaseSchema.migrations.first(where: { $0.version == 10 })
+  )
+  #expect(DatabaseSchema.migrations.firstIndex(of: migration) == 9)
+  #expect(migration.name == "progressive-production-rollout-authority")
+  #expect(migration.requiresBackup)
+  #expect(migration.statements.count == schemaTenStatementCuts.count)
+  #expect(migrationDigest(migration) == expectedSchemaTenMigrationDigest)
   return migration
 }
 
@@ -969,6 +1145,53 @@ private func schemaEightSnapshot(of database: SQLiteStore) async throws -> Schem
     applicationRows: rows,
     digest: sha256(digestComponents.joined(separator: "\n"))
   )
+}
+
+private func tableColumns(in database: SQLiteStore) async throws -> [String: [String]] {
+  let tables = try await database.query(
+    """
+    SELECT name FROM sqlite_schema
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+    """
+  )
+  var result: [String: [String]] = [:]
+  for row in tables {
+    guard case .text(let table)? = row["name"] else {
+      throw SQLiteStoreError.unexpectedResult("schema table name is not text")
+    }
+    result[table] = try await database.query(
+      "PRAGMA table_info(\(quotedIdentifier(table)))"
+    ).compactMap { column -> (Int, String)? in
+      guard case .integer(let identifier)? = column["cid"],
+        case .text(let name)? = column["name"]
+      else { return nil }
+      return (Int(identifier), name)
+    }.sorted { $0.0 < $1.0 }.map(\.1)
+  }
+  return result
+}
+
+private func historicalRows(
+  in database: SQLiteStore,
+  snapshot: HistoricalSchemaNineSnapshot
+) async throws -> [String: [String]] {
+  var result: [String: [String]] = [:]
+  for table in snapshot.columns.keys.sorted() {
+    let columns = snapshot.columns[table] ?? []
+    guard !columns.isEmpty else {
+      result[table] = []
+      continue
+    }
+    let projection = columns.map(quotedIdentifier).joined(separator: ", ")
+    let filter = table == "schema_migrations" ? " WHERE version <= 9" : ""
+    result[table] = try await database.query(
+      "SELECT \(projection) FROM \(quotedIdentifier(table))\(filter)"
+    ).map {
+      canonicalRow($0, columns: columns, table: table)
+    }.sorted()
+  }
+  return result
 }
 
 private func applicationRows(
@@ -1147,13 +1370,13 @@ private func assertDatabaseIntegrity(_ database: SQLiteStore) async throws {
   #expect(try await database.query("PRAGMA foreign_key_check").isEmpty)
 }
 
-private func migrationBackupURLs(in root: URL) throws -> [URL] {
+private func migrationBackupURLs(in root: URL, beforeVersion: Int = 9) throws -> [URL] {
   try FileManager.default.contentsOfDirectory(
     at: root,
     includingPropertiesForKeys: nil,
     options: [.skipsHiddenFiles]
   ).filter {
-    $0.lastPathComponent.hasPrefix("jidoka-code.sqlite3.before-v9-")
+    $0.lastPathComponent.hasPrefix("jidoka-code.sqlite3.before-v\(beforeVersion)-")
       && $0.pathExtension == "sqlite3"
   }.sorted { $0.lastPathComponent < $1.lastPathComponent }
 }

@@ -1,0 +1,33 @@
+{
+  "qualificationCounters": {
+    "credentialReads": 0,
+    "gitRemoteReads": 0,
+    "githubMutations": 0,
+    "providerCalls": 0
+  },
+  "release": {
+    "bundleBuild": 3,
+    "bundleVersion": "0.2.0",
+    "databaseSchemaVersion": 10,
+    "engineProtocolVersion": 12,
+    "maximumConcurrency": 1,
+    "rolloutPolicyVersion": 1
+  },
+  "requiredSourcePaths": [
+    "Packaging/Info.plist",
+    "Packaging/app-inventory.txt",
+    "Sources/JidokaCodeCore/Application/EngineProtocol.swift",
+    "Sources/JidokaCodeCore/Application/RolloutReleaseIdentityAttestor.swift",
+    "Sources/JidokaCodeCore/State/DatabaseSchema.swift",
+    "Sources/JidokaCodeCore/State/RolloutAuthority.swift",
+    "Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift",
+    "Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift",
+    "Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift",
+    "docs/operations/progressive-production-rollout.md",
+    "docs/operations/progressive-production-rollout-expected.schema.json",
+    "scripts/generate-progressive-production-release.mjs",
+    "scripts/package-app.sh",
+    "scripts/progressive-production-rollout-preflight.sh"
+  ],
+  "schemaVersion": 1
+}

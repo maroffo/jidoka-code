@@ -4,6 +4,7 @@ public struct PreparedIssueTriageJob: Sendable {
   public let repository: RepositoryConfiguration
   public let issue: GitHubIssue
   public let comments: [GitHubComment]
+  public let labels: [GitHubLabel]
   public let issueRevision: IssueRevision
   public let baseRevision: BaseRevision
   public let workspaceURL: URL
@@ -13,6 +14,7 @@ public struct PreparedIssueTriageJob: Sendable {
     repository: RepositoryConfiguration,
     issue: GitHubIssue,
     comments: [GitHubComment],
+    labels: [GitHubLabel],
     issueRevision: IssueRevision,
     baseRevision: BaseRevision,
     workspaceURL: URL,
@@ -21,6 +23,7 @@ public struct PreparedIssueTriageJob: Sendable {
     self.repository = repository
     self.issue = issue
     self.comments = comments
+    self.labels = labels
     self.issueRevision = issueRevision
     self.baseRevision = baseRevision
     self.workspaceURL = workspaceURL
@@ -152,6 +155,7 @@ public struct SystemIssueTriageJobPreparer: IssueTriageJobPreparing, Sendable {
       repository: repository,
       issue: issue,
       comments: comments,
+      labels: labels,
       issueRevision: issueRevision,
       baseRevision: baseRevision
     )
@@ -159,6 +163,7 @@ public struct SystemIssueTriageJobPreparer: IssueTriageJobPreparing, Sendable {
       repository: repository,
       issue: issue,
       comments: comments,
+      labels: labels,
       issueRevision: issueRevision,
       baseRevision: baseRevision,
       workspaceURL: materialization.workspaceURL,
@@ -166,10 +171,11 @@ public struct SystemIssueTriageJobPreparer: IssueTriageJobPreparing, Sendable {
     )
   }
 
-  private static func artifact(
+  static func artifact(
     repository: RepositoryConfiguration,
     issue: GitHubIssue,
     comments: [GitHubComment],
+    labels: [GitHubLabel],
     issueRevision: IssueRevision,
     baseRevision: BaseRevision
   ) throws -> Data {
@@ -192,7 +198,7 @@ public struct SystemIssueTriageJobPreparer: IssueTriageJobPreparing, Sendable {
         "authorID": issue.user.nodeID,
         "body": issue.body ?? "",
         "createdAt": issue.createdAt,
-        "domainLabels": issue.labels.map(\.name).filter { !isWorkflowLabel($0) }.sorted(),
+        "domainLabels": labels.map(\.name).filter { !isWorkflowLabel($0) }.sorted(),
         "nodeID": issue.nodeID,
         "number": issue.number,
         "title": issue.title,
@@ -211,7 +217,7 @@ public struct SystemIssueTriageJobPreparer: IssueTriageJobPreparing, Sendable {
     return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
   }
 
-  private static func isWorkflowLabel(_ value: String) -> Bool {
+  static func isWorkflowLabel(_ value: String) -> Bool {
     let lowered = value.lowercased()
     return lowered.hasPrefix("agent:") || lowered.hasPrefix("plan:")
   }
@@ -283,6 +289,7 @@ public actor IssueTriageJobWorkflow: JobWorkflowRunning {
   private let labelBootstrapper: GitHubWorkflowLabelBootstrapper
   private let labelMutator: GitHubWorkflowLabelMutator
   private let repositories: RepositoryStore
+  private let rolloutSnapshots: (any RolloutJobInputSnapshotRecording)?
   private let authorID: Int64
   private let now: @Sendable () -> Date
   private let afterStepPersisted: @Sendable (JobStepKind) async throws -> Void
@@ -298,6 +305,7 @@ public actor IssueTriageJobWorkflow: JobWorkflowRunning {
     labelBootstrapper: GitHubWorkflowLabelBootstrapper,
     labelMutator: GitHubWorkflowLabelMutator,
     repositories: RepositoryStore,
+    rolloutSnapshots: (any RolloutJobInputSnapshotRecording)? = nil,
     authorID: Int64,
     now: @escaping @Sendable () -> Date = Date.init,
     afterStepPersisted: @escaping @Sendable (JobStepKind) async throws -> Void = { _ in },
@@ -312,6 +320,7 @@ public actor IssueTriageJobWorkflow: JobWorkflowRunning {
     self.labelBootstrapper = labelBootstrapper
     self.labelMutator = labelMutator
     self.repositories = repositories
+    self.rolloutSnapshots = rolloutSnapshots
     self.authorID = authorID
     self.now = now
     self.afterStepPersisted = afterStepPersisted
@@ -319,6 +328,14 @@ public actor IssueTriageJobWorkflow: JobWorkflowRunning {
   }
 
   public func run(jobID: UUID) async throws {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .workflow(jobID: jobID))
+    ) {
+      try await self.runAuthorized(jobID: jobID)
+    }
+  }
+
+  private func runAuthorized(jobID: UUID) async throws {
     guard let job = try await jobs.job(id: jobID), job.identity.kind == .issueTriage else {
       throw IssueTriageJobError.invalidJob
     }
@@ -420,6 +437,7 @@ public actor IssueTriageJobWorkflow: JobWorkflowRunning {
       GitHubMarkerPublicationRequest(
         jobID: job.id,
         operation: .createMarkerComment,
+        repositoryID: repository.id,
         repository: GitHubRepositoryCoordinates(
           owner: repository.owner,
           repository: repository.name
@@ -446,6 +464,17 @@ public actor IssueTriageJobWorkflow: JobWorkflowRunning {
 
   private func runTriage(_ job: JobRecord) async throws {
     let prepared = try await inputs.prepare(job: job)
+    if let rolloutSnapshots {
+      try await rolloutSnapshots.freezeJobInputSnapshot(
+        RolloutJobInputSnapshot(
+          jobID: job.id,
+          canonicalInputSHA256: GitHubMarkerCodec.sha256(prepared.artifact),
+          baseSHA: prepared.baseRevision.sha,
+          labelStateSHA256: try RolloutPreviewBuilder.labelStateSHA256(prepared.labels)
+        ),
+        now: now()
+      )
+    }
     let bootstrap = try await labelBootstrapper.bootstrap(
       jobID: job.id,
       repository: GitHubRepositoryCoordinates(
@@ -738,6 +767,7 @@ public actor IssueTriageJobWorkflow: JobWorkflowRunning {
     GitHubMarkerPublicationRequest(
       jobID: job.id,
       operation: .createMarkerComment,
+      repositoryID: repository.id,
       repository: GitHubRepositoryCoordinates(
         owner: repository.owner,
         repository: repository.name

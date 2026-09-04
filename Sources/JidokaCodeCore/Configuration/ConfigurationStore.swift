@@ -86,6 +86,7 @@ public struct AppConfiguration: Codable, Equatable, Sendable {
   public let credentialDeletionPending: Bool
   public let loginItemSelected: Bool
   public let loginItemStatus: LifecycleServiceStatus
+  public let activeRolloutAuthorizationID: UUID?
 
   public init(maxConcurrency: Int, paused: Bool) {
     self.init(
@@ -102,7 +103,8 @@ public struct AppConfiguration: Codable, Equatable, Sendable {
       previousGitHubAccount: nil,
       credentialDeletionPending: false,
       loginItemSelected: false,
-      loginItemStatus: .notRegistered
+      loginItemStatus: .notRegistered,
+      activeRolloutAuthorizationID: nil
     )
   }
 
@@ -120,7 +122,8 @@ public struct AppConfiguration: Codable, Equatable, Sendable {
     previousGitHubAccount: String?,
     credentialDeletionPending: Bool,
     loginItemSelected: Bool,
-    loginItemStatus: LifecycleServiceStatus
+    loginItemStatus: LifecycleServiceStatus,
+    activeRolloutAuthorizationID: UUID? = nil
   ) {
     self.maxConcurrency = maxConcurrency
     self.paused = paused
@@ -136,6 +139,7 @@ public struct AppConfiguration: Codable, Equatable, Sendable {
     self.credentialDeletionPending = credentialDeletionPending
     self.loginItemSelected = loginItemSelected
     self.loginItemStatus = loginItemStatus
+    self.activeRolloutAuthorizationID = activeRolloutAuthorizationID
   }
 }
 
@@ -168,6 +172,7 @@ public enum ConfigurationStoreError: Error, Equatable, Sendable {
   case credentialReplacementMismatch
   case invalidLoginItemStatus
   case generationRolloverRequiresAuthorization
+  case rolloutActivationRequired
   case decode(String)
 }
 
@@ -306,7 +311,7 @@ public actor ConfigurationStore {
   }
 
   public func setMaxConcurrency(_ value: Int, now: Date) async throws {
-    guard (1...8).contains(value) else {
+    guard value == 1 else {
       throw ConfigurationStoreError.invalidMaxConcurrency
     }
     try await database.execute(
@@ -318,8 +323,10 @@ public actor ConfigurationStore {
   }
 
   public func setPaused(_ paused: Bool, now: Date) async throws {
-    if !paused, try await hasGenerationRollover() {
-      throw ConfigurationStoreError.generationRolloverRequiresAuthorization
+    // A paused-to-running transition must insert and bind the durable capability in
+    // RolloutAuthorityStore.activate. This setter is containment-only in schema 10.
+    guard paused else {
+      throw ConfigurationStoreError.rolloutActivationRequired
     }
     try await database.execute(
       "UPDATE app_settings SET paused = ?, updated_at = ? WHERE singleton = 1",
@@ -353,12 +360,10 @@ public actor ConfigurationStore {
       """
       UPDATE app_settings
       SET onboarding_complete = ?,
-          paused = CASE WHEN ? = 1 THEN 0 ELSE paused END,
           updated_at = ?
       WHERE singleton = 1
       """,
       bindings: [
-        .integer(complete ? 1 : 0),
         .integer(complete ? 1 : 0),
         .real(now.timeIntervalSince1970),
       ]
@@ -773,7 +778,11 @@ public actor ConfigurationStore {
       previousGitHubAccount: try optionalText(row, "previous_github_account"),
       credentialDeletionPending: try integer(row, "credential_deletion_pending") == 1,
       loginItemSelected: try integer(row, "login_item_selected") == 1,
-      loginItemStatus: loginItemStatus
+      loginItemStatus: loginItemStatus,
+      activeRolloutAuthorizationID:
+        row.columns.contains("active_rollout_authorization_id")
+        ? try optionalUUID(row, "active_rollout_authorization_id")
+        : nil
     )
   }
 
@@ -814,6 +823,14 @@ public actor ConfigurationStore {
     case .null: nil
     default: throw ConfigurationStoreError.decode("expected optional integer column \(column)")
     }
+  }
+
+  private static func optionalUUID(_ row: SQLiteRow, _ column: String) throws -> UUID? {
+    guard let value = try optionalText(row, column) else { return nil }
+    guard let uuid = UUID(uuidString: value), uuid.uuidString.lowercased() == value else {
+      throw ConfigurationStoreError.decode("invalid UUID column \(column)")
+    }
+    return uuid
   }
 
   private static func uuid(_ row: SQLiteRow, _ column: String) throws -> UUID {

@@ -539,6 +539,7 @@ public struct SystemMutationReconciliationSleeper: MutationReconciliationSleeper
 public actor MutationReconciliationRunner {
   private let store: MutationIntentStore
   private let reader: any MutationObservationReader
+  private let authority: any RolloutEffectAuthorizing
   private let sleeper: any MutationReconciliationSleeper
   private let branchCASCreateOnlyProven: Bool
   private let now: @Sendable () -> Date
@@ -546,12 +547,14 @@ public actor MutationReconciliationRunner {
   public init(
     store: MutationIntentStore,
     reader: any MutationObservationReader,
+    authority: any RolloutEffectAuthorizing,
     sleeper: any MutationReconciliationSleeper = SystemMutationReconciliationSleeper(),
     branchCASCreateOnlyProven: Bool = false,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.store = store
     self.reader = reader
+    self.authority = authority
     self.sleeper = sleeper
     self.branchCASCreateOnlyProven = branchCASCreateOnlyProven
     self.now = now
@@ -567,6 +570,12 @@ public actor MutationReconciliationRunner {
       knowledge = .notSent
     case .sendStarted:
       intent = try await store.markReconcileRequired(id: intentID, now: now())
+      try await authority.recordMutationObservation(
+        intentID: intentID,
+        observation: .observationRequired,
+        evidenceSHA256: GitHubMarkerCodec.sha256(Data("send outcome unknown".utf8)),
+        now: now()
+      )
       knowledge = .unknown
     case .reconcileRequired:
       knowledge = .unknown
@@ -579,7 +588,18 @@ public actor MutationReconciliationRunner {
     for (index, offset) in MutationReconciliationPolicy.delayedReadSeconds.enumerated() {
       try await sleeper.sleep(seconds: offset - previousOffset)
       previousOffset = offset
-      let observation = try await reader.observe(intent: intent, attempt: index + 1)
+      let observation: MutationObservation
+      if knowledge == .unknown {
+        observation = try await RolloutEffectTaskContext.$current.withValue(
+          RolloutEffectExecutionContext(
+            mode: .readback(jobID: intent.jobID, intentID: intent.id)
+          )
+        ) {
+          try await reader.observe(intent: intent, attempt: index + 1)
+        }
+      } else {
+        observation = try await reader.observe(intent: intent, attempt: index + 1)
+      }
       if let evidence = observation.evidenceDigest {
         guard GitHubInputValidation.validSHA256(evidence) else {
           throw MutationIntentStoreError.invalidDigest
@@ -599,12 +619,14 @@ public actor MutationReconciliationRunner {
         observation: observation,
         branchCASCreateOnlyProven: branchCASCreateOnlyProven
       )
-      return try await store.settle(
+      let settled = try await store.settle(
         id: intentID,
         outcome: outcome,
         evidenceDigest: lastEvidence,
         now: now()
       )
+      try await recordRolloutSettlement(settled, evidenceSHA256: lastEvidence)
+      return settled
     }
 
     let outcome = MutationReconciliationPolicy.classify(
@@ -613,10 +635,32 @@ public actor MutationReconciliationRunner {
       observation: .effectAbsent(evidenceDigest: lastEvidence),
       branchCASCreateOnlyProven: branchCASCreateOnlyProven
     )
-    return try await store.settle(
+    let settled = try await store.settle(
       id: intentID,
       outcome: outcome,
       evidenceDigest: lastEvidence,
+      now: now()
+    )
+    try await recordRolloutSettlement(settled, evidenceSHA256: lastEvidence)
+    return settled
+  }
+
+  private func recordRolloutSettlement(
+    _ intent: MutationIntentRecord,
+    evidenceSHA256: String
+  ) async throws {
+    if intent.state == .attributed {
+      try await authority.recordMutationObservation(
+        intentID: intent.id,
+        observation: .attributed,
+        evidenceSHA256: evidenceSHA256,
+        now: now()
+      )
+    }
+    try await authority.recordMutationObservation(
+      intentID: intent.id,
+      observation: .settled,
+      evidenceSHA256: evidenceSHA256,
       now: now()
     )
   }

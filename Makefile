@@ -5,7 +5,7 @@ JIDOKA_RELEASE_RUNTIME_ROOT ?= $(CURDIR)/build/runtime-input/qualified-runtime
 override NODE := $(abspath $(JIDOKA_RELEASE_RUNTIME_ROOT))/node/bin/node
 export JIDOKA_RELEASE_RUNTIME_ROOT
 
-.PHONY: check test-e2e jidoka-code-check jidoka-code-test jidoka-code-test-herdr jidoka-code-test-herdr-readiness jidoka-code-test-ui jidoka-code-test-s11-herdr jidoka-code-test-s12-pi-tui jidoka-code-w7-acceptance jidoka-code-app jidoka-code-package jidoka-code-test-s2-preflight jidoka-code-test-s3-preflight jidoka-code-test-s4-preflight jidoka-code-test-s5-s7-preflight jidoka-code-test-s8-preflight jidoka-code-test-s9-preflight jidoka-code-test-w5-preflight jidoka-code-test-location-probe-packaging
+.PHONY: check test-e2e jidoka-code-check jidoka-code-test jidoka-code-test-herdr jidoka-code-test-herdr-readiness jidoka-code-test-ui jidoka-code-test-s11-herdr jidoka-code-test-s12-pi-tui jidoka-code-w7-acceptance jidoka-code-production-automation-acceptance jidoka-code-app jidoka-code-package jidoka-code-test-s2-preflight jidoka-code-test-s3-preflight jidoka-code-test-s4-preflight jidoka-code-test-s5-s7-preflight jidoka-code-test-s8-preflight jidoka-code-test-s9-preflight jidoka-code-test-w5-preflight jidoka-code-test-location-probe-packaging
 
 jidoka-code-test-w5-preflight:
 	./scripts/tests/test-production-readiness-preflight.sh
@@ -25,8 +25,11 @@ jidoka-code-check:
 	test "$$(PATH=/nonexistent /bin/bash ./scripts/qualified-runtime-node.sh)" = "$(NODE)"
 	./scripts/verify-toolchain.sh
 	@if DEVELOPER_DIR=/tmp ./scripts/verify-toolchain.sh >/dev/null 2>&1; then echo "toolchain verifier accepted an invalid path" >&2; exit 1; fi
-	shellcheck scripts/verify-toolchain.sh scripts/qualified-runtime-node.sh scripts/tests/fixtures/pi-rpc-process.sh scripts/package-app.sh scripts/package-installer.sh scripts/production-readiness-preflight.sh scripts/build-location-probe-packages.sh scripts/audit-location-probe-packages.sh scripts/tests/test-production-readiness-preflight.sh scripts/tests/test-location-probe-packaging.sh scripts/spikes/test-s1-package.sh scripts/spikes/test-s2-lifecycle.sh scripts/spikes/test-s3-keychain.sh scripts/spikes/test-s4-pi.sh scripts/spikes/test-s5-s7-local.sh scripts/spikes/test-s8-workflows.sh scripts/spikes/test-s9-topology.sh scripts/spikes/test-s10-ui.sh scripts/spikes/test-s11-herdr.sh scripts/spikes/test-s12-pi-tui.sh
+	shellcheck scripts/verify-toolchain.sh scripts/qualified-runtime-node.sh scripts/tests/fixtures/pi-rpc-process.sh scripts/package-app.sh scripts/package-installer.sh scripts/production-readiness-preflight.sh scripts/progressive-production-rollout-preflight.sh scripts/build-location-probe-packages.sh scripts/audit-location-probe-packages.sh scripts/tests/test-production-readiness-preflight.sh scripts/tests/test-progressive-production-rollout-preflight.sh scripts/tests/test-progressive-production-automation.sh scripts/tests/test-location-probe-packaging.sh scripts/spikes/test-s1-package.sh scripts/spikes/test-s2-lifecycle.sh scripts/spikes/test-s3-keychain.sh scripts/spikes/test-s4-pi.sh scripts/spikes/test-s5-s7-local.sh scripts/spikes/test-s8-workflows.sh scripts/spikes/test-s9-topology.sh scripts/spikes/test-s10-ui.sh scripts/spikes/test-s11-herdr.sh scripts/spikes/test-s12-pi-tui.sh
 	./scripts/tests/test-production-readiness-preflight.sh
+	$(NODE) --check scripts/generate-progressive-production-release.mjs
+	$(NODE) --check scripts/tests/validate-progressive-rollout-expected.mjs
+	./scripts/tests/test-progressive-production-rollout-preflight.sh
 	./scripts/tests/test-location-probe-packaging.sh
 	/usr/bin/perl -c scripts/run-bounded-command.pl
 	/usr/bin/plutil -lint Packaging/app-component.plist
@@ -88,6 +91,10 @@ jidoka-code-test-s12-pi-tui:
 	./scripts/spikes/test-s12-pi-tui.sh
 
 jidoka-code-w7-acceptance: jidoka-code-check jidoka-code-test-ui jidoka-code-test-s4-preflight jidoka-code-test-s8-preflight
+
+jidoka-code-production-automation-acceptance:
+	./scripts/tests/test-progressive-production-rollout-preflight.sh
+	./scripts/tests/test-progressive-production-automation.sh
 
 jidoka-code-app:
 	./scripts/verify-toolchain.sh

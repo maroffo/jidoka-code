@@ -16,6 +16,14 @@ function absolute(value, name) {
   return value;
 }
 
+function foundationStandardPath(value) {
+  if (value === "/private/tmp") return "/tmp";
+  if (value.startsWith("/private/tmp/")) return `/tmp/${value.slice(13)}`;
+  if (value === "/private/var") return "/var";
+  if (value.startsWith("/private/var/")) return `/var/${value.slice(13)}`;
+  return value;
+}
+
 function exactKeys(value, expected) {
   return value && typeof value === "object" && !Array.isArray(value)
     && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
@@ -103,7 +111,9 @@ function pane(host, runRoot, cwd, runID) {
     cwd: privateDirectory(cwd, "pane cwd"),
     env: {
       JIDOKA_CODE_DEBUG_RELEASE_RUNTIME_ROOT: runtimeRoot,
-      JIDOKA_CODE_HERDR_RUN_ROOT: privateDirectory(runRoot, "run root"),
+      JIDOKA_CODE_HERDR_RUN_ROOT: foundationStandardPath(
+        privateDirectory(runRoot, "run root"),
+      ),
     },
     label: "triage",
     type: "pane",

@@ -284,7 +284,7 @@ struct GitProcessTests {
       script,
       """
       #!/bin/sh
-      /usr/bin/python3 -c 'import os,time; os.setsid(); open("\(pidFile.path)", "w").write(str(os.getpid())); os.close(1); os.close(2); time.sleep(30)' &
+      /usr/bin/python3 '\(ProcessIdentityFixtureRecord.sessionEscapeScript.path)' '\(pidFile.path)' &
       attempt=0
       while [ ! -s '\(pidFile.path)' ] && [ "$attempt" -lt 100 ]
       do
@@ -309,7 +309,7 @@ struct GitProcessTests {
           timeoutSeconds: 3
         ))
     }
-    let identity = try await recordedIdentity(at: pidFile)
+    let identity = try await ProcessIdentityFixtureRecord.load(from: pidFile)
     defer {
       if SupervisedProcessTracker.matches(identity) {
         _ = Darwin.kill(identity.processID, SIGKILL)
@@ -332,7 +332,7 @@ struct GitProcessTests {
       script,
       """
       #!/bin/sh
-      /usr/bin/python3 -c 'import os,time; os.setsid(); open("\(pidFile.path)", "w").write(str(os.getpid())); os.close(1); os.close(2); time.sleep(30)' &
+      /usr/bin/python3 '\(ProcessIdentityFixtureRecord.sessionEscapeScript.path)' '\(pidFile.path)' &
       attempt=0
       while [ ! -s '\(pidFile.path)' ] && [ "$attempt" -lt 100 ]
       do
@@ -356,7 +356,7 @@ struct GitProcessTests {
           timeoutSeconds: 0.5
         ))
     }
-    let identity = try await recordedIdentity(at: pidFile)
+    let identity = try await ProcessIdentityFixtureRecord.load(from: pidFile)
     defer {
       if SupervisedProcessTracker.matches(identity) {
         _ = Darwin.kill(identity.processID, SIGKILL)
@@ -388,17 +388,4 @@ struct GitProcessTests {
     }
   }
 
-  private func recordedIdentity(at pidFile: URL) async throws -> SupervisedProcessIdentity {
-    for _ in 0..<200 {
-      if let value = try? String(contentsOf: pidFile, encoding: .utf8)
-        .trimmingCharacters(in: .whitespacesAndNewlines),
-        let processID = pid_t(value),
-        let identity = SupervisedProcessTracker.identity(processID)
-      {
-        return identity
-      }
-      try await Task.sleep(for: .milliseconds(5))
-    }
-    throw GitProcessError.cleanupFailed
-  }
 }

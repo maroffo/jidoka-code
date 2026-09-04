@@ -1,0 +1,29 @@
+[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Emitting module JidokaCodeCoreTests
+[4/5] Compiling JidokaCodeCoreTests PiRPCWorkflowExecutorTests.swift
+[4/6] Write Objects.LinkFileList
+[5/6] Linking JidokaCodePackageTests
+Build complete! (3.60s)
+Test Suite 'Selected tests' started at 2026-09-04 00:28:55.624.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 00:28:55.625.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 00:28:55.625.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 00:28:55.625.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Production Pi RPC workflow adapter" started.
+◇ Test "read-only roles reject write paths and session directives stay canonical" started.
+◇ Test "unsafe application directories fail before the process runner" started.
+◇ Test "executor constructs the canonical launch from application-only preparation" started.
+◇ Test "application preparation cannot select the wrong model profile" started.
+✔ Test "application preparation cannot select the wrong model profile" passed after 0.031 seconds.
+✔ Test "executor constructs the canonical launch from application-only preparation" passed after 0.038 seconds.
+✔ Test "unsafe application directories fail before the process runner" passed after 0.039 seconds.
+✔ Test "read-only roles reject write paths and session directives stay canonical" passed after 0.047 seconds.
+✔ Suite "Production Pi RPC workflow adapter" passed after 0.047 seconds.
+✔ Test run with 4 tests in 1 suite passed after 0.047 seconds.

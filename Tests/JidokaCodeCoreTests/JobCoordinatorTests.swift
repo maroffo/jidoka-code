@@ -14,6 +14,36 @@ struct JobCoordinatorTests {
     #expect(classification == .piInterruptedUnknown)
   }
 
+  @Test("W0: an unscoped pass cannot dispatch two serial queued jobs")
+  func unscopedPassDoesNotWalkQueue() async throws {
+    let fixture = try await JobCoordinatorFixture()
+    defer { fixture.remove() }
+    let repository = try await fixture.addRepository(activateDispatch: false)
+    try await fixture.configuration.setMaxConcurrency(1, now: fixture.now)
+    for number in 1...2 {
+      _ = try await fixture.jobs.createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repository.id,
+          kind: .prReview,
+          objectNodeID: "unscoped-pr-\(number)",
+          revisionKey: String(repeating: String(number), count: 40)
+        ),
+        objectNumber: number,
+        contractVersionUsed: "w0-rollout-baseline",
+        priority: .prReview,
+        firstStep: .review,
+        now: fixture.now.addingTimeInterval(TimeInterval(number))
+      )
+    }
+
+    await fixture.coordinator().run(
+      pass: SchedulerPass(reasons: [.resume], startedAt: fixture.now)
+    )
+
+    #expect(await fixture.workflows.order().isEmpty)
+    #expect(try await fixture.jobs.jobs().allSatisfy { $0.state == .queued })
+  }
+
   @Test("one pass discovers and dispatches PR, implementation, and triage in locked priority")
   func discoveryAndPriority() async throws {
     let fixture = try await JobCoordinatorFixture()
@@ -85,8 +115,8 @@ struct JobCoordinatorTests {
     #expect(try await fixture.jobs.job(id: jobs[1].id)?.state == .queued)
   }
 
-  @Test("repository disable is not a selector for an already queued job")
-  func disabledRepositoryDoesNotFilterQueue() async throws {
+  @Test("W0: repository flag drift leaves an already queued job inert")
+  func disabledRepositoryFiltersQueuedJob() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
     let repository = try await fixture.addRepository()
@@ -126,8 +156,8 @@ struct JobCoordinatorTests {
       pass: SchedulerPass(reasons: [.manual], startedAt: fixture.now)
     )
 
-    #expect((await fixture.workflows.order()) == [.prReview])
-    #expect(try await fixture.jobs.job(id: job.id)?.state == .blocked)
+    #expect((await fixture.workflows.order()).isEmpty)
+    #expect(try await fixture.jobs.job(id: job.id)?.state == .queued)
   }
 
   @Test("reconciliation dispatch runs before any new discovery read")
@@ -171,8 +201,8 @@ struct JobCoordinatorTests {
     #expect(try await fixture.jobs.job(id: job.id)?.state == .blocked)
   }
 
-  @Test("dispatch gate preserves recovery but suppresses discovery and new jobs")
-  func dispatchGate() async throws {
+  @Test("W0: pause suppresses unbound recovery as well as discovery")
+  func pausedDispatchGateSuppressesRecovery() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
     let repository = try await fixture.addRepository()
@@ -211,8 +241,8 @@ struct JobCoordinatorTests {
     let jobs = try await fixture.jobs.jobs()
     #expect(jobs.count == 1)
     #expect(jobs.first?.id == recoveryJob.id)
-    #expect(jobs.first?.state == .blocked)
-    #expect((await fixture.events.values()).contains("workflow:prReview:reconciling"))
+    #expect(jobs.first?.state == .reconciliationQueued)
+    #expect(!(await fixture.events.values()).contains("workflow:prReview:reconciling"))
     #expect(!(await fixture.events.values()).contains("api:pulls"))
     #expect(!(await fixture.events.values()).contains("api:issues"))
     #expect((await coordinator.snapshot()).failures.isEmpty)
@@ -468,7 +498,7 @@ struct JobCoordinatorTests {
     #expect(retrying.notBefore == fixture.now.addingTimeInterval(1))
   }
 
-  @Test("paused passes promote exactly-due and overdue retries but not future deadlines")
+  @Test("paused legacy passes promote exactly-due and overdue retries but not future deadlines")
   func retryDeadlineBoundaries() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
@@ -648,9 +678,17 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
     try await configuration.setProviderDisclosureAcknowledged(true, now: now)
     try await configuration.setLoginItem(selected: true, status: .enabled, now: now)
     try await configuration.setOnboardingComplete(true, now: now)
+    try await database.execute(
+      """
+      UPDATE app_settings
+      SET github_account = 'owner', github_author_id = 1, updated_at = ?
+      WHERE singleton = 1
+      """,
+      bindings: [.real(now.timeIntervalSince1970)]
+    )
   }
 
-  func addRepository() async throws -> RepositoryConfiguration {
+  func addRepository(activateDispatch: Bool = true) async throws -> RepositoryConfiguration {
     let repository = RepositoryConfiguration(
       id: UUID(),
       nodeID: "repository-node",
@@ -663,7 +701,103 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
       enabled: true
     )
     try await configuration.upsertRepository(repository, now: now)
+    if activateDispatch {
+      try await activateCompatibilityScope(repository: repository)
+    }
     return repository
+  }
+
+  private func activateCompatibilityScope(repository: RepositoryConfiguration) async throws {
+    let authority = RolloutAuthorityStore(
+      database: database,
+      enforceFinitePromotion: false
+    )
+    let baseEvidence = try await authority.localEvidence(repositoryID: repository.id)
+    let digest = String(repeating: "a", count: 64)
+    let previewExpiresAt = now.addingTimeInterval(600)
+    let windowExpiresAt = now.addingTimeInterval(3_600)
+    let scope = RolloutScope(
+      mode: .finiteWindow,
+      stage: .prReview,
+      repository: RolloutRepositoryIdentity(
+        id: repository.id,
+        nodeID: repository.nodeID,
+        owner: repository.owner,
+        name: repository.name,
+        defaultBranch: repository.defaultBranch,
+        enabled: repository.enabled,
+        reviewEnabled: repository.reviewEnabled,
+        triageEnabled: repository.triageEnabled,
+        implementationEnabled: repository.implementationEnabled
+      ),
+      object: nil,
+      finiteWindow: RolloutFiniteWindowSelector(
+        maximumJobs: 1,
+        expiresAtMilliseconds: Int64(windowExpiresAt.timeIntervalSince1970 * 1_000),
+        observedObjectNumberUpperBound: 1,
+        maximumFutureObjectNumber: 1,
+        candidates: [
+          RolloutWindowCandidate(
+            ordinal: 0,
+            nodeID: "compatibility-candidate",
+            number: 1,
+            revisionKey: String(repeating: "1", count: 40),
+            canonicalInputSHA256: String(repeating: "b", count: 64)
+          )
+        ]
+      )
+    )
+    let evidence = try await authority.localEvidence(scope: scope, jobBinding: nil)
+    let input = RolloutPreviewInput(
+      releaseIdentity: RolloutReleaseIdentity(
+        sourceCommit: String(repeating: "1", count: 40),
+        sourceTree: String(repeating: "2", count: 40),
+        bundleVersion: "0.2.0",
+        bundleBuild: 3,
+        applicationSHA256: digest,
+        helperSHA256: digest,
+        herdrHostSHA256: digest,
+        schemaVersion: 10,
+        engineProtocolVersion: 12,
+        runtimeManifestSHA256: digest,
+        runtimeTreeSHA256: digest,
+        modelProfilesSHA256: baseEvidence.modelProfilesSHA256,
+        workflowResourcesSHA256: digest,
+        githubAccount: "owner",
+        githubAuthorID: 1,
+        repositoryConfigurationSHA256: baseEvidence.repositoryConfigurationSHA256,
+        maxConcurrency: 1
+      ),
+      scope: scope,
+      budgets: RolloutBudgets(
+        jobs: 1,
+        githubReadRequests: 10,
+        githubReadPages: 10,
+        githubReadBytes: 1_000_000,
+        gitRemoteReads: 0,
+        providerSessions: 4,
+        approvedCommands: 0,
+        markerParts: 1,
+        labelWrites: 0,
+        branchCreates: 0,
+        pullRequestCreates: 0,
+        githubSends: 1,
+        gitSends: 0
+      ),
+      inventory: evidence.inventory,
+      missingLabels: [],
+      commands: [],
+      jobBinding: nil,
+      createdAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+      expiresAtMilliseconds: Int64(previewExpiresAt.timeIntervalSince1970 * 1_000)
+    )
+    let preview = try await authority.preview(input: input)
+    _ = try await authority.activate(
+      approvedCanonicalJSON: preview.canonicalJSON,
+      confirmedSHA256: preview.sha256,
+      recomputedInput: input,
+      now: now.addingTimeInterval(1)
+    )
   }
 
   func coordinator(

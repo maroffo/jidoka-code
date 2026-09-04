@@ -3,6 +3,7 @@ import Foundation
 public struct GitHubMarkerPublicationRequest: Sendable {
   public let jobID: UUID
   public let operation: MutationOperation
+  public let repositoryID: UUID
   public let repository: GitHubRepositoryCoordinates
   public let repositoryNodeID: String
   public let objectNodeID: String
@@ -17,6 +18,7 @@ public struct GitHubMarkerPublicationRequest: Sendable {
   public init(
     jobID: UUID,
     operation: MutationOperation,
+    repositoryID: UUID,
     repository: GitHubRepositoryCoordinates,
     repositoryNodeID: String,
     objectNodeID: String,
@@ -30,6 +32,7 @@ public struct GitHubMarkerPublicationRequest: Sendable {
   ) {
     self.jobID = jobID
     self.operation = operation
+    self.repositoryID = repositoryID
     self.repository = repository
     self.repositoryNodeID = repositoryNodeID
     self.objectNodeID = objectNodeID
@@ -46,6 +49,7 @@ public struct GitHubMarkerPublicationRequest: Sendable {
     GitHubMarkerPublicationRequest(
       jobID: jobID,
       operation: operation,
+      repositoryID: repositoryID,
       repository: repository,
       repositoryNodeID: repositoryNodeID,
       objectNodeID: objectNodeID,
@@ -134,6 +138,7 @@ public actor GitHubMarkerPublisher {
   private let executor: GitHubMutationExecutor
   private let intents: MutationIntentStore
   private let reads: any GitHubMutationReadAPI
+  private let authority: any RolloutEffectAuthorizing
   private let canaryAuthorizer: (any JobCanaryMarkerAuthorizing)?
   private let sleeper: any MutationReconciliationSleeper
   private let now: @Sendable () -> Date
@@ -142,6 +147,7 @@ public actor GitHubMarkerPublisher {
     executor: GitHubMutationExecutor,
     intents: MutationIntentStore,
     reads: any GitHubMutationReadAPI,
+    authority: any RolloutEffectAuthorizing,
     canaryAuthorizer: (any JobCanaryMarkerAuthorizing)? = nil,
     sleeper: any MutationReconciliationSleeper = SystemMutationReconciliationSleeper(),
     now: @escaping @Sendable () -> Date = Date.init
@@ -149,6 +155,7 @@ public actor GitHubMarkerPublisher {
     self.executor = executor
     self.intents = intents
     self.reads = reads
+    self.authority = authority
     self.canaryAuthorizer = canaryAuthorizer
     self.sleeper = sleeper
     self.now = now
@@ -200,7 +207,7 @@ public actor GitHubMarkerPublisher {
     )
     let target =
       "\(request.repository.owner)/\(request.repository.repository)/issues/\(request.number)"
-    var entries: [(part: GitHubMarkerPart, key: String, intent: MutationIntentRecord?)] = []
+    var entries: [(part: GitHubMarkerPart, key: String, intent: MutationIntentRecord)] = []
     entries.reserveCapacity(parts.count)
     for part in parts {
       let key = Self.partIdempotencyKey(
@@ -208,29 +215,67 @@ public actor GitHubMarkerPublisher {
         index: part.index,
         payloadSHA256: part.payloadSHA256
       )
-      entries.append((part, key, try await intents.intent(idempotencyKey: key)))
+      let operation = GitHubOperation.createComment(
+        owner: request.repository.owner,
+        repository: request.repository.repository,
+        number: request.number,
+        body: part.body
+      )
+      let prepared = try await intents.prepare(
+        jobID: request.jobID,
+        idempotencyKey: key,
+        operation: request.operation,
+        target: target,
+        expectedStateDigest: documentSHA256,
+        requestDigest: try GitHubMutationExecutor.requestDigest(operation),
+        now: request.now
+      )
+      entries.append((part, key, prepared))
     }
-    var dispatched = entries.compactMap(\.intent)
+    let freshIntents = entries.compactMap { entry -> UUID? in
+      entry.intent.state == .prepared || entry.intent.state == .retryAllowed
+        ? entry.intent.id : nil
+    }
+    if !freshIntents.isEmpty {
+      _ = try await authority.reserveMarkerBatch(
+        RolloutMarkerBatchEffect(
+          jobID: request.jobID,
+          operation: request.operation,
+          repositoryID: request.repositoryID,
+          repository: request.repository,
+          repositoryNodeID: request.repositoryNodeID,
+          objectNodeID: request.objectNodeID,
+          objectNumber: request.number,
+          revision: request.revision,
+          markerKind: request.kind,
+          authorID: request.authorID,
+          documentSHA256: documentSHA256,
+          generation: request.generation,
+          intentIDs: freshIntents
+        ),
+        now: request.now
+      )
+    }
+    var dispatched = entries.map(\.intent)
     var stopSending = false
     for entry in entries {
       if stopSending { continue }
-      if let existing = entry.intent {
-        switch existing.state {
-        case .prepared, .retryAllowed:
-          break
-        case .sendStarted, .reconcileRequired:
-          stopSending = true
-          continue
-        case .attributed:
-          continue
-        case .escalated:
-          return try await escalatedResult(
-            identity: identity,
-            documentSHA256: documentSHA256,
-            intents: dispatched,
-            evidence: existing.readBackEvidence
-          )
-        }
+      let existing = entry.intent
+      switch existing.state {
+      case .prepared, .retryAllowed:
+        break
+      case .sendStarted, .reconcileRequired:
+        stopSending = true
+        continue
+      case .attributed:
+        continue
+      case .escalated:
+        return try await escalatedResult(
+          identity: identity,
+          documentSHA256: documentSHA256,
+          intents: dispatched,
+          evidence: existing.readBackEvidence
+        )
       }
       do {
         let dispatch = try await executor.prepareAndSend(
@@ -299,6 +344,7 @@ public actor GitHubMarkerPublisher {
     let reconciler = MutationReconciliationRunner(
       store: intents,
       reader: reader,
+      authority: authority,
       sleeper: sleeper,
       now: now
     )
@@ -309,12 +355,13 @@ public actor GitHubMarkerPublisher {
     switch settled.state {
     case .attributed:
       for intent in dispatched where intent.id != settled.id {
-        _ = try await intents.settle(
+        let attributed = try await intents.settle(
           id: intent.id,
           outcome: .attributableEffect,
           evidenceDigest: evidence,
           now: now()
         )
+        try await recordSettlement(attributed, evidenceSHA256: evidence)
       }
       let comments = try await reads.listComments(
         owner: request.repository.owner,
@@ -360,12 +407,13 @@ public actor GitHubMarkerPublisher {
   ) async throws -> GitHubMarkerPublicationResult {
     let digest = evidence ?? Self.digest([identity.idempotencyKey, "escalated"])
     for intent in values where !intent.state.isTerminal {
-      _ = try await intents.settle(
+      let escalated = try await intents.settle(
         id: intent.id,
         outcome: .escalation,
         evidenceDigest: digest,
         now: now()
       )
+      try await recordSettlement(escalated, evidenceSHA256: digest)
     }
     return GitHubMarkerPublicationResult(
       disposition: .escalated,
@@ -374,6 +422,26 @@ public actor GitHubMarkerPublisher {
       comments: [],
       intentIDs: values.map(\.id),
       evidenceDigest: digest
+    )
+  }
+
+  private func recordSettlement(
+    _ intent: MutationIntentRecord,
+    evidenceSHA256: String
+  ) async throws {
+    if intent.state == .attributed {
+      try await authority.recordMutationObservation(
+        intentID: intent.id,
+        observation: .attributed,
+        evidenceSHA256: evidenceSHA256,
+        now: now()
+      )
+    }
+    try await authority.recordMutationObservation(
+      intentID: intent.id,
+      observation: .settled,
+      evidenceSHA256: evidenceSHA256,
+      now: now()
     )
   }
 

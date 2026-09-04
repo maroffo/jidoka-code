@@ -67,6 +67,22 @@ public struct MenuBarContentView: View {
         }
       }
 
+      if let rollout = model.state?.rollout {
+        Divider()
+        Text("Progressive rollout")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        Text(rolloutSummary(rollout))
+          .lineLimit(3)
+          .accessibilityLabel("Rollout: \(rolloutSummary(rollout))")
+        Text("Preview digest: \(rollout.status.authorization.previewSHA256)")
+          .font(.caption.monospaced())
+          .lineLimit(1)
+        Text(remainingBudgetSummary(rollout.status.remainingBudgets))
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
       Divider()
       Button("Poll Now", systemImage: "arrow.clockwise") {
         Task { await model.pollNow() }
@@ -82,14 +98,17 @@ public struct MenuBarContentView: View {
           .accessibilityLabel("Polling unavailable: \(reason)")
       }
 
-      Button(
-        model.state?.paused == true ? "Resume" : "Pause",
-        systemImage: model.state?.paused == true ? "play.fill" : "pause.fill"
-      ) {
-        Task { await model.togglePaused() }
+      Button("Stop and Drain", systemImage: "stop.circle") {
+        Task { await model.stopAndDrain() }
       }
-      .disabled(!model.canPauseOrResume)
-      .accessibilityIdentifier(JidokaAccessibilityID.pauseResume)
+      .disabled(!model.canStopAndDrain)
+      .accessibilityIdentifier(JidokaAccessibilityID.rolloutStop)
+
+      Button("Preview Recovery", systemImage: "arrow.trianglehead.2.clockwise.rotate.90") {
+        Task { await model.previewRecovery() }
+      }
+      .disabled(!model.canPreviewRecovery)
+      .accessibilityIdentifier(JidokaAccessibilityID.rolloutRecovery)
 
       Button("Open in Herdr", systemImage: "rectangle.inset.focused") {
         Task { await model.focusInHerdr() }
@@ -143,6 +162,39 @@ public struct MenuBarContentView: View {
           + "Generation: \(mutation.mutationGeneration)"
       )
     }
+    .confirmationDialog(
+      "Execute this readback-only recovery?",
+      isPresented: Binding(
+        get: { model.recoveryPreview != nil },
+        set: { if !$0 { model.cancelRecovery() } }
+      ),
+      titleVisibility: .visible,
+      presenting: model.recoveryPreview
+    ) { _ in
+      Button("Execute Exact Recovery") {
+        Task { await model.executeRecovery() }
+      }
+      Button("Cancel", role: .cancel) { model.cancelRecovery() }
+    } message: { preview in
+      Text(
+        "Recovery digest: \(preview.sha256)\n"
+          + "Readback-only effects: \(preview.payload.effects.filter { $0.readbackOnly }.count)\n"
+          + "Fresh provider, command, Git, and GitHub sends remain denied."
+      )
+    }
+  }
+
+  private func rolloutSummary(_ report: RolloutOperatorReport) -> String {
+    let scope = report.status.scope
+    let object = scope.object.map { " #\($0.number)" } ?? ""
+    return "\(report.status.authorization.state.rawValue): \(scope.repository.owner)/"
+      + "\(scope.repository.name), \(scope.stage.rawValue)\(object)"
+  }
+
+  private func remainingBudgetSummary(_ budgets: RolloutBudgets) -> String {
+    "Remaining: \(budgets.jobs) jobs, \(budgets.providerSessions) provider sessions, "
+      + "\(budgets.githubReadRequests) GitHub reads, \(budgets.githubSends) GitHub sends, "
+      + "\(budgets.gitSends) Git sends."
   }
 
   private func ambiguousSummary(_ mutation: EngineAmbiguousMutation) -> String {
@@ -399,6 +451,7 @@ public struct SettingsView: View {
       VStack(alignment: .leading, spacing: 24) {
         settingsHeader
         repositoriesSection
+        rolloutSection
         modelsSection
         credentialSection
         automationSection
@@ -549,6 +602,102 @@ public struct SettingsView: View {
       }
       .labelStyle(.iconOnly)
       .buttonStyle(.borderless)
+    }
+  }
+
+  private var rolloutSection: some View {
+    settingsCard(title: "Progressive Rollout", systemImage: "checkmark.shield") {
+      VStack(alignment: .leading, spacing: 12) {
+        Text(
+          "Paste canonical base64 rollout input produced by the source-controlled CLI. "
+            + "Previewing is read-only. Activation requires the exact displayed digest."
+        )
+        .foregroundStyle(.secondary)
+
+        TextEditor(text: $model.rolloutInputBase64)
+          .font(.system(.caption, design: .monospaced))
+          .frame(minHeight: 72, maxHeight: 120)
+          .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+          .accessibilityLabel("Canonical base64 rollout input")
+          .accessibilityIdentifier(JidokaAccessibilityID.rolloutInput)
+
+        Button("Build Read-only Preview", systemImage: "doc.text.magnifyingglass") {
+          Task { await model.previewRollout() }
+        }
+        .disabled(!model.canPreviewRollout)
+        .accessibilityIdentifier(JidokaAccessibilityID.rolloutPreview)
+
+        if let preview = model.pendingRolloutPreview {
+          Divider()
+          let scope = preview.payload.scope
+          Text("Target: \(scope.repository.owner)/\(scope.repository.name)")
+            .font(.headline)
+          Text("Stage: \(scope.stage.rawValue), mode: \(scope.mode.rawValue)")
+          if let object = scope.object {
+            Text("Object: #\(object.number), revision: \(object.revisionKey)")
+            Text("Current durable step: \(object.currentStep)")
+          }
+          Text("Expires: \(preview.payload.expiresAtMilliseconds)")
+          Text("Preview SHA-256: \(preview.sha256)")
+            .font(.system(.caption, design: .monospaced))
+            .textSelection(.enabled)
+
+          Text(
+            "Predicted effect envelope from "
+              + "\(preview.payload.effectEnvelope.stage.rawValue)/"
+              + preview.payload.effectEnvelope.currentStep
+          )
+          .font(.subheadline.weight(.semibold))
+          ForEach(preview.payload.effectEnvelope.allowances, id: \.kind) { allowance in
+            Text("\(allowance.kind.rawValue): at most \(allowance.maximumCount)")
+              .font(.caption)
+          }
+          if !preview.payload.missingLabels.isEmpty {
+            Text("Missing labels")
+              .font(.subheadline.weight(.semibold))
+            ForEach(preview.payload.missingLabels, id: \.name) { label in
+              Text("\(label.name), #\(label.color), \(label.description)")
+                .font(.caption)
+            }
+          }
+          if !preview.payload.commands.isEmpty {
+            Text("Approved commands")
+              .font(.subheadline.weight(.semibold))
+            ForEach(preview.payload.commands, id: \.ordinal) { command in
+              Text(
+                "\(command.ordinal): \(command.commandID), definition "
+                  + "\(command.definitionSHA256), plan \(command.frozenPlanSHA256), "
+                  + "workspace \(command.workspaceHeadSHA)"
+              )
+              .font(.caption.monospaced())
+            }
+          }
+          Text(String(decoding: preview.canonicalJSON, as: UTF8.self))
+            .font(.system(.caption2, design: .monospaced))
+            .textSelection(.enabled)
+            .lineLimit(12)
+            .accessibilityLabel("Complete canonical rollout preview")
+            .accessibilityIdentifier(JidokaAccessibilityID.rolloutCanonical)
+
+          TextField(
+            "Type the complete preview SHA-256 to authorize", text: $model.rolloutConfirmationSHA256
+          )
+          .textFieldStyle(.roundedBorder)
+          .font(.system(.body, design: .monospaced))
+          .accessibilityIdentifier(JidokaAccessibilityID.rolloutConfirmation)
+          HStack {
+            Button("Authorize and Run Exact Preview", systemImage: "play.shield") {
+              Task { await model.activateRollout() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!model.canActivateRollout)
+            .accessibilityIdentifier(JidokaAccessibilityID.rolloutActivate)
+            Button("Discard Preview", role: .cancel) {
+              model.clearRolloutPreview()
+            }
+          }
+        }
+      }
     }
   }
 
@@ -729,13 +878,10 @@ public struct SettingsView: View {
   private var automationSection: some View {
     settingsCard(title: "Automation", systemImage: "gearshape.2") {
       VStack(alignment: .leading, spacing: 14) {
-        Stepper(value: $model.maxConcurrency, in: 1...8) {
-          Text("Maximum concurrent jobs: \(model.maxConcurrency)")
-        }
-        Button("Save Concurrency") {
-          Task { await model.saveMaxConcurrency() }
-        }
-        .disabled(model.isWorking)
+        Text("Maximum concurrent jobs: 1")
+        Text("Progressive production rollout remains serial for this release.")
+          .foregroundStyle(.secondary)
+          .disabled(model.isWorking)
 
         Divider()
 

@@ -1,0 +1,27 @@
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.10s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.10s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+Pi runtime attestation tests: PASS
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.11s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrHost' complete! (0.10s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrFixture' complete! (0.10s)
+file:///private/tmp/jidoka-code-progressive-production-automation/scripts/spikes/herdr-s12-fixture.mjs:10
+  throw new Error(`herdr s12 fixture failed: ${message}`);
+        ^
+
+Error: herdr s12 fixture failed: herdr s12 fixture failed: unsafe release runtime root
+    at fail (file:///private/tmp/jidoka-code-progressive-production-automation/scripts/spikes/herdr-s12-fixture.mjs:10:9)
+    at file:///private/tmp/jidoka-code-progressive-production-automation/scripts/spikes/herdr-s12-fixture.mjs:291:3
+
+Node.js v26.7.0
+S12 artifacts retained at /tmp/jidoka-code-progressive-production-automation/build/evidence/jidoka-herdr-s12.ZuihXn

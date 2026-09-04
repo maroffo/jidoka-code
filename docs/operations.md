@@ -1,5 +1,9 @@
 # Jidoka Code operations
 
+Progressive production authority for release `0.2.0` build `3` is documented in
+`docs/operations/progressive-production-rollout.md`. Its source-only and installed-stopped
+preflight is separate from the historical `0.1.1` cutover procedure below.
+
 ## Runtime prerequisites
 
 Jidoka Code requires macOS 14 or later and an external Herdr runtime. The compatibility policy accepts only Herdr `0.8.2`, socket protocol `20`, the approved arm64 executable digest, and the approved bundled API schema digest.

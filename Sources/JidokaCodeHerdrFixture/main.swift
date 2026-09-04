@@ -67,7 +67,8 @@ enum JidokaCodeHerdrFixtureMain {
     let workflow = try PiWorkflowRuntimeConfiguration.load(from: workflowConfigurationURL)
     guard tui.workflow == workflow.workflow,
       tui.role == workflow.role,
-      tui.workspaceRoot.path == workflow.workspaceRoot.resolvingSymlinksInPath().path
+      tui.workspaceRoot.resolvingSymlinksInPath().path
+        == workflow.workspaceRoot.resolvingSymlinksInPath().path
     else {
       throw HerdrHostError.invalidDescriptor
     }
@@ -147,7 +148,8 @@ enum JidokaCodeHerdrFixtureMain {
         workflow.role == .triage,
         workflow.nonce == specification.workflowNonce,
         workflow.artifactSHA256 == specification.artifactSHA256,
-        workflow.workspaceRoot.path == workspace.path,
+        workflow.workspaceRoot.resolvingSymlinksInPath().path
+          == workspace.resolvingSymlinksInPath().path,
         workflow.resources == resources.workflowResources
       else {
         throw HerdrHostError.invalidDescriptor
@@ -250,9 +252,13 @@ enum JidokaCodeHerdrFixtureMain {
         settlement: settlement,
         resolvedRuntime: resolvedRuntime
       )
+      let descriptorRoot = URL(
+        fileURLWithPath: specification.runRoot,
+        isDirectory: true
+      ).standardizedFileURL
       let digest = try HerdrHostDescriptorStore.prepareDebugFixture(
         descriptor,
-        in: URL(fileURLWithPath: specification.runRoot, isDirectory: true),
+        in: descriptorRoot,
         resolvedRuntime: resolvedRuntime
       )
       let evidence = H3PreparationEvidence(

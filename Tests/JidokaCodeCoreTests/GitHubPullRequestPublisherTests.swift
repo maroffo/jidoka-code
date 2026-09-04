@@ -162,10 +162,16 @@ private final class PullRequestPublisherFixture: @unchecked Sendable {
     let headSHA = String(repeating: "b", count: 40)
     api = PullRequestPublisherAPI(mode: mode, headSHA: headSHA)
     let intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     publisher = GitHubPullRequestPublisher(
-      executor: GitHubMutationExecutor(intents: intents, broker: api),
+      executor: GitHubMutationExecutor(
+        intents: intents,
+        broker: api,
+        authority: authority
+      ),
       intents: intents,
       reads: api,
+      authority: authority,
       sleeper: PullRequestPublisherImmediateSleeper(),
       now: { Date(timeIntervalSince1970: 140_001) }
     )
@@ -201,12 +207,12 @@ private actor PullRequestPublisherAPI: GitHubMutationReadAPI, GitHubMutationSend
 
   func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse {
     if mode == .throwBeforeSend {
       throw URLError(.networkConnectionLost)
     }
-    try await beforeSend()
+    _ = try await beforeSend()
     sendCount += 1
     guard case .createPullRequest(_, _, let request) = operation else {
       throw PullRequestPublisherFixtureError.unexpectedOperation

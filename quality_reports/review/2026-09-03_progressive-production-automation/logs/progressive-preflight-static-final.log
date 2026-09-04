@@ -1,0 +1,1 @@
+progressive-production-rollout-preflight: PASS stage=static credentialReads=0 providerCalls=0 githubMutations=0 gitRemoteReads=0

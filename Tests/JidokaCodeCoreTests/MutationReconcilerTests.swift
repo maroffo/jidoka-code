@@ -188,6 +188,7 @@ struct MutationReconcilerTests {
     let runner = MutationReconciliationRunner(
       store: fixture.store,
       reader: reader,
+      authority: ExplicitTestRolloutEffectAuthority(),
       sleeper: sleeper,
       now: { Date(timeIntervalSince1970: 10_001) }
     )
@@ -219,6 +220,7 @@ struct MutationReconcilerTests {
     let runner = MutationReconciliationRunner(
       store: fixture.store,
       reader: reader,
+      authority: ExplicitTestRolloutEffectAuthority(),
       sleeper: sleeper,
       now: { Date(timeIntervalSince1970: 10_002) }
     )

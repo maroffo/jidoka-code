@@ -120,6 +120,17 @@ struct ApprovedCommandRunStoreTests {
       )
     }
 
+    _ = try await fixture.database.execute(
+      "UPDATE jobs SET state = 'blocked' WHERE id = ?",
+      bindings: [.text(fixture.job.id.uuidString.lowercased())]
+    )
+    await #expect(throws: ApprovedCommandRunStoreError.identityCollision) {
+      _ = try await fixture.store.start(runID: prepared.id)
+    }
+    _ = try await fixture.database.execute(
+      "UPDATE jobs SET state = 'runningPi' WHERE id = ?",
+      bindings: [.text(fixture.job.id.uuidString.lowercased())]
+    )
     try await fixture.configuration.setPaused(
       true,
       now: Date(timeIntervalSince1970: 200_001)
@@ -128,17 +139,6 @@ struct ApprovedCommandRunStoreTests {
       _ = try await fixture.store.start(runID: prepared.id)
     }
     #expect(try await fixture.store.run(id: prepared.id)?.state == .prepared)
-    try await fixture.configuration.setPaused(
-      false,
-      now: Date(timeIntervalSince1970: 200_002)
-    )
-    _ = try await fixture.database.execute(
-      "UPDATE jobs SET state = 'blocked' WHERE id = ?",
-      bindings: [.text(fixture.job.id.uuidString.lowercased())]
-    )
-    await #expect(throws: ApprovedCommandRunStoreError.identityCollision) {
-      _ = try await fixture.store.start(runID: prepared.id)
-    }
     await #expect(throws: SQLiteStoreError.self) {
       _ = try await fixture.database.execute(
         "UPDATE approved_command_runs SET state = 'started' WHERE id = ?",
@@ -273,8 +273,10 @@ private final class ApprovedCommandStoreFixture: @unchecked Sendable {
   let jobs: DurableJobStore
   let store: ApprovedCommandRunStore
   let repositoryID: UUID
+  let repository: RepositoryConfiguration
   let job: JobRecord
   let workspaceIdentity: ApprovedCommandWorkspaceIdentity
+  private var rolloutAuthority: RolloutAuthorityStore?
 
   init(prefix: String) async throws {
     root = try makeApprovedCommandTemporaryDirectory(prefix: prefix)
@@ -287,18 +289,19 @@ private final class ApprovedCommandStoreFixture: @unchecked Sendable {
     database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
     configuration = ConfigurationStore(database: database)
     repositoryID = UUID()
+    repository = RepositoryConfiguration(
+      id: repositoryID,
+      nodeID: "repository-\(repositoryID.uuidString.lowercased())",
+      owner: "owner",
+      name: "repo",
+      defaultBranch: "main",
+      reviewEnabled: true,
+      triageEnabled: true,
+      implementationEnabled: true,
+      enabled: true
+    )
     try await configuration.upsertRepository(
-      RepositoryConfiguration(
-        id: repositoryID,
-        nodeID: "repository-\(repositoryID.uuidString.lowercased())",
-        owner: "owner",
-        name: "repo",
-        defaultBranch: "main",
-        reviewEnabled: true,
-        triageEnabled: true,
-        implementationEnabled: true,
-        enabled: true
-      ),
+      repository,
       now: Date(timeIntervalSince1970: 200_000)
     )
     jobs = DurableJobStore(database: database)
@@ -354,7 +357,18 @@ private final class ApprovedCommandStoreFixture: @unchecked Sendable {
     plan: FrozenCommandPlan,
     ordinal: Int = 0
   ) async throws -> ApprovedCommandRunRecord {
-    try await store.prepare(
+    if rolloutAuthority == nil {
+      rolloutAuthority = try await activateTestImplementationRollout(
+        database: database,
+        repository: repository,
+        job: job,
+        plan: plan,
+        workspaceHeadSHA: String(repeating: "a", count: 40),
+        now: Date(timeIntervalSince1970: 200_000),
+        currentTime: { Date(timeIntervalSince1970: 200_002) }
+      )
+    }
+    return try await store.prepare(
       job: job,
       phase: .bootstrap,
       round: 1,

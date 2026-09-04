@@ -1,0 +1,17 @@
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.21s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.11s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrHost' complete! (0.19s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrFixture' complete! (0.11s)
+S11 Herdr failed: split layout export unavailable
+S11 artifacts retained at /private/tmp/jidoka-code-progressive-production-automation/build/evidence/jidoka-herdr-s11.4jLVXD

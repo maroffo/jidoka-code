@@ -1,0 +1,16 @@
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.10s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrHost' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrFixture' complete! (0.10s)
+S11 Herdr isolated E2E: PASS
+session=jidoka-s11-8puqht workspace=w2 panes=w2:p2,w2:p3 default_socket_contacts=0
+roles=plan,review launch=exact-argv lifecycle=custom-no-session-ref child_herdr_env=0 focus_changes=0 terminal_close=after-done

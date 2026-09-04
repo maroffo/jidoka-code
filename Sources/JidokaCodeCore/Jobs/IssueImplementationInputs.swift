@@ -4,6 +4,7 @@ public struct PreparedIssueImplementationJob: Sendable {
   public let repository: RepositoryConfiguration
   public let issue: GitHubIssue
   public let comments: [GitHubComment]
+  public let labels: [GitHubLabel]
   public let workflowLabels: Set<String>
   public let issueRevision: IssueRevision
   public let baseRevision: BaseRevision
@@ -17,6 +18,7 @@ public struct PreparedIssueImplementationJob: Sendable {
     repository: RepositoryConfiguration,
     issue: GitHubIssue,
     comments: [GitHubComment],
+    labels: [GitHubLabel],
     workflowLabels: Set<String>,
     issueRevision: IssueRevision,
     baseRevision: BaseRevision,
@@ -29,6 +31,7 @@ public struct PreparedIssueImplementationJob: Sendable {
     self.repository = repository
     self.issue = issue
     self.comments = comments
+    self.labels = labels
     self.workflowLabels = workflowLabels
     self.issueRevision = issueRevision
     self.baseRevision = baseRevision
@@ -158,6 +161,7 @@ public struct SystemIssueImplementationJobPreparer: IssueImplementationJobPrepar
       repository: repository,
       issue: issue,
       comments: comments,
+      labels: labels,
       workflowLabels: Set(
         labels.map(\.name).filter(Self.isWorkflowLabel).map { $0.lowercased() }
       ),
@@ -171,7 +175,7 @@ public struct SystemIssueImplementationJobPreparer: IssueImplementationJobPrepar
     )
   }
 
-  private static func branch(number: Int, title: String) throws -> String {
+  static func branch(number: Int, title: String) throws -> String {
     let lowered = title.lowercased()
     var slug = ""
     var pendingSeparator = false
@@ -196,7 +200,7 @@ public struct SystemIssueImplementationJobPreparer: IssueImplementationJobPrepar
     return value
   }
 
-  private static func artifact(
+  static func artifact(
     repository: RepositoryConfiguration,
     issue: GitHubIssue,
     comments: [GitHubComment],
@@ -245,7 +249,7 @@ public struct SystemIssueImplementationJobPreparer: IssueImplementationJobPrepar
     return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
   }
 
-  private static func isWorkflowLabel(_ value: String) -> Bool {
+  static func isWorkflowLabel(_ value: String) -> Bool {
     let lowered = value.lowercased()
     return lowered.hasPrefix("agent:") || lowered.hasPrefix("plan:")
   }

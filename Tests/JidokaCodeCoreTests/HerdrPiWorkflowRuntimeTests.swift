@@ -2431,7 +2431,8 @@ struct HerdrPiWorkflowRuntimeTests {
       resourceTreeAttestation: fixture.resourceTreeAttestation,
       paneTokensSHA256: replacementPaneTokensSHA256,
       processIdentityForRoleHost: fixture.processIdentities.require,
-      roleHostExitObserved: { _, _ in true }
+      roleHostExitObserved: { _, _ in true },
+      rolloutAuthority: ExplicitTestRolloutEffectAuthority()
     )
     let before = await fixture.herdr.remoteSnapshot()
     await fixture.herdr.failAllRoleProcessInfo()
@@ -3267,7 +3268,7 @@ struct HerdrPiWorkflowRuntimeTests {
       .initialHerdrPreparation: 1,
       .herdrRecoveryRetry: 3,
       .descriptorCreate: 1,
-      .descriptorDecode: 17,
+      .descriptorDecode: 19,
       .replacementCandidate: 8,
       .preCredentialExecution: 1,
       .finalPreSendProof: 2,
@@ -4144,14 +4145,15 @@ struct HerdrPiWorkflowRuntimeTests {
     let replacementsBefore = try await fixture.runStore.replacementRoleHosts(
       jobID: fixture.jobID
     )
-    let isolationBefore = try await fixture.replacementIsolationSnapshot(
-      database: fixture.database,
-      excluding: fixture.jobID
-    )
     await fixture.database.close()
 
     let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials
+      providerCredentials: incident.providerCredentials,
+      migrations: DatabaseSchema.migrations
+    )
+    let isolationBefore = try await fixture.replacementIsolationSnapshot(
+      database: reopened.database,
+      excluding: fixture.jobID
     )
     let probe = ReplacementProductionReloadProbe(
       jobs: reopened.jobs,
@@ -5819,7 +5821,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
     fastRuntime: Bool = false,
     isolatedResourceRoot: Bool = false,
     providerCredentials: PiProviderCredentialSnapshotter? = nil,
-    migrations: [SQLiteMigration] = DatabaseSchema.migrations
+    migrations: [SQLiteMigration] = Array(DatabaseSchema.migrations.dropLast())
   ) async throws -> Self {
     let root = try privateDirectory(name: "herdr-production-runtime")
     let applicationSupport = try childDirectory("app", in: root)
@@ -5903,7 +5905,8 @@ private struct HerdrPiRuntimeFixture: Sendable {
       resourceTreeAttestation: resourceTreeAttestation,
       paneTokensSHA256: replacementPaneTokensSHA256,
       launchCheckpoint: launchCheckpoints.record,
-      providerCredentials: providerCredentials
+      providerCredentials: providerCredentials,
+      rolloutAuthority: ExplicitTestRolloutEffectAuthority()
     )
     let artifact = Data("Untrusted synthetic issue artifact.\n".utf8)
     let digest = SHA256.hash(data: artifact).map { String(format: "%02x", $0) }.joined()
@@ -6174,17 +6177,20 @@ private struct HerdrPiRuntimeFixture: Sendable {
       roleHostExitObserved: roleHostExitObserved,
       replacementCheckpoint: replacementCheckpoint,
       launchCheckpoint: launchCheckpoints.record,
-      providerCredentials: providerCredentials
+      providerCredentials: providerCredentials,
+      rolloutAuthority: ExplicitTestRolloutEffectAuthority()
     )
   }
 
   func reopenReplacementRuntime(
     providerCredentials: PiProviderCredentialSnapshotter? = nil,
+    migrations: [SQLiteMigration] = Array(DatabaseSchema.migrations.dropLast()),
     replacementCheckpoint:
       @escaping @Sendable (HerdrRoleHostReplacementCheckpoint) throws -> Void = { _ in }
   ) throws -> ReopenedReplacementRuntime {
     let reopenedDatabase = try SQLiteStore(
-      databaseURL: applicationSupport.appendingPathComponent("state.sqlite3")
+      databaseURL: applicationSupport.appendingPathComponent("state.sqlite3"),
+      migrations: migrations
     )
     let reopenedConfiguration = ConfigurationStore(database: reopenedDatabase)
     let reopenedJobs = DurableJobStore(database: reopenedDatabase)
@@ -6228,7 +6234,8 @@ private struct HerdrPiRuntimeFixture: Sendable {
       },
       replacementCheckpoint: replacementCheckpoint,
       launchCheckpoint: launchCheckpoints.record,
-      providerCredentials: providerCredentials
+      providerCredentials: providerCredentials,
+      rolloutAuthority: ExplicitTestRolloutEffectAuthority()
     )
     return ReopenedReplacementRuntime(
       database: reopenedDatabase,

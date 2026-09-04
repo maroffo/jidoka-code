@@ -15,12 +15,16 @@ struct GitHubMutationExecutorTests {
       idempotencyKey: key,
       stubs: [.response(status: 201, body: try commentResponseJSON())]
     )
+    let authority = ExplicitTestRolloutEffectAuthority(intents: fixture.intents)
     let executor = GitHubMutationExecutor(
       intents: fixture.intents,
       broker: GitHubBroker(
         tokenProvider: ExecutorTokenProvider(),
-        transport: transport
-      )
+        transport: transport,
+        readAuthority: authority,
+        effectAuthority: authority
+      ),
+      authority: authority
     )
     let operation = GitHubOperation.createComment(
       owner: "owner",
@@ -67,12 +71,16 @@ struct GitHubMutationExecutorTests {
       idempotencyKey: String(repeating: "f", count: 64),
       stubs: []
     )
+    let authority = ExplicitTestRolloutEffectAuthority(intents: fixture.intents)
     let executor = GitHubMutationExecutor(
       intents: fixture.intents,
       broker: GitHubBroker(
         tokenProvider: ExecutorTokenProvider(),
-        transport: transport
-      )
+        transport: transport,
+        readAuthority: authority,
+        effectAuthority: authority
+      ),
+      authority: authority
     )
     await #expect(throws: GitHubMutationExecutorError.readOperationForbidden) {
       _ = try await executor.prepareAndSend(
@@ -122,12 +130,16 @@ struct GitHubMutationExecutorTests {
       idempotencyKey: key,
       stubs: []
     )
+    let authority = ExplicitTestRolloutEffectAuthority(intents: fixture.intents)
     let executor = GitHubMutationExecutor(
       intents: fixture.intents,
       broker: GitHubBroker(
         tokenProvider: InvalidExecutorTokenProvider(),
-        transport: transport
-      )
+        transport: transport,
+        readAuthority: authority,
+        effectAuthority: authority
+      ),
+      authority: authority
     )
     await #expect(throws: GitHubBrokerError.invalidCredential) {
       _ = try await executor.prepareAndSend(
@@ -162,8 +174,18 @@ struct GitHubMutationExecutorTests {
         .failure(.timedOut),
       ]
     )
-    let broker = GitHubBroker(tokenProvider: ExecutorTokenProvider(), transport: transport)
-    let executor = GitHubMutationExecutor(intents: fixture.intents, broker: broker)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: fixture.intents)
+    let broker = GitHubBroker(
+      tokenProvider: ExecutorTokenProvider(),
+      transport: transport,
+      readAuthority: authority,
+      effectAuthority: authority
+    )
+    let executor = GitHubMutationExecutor(
+      intents: fixture.intents,
+      broker: broker,
+      authority: authority
+    )
     let denied = try await executor.prepareAndSend(
       jobID: fixture.jobID,
       idempotencyKey: deniedKey,

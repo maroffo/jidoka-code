@@ -1,0 +1,15 @@
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.10s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrHost' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrFixture' complete! (0.11s)
+herdr s11 fixture failed: authoritative screen omitted fixture evidence
+S11 Herdr failed: plan screen missed fixture output

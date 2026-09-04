@@ -67,12 +67,14 @@ struct WorkspaceImporterTests {
       database: database,
       transport: fixture.git
     )
-    let materialized = try await store.materializeWorkspace(
-      jobID: job.id,
-      remote: remote,
-      baseSHA: base,
-      branch: "agent/issue-8-import"
-    )
+    let materialized = try await withTestRolloutWorkflow(jobID: job.id) {
+      try await store.materializeWorkspace(
+        jobID: job.id,
+        remote: remote,
+        baseSHA: base,
+        branch: "agent/issue-8-import"
+      )
+    }
     let changedPath = "Sources/Feature.swift"
     let changedURL = materialized.workspaceURL.appendingPathComponent(changedPath)
     try FileManager.default.createDirectory(

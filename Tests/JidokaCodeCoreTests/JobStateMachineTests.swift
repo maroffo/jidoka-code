@@ -12,7 +12,7 @@ struct JobStateMachineTests {
       let effect = try JobStateMachine.transition(
         from: transition.from,
         event: transition.event,
-        context: transitionContext(now: now)
+        context: transitionContext(now: now, nextStep: transition.nextStep)
       )
       #expect(effect.to == transition.to)
       #expect(effect.lease == transition.lease)
@@ -263,11 +263,15 @@ private let allowedTransitions: [ExpectedTransition] = [
   .init(.preparing, .selectLocalStep, .executing, lease: .retain),
   .init(.preparing, .transientSetupFailure, .retryBackoff, lease: .release, attemptDelta: 1),
   .init(.preparing, .permanentSetupFailure, .blocked, lease: .release),
+  .init(.preparing, .phaseCheckpoint, .queued, lease: .release, nextStep: .orchestrate),
   .init(.runningPi, .piCompleted, .executing, lease: .retain, stepDelta: 1),
   .init(.runningPi, .transientPiFailure, .retryBackoff, lease: .release, attemptDelta: 1),
   .init(.runningPi, .piInterruptedUnknown, .reconciliationQueued, lease: .clearStale),
   .init(.runningPi, .piPermanentFailure, .blocked, lease: .release),
   .init(.executing, .localStepCompletedMore, .preparing, lease: .retain, stepDelta: 1),
+  .init(
+    .executing, .phaseCheckpoint, .queued, lease: .release, stepDelta: 1,
+    nextStep: .orchestrate),
   .init(.executing, .inputsInvalidated, .preparing, lease: .retain, nextStep: .triage),
   .init(.executing, .mutationNeedsAttribution, .reconciling, lease: .retain),
   .init(.executing, .transientLocalFailure, .retryBackoff, lease: .release, attemptDelta: 1),
@@ -276,6 +280,9 @@ private let allowedTransitions: [ExpectedTransition] = [
   .init(.executing, .localPermanentFailure, .blocked, lease: .release),
   .init(.reconciling, .inputsInvalidated, .preparing, lease: .retain, nextStep: .triage),
   .init(.reconciling, .effectAttributedMore, .preparing, lease: .retain, stepDelta: 1),
+  .init(
+    .reconciling, .phaseCheckpoint, .queued, lease: .release, stepDelta: 1,
+    nextStep: .replan),
   .init(.reconciling, .acceptanceComplete, .succeeded, lease: .release, disposition: .attributed),
   .init(.reconciling, .humanGatePublished, .waitingHuman, lease: .release, disposition: .inFlight),
   .init(.reconciling, .safeRetry, .retryBackoff, lease: .release, attemptDelta: 1),
@@ -303,12 +310,16 @@ private let allowedTransitions: [ExpectedTransition] = [
   .init(.reconciliationQueued, .canaryTopologyRecovered, .preparing, lease: .acquireRecovery),
 ]
 
-private func transitionContext(now: Date) -> JobTransitionContext {
+private func transitionContext(
+  now: Date,
+  nextStep: JobStepKind? = nil
+) -> JobTransitionContext {
   JobTransitionContext(
     now: now,
     reason: "fixture",
     notBefore: now.addingTimeInterval(60),
     acceptanceEvidenceDigest: String(repeating: "a", count: 64),
-    artifactID: "artifact"
+    artifactID: "artifact",
+    nextStep: nextStep
   )
 }

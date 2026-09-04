@@ -5,20 +5,26 @@ actor DurableApprovedCommandExecutor: PiApprovedCommandExecuting {
   private let store: ApprovedCommandRunStore
   private let gate: ApprovedCommandExecutionGate
   private let runner: VerificationCommandRunner
+  private let authority: any RolloutEffectAuthorizing
   private let workspace: URL
+  private let now: @Sendable () -> Date
 
   init(
     job: JobRecord,
     store: ApprovedCommandRunStore,
     gate: ApprovedCommandExecutionGate,
     runner: VerificationCommandRunner,
-    workspace: URL
+    authority: any RolloutEffectAuthorizing,
+    workspace: URL,
+    now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.job = job
     self.store = store
     self.gate = gate
     self.runner = runner
+    self.authority = authority
     self.workspace = workspace.standardizedFileURL
+    self.now = now
   }
 
   func execute(
@@ -116,32 +122,94 @@ actor DurableApprovedCommandExecutor: PiApprovedCommandExecuting {
     case .prepared:
       break
     }
-    run = try await store.start(runID: run.id)
-    if run.state == .resultAccepted {
-      return try await replay(run: run, plan: plan)
-    }
-    guard run.state == .started else {
-      throw ApprovedCommandRunStoreError.invalidTransition
-    }
-    let evidence: VerificationCommandEvidence
+    let workspaceHeadSHA = try await runner.repositoryHeadSHA(workspace: workspace)
+    let effect = RolloutApprovedCommandEffect(
+      jobID: job.id,
+      commandID: command.id,
+      definitionSHA256: command.definitionDigest,
+      planSHA256: plan.digest,
+      workspaceHeadSHA: workspaceHeadSHA,
+      phase: phase,
+      round: round,
+      ordinal: commandOrdinal
+    )
+    var permit: RolloutEffectPermit? = try await authority.reserveApprovedCommand(
+      effect,
+      now: now()
+    )
+    var processBoundaryCrossed = false
     do {
-      evidence = try await runner.executePrepared(preparedExecution)
-    } catch {
-      _ = try? await store.markUnknown(runID: run.id)
-      throw ApprovedCommandRunStoreError.outcomeUnknown(run.id)
-    }
-    do {
-      _ = try await store.accept(runID: run.id, evidence: evidence)
+      guard let activePermit = permit else {
+        throw RolloutAuthorityError.effectAdmissionClosed
+      }
+      try await authority.bindApprovedCommandReservation(
+        activePermit,
+        effect: effect,
+        runID: run.id,
+        now: now()
+      )
+      run = try await store.start(runID: run.id)
+      let evidence: VerificationCommandEvidence
+      if run.state == .resultAccepted {
+        evidence = try await replay(run: run, plan: plan)
+      } else {
+        guard run.state == .started else {
+          throw ApprovedCommandRunStoreError.invalidTransition
+        }
+        do {
+          guard try await runner.repositoryHeadSHA(workspace: workspace) == workspaceHeadSHA else {
+            throw VerificationCommandError.repositoryStateUnavailable
+          }
+          guard let activePermit = permit else {
+            throw RolloutAuthorityError.effectAdmissionClosed
+          }
+          try await authority.verifyApprovedCommandPermit(activePermit, effect: effect)
+          processBoundaryCrossed = true
+          evidence = try await runner.executePrepared(preparedExecution)
+        } catch {
+          _ = try? await store.markUnknown(runID: run.id)
+          throw ApprovedCommandRunStoreError.outcomeUnknown(run.id)
+        }
+        do {
+          _ = try await store.accept(runID: run.id, evidence: evidence)
+        } catch {
+          if let accepted = try? await store.acceptedEvidence(runID: run.id),
+            accepted == evidence
+          {
+            // The durable result committed before the interrupted acknowledgement.
+          } else {
+            _ = try? await store.markUnknown(runID: run.id)
+            throw error
+          }
+        }
+      }
+      if let activePermit = permit {
+        try await authority.settleEffect(
+          activePermit,
+          evidenceSHA256: try Self.evidenceSHA256(evidence),
+          now: now()
+        )
+        permit = nil
+      }
       return evidence
     } catch {
-      if let accepted = try? await store.acceptedEvidence(runID: run.id),
-        accepted == evidence
-      {
-        return evidence
+      if let permit, !processBoundaryCrossed {
+        try await authority.settleEffect(
+          permit,
+          evidenceSHA256: GitHubMarkerCodec.sha256(
+            Data(String(reflecting: type(of: error)).utf8)
+          ),
+          now: now()
+        )
       }
-      _ = try? await store.markUnknown(runID: run.id)
       throw error
     }
+  }
+
+  private static func evidenceSHA256(
+    _ evidence: VerificationCommandEvidence
+  ) throws -> String {
+    RolloutCanonicalJSON.sha256(try RolloutCanonicalJSON.encode(evidence))
   }
 
   private func replay(

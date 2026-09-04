@@ -3,6 +3,8 @@ set -u
 
 mode="${FAKE_MODE:?}"
 pid_file="${FAKE_CHILD_PID_FILE:?}"
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+identity_script="$script_dir/process-identity-session-escape.py"
 child_pid=""
 
 emit() {
@@ -33,9 +35,7 @@ spawn_session_escape() {
     if [ -n "$child_pid" ]; then
         return
     fi
-    /usr/bin/python3 -c \
-        'import os,sys,time; os.setsid(); open(sys.argv[1], "w").write(str(os.getpid())); os.close(0); os.close(1); os.close(2); time.sleep(30)' \
-        "$pid_file" &
+    /usr/bin/python3 "$identity_script" "$pid_file" &
     child_pid=$!
     attempt=0
     while [ ! -s "$pid_file" ] && [ "$attempt" -lt 100 ]; do

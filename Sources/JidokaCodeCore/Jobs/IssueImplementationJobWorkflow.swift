@@ -33,6 +33,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
   private let branchPublisher: DurableGitPublisher
   private let pullRequestPublisher: GitHubPullRequestPublisher
   private let credentials: (any GitCredentialSessionProviding)?
+  private let rolloutSnapshots: (any RolloutJobInputSnapshotRecording)?
   private let authorID: Int64
   private let contractVersion: String
   private let now: @Sendable () -> Date
@@ -53,6 +54,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     branchPublisher: DurableGitPublisher,
     pullRequestPublisher: GitHubPullRequestPublisher,
     credentials: (any GitCredentialSessionProviding)? = nil,
+    rolloutSnapshots: (any RolloutJobInputSnapshotRecording)? = nil,
     authorID: Int64,
     contractVersion: String,
     now: @escaping @Sendable () -> Date = Date.init,
@@ -72,6 +74,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     self.branchPublisher = branchPublisher
     self.pullRequestPublisher = pullRequestPublisher
     self.credentials = credentials
+    self.rolloutSnapshots = rolloutSnapshots
     self.authorID = authorID
     self.contractVersion = contractVersion
     self.now = now
@@ -80,6 +83,14 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
   }
 
   public func run(jobID: UUID) async throws {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .workflow(jobID: jobID))
+    ) {
+      try await self.runAuthorized(jobID: jobID)
+    }
+  }
+
+  private func runAuthorized(jobID: UUID) async throws {
     guard let job = try await jobs.job(id: jobID), job.identity.kind == .issueImplementation else {
       throw IssueImplementationJobError.invalidJob
     }
@@ -133,6 +144,14 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
 
   @discardableResult
   public func evaluateWaitingApproval(jobID: UUID) async throws -> JobRecord {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .workflow(jobID: jobID))
+    ) {
+      try await self.evaluateWaitingApprovalAuthorized(jobID: jobID)
+    }
+  }
+
+  private func evaluateWaitingApprovalAuthorized(jobID: UUID) async throws -> JobRecord {
     guard let job = try await jobs.job(id: jobID),
       job.identity.kind == .issueImplementation,
       job.state == .waitingHuman
@@ -191,12 +210,21 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     case .plan, .replan:
       try await resumeCompletedPlanning(job, step: step)
     case .writePlan:
-      _ = try await advanceRecovered(
+      let preparing = try await advanceRecovered(
         job,
         nextStep: .orchestrate,
         reason: "frozen plan step completed before interruption"
       )
-      try await run(jobID: job.id)
+      _ = try await jobs.transition(
+        jobID: preparing.id,
+        eventKey: eventKey(preparing, "recover-plan-checkpoint"),
+        event: .phaseCheckpoint,
+        context: JobTransitionContext(
+          now: now(),
+          reason: "frozen plan persisted at the execution authorization boundary",
+          nextStep: .orchestrate
+        )
+      )
     case .publishPlan:
       let claim = try await currentClaim(job)
       try await jobs.finishClaim(
@@ -251,12 +279,16 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     case .qa:
       try await finalizeQA(job)
     case .consumeStaleApproval:
-      _ = try await advanceRecovered(
-        job,
-        nextStep: .replan,
-        reason: "stale approval consumption completed before interruption"
+      _ = try await jobs.transition(
+        jobID: job.id,
+        eventKey: eventKey(job, "recover-stale-approval-checkpoint"),
+        event: .phaseCheckpoint,
+        context: JobTransitionContext(
+          now: now(),
+          reason: "stale approval consumption completed at the planning authorization boundary",
+          nextStep: .replan
+        )
       )
-      try await run(jobID: job.id)
     case .publish:
       let claim = try await currentClaim(job)
       try await jobs.finishClaim(
@@ -387,11 +419,13 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     _ = try await jobs.transition(
       jobID: job.id,
       eventKey: eventKey(executing, "recover-plan-frozen"),
-      event: .localStepCompletedMore,
+      event: .phaseCheckpoint,
       context: JobTransitionContext(
-        now: now(), reason: "recovered plan and command registry frozen", nextStep: .orchestrate)
+        now: now(),
+        reason: "recovered plan persisted at the execution authorization boundary",
+        nextStep: .orchestrate
+      )
     )
-    try await run(jobID: job.id)
   }
 
   private func advanceRecovered(
@@ -420,6 +454,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
         GitHubMarkerPublicationRequest(
           jobID: job.id,
           operation: .claimIssue,
+          repositoryID: repository.id,
           repository: coordinates,
           repositoryNodeID: repository.nodeID,
           objectNodeID: job.identity.objectNodeID,
@@ -439,6 +474,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
         GitHubMarkerPublicationRequest(
           jobID: job.id,
           operation: .publishComplexPlan,
+          repositoryID: repository.id,
           repository: coordinates,
           repositoryNodeID: repository.nodeID,
           objectNodeID: job.identity.objectNodeID,
@@ -463,6 +499,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
         GitHubMarkerPublicationRequest(
           jobID: job.id,
           operation: .blockIssue,
+          repositoryID: repository.id,
           repository: coordinates,
           repositoryNodeID: repository.nodeID,
           objectNodeID: job.identity.objectNodeID,
@@ -483,6 +520,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
         GitHubMarkerPublicationRequest(
           jobID: job.id,
           operation: .linkPullRequest,
+          repositoryID: repository.id,
           repository: coordinates,
           repositoryNodeID: repository.nodeID,
           objectNodeID: job.identity.objectNodeID,
@@ -584,6 +622,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       let request = GitHubMarkerPublicationRequest(
         jobID: job.id,
         operation: .claimIssue,
+        repositoryID: repository.id,
         repository: Self.coordinates(repository),
         repositoryNodeID: repository.nodeID,
         objectNodeID: job.identity.objectNodeID,
@@ -619,6 +658,11 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
         throw IssueImplementationJobError.staleBaseRevision
       }
     }
+    try await freezeRolloutSnapshot(
+      job: job,
+      prepared: prepared,
+      planSHA256: envelope?.plan.digest
+    )
     let bootstrap = try await labelBootstrapper.bootstrap(
       jobID: job.id,
       repository: Self.coordinates(prepared.repository),
@@ -661,6 +705,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     let markerRequest = GitHubMarkerPublicationRequest(
       jobID: job.id,
       operation: .claimIssue,
+      repositoryID: prepared.repository.id,
       repository: coordinates,
       repositoryNodeID: prepared.repository.nodeID,
       objectNodeID: prepared.issue.nodeID,
@@ -874,19 +919,16 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
           mutationID: nil,
           evidence: plan.planningDecisionSHA256
         )
-        let preparing = Self.job(
-          try await jobs.transition(
-            jobID: job.id,
-            eventKey: eventKey(freezing, "plan-frozen"),
-            event: .localStepCompletedMore,
-            context: JobTransitionContext(
-              now: now(),
-              reason: "plan and command registry frozen",
-              nextStep: .orchestrate
-            )
+        _ = try await jobs.transition(
+          jobID: job.id,
+          eventKey: eventKey(freezing, "plan-frozen-checkpoint"),
+          event: .phaseCheckpoint,
+          context: JobTransitionContext(
+            now: now(),
+            reason: "plan and command registry frozen at the execution authorization boundary",
+            nextStep: .orchestrate
           )
         )
-        try await runOrchestration(preparing)
       }
     case .humanOwned, .blocked:
       let label = output.disposition == .humanOwned ? "agent:human" : "agent:blocked"
@@ -942,6 +984,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       request: GitHubMarkerPublicationRequest(
         jobID: job.id,
         operation: .publishComplexPlan,
+        repositoryID: prepared.repository.id,
         repository: coordinates,
         repositoryNodeID: prepared.repository.nodeID,
         objectNodeID: prepared.issue.nodeID,
@@ -1088,6 +1131,16 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     guard envelope.baseRevision == prepared.baseRevision else {
       throw IssueImplementationJobError.staleBaseRevision
     }
+    let resumedApprovedPlan = try await jobs.steps(jobID: job.id).contains {
+      $0.kind == .claimApprovedPlan
+    }
+    if !resumedApprovedPlan {
+      try await freezeRolloutSnapshot(
+        job: job,
+        prepared: prepared,
+        planSHA256: envelope.plan.digest
+      )
+    }
     let artifactSHA256 = GitHubMarkerCodec.sha256(prepared.artifact)
     if let recovered = try await recoverableOrchestrationEvidence(
       job: job,
@@ -1224,6 +1277,26 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       )
     )
     try await publishBranch(pushing)
+  }
+
+  private func freezeRolloutSnapshot(
+    job: JobRecord,
+    prepared: PreparedIssueImplementationJob,
+    planSHA256: String?
+  ) async throws {
+    guard let rolloutSnapshots else { return }
+    try await rolloutSnapshots.freezeJobInputSnapshot(
+      RolloutJobInputSnapshot(
+        jobID: job.id,
+        canonicalInputSHA256: GitHubMarkerCodec.sha256(prepared.artifact),
+        baseSHA: prepared.baseRevision.sha,
+        labelStateSHA256: try RolloutPreviewBuilder.labelStateSHA256(
+          prepared.labels
+        ),
+        planSHA256: planSHA256
+      ),
+      now: now()
+    )
   }
 
   private func publishBranch(_ job: JobRecord) async throws {
@@ -1393,6 +1466,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       request: GitHubMarkerPublicationRequest(
         jobID: job.id,
         operation: .linkPullRequest,
+        repositoryID: prepared.repository.id,
         repository: Self.coordinates(prepared.repository),
         repositoryNodeID: prepared.repository.nodeID,
         objectNodeID: prepared.issue.nodeID,
@@ -1517,7 +1591,8 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
     guard let headSHA = evidence.headSHA else {
       throw IssueImplementationJobError.publicationEvidenceMissing
     }
-    let reviewCreation = try await jobs.createJob(
+    let reviewCreation = try await jobs.createQuarantinedGeneratedReviewJob(
+      parentJobID: job.id,
       identity: LogicalJobIdentity(
         repositoryID: job.identity.repositoryID,
         kind: .prReview,
@@ -1526,8 +1601,6 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       ),
       objectNumber: pullRequest.number,
       contractVersionUsed: contractVersion,
-      priority: .prReview,
-      firstStep: .review,
       now: now()
     )
     if case .created(let reviewJob) = reviewCreation {
@@ -1623,19 +1696,16 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       mutationID: result.intentIDs.map(\.uuidString).joined(separator: ","),
       evidence: "stale-approval-consumed"
     )
-    let preparing = Self.job(
-      try await jobs.transition(
-        jobID: job.id,
-        eventKey: eventKey(reconciling, "stale-approval-consumed"),
-        event: .effectAttributedMore,
-        context: JobTransitionContext(
-          now: now(),
-          reason: "stale approval consumed before exact replanning",
-          nextStep: .replan
-        )
+    _ = try await jobs.transition(
+      jobID: job.id,
+      eventKey: eventKey(reconciling, "stale-approval-checkpoint"),
+      event: .phaseCheckpoint,
+      context: JobTransitionContext(
+        now: now(),
+        reason: "stale approval consumed at the planning authorization boundary",
+        nextStep: .replan
       )
     )
-    try await runPlanning(preparing)
   }
 
   private func publishBlocked(_ job: JobRecord) async throws {
@@ -1670,6 +1740,7 @@ public actor IssueImplementationJobWorkflow: JobWorkflowRunning,
       request: GitHubMarkerPublicationRequest(
         jobID: job.id,
         operation: .blockIssue,
+        repositoryID: prepared.repository.id,
         repository: coordinates,
         repositoryNodeID: prepared.repository.nodeID,
         objectNodeID: prepared.issue.nodeID,

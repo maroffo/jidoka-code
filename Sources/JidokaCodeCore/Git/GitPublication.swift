@@ -65,13 +65,16 @@ public struct DurableGitPublicationDispatch: Sendable {
 public actor DurableGitPublisher {
   private let intents: MutationIntentStore
   private let publisher: GitPublisher
+  private let authority: any RolloutEffectAuthorizing
   private var activeIdempotencyKeys: Set<String> = []
 
   public init(
     intents: MutationIntentStore,
-    transport: any GitPublicationTransporting = SystemGitTransport()
+    transport: any GitPublicationTransporting,
+    authority: any RolloutEffectAuthorizing
   ) {
     self.intents = intents
+    self.authority = authority
     publisher = GitPublisher(transport: transport)
   }
 
@@ -129,7 +132,18 @@ public actor DurableGitPublisher {
     }
 
     let intentID = intent.id
-    let intentStore = intents
+    let effect = RolloutGitSendEffect(
+      jobID: request.jobID,
+      intentID: intentID,
+      repositoryID: remote.repositoryID,
+      repositoryNodeID: remote.nodeID,
+      branch: request.branch,
+      exactSHA: request.exactSHA,
+      target: request.target(remote: remote),
+      expectedStateSHA256: request.expectedStateDigest,
+      requestSHA256: request.requestDigest(remote: remote)
+    )
+    let rolloutAuthority = authority
     let publication: GitPublicationResult
     do {
       publication = try await publisher.publishCreateOnly(
@@ -139,7 +153,11 @@ public actor DurableGitPublisher {
         repository: repository,
         credentials: credentials
       ) {
-        _ = try await intentStore.markSendStarted(id: intentID, now: now)
+        let permit = try await rolloutAuthority.reserveGitSendAndMarkStarted(
+          effect,
+          now: now
+        )
+        return (permit, effect)
       }
     } catch {
       try await markReconcileRequiredIfSendStarted(id: intentID, now: now)
@@ -155,6 +173,7 @@ public actor DurableGitPublisher {
       evidenceDigest: publication.evidenceDigest,
       now: now
     )
+    try await recordSettlement(settled, evidenceSHA256: publication.evidenceDigest, now: now)
     return DurableGitPublicationDispatch(intent: settled, publication: publication)
   }
 
@@ -166,26 +185,60 @@ public actor DurableGitPublisher {
     credentials: (any GitCredentialSessionProviding)?,
     now: Date
   ) async throws -> DurableGitPublicationDispatch {
-    let publication = try await publisher.reconcileCreateOnly(
-      branch: request.branch,
-      exactSHA: request.exactSHA,
-      remote: remote,
-      repository: repository,
-      credentials: credentials
-    )
+    let publication = try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(
+        mode: .readback(jobID: request.jobID, intentID: intent.id)
+      )
+    ) {
+      try await publisher.reconcileCreateOnly(
+        branch: request.branch,
+        exactSHA: request.exactSHA,
+        remote: remote,
+        repository: repository,
+        credentials: credentials
+      )
+    }
     let settled = try await intents.settle(
       id: intent.id,
       outcome: Self.outcome(publication.disposition),
       evidenceDigest: publication.evidenceDigest,
       now: now
     )
+    try await recordSettlement(settled, evidenceSHA256: publication.evidenceDigest, now: now)
     return DurableGitPublicationDispatch(intent: settled, publication: publication)
   }
 
   private func markReconcileRequiredIfSendStarted(id: UUID, now: Date) async throws {
     if try await intents.intent(id: id)?.state == .sendStarted {
       _ = try await intents.markReconcileRequired(id: id, now: now)
+      try await authority.recordMutationObservation(
+        intentID: id,
+        observation: .observationRequired,
+        evidenceSHA256: GitHubMarkerCodec.sha256(Data("git send outcome unknown".utf8)),
+        now: now
+      )
     }
+  }
+
+  private func recordSettlement(
+    _ intent: MutationIntentRecord,
+    evidenceSHA256: String,
+    now: Date
+  ) async throws {
+    if intent.state == .attributed {
+      try await authority.recordMutationObservation(
+        intentID: intent.id,
+        observation: .attributed,
+        evidenceSHA256: evidenceSHA256,
+        now: now
+      )
+    }
+    try await authority.recordMutationObservation(
+      intentID: intent.id,
+      observation: .settled,
+      evidenceSHA256: evidenceSHA256,
+      now: now
+    )
   }
 
   private static func outcome(
@@ -213,7 +266,8 @@ actor GitPublisher {
     remote: GitRemoteRepository,
     repository: URL,
     credentials: (any GitCredentialSessionProviding)? = nil,
-    beforeSend: (@Sendable () async throws -> Void)? = nil
+    beforeSend:
+      (@Sendable () async throws -> (RolloutEffectPermit, RolloutGitSendEffect))? = nil
   ) async throws -> GitPublicationResult {
     try await validateLocalInputs(
       branch: branch,
@@ -244,7 +298,8 @@ actor GitPublisher {
       )
     }
 
-    try await beforeSend?()
+    guard let beforeSend else { throw GitTransportError.rolloutAuthorityRequired }
+    let sendAuthority = try await beforeSend()
     let send: GitProcessResult?
     do {
       send = try await transport.createRemoteRef(
@@ -252,19 +307,30 @@ actor GitPublisher {
         exactSHA: exactSHA,
         remote: remote,
         repository: repository,
-        credentials: credentials
+        credentials: credentials,
+        permit: sendAuthority.0,
+        effect: sendAuthority.1
       )
     } catch {
       send = nil
     }
     let after: String?
     do {
-      after = try await transport.readRemoteRef(
-        reference,
-        remote: remote,
-        repository: repository,
-        credentials: credentials
-      )
+      after = try await RolloutEffectTaskContext.$current.withValue(
+        RolloutEffectExecutionContext(
+          mode: .readback(
+            jobID: sendAuthority.1.jobID,
+            intentID: sendAuthority.1.intentID
+          )
+        )
+      ) {
+        try await transport.readRemoteRef(
+          reference,
+          remote: remote,
+          repository: repository,
+          credentials: credentials
+        )
+      }
     } catch {
       return result(
         disposition: .escalation,

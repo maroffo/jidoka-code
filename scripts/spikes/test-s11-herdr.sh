@@ -4,6 +4,16 @@ set -euo pipefail
 readonly DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 export DEVELOPER_DIR
 
+foundation_standard_path() {
+    case "$1" in
+        /private/tmp) printf '/tmp\n' ;;
+        /private/tmp/*) printf '/tmp/%s\n' "${1#/private/tmp/}" ;;
+        /private/var) printf '/var\n' ;;
+        /private/var/*) printf '/var/%s\n' "${1#/private/var/}" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
@@ -44,7 +54,7 @@ cd "$ROOT"
 /usr/bin/xcrun swift build --configuration release --product JidokaCodeHerdrHost
 /usr/bin/xcrun swift build --configuration release --product JidokaCodeHerdrFixture
 BIN_DIR="$(/usr/bin/xcrun swift build --configuration release --show-bin-path)"
-BIN_DIR="$(cd "$BIN_DIR" && pwd -P)"
+BIN_DIR="$(foundation_standard_path "$(cd "$BIN_DIR" && pwd -P)")"
 readonly BIN_DIR
 readonly HOST="$BIN_DIR/JidokaCodeHerdrHost"
 readonly CHILD="$BIN_DIR/JidokaCodeHerdrFixture"
@@ -53,7 +63,7 @@ readonly CHILD="$BIN_DIR/JidokaCodeHerdrFixture"
 
 /bin/mkdir -p "$ROOT/build/evidence"
 TMP="$(/usr/bin/mktemp -d "$ROOT/build/evidence/jidoka-herdr-s11.XXXXXX")"
-TMP="$(cd "$TMP" && pwd -P)"
+TMP="$(foundation_standard_path "$(cd "$TMP" && pwd -P)")"
 readonly TMP
 readonly RUN_ROOT="$TMP/runs"
 readonly WORK_ROOT="$TMP/work"

@@ -24,6 +24,8 @@ readonly PUSH_GUARD_EXECUTABLE="$GIT_HOOKS/pre-push"
 readonly HERDR_HOST_EXECUTABLE="$HELPERS/JidokaCodeHerdrHost"
 readonly HERDR_RESOURCES="$RESOURCES/Herdr"
 readonly RELEASE_RUNTIME="$RESOURCES/PiRuntime"
+readonly RELEASE_IDENTITY_MANIFEST="$RESOURCES/progressive-production-release.json"
+readonly RELEASE_IDENTITY_GENERATOR="$ROOT/scripts/generate-progressive-production-release.mjs"
 readonly RUNTIME_INVENTORY="$BUILD_ROOT/runtime-inventory.txt"
 readonly RUNTIME_ENTITLEMENTS="$ROOT/Packaging/runtime-node-entitlements.plist"
 readonly RUNTIME_INPUT="${JIDOKA_RELEASE_RUNTIME_ROOT:-}"
@@ -74,6 +76,11 @@ readonly SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 readonly SIGNING_KEYCHAIN="${SIGNING_KEYCHAIN:-}"
 readonly ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
 RUNTIME_INVENTORY_TEMP=""
+RELEASE_IDENTITY_TEMP=""
+SOURCE_COMMIT=""
+SOURCE_TREE=""
+STAGED_RUNTIME_IDENTITY_SHA256=""
+PACKAGED_RUNTIME_IDENTITY_SHA256=""
 
 fail() {
     printf 'packaging failed: %s\n' "$1" >&2
@@ -92,6 +99,14 @@ cleanup() {
         ! -L "$RUNTIME_INVENTORY_TEMP" ]]; then
         case "$RUNTIME_INVENTORY_TEMP" in
             "$BUILD_ROOT"/.runtime-inventory.*) /bin/rm -f -- "$RUNTIME_INVENTORY_TEMP" ;;
+        esac
+    fi
+    if [[ -n "$RELEASE_IDENTITY_TEMP" && -f "$RELEASE_IDENTITY_TEMP" && \
+        ! -L "$RELEASE_IDENTITY_TEMP" ]]; then
+        case "$RELEASE_IDENTITY_TEMP" in
+            "$RESOURCES"/.progressive-production-release.*)
+                /bin/rm -f -- "$RELEASE_IDENTITY_TEMP"
+                ;;
         esac
     fi
 }
@@ -180,9 +195,138 @@ verify_staged_runtime_performance() {
         "$RUNTIME_MANIFEST_SHA256" "$RUNTIME_ID" "$identity")"
     [[ "$report" == "$expected_report" ]] || \
         fail "staged release runtime verifier reported unexpected identity fields"
+    STAGED_RUNTIME_IDENTITY_SHA256="$identity"
     printf \
         'staged_runtime_verifier_seconds=%s runtime_id=%s manifest_sha256=%s runtime_identity_sha256=%s\n' \
         "$elapsed" "$RUNTIME_ID" "$RUNTIME_MANIFEST_SHA256" "$identity"
+}
+
+capture_source_identity() {
+    local worktree_status
+
+    SOURCE_COMMIT="$(/usr/bin/git -C "$ROOT" rev-parse --verify HEAD)" || \
+        fail "source commit is unavailable"
+    SOURCE_TREE="$(/usr/bin/git -C "$ROOT" rev-parse --verify 'HEAD^{tree}')" || \
+        fail "source tree is unavailable"
+    [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || \
+        fail "source commit or tree identity is malformed"
+
+    if [[ "$SIGN_IDENTITY" != "-" ]]; then
+        worktree_status="$(
+            /usr/bin/git -C "$ROOT" status --porcelain=v1 --untracked-files=normal
+        )"
+        [[ -z "$worktree_status" ]] || \
+            fail "identity-signed packaging requires a clean source worktree"
+    fi
+}
+
+generate_release_identity_manifest() {
+    local bundle_build
+    local bundle_version
+    local helper_sha256
+    local herdr_host_sha256
+    local runtime_identity_sha256="$1"
+    local runtime_manifest_sha256
+    local workflow_resources_sha256
+
+    [[ "$runtime_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+        fail "release runtime identity is unavailable"
+    if [[ -e "$RELEASE_IDENTITY_MANIFEST" || -L "$RELEASE_IDENTITY_MANIFEST" ]]; then
+        [[ -f "$RELEASE_IDENTITY_MANIFEST" && ! -L "$RELEASE_IDENTITY_MANIFEST" && \
+            "$(/usr/bin/stat -f '%OLp' "$RELEASE_IDENTITY_MANIFEST")" == "644" && \
+            "$(/usr/bin/stat -f '%l' "$RELEASE_IDENTITY_MANIFEST")" == "1" ]] || \
+            fail "existing release identity manifest is unsafe"
+    fi
+
+    bundle_version="$(
+        /usr/bin/plutil -extract CFBundleShortVersionString raw "$CONTENTS/Info.plist"
+    )"
+    bundle_build="$(/usr/bin/plutil -extract CFBundleVersion raw "$CONTENTS/Info.plist")"
+    helper_sha256="$(
+        /usr/bin/shasum -a 256 "$ENGINE_EXECUTABLE" | /usr/bin/awk '{print $1}'
+    )"
+    herdr_host_sha256="$(
+        /usr/bin/shasum -a 256 "$HERDR_HOST_EXECUTABLE" | /usr/bin/awk '{print $1}'
+    )"
+    runtime_manifest_sha256="$(
+        /usr/bin/shasum -a 256 "$RELEASE_RUNTIME/runtime-manifest.json" | \
+            /usr/bin/awk '{print $1}'
+    )"
+    workflow_resources_sha256="$(
+        /usr/bin/shasum -a 256 "$RESOURCES/Pi/workflow-resources.json" | \
+            /usr/bin/awk '{print $1}'
+    )"
+    [[ "$runtime_manifest_sha256" == "$RUNTIME_MANIFEST_SHA256" ]] || \
+        fail "packaged runtime manifest identity differs before release manifest generation"
+
+    RELEASE_IDENTITY_TEMP="$(
+        /usr/bin/mktemp "$RESOURCES/.progressive-production-release.XXXXXX"
+    )"
+    [[ -f "$RELEASE_IDENTITY_TEMP" && ! -L "$RELEASE_IDENTITY_TEMP" && \
+        "$(/usr/bin/stat -f '%OLp' "$RELEASE_IDENTITY_TEMP")" == "600" && \
+        "$(/usr/bin/stat -f '%l' "$RELEASE_IDENTITY_TEMP")" == "1" ]] || \
+        fail "private release identity manifest could not be created"
+    "$RUNTIME_NODE_INPUT" "$RELEASE_IDENTITY_GENERATOR" \
+        "$SOURCE_COMMIT" \
+        "$SOURCE_TREE" \
+        "$bundle_version" \
+        "$bundle_build" \
+        "$helper_sha256" \
+        "$herdr_host_sha256" \
+        "10" \
+        "12" \
+        "$runtime_manifest_sha256" \
+        "$runtime_identity_sha256" \
+        "$workflow_resources_sha256" \
+        >"$RELEASE_IDENTITY_TEMP"
+    [[ "$(/usr/bin/stat -f '%z' "$RELEASE_IDENTITY_TEMP")" -gt 0 && \
+        "$(/usr/bin/stat -f '%z' "$RELEASE_IDENTITY_TEMP")" -le 65536 ]] || \
+        fail "release identity manifest size is invalid"
+    /usr/bin/plutil -convert xml1 -o /dev/null "$RELEASE_IDENTITY_TEMP"
+    /bin/chmod 0644 "$RELEASE_IDENTITY_TEMP"
+    /bin/mv -- "$RELEASE_IDENTITY_TEMP" "$RELEASE_IDENTITY_MANIFEST"
+    RELEASE_IDENTITY_TEMP=""
+}
+
+capture_packaged_runtime_identity() {
+    local expected_report
+    local identity
+    local report
+
+    if [[ "$SIGN_IDENTITY" == "-" ]]; then
+        report="$(
+            run_release_runtime_probe \
+                "$APP_EXECUTABLE" \
+                --release-runtime-verify-adhoc
+        )" || fail "assembled ad hoc bundle runtime validation failed"
+    else
+        report="$(
+            run_release_runtime_probe \
+                "$STAGED_RUNTIME_VERIFIER" \
+                --release-runtime-verify-developer-id \
+                "$APP"
+        )" || fail "assembled Developer ID bundle runtime validation failed"
+    fi
+    identity="$(
+        printf '%s\n' "$report" | \
+            /usr/bin/plutil -extract runtimeIdentitySHA256 raw -o - -
+    )"
+    [[ "$identity" =~ ^[0-9a-f]{64}$ ]] || \
+        fail "packaged release runtime verifier reported an invalid identity"
+    expected_report="$(printf \
+        '{"manifestSHA256":"%s","runtimeID":"%s","runtimeIdentitySHA256":"%s","schemaVersion":1}' \
+        "$RUNTIME_MANIFEST_SHA256" "$RUNTIME_ID" "$identity")"
+    [[ "$report" == "$expected_report" ]] || \
+        fail "packaged release runtime verifier reported unexpected identity fields"
+    PACKAGED_RUNTIME_IDENTITY_SHA256="$identity"
+}
+
+verify_packaged_runtime_identity() {
+    local expected_identity="$PACKAGED_RUNTIME_IDENTITY_SHA256"
+
+    capture_packaged_runtime_identity
+    [[ "$PACKAGED_RUNTIME_IDENTITY_SHA256" == "$expected_identity" ]] || \
+        fail "outer signing changed the packaged release runtime identity"
 }
 
 assert_safe_runtime_input_chain() {
@@ -568,6 +712,7 @@ if [[ "$SIGN_IDENTITY" == "-" && "$ALLOW_ADHOC_SIGNING" != "1" ]]; then
 fi
 configure_signing_keychain
 verify_signing_identity
+capture_source_identity
 validate_runtime_input
 "$ROOT/scripts/verify-toolchain.sh"
 
@@ -576,6 +721,7 @@ for input in \
     "$ROOT/Packaging/app-inventory.txt" \
     "$ROOT/Packaging/runtime-node-entitlements.plist" \
     "$ROOT/Packaging/com.maroffo.JidokaCode.Engine.plist" \
+    "$RELEASE_IDENTITY_GENERATOR" \
     "$ROOT/Resources/Herdr/api-schema-0.8.2.json" \
     "$ROOT/Resources/Herdr/runtime-builds.json" \
     "$ROOT/Resources/Pi/manifest.json" \
@@ -830,6 +976,10 @@ sign_path "$ENGINE_EXECUTABLE" com.maroffo.JidokaCode.Engine
 sign_path "$ASKPASS_EXECUTABLE" com.maroffo.JidokaCode.AskPass
 sign_path "$PUSH_GUARD_EXECUTABLE" com.maroffo.JidokaCode.PushGuard
 sign_path "$HERDR_HOST_EXECUTABLE" com.maroffo.JidokaCode.HerdrHost
+generate_release_identity_manifest "$STAGED_RUNTIME_IDENTITY_SHA256"
+sign_path "$APP" com.maroffo.JidokaCode
+capture_packaged_runtime_identity
+generate_release_identity_manifest "$PACKAGED_RUNTIME_IDENTITY_SHA256"
 sign_path "$APP" com.maroffo.JidokaCode
 verify_bundle_modes
 /usr/bin/codesign --verify --strict "$ENGINE_EXECUTABLE"
@@ -843,18 +993,7 @@ verify_bundle_modes
     fail "outer signing changed the runtime Node CodeDirectory"
 verify_signed_team
 validate_runtime_native_code "$RELEASE_RUNTIME/pi"
-if [[ "$SIGN_IDENTITY" == "-" ]]; then
-    run_release_runtime_probe \
-        "$APP_EXECUTABLE" \
-        --release-runtime-verify-adhoc >/dev/null || \
-        fail "assembled ad hoc bundle runtime validation failed"
-else
-    run_release_runtime_probe \
-        "$STAGED_RUNTIME_VERIFIER" \
-        --release-runtime-verify-developer-id \
-        "$APP" >/dev/null || \
-        fail "assembled Developer ID bundle runtime validation failed"
-fi
+verify_packaged_runtime_identity
 
 validate_runtime_inventory_destination
 RUNTIME_INVENTORY_TEMP="$(/usr/bin/mktemp "$BUILD_ROOT/.runtime-inventory.XXXXXX")"

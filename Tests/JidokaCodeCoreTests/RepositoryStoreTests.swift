@@ -93,32 +93,40 @@ struct RepositoryStoreTests {
       database: database,
       transport: fixture.git
     )
-    let mirror = try await store.ensureMirror(remote: remote)
+    let mirror = try await withTestRolloutWorkflow(jobID: job.id) {
+      try await store.ensureMirror(remote: remote)
+    }
     #expect(
       mirror.path.hasSuffix("/Repositories/\(repositoryID.uuidString.lowercased())/mirror.git"))
-    let fetched = try await store.fetchPullRequest(
-      number: 7,
-      expectedSHA: headSHA,
-      jobID: job.id,
-      remote: remote
-    )
-    #expect(fetched == headSHA)
-    await #expect(throws: GitTransportError.exactSHAMismatch) {
-      _ = try await store.fetchPullRequest(
+    let fetched = try await withTestRolloutWorkflow(jobID: job.id) {
+      try await store.fetchPullRequest(
         number: 7,
-        expectedSHA: String(repeating: "a", count: 40),
-        jobID: UUID(),
+        expectedSHA: headSHA,
+        jobID: job.id,
         remote: remote
       )
     }
+    #expect(fetched == headSHA)
+    await #expect(throws: GitTransportError.exactSHAMismatch) {
+      _ = try await withTestRolloutWorkflow(jobID: job.id) {
+        try await store.fetchPullRequest(
+          number: 7,
+          expectedSHA: String(repeating: "a", count: 40),
+          jobID: job.id,
+          remote: remote
+        )
+      }
+    }
 
-    let materialized = try await store.materializeWorkspace(
-      jobID: job.id,
-      remote: remote,
-      baseSHA: baseSHA,
-      branch: "agent/issue-7-fixture",
-      now: Date(timeIntervalSince1970: 1_001)
-    )
+    let materialized = try await withTestRolloutWorkflow(jobID: job.id) {
+      try await store.materializeWorkspace(
+        jobID: job.id,
+        remote: remote,
+        baseSHA: baseSHA,
+        branch: "agent/issue-7-fixture",
+        now: Date(timeIntervalSince1970: 1_001)
+      )
+    }
     #expect(materialized.record.localHeadSHA == baseSHA)
     #expect(materialized.record.cleanupState == .retained)
     #expect(
@@ -251,14 +259,18 @@ struct RepositoryStoreTests {
       database: database,
       transport: fixture.git
     )
-    _ = try await store.ensureMirror(remote: remote)
-    let materialized = try await store.materializeWorkspace(
-      jobID: job.id,
-      remote: remote,
-      baseSHA: baseSHA,
-      branch: "agent/issue-1-retirement",
-      now: Date(timeIntervalSince1970: 2)
-    )
+    _ = try await withTestRolloutWorkflow(jobID: job.id) {
+      try await store.ensureMirror(remote: remote)
+    }
+    let materialized = try await withTestRolloutWorkflow(jobID: job.id) {
+      try await store.materializeWorkspace(
+        jobID: job.id,
+        remote: remote,
+        baseSHA: baseSHA,
+        branch: "agent/issue-1-retirement",
+        now: Date(timeIntervalSince1970: 2)
+      )
+    }
     #expect(try await store.workspaceIsCleanAtRecordedHead(jobID: job.id))
 
     try await database.execute("UPDATE app_settings SET paused = 1 WHERE singleton = 1")

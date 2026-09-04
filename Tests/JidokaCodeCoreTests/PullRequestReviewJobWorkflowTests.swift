@@ -193,6 +193,14 @@ struct PullRequestReviewJobWorkflowTests {
   func startupRecoveryReplay() async throws {
     let fixture = try await PullRequestReviewJobFixture()
     defer { fixture.remove() }
+    _ = try await activateTestPullRequestRollout(
+      database: fixture.database,
+      repository: fixture.repository,
+      job: fixture.job,
+      baseSHA: fixture.pullRequest.base.sha,
+      headSHA: fixture.pullRequest.head.sha,
+      now: fixture.now
+    )
     try await fixture.database.execute(
       "UPDATE jobs SET state = 'runningPi' WHERE id = ?",
       bindings: [.text(fixture.job.id.uuidString.lowercased())]
@@ -245,6 +253,14 @@ struct PullRequestReviewJobWorkflowTests {
   func topologyRecoveryReviewSelection() async throws {
     let fixture = try await PullRequestReviewJobFixture()
     defer { fixture.remove() }
+    _ = try await activateTestPullRequestRollout(
+      database: fixture.database,
+      repository: fixture.repository,
+      job: fixture.job,
+      baseSHA: fixture.pullRequest.base.sha,
+      headSHA: fixture.pullRequest.head.sha,
+      now: fixture.now
+    )
     let jobID = fixture.job.id.uuidString.lowercased()
     let scope = JobCanaryScope(
       jobID: fixture.job.id,
@@ -524,15 +540,21 @@ private final class PullRequestReviewJobFixture: @unchecked Sendable {
       remoteResolver: LocalPullRequestRemoteResolver(remote: remote)
     )
     intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     artifacts = try ArtifactStore(
       rootURL: root.appendingPathComponent("Artifacts", isDirectory: true),
       database: database
     )
     reviewed = ReviewedRevisionStore(database: database)
     let publisher = GitHubMarkerPublisher(
-      executor: GitHubMutationExecutor(intents: intents, broker: api),
+      executor: GitHubMutationExecutor(
+        intents: intents,
+        broker: api,
+        authority: authority
+      ),
       intents: intents,
       reads: api,
+      authority: authority,
       sleeper: PullRequestImmediateSleeper(),
       now: { Date(timeIntervalSince1970: 90_001) }
     )
@@ -579,15 +601,21 @@ private final class PullRequestReviewJobFixture: @unchecked Sendable {
       remoteResolver: LocalPullRequestRemoteResolver(remote: remote)
     )
     let reopenedIntents = MutationIntentStore(database: reopenedDatabase)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: reopenedIntents)
     let reopenedArtifacts = try ArtifactStore(
       rootURL: root.appendingPathComponent("Artifacts", isDirectory: true),
       database: reopenedDatabase
     )
     let reopenedReviewed = ReviewedRevisionStore(database: reopenedDatabase)
     let publisher = GitHubMarkerPublisher(
-      executor: GitHubMutationExecutor(intents: reopenedIntents, broker: api),
+      executor: GitHubMutationExecutor(
+        intents: reopenedIntents,
+        broker: api,
+        authority: authority
+      ),
       intents: reopenedIntents,
       reads: api,
+      authority: authority,
       sleeper: PullRequestImmediateSleeper(),
       now: { Date(timeIntervalSince1970: 90_001) }
     )
@@ -789,9 +817,9 @@ private actor PullRequestReviewGitHubFixture: GitHubReadAPI, PullRequestReviewGi
 
   func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse {
-    try await beforeSend()
+    _ = try await beforeSend()
     guard case .createComment(_, _, _, let body) = operation else {
       throw PullRequestReviewJobFixtureError.unexpectedOperation
     }

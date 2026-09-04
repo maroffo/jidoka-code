@@ -29,7 +29,7 @@ struct ViewModelFlowTests {
     #expect(model.state?.lifecycle == .ready)
     #expect(app.state?.lifecycle == .ready)
     #expect(!app.canPoll)
-    #expect(app.pollingUnavailableReason == "Add and enable a repository in Settings to poll.")
+    #expect(app.pollingUnavailableReason == "Poll Now requires an active finite rollout window.")
     #expect(await fake.tokenWasReceived)
 
     let encoded = try JSONEncoder().encode(try #require(model.state))
@@ -51,8 +51,8 @@ struct ViewModelFlowTests {
     await settings.refresh()
     settings.repositoryReference = "owner/repo"
     await settings.addRepository()
-    #expect(app.canPoll)
-    #expect(app.pollingUnavailableReason == nil)
+    #expect(!app.canPoll)
+    #expect(app.pollingUnavailableReason == "Poll Now requires an active finite rollout window.")
   }
 
   @Test("invalid credential error is actionable and redacted")
@@ -75,20 +75,19 @@ struct ViewModelFlowTests {
     #expect(accessFailure.detail.contains("signed engine helper"))
   }
 
-  @Test("menu pause suppresses poll but durable quit still checkpoints")
-  func menuPauseAndQuit() async {
+  @Test("menu stop and drain suppresses poll but durable quit still checkpoints")
+  func menuStopAndQuit() async {
     let fake = AppSupportEngineFake(onboardingComplete: true)
+    await fake.activateFiniteRollout()
     let model = AppViewModel(client: fake)
     await model.refresh()
     #expect(model.canPoll)
 
-    await model.togglePaused()
+    await model.pollNow()
+    #expect(await fake.pollCount == 1)
+    await model.stopAndDrain()
     #expect(model.state?.paused == true)
     #expect(!model.canPoll)
-    await model.pollNow()
-    #expect(await fake.pollCount == 0)
-
-    await model.togglePaused()
     await model.pollNow()
     #expect(await fake.pollCount == 1)
     #expect(await model.prepareForQuit()?.databaseCheckpointed == true)
@@ -126,6 +125,7 @@ struct ViewModelFlowTests {
   @Test("polling reports one deterministic blocker for every dispatch gate")
   func pollingBlockers() async throws {
     let fake = AppSupportEngineFake(onboardingComplete: true)
+    await fake.activateFiniteRollout()
     let model = AppViewModel(client: fake)
     await model.refresh()
     let ready = try #require(model.state)
@@ -137,8 +137,8 @@ struct ViewModelFlowTests {
         "Finish setup to enable polling."
       ),
       (
-        pollingState(ready, paused: true, repositories: []),
-        "Resume automation to poll."
+        pollingState(ready, includeRollout: false),
+        "Poll Now requires an active finite rollout window."
       ),
       (
         pollingState(ready, credential: .missing),
@@ -154,7 +154,7 @@ struct ViewModelFlowTests {
       ),
       (
         pollingState(ready, repositories: []),
-        "Add and enable a repository in Settings to poll."
+        "The rollout repository is not enabled."
       ),
       (
         pollingState(ready, loginSelected: false, loginStatus: .notRegistered),
@@ -340,12 +340,12 @@ struct ViewModelFlowTests {
     model.setProfileThinking(.xhigh, role: .review)
     await model.saveProfile(role: .review)
     #expect(model.profileDrafts[.review]?.source == .custom)
-    model.maxConcurrency = 8
+    model.maxConcurrency = 1
     await model.saveMaxConcurrency()
     await model.runHerdrPreflight()
     await model.focusInHerdr()
     #expect(await fake.focusCount == 1)
-    #expect(model.state?.settings.maxConcurrency == 8)
+    #expect(model.state?.settings.maxConcurrency == 1)
     await model.setLoginItemEnabled(false)
     #expect(!model.loginItemSelected)
 
@@ -375,7 +375,8 @@ struct ViewModelFlowTests {
     repositories: [RepositoryConfiguration]? = nil,
     loginSelected: Bool? = nil,
     loginStatus: LifecycleServiceStatus? = nil,
-    profiles: [ModelProfileConfiguration]? = nil
+    profiles: [ModelProfileConfiguration]? = nil,
+    includeRollout: Bool = true
   ) -> EngineUIState {
     let lifecycle = lifecycle ?? base.lifecycle
     let credential = credential ?? base.settings.credential
@@ -416,7 +417,8 @@ struct ViewModelFlowTests {
         herdr: herdr,
         modelCatalog: base.settings.modelCatalog
       ),
-      diagnostics: base.diagnostics
+      diagnostics: base.diagnostics,
+      rollout: includeRollout ? base.rollout : nil
     )
   }
 
@@ -425,7 +427,8 @@ struct ViewModelFlowTests {
     let identifiers = [
       JidokaAccessibilityID.menuStatus,
       JidokaAccessibilityID.pollNow,
-      JidokaAccessibilityID.pauseResume,
+      JidokaAccessibilityID.rolloutStop,
+      JidokaAccessibilityID.rolloutRecovery,
       JidokaAccessibilityID.focusInHerdr,
       JidokaAccessibilityID.settings,
       JidokaAccessibilityID.openLogs,
@@ -448,6 +451,11 @@ struct ViewModelFlowTests {
       JidokaAccessibilityID.settingsFocusInHerdr,
       JidokaAccessibilityID.settingsRepositoryReference,
       JidokaAccessibilityID.settingsRepositoryAdd,
+      JidokaAccessibilityID.rolloutInput,
+      JidokaAccessibilityID.rolloutPreview,
+      JidokaAccessibilityID.rolloutCanonical,
+      JidokaAccessibilityID.rolloutConfirmation,
+      JidokaAccessibilityID.rolloutActivate,
       JidokaAccessibilityID.settingsModelCatalogRefresh,
       JidokaAccessibilityID.settingsModelCatalogNotice,
       JidokaAccessibilityID.settingsModelSelector,
@@ -498,7 +506,7 @@ private actor AppSupportEngineFake: EngineClient {
   private var repositories: [RepositoryConfiguration]
   private var profiles: [ModelProfileConfiguration]
   private var modelCatalog: PiModelCatalog
-  private var maxConcurrency = 2
+  private var maxConcurrency = 1
   private var loginSelected: Bool
   private var loginStatus: LifecycleServiceStatus
   private var externalAcknowledged: Bool
@@ -506,6 +514,7 @@ private actor AppSupportEngineFake: EngineClient {
   private var ambiguousMutations: [EngineAmbiguousMutation]
   private var failures: [EngineCommandKind: EngineClientErrorCode] = [:]
   private var checkpointDatabaseSucceeded = true
+  private var rolloutState: RolloutAuthorizationState?
   private var revision = 0
 
   private(set) var commandKinds: [EngineCommandKind] = []
@@ -555,6 +564,11 @@ private actor AppSupportEngineFake: EngineClient {
     checkpointDatabaseSucceeded = value
   }
 
+  func activateFiniteRollout() {
+    rolloutState = .active
+    paused = false
+  }
+
   func send(_ command: EngineCommand) throws -> EngineCommandResponse {
     commandKinds.append(command.kind)
     if let failure = failures[command.kind] {
@@ -602,7 +616,7 @@ private actor AppSupportEngineFake: EngineClient {
           reviewEnabled: draft.reviewEnabled,
           triageEnabled: draft.triageEnabled,
           implementationEnabled: draft.implementationEnabled,
-          enabled: true
+          enabled: draft.enabled
         )
       )
     case .updateRepository(let repository):
@@ -619,6 +633,19 @@ private actor AppSupportEngineFake: EngineClient {
       paused = value
     case .pollNow:
       pollCount += 1
+    case .rolloutStatus:
+      break
+    case .stopAndDrainRollout(let request):
+      guard let rollout = makeRolloutReport(),
+        rollout.status.authorization.id == request.authorizationID,
+        rollout.status.authorization.previewSHA256 == request.previewSHA256
+      else { throw EngineClientError(.invalidCommand) }
+      rolloutState = .revoked
+      paused = true
+    case .previewRollout, .activateRollout,
+      .previewRolloutRecovery, .executeRolloutRecovery,
+      .previewFiniteWindow, .activateFiniteWindow:
+      throw EngineClientError(.invalidCommand)
     case .recheckAmbiguousMutation:
       recheckCount += 1
     case .authorizeRetry(let evidence):
@@ -704,7 +731,87 @@ private actor AppSupportEngineFake: EngineClient {
         coordinatorFailureCodes: [],
         piIssueCode: pi.issueCode,
         herdrIssueCode: herdr.issueCode
+      ),
+      rollout: makeRolloutReport()
+    )
+  }
+
+  private func makeRolloutReport() -> RolloutOperatorReport? {
+    guard let rolloutState else { return nil }
+    let repository = Self.repository()
+    let digest = String(repeating: "a", count: 64)
+    let authorization = RolloutAuthorization(
+      id: "44444444-4444-4444-4444-444444444444",
+      previewSHA256: digest,
+      state: rolloutState,
+      scopeMode: .finiteWindow,
+      workflowStage: .prReview,
+      repositoryID: repository.id,
+      activatedAtMilliseconds: 300_000,
+      expiresAtMilliseconds: 600_000,
+      updatedAtMilliseconds: 300_000,
+      terminalReason: rolloutState == .revoked ? "OPERATOR_STOPPED" : nil
+    )
+    let release = RolloutReleaseIdentity(
+      sourceCommit: String(repeating: "1", count: 40),
+      sourceTree: String(repeating: "2", count: 40),
+      bundleVersion: "1.0.0",
+      bundleBuild: 1,
+      applicationSHA256: digest,
+      helperSHA256: String(repeating: "b", count: 64),
+      herdrHostSHA256: String(repeating: "c", count: 64),
+      schemaVersion: 10,
+      engineProtocolVersion: 12,
+      runtimeManifestSHA256: String(repeating: "d", count: 64),
+      runtimeTreeSHA256: String(repeating: "e", count: 64),
+      modelProfilesSHA256: String(repeating: "f", count: 64),
+      workflowResourcesSHA256: String(repeating: "0", count: 64),
+      githubAccount: "octocat",
+      githubAuthorID: 1,
+      repositoryConfigurationSHA256: String(repeating: "3", count: 64),
+      maxConcurrency: 1
+    )
+    let scope = RolloutScope(
+      mode: .finiteWindow,
+      stage: .prReview,
+      repository: RolloutRepositoryIdentity(
+        id: repository.id,
+        nodeID: repository.nodeID,
+        owner: repository.owner,
+        name: repository.name,
+        defaultBranch: repository.defaultBranch,
+        enabled: repository.enabled,
+        reviewEnabled: repository.reviewEnabled,
+        triageEnabled: repository.triageEnabled,
+        implementationEnabled: repository.implementationEnabled
+      ),
+      object: nil,
+      finiteWindow: RolloutFiniteWindowSelector(
+        maximumJobs: 1,
+        expiresAtMilliseconds: 600_000,
+        candidates: []
       )
+    )
+    return RolloutOperatorReport(
+      status: RolloutStatusReport(
+        authorization: authorization,
+        releaseIdentity: release,
+        scope: scope,
+        effectEnvelope: RolloutEffectEnvelope(
+          stage: .prReview,
+          currentStep: JobStepKind.review.rawValue,
+          allowances: []
+        ),
+        missingLabels: [],
+        commands: [],
+        initialBudgets: .zero,
+        remainingBudgets: .zero,
+        boundJobIDs: [],
+        reservations: [],
+        events: []
+      ),
+      jobs: [],
+      checkpointSHA256: nil
     )
   }
 

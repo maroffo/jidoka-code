@@ -201,9 +201,19 @@ struct PiWorkflowResourceTests {
       JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as? [String: Any]
     )
     let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
+    let canonicalWorkspace = try PiTUIFileProtocol.canonicalExistingURL(fixture.workspace)
+    let canonicalResourceRoot = try PiTUIFileProtocol.canonicalExistingURL(
+      fixture.catalog.resourceRoot
+    )
+    let canonicalManifest = try PiTUIFileProtocol.canonicalExistingURL(
+      fixture.catalog.manifestURL
+    )
 
     #expect(configuration.toolPolicy == .writer)
     #expect(object["toolPolicy"] as? String == "writer")
+    #expect(object["workspaceRoot"] as? String == canonicalWorkspace.path)
+    #expect(object["resourceRoot"] as? String == canonicalResourceRoot.path)
+    #expect(object["resourceManifestPath"] as? String == canonicalManifest.path)
     #expect(object["allowedCommandIDs"] as? [String] == ["check", "test"])
     #expect(
       Set(object.keys)

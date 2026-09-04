@@ -41,6 +41,62 @@ public protocol IssueImplementationApprovalEvaluating: Sendable {
   func evaluateWaitingApproval(jobID: UUID) async throws -> JobRecord
 }
 
+public protocol RolloutStartedEffectReconciling: Sendable {
+  func reconcileStartedEffects(now: Date) async throws
+}
+
+public actor RolloutWorkflowReadbackReconciler: RolloutStartedEffectReconciling {
+  private let database: SQLiteStore
+  private let jobs: DurableJobStore
+  private let workflows: JobWorkflowRegistry
+  private let authority: any RolloutEffectAuthorizing
+
+  public init(
+    database: SQLiteStore,
+    jobs: DurableJobStore,
+    workflows: JobWorkflowRegistry,
+    authority: any RolloutEffectAuthorizing
+  ) {
+    self.database = database
+    self.jobs = jobs
+    self.workflows = workflows
+    self.authority = authority
+  }
+
+  public func reconcileStartedEffects(now: Date) async throws {
+    _ = try await authority.reconcileLocalEffectResults(now: now)
+    let rows = try await database.query(
+      """
+      SELECT jobs.id, MIN(reservation.mutation_intent_id) AS intent_id
+      FROM jobs
+      JOIN rollout_effect_reservations AS reservation ON reservation.job_id = jobs.id
+      WHERE jobs.state IN ('reconciling', 'awaitingResolution')
+        AND reservation.state IN ('sendStarted', 'observationRequired')
+        AND reservation.mutation_intent_id IS NOT NULL
+      GROUP BY jobs.id
+      ORDER BY jobs.priority, jobs.created_at, jobs.id
+      """
+    )
+    for row in rows {
+      guard case .text(let idText)? = row["id"],
+        let id = UUID(uuidString: idText),
+        id.uuidString.lowercased() == idText,
+        case .text(let intentIDText)? = row["intent_id"],
+        let intentID = UUID(uuidString: intentIDText),
+        intentID.uuidString.lowercased() == intentIDText,
+        let job = try await jobs.job(id: id)
+      else {
+        throw JobCoordinatorInternalError.invalidRolloutReadback
+      }
+      try await RolloutEffectTaskContext.$current.withValue(
+        RolloutEffectExecutionContext(mode: .readback(jobID: id, intentID: intentID))
+      ) {
+        try await workflows.workflow(for: job.identity.kind).run(jobID: id)
+      }
+    }
+  }
+}
+
 public enum JobWorkflowFailureDisposition: Equatable, Sendable {
   case transient(notBefore: Date)
   case piInterruptedUnknown
@@ -153,6 +209,8 @@ public actor JobCoordinator: SchedulerPassRunner {
   private let repositories: RepositoryStore
   private let schedulerPersistence: SchedulerPersistence
   private let workflows: JobWorkflowRegistry
+  private let rolloutAuthority: RolloutAuthorityStore?
+  private let rolloutReadbacks: (any RolloutStartedEffectReconciling)?
   private let contractVersion: String
   private let failureClassifier: any JobWorkflowFailureClassifying
   private let newDispatchAllowed: @Sendable () async -> Bool
@@ -169,6 +227,8 @@ public actor JobCoordinator: SchedulerPassRunner {
     schedulerPersistence: SchedulerPersistence,
     workflows: JobWorkflowRegistry,
     contractVersion: String,
+    rolloutAuthority: RolloutAuthorityStore? = nil,
+    rolloutReadbacks: (any RolloutStartedEffectReconciling)? = nil,
     failureClassifier: any JobWorkflowFailureClassifying = DefaultJobWorkflowFailureClassifier(),
     newDispatchAllowed: @escaping @Sendable () async -> Bool = { true },
     now: @escaping @Sendable () -> Date = Date.init
@@ -180,6 +240,8 @@ public actor JobCoordinator: SchedulerPassRunner {
     self.schedulerPersistence = schedulerPersistence
     self.workflows = workflows
     self.contractVersion = contractVersion
+    self.rolloutAuthority = rolloutAuthority
+    self.rolloutReadbacks = rolloutReadbacks
     self.failureClassifier = failureClassifier
     self.newDispatchAllowed = newDispatchAllowed
     self.now = now
@@ -187,7 +249,18 @@ public actor JobCoordinator: SchedulerPassRunner {
 
   public func recoverAtStartup() async throws {
     guard !startupRecoveryCompleted else { return }
-    _ = try await jobs.recoverAtStartup(now: now())
+    if let rolloutAuthority {
+      if let interrupted = try await rolloutAuthority.markInterruptedLaneRecoveryRequired(
+        now: now()
+      ) {
+        _ = try await jobs.recoverRolloutAtStartup(
+          authorizationID: interrupted.authorization.id,
+          now: now()
+        )
+      }
+    } else {
+      _ = try await jobs.recoverAtStartup(now: now())
+    }
     startupRecoveryCompleted = true
   }
 
@@ -197,30 +270,120 @@ public actor JobCoordinator: SchedulerPassRunner {
     do {
       try await recoverAtStartup()
       let snapshot = try await configuration.snapshot()
-      try await dispatchCleanupRecovery()
-      try await dispatchRecovery()
+      let rollout = try await rolloutAuthority?.activeStatus(now: now())
+      if rolloutAuthority != nil, rollout == nil {
+        guard let rolloutReadbacks else {
+          throw JobCoordinatorInternalError.rolloutReadbackReconcilerMissing
+        }
+        try await rolloutReadbacks.reconcileStartedEffects(now: now())
+        return
+      }
+      if rolloutAuthority == nil {
+        try await dispatchCleanupRecovery()
+      }
+      try await dispatchRecovery(rollout: rollout)
       // Deadline promotion is durable bookkeeping only. The lease and workflow remain
       // behind the pause and dispatch gates below.
-      try await dispatchDueRetries()
+      try await dispatchDueRetries(rollout: rollout)
       let dispatchAllowed = await newDispatchAllowed()
       if snapshot.app.paused || !dispatchAllowed {
         try await dispatchCleanupRecovery()
         return
       }
-      for repository in snapshot.repositories where repository.enabled {
-        guard await newDispatchAllowed() else { break }
-        await discover(repository)
+      if let rollout {
+        if rollout.scope.mode == .finiteWindow,
+          let repository = snapshot.repositories.first(where: {
+            $0.id == rollout.authorization.repositoryID
+          })
+        {
+          guard await newDispatchAllowed() else { return }
+          await RolloutEffectTaskContext.$current.withValue(
+            RolloutEffectExecutionContext(mode: .discovery)
+          ) {
+            await discover(repository, rollout: rollout)
+          }
+        }
+      } else {
+        for repository in snapshot.repositories where repository.enabled {
+          guard await newDispatchAllowed() else { break }
+          await RolloutEffectTaskContext.$current.withValue(
+            RolloutEffectExecutionContext(mode: .discovery)
+          ) {
+            await discover(repository, rollout: nil)
+          }
+        }
       }
       if await newDispatchAllowed() {
-        try await dispatchQueuedJobs()
+        try await dispatchWaitingHuman(rollout: rollout)
       }
-      try await dispatchCleanupRecovery()
+      if await newDispatchAllowed() {
+        try await dispatchQueuedJobs(rollout: rollout)
+      }
+      if let rollout {
+        try await finalizeRollout(rollout)
+      } else {
+        try await dispatchCleanupRecovery()
+      }
     } catch {
       failures.append(
         JobCoordinatorFailure(
           repositoryID: nil,
           jobID: nil,
           stage: "scheduler-pass",
+          errorType: Self.errorType(error)
+        )
+      )
+    }
+  }
+
+  private func dispatchWaitingHuman(rollout: RolloutStatusReport?) async throws {
+    guard let rollout,
+      rollout.scope.mode == .exactObject,
+      rollout.scope.stage == .implementationExecute
+    else { return }
+    let waiting = try await jobs.jobs(nonTerminalOnly: true)
+      .filter { $0.state == .waitingHuman && Self.admitted($0, by: rollout) }
+      .sorted(by: Self.precedes)
+    for job in waiting {
+      guard await newDispatchAllowed() else { return }
+      do {
+        guard
+          let repository = try await configuration.repository(
+            id: job.identity.repositoryID
+          ), Self.repository(repository, allows: job.identity.kind)
+        else {
+          throw JobCoordinatorInternalError.rolloutRepositoryUnavailable
+        }
+        try await jobs.requireActiveRolloutBinding(jobID: job.id, now: now())
+        let workflow = workflows.workflow(for: job.identity.kind)
+        guard let approval = workflow as? any IssueImplementationApprovalEvaluating else {
+          throw JobCoordinatorInternalError.approvalEvaluatorMissing
+        }
+        _ = try await RolloutEffectTaskContext.$current.withValue(
+          RolloutEffectExecutionContext(mode: .workflow(jobID: job.id))
+        ) {
+          try await approval.evaluateWaitingApproval(jobID: job.id)
+        }
+      } catch {
+        await record(job: job, stage: "waiting-human-approval", error: error)
+      }
+    }
+  }
+
+  public func runReadbackOnly(pass: SchedulerPass) async {
+    lastPass = pass
+    failures = []
+    do {
+      guard rolloutAuthority != nil, let rolloutReadbacks else {
+        throw JobCoordinatorInternalError.rolloutReadbackReconcilerMissing
+      }
+      try await rolloutReadbacks.reconcileStartedEffects(now: now())
+    } catch {
+      failures.append(
+        JobCoordinatorFailure(
+          repositoryID: nil,
+          jobID: nil,
+          stage: "rollout-readback",
           errorType: Self.errorType(error)
         )
       )
@@ -248,9 +411,13 @@ public actor JobCoordinator: SchedulerPassRunner {
           reason: "exact paused canary inputs selected"
         )
       )
-      try await workflows.workflow(for: .prReview).run(
-        jobID: Self.job(from: preparing).id
-      )
+      try await RolloutEffectTaskContext.$current.withValue(
+        RolloutEffectExecutionContext(mode: .historicalCanary(jobID: jobID))
+      ) {
+        try await workflows.workflow(for: .prReview).run(
+          jobID: Self.job(from: preparing).id
+        )
+      }
     } catch {
       await failJob(leased, error: error, stage: "canary")
     }
@@ -275,10 +442,14 @@ public actor JobCoordinator: SchedulerPassRunner {
       throw JobCoordinatorInternalError.invalidCanary
     }
     do {
-      try await workflows.workflow(for: .prReview).runRecoveredCanary(
-        jobID: recovered.id,
-        recoveryEvidenceSHA256: recoveryEvidenceSHA256
-      )
+      try await RolloutEffectTaskContext.$current.withValue(
+        RolloutEffectExecutionContext(mode: .historicalCanary(jobID: jobID))
+      ) {
+        try await workflows.workflow(for: .prReview).runRecoveredCanary(
+          jobID: recovered.id,
+          recoveryEvidenceSHA256: recoveryEvidenceSHA256
+        )
+      }
     } catch {
       await failJob(recovered, error: error, stage: "canary-recovery")
     }
@@ -303,11 +474,15 @@ public actor JobCoordinator: SchedulerPassRunner {
       throw JobCoordinatorInternalError.invalidCanary
     }
     do {
-      try await workflows.workflow(for: .prReview).runCanaryPiFreshRetry(
-        jobID: jobID,
-        recoveryEvidenceSHA256: recoveryEvidenceSHA256,
-        retryEvidenceSHA256: retryEvidenceSHA256
-      )
+      try await RolloutEffectTaskContext.$current.withValue(
+        RolloutEffectExecutionContext(mode: .historicalCanary(jobID: jobID))
+      ) {
+        try await workflows.workflow(for: .prReview).runCanaryPiFreshRetry(
+          jobID: jobID,
+          recoveryEvidenceSHA256: recoveryEvidenceSHA256,
+          retryEvidenceSHA256: retryEvidenceSHA256
+        )
+      }
     } catch {
       await record(job: state.job, stage: "canary-pi-fresh-retry", error: error)
     }
@@ -321,9 +496,13 @@ public actor JobCoordinator: SchedulerPassRunner {
     guard state.retry.job.identity.kind == .prReview else {
       throw JobCoordinatorInternalError.invalidCanary
     }
-    try await workflows.workflow(for: .prReview).runCanaryRoleHostReplacement(
-      request: request
-    )
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .historicalCanary(jobID: state.retry.job.id))
+    ) {
+      try await workflows.workflow(for: .prReview).runCanaryRoleHostReplacement(
+        request: request
+      )
+    }
   }
 
   private func dispatchCleanupRecovery() async throws {
@@ -345,11 +524,13 @@ public actor JobCoordinator: SchedulerPassRunner {
     }
   }
 
-  private func dispatchRecovery() async throws {
+  private func dispatchRecovery(rollout: RolloutStatusReport?) async throws {
     // An admitted canary without its append-only close record is human recovery
     // authority, never permission for startup to launch or substitute work.
     guard try await jobs.unresolvedCanaryJobID() == nil else { return }
-    let current = try await jobs.jobs(nonTerminalOnly: true)
+    let current = try await jobs.jobs(nonTerminalOnly: true).filter {
+      Self.admitted($0, by: rollout)
+    }
     let recovery = current.filter { $0.state == .reconciliationQueued }.sorted(by: Self.precedes)
     for job in recovery {
       do {
@@ -362,7 +543,14 @@ public actor JobCoordinator: SchedulerPassRunner {
             reason: "recovery reconciliation acquired repository lease"
           )
         )
-        try await workflows.workflow(for: job.identity.kind).run(jobID: job.id)
+        if rolloutAuthority != nil {
+          try await jobs.requireActiveRolloutBinding(
+            jobID: job.id,
+            now: now(),
+            recovery: true
+          )
+        }
+        try await runWorkflow(job)
         if let unresolved = try await jobs.job(id: job.id), unresolved.state == .reconciling {
           _ = try await jobs.transition(
             jobID: unresolved.id,
@@ -375,27 +563,47 @@ public actor JobCoordinator: SchedulerPassRunner {
             )
           )
         }
+      } catch DurableJobStoreError.rolloutAuthorityRequired,
+        DurableJobStoreError.dispatchSuppressed
+      {
+        return
       } catch {
         await failJob(job, error: error, stage: "recovery")
       }
     }
     for job in current.filter({ $0.state == .awaitingResolution }).sorted(by: Self.precedes) {
       do {
-        try await workflows.workflow(for: job.identity.kind).run(jobID: job.id)
+        if rolloutAuthority != nil {
+          try await jobs.requireActiveRolloutBinding(
+            jobID: job.id,
+            now: now(),
+            recovery: true
+          )
+        }
+        try await runWorkflow(job)
+      } catch DurableJobStoreError.rolloutAuthorityRequired,
+        DurableJobStoreError.dispatchSuppressed
+      {
+        return
       } catch {
         await record(job: job, stage: "late-read", error: error)
       }
     }
   }
 
-  private func dispatchDueRetries() async throws {
+  private func dispatchDueRetries(rollout: RolloutStatusReport?) async throws {
+    if rollout?.scope.mode == .exactObject { return }
     let instant = now()
     let due = try await jobs.jobs(nonTerminalOnly: true)
       .filter { job in
         job.state == .retryBackoff && job.notBefore.map { $0 <= instant } == true
+          && Self.admitted(job, by: rollout)
       }
       .sorted(by: Self.precedes)
     for job in due {
+      if rolloutAuthority != nil {
+        try await jobs.requireActiveRolloutBinding(jobID: job.id, now: instant)
+      }
       _ = try await jobs.transition(
         jobID: job.id,
         eventKey: eventKey(job: job, suffix: "retry-deadline"),
@@ -405,7 +613,10 @@ public actor JobCoordinator: SchedulerPassRunner {
     }
   }
 
-  private func discover(_ repository: RepositoryConfiguration) async {
+  private func discover(
+    _ repository: RepositoryConfiguration,
+    rollout: RolloutStatusReport?
+  ) async {
     let instant = now()
     do {
       if let backoff = try await schedulerPersistence.backoff(repositoryID: repository.id),
@@ -413,7 +624,11 @@ public actor JobCoordinator: SchedulerPassRunner {
       {
         return
       }
-      if repository.reviewEnabled {
+      let reviewStageAllowed =
+        rollout.map {
+          [.prReview, .generatedPRReview].contains($0.scope.stage)
+        } ?? true
+      if repository.reviewEnabled && reviewStageAllowed {
         let observations = try await discovery.pullRequests(
           owner: repository.owner,
           repository: repository.name,
@@ -421,51 +636,98 @@ public actor JobCoordinator: SchedulerPassRunner {
           repositoryNodeID: repository.nodeID
         )
         guard await newDispatchAllowed() else { return }
-        for observation in observations where observation.disposition == .candidate {
+        let candidates = observations.filter { $0.disposition == .candidate }.sorted {
+          Self.candidatePrecedes(
+            number: $0.pullRequest.number,
+            nodeID: $0.pullRequest.nodeID,
+            revisionKey: $0.pullRequest.head.sha,
+            number: $1.pullRequest.number,
+            nodeID: $1.pullRequest.nodeID,
+            revisionKey: $1.pullRequest.head.sha
+          )
+        }
+        for observation in candidates {
           guard await newDispatchAllowed() else { return }
+          let revisionKey = observation.pullRequest.head.sha
+          let rolloutBinding = Self.creationBinding(
+            rollout: rollout,
+            objectNodeID: observation.pullRequest.nodeID,
+            objectNumber: observation.pullRequest.number,
+            revisionKey: revisionKey
+          )
+          if rollout != nil, rolloutBinding == nil { continue }
           _ = try await jobs.createJob(
             identity: LogicalJobIdentity(
               repositoryID: repository.id,
               kind: .prReview,
               objectNodeID: observation.pullRequest.nodeID,
-              revisionKey: observation.pullRequest.head.sha
+              revisionKey: revisionKey
             ),
             objectNumber: observation.pullRequest.number,
             contractVersionUsed: contractVersion,
             priority: .prReview,
             firstStep: .review,
             now: instant,
-            requiresDispatchEligibility: true
+            requiresDispatchEligibility: true,
+            rolloutBinding: rolloutBinding
           )
         }
       }
-      if repository.triageEnabled {
+      let triageStageAllowed = rollout.map { $0.scope.stage == .issueTriage } ?? true
+      if repository.triageEnabled && triageStageAllowed {
         let observations = try await discovery.issues(
           owner: repository.owner,
           repository: repository.name,
           repositoryID: repository.id
         )
         guard await newDispatchAllowed() else { return }
-        for observation in observations where observation.disposition == .candidate {
+        let candidates = observations.filter { $0.disposition == .candidate }.sorted {
+          Self.candidatePrecedes(
+            number: $0.issue.number,
+            nodeID: $0.issue.nodeID,
+            revisionKey: "initial-triage",
+            number: $1.issue.number,
+            nodeID: $1.issue.nodeID,
+            revisionKey: "initial-triage"
+          )
+        }
+        for observation in candidates {
           guard await newDispatchAllowed() else { return }
+          let revisionKey = "initial-triage"
+          let rolloutBinding = Self.creationBinding(
+            rollout: rollout,
+            objectNodeID: observation.issue.nodeID,
+            objectNumber: observation.issue.number,
+            revisionKey: revisionKey
+          )
+          if rollout != nil, rolloutBinding == nil { continue }
           _ = try await jobs.createJob(
             identity: LogicalJobIdentity(
               repositoryID: repository.id,
               kind: .issueTriage,
               objectNodeID: observation.issue.nodeID,
-              revisionKey: "initial-triage"
+              revisionKey: revisionKey
             ),
             objectNumber: observation.issue.number,
             contractVersionUsed: contractVersion,
             priority: .triage,
             firstStep: .triage,
             now: instant,
-            requiresDispatchEligibility: true
+            requiresDispatchEligibility: true,
+            rolloutBinding: rolloutBinding
           )
         }
       }
-      if repository.implementationEnabled, await newDispatchAllowed() {
-        try await discoverImplementation(repository, now: instant)
+      let implementationStageAllowed =
+        rollout.map {
+          $0.scope.stage == .implementationPlan || $0.scope.stage == .implementationExecute
+        } ?? true
+      let implementationDispatchAllowed = await newDispatchAllowed()
+      if repository.implementationEnabled
+        && implementationStageAllowed
+        && implementationDispatchAllowed
+      {
+        try await discoverImplementation(repository, rollout: rollout, now: instant)
       }
       try await schedulerPersistence.recordSuccess(repositoryID: repository.id)
     } catch DurableJobStoreError.dispatchSuppressed {
@@ -489,6 +751,7 @@ public actor JobCoordinator: SchedulerPassRunner {
 
   private func discoverImplementation(
     _ repository: RepositoryConfiguration,
+    rollout: RolloutStatusReport?,
     now instant: Date
   ) async throws {
     let observations = try await discovery.implementationIssues(
@@ -497,29 +760,43 @@ public actor JobCoordinator: SchedulerPassRunner {
       repositoryID: repository.id
     )
     guard await newDispatchAllowed() else { return }
-    for observation in observations {
+    for observation in observations.sorted(by: {
+      if $0.issue.number != $1.issue.number { return $0.issue.number < $1.issue.number }
+      return $0.issue.nodeID < $1.issue.nodeID
+    }) {
       guard await newDispatchAllowed() else { return }
       guard case .candidate(let kind) = observation.disposition else { continue }
       switch kind {
       case .ready:
+        if let rollout, rollout.scope.stage != .implementationPlan { continue }
         let generation = try await jobs.nextClaimGeneration(
           issueNodeID: observation.issue.nodeID
         )
+        let revisionKey = "claim-\(generation)"
+        let rolloutBinding = Self.creationBinding(
+          rollout: rollout,
+          objectNodeID: observation.issue.nodeID,
+          objectNumber: observation.issue.number,
+          revisionKey: revisionKey
+        )
+        if rollout != nil, rolloutBinding == nil { continue }
         _ = try await jobs.createJob(
           identity: LogicalJobIdentity(
             repositoryID: repository.id,
             kind: .issueImplementation,
             objectNodeID: observation.issue.nodeID,
-            revisionKey: "claim-\(generation)"
+            revisionKey: revisionKey
           ),
           objectNumber: observation.issue.number,
           contractVersionUsed: contractVersion,
           priority: .issueImplementation,
           firstStep: .claimReady,
           now: instant,
-          requiresDispatchEligibility: true
+          requiresDispatchEligibility: true,
+          rolloutBinding: rolloutBinding
         )
       case .approvedComplex:
+        if let rollout, rollout.scope.stage != .implementationExecute { continue }
         let waiting = try await jobs.jobs(nonTerminalOnly: true).filter {
           $0.identity.repositoryID == repository.id
             && $0.identity.objectNodeID == observation.issue.nodeID
@@ -533,17 +810,38 @@ public actor JobCoordinator: SchedulerPassRunner {
         guard let approval = workflow as? any IssueImplementationApprovalEvaluating else {
           throw JobCoordinatorInternalError.approvalEvaluatorMissing
         }
-        _ = try await approval.evaluateWaitingApproval(jobID: job.id)
+        if rolloutAuthority != nil {
+          try await jobs.requireActiveRolloutBinding(jobID: job.id, now: now())
+        }
+        _ = try await RolloutEffectTaskContext.$current.withValue(
+          RolloutEffectExecutionContext(mode: .workflow(jobID: job.id))
+        ) {
+          try await approval.evaluateWaitingApproval(jobID: job.id)
+        }
       }
     }
   }
 
-  private func dispatchQueuedJobs() async throws {
+  private func dispatchQueuedJobs(rollout: RolloutStatusReport?) async throws {
     let queued = try await jobs.jobs(nonTerminalOnly: true)
-      .filter { $0.state == .queued }
+      .filter { $0.state == .queued && Self.admitted($0, by: rollout) }
       .sorted(by: Self.precedes)
     for original in queued {
       guard await newDispatchAllowed() else { return }
+      guard
+        let repository = try await configuration.repository(
+          id: original.identity.repositoryID
+        ), Self.repository(repository, allows: original.identity.kind)
+      else {
+        if rollout != nil {
+          await record(
+            job: original,
+            stage: "dispatch",
+            error: JobCoordinatorInternalError.rolloutRepositoryUnavailable
+          )
+        }
+        continue
+      }
       do {
         let leased = try await jobs.transition(
           jobID: original.id,
@@ -564,11 +862,13 @@ public actor JobCoordinator: SchedulerPassRunner {
             reason: "job inputs selected for validation"
           )
         )
-        try await workflows.workflow(for: original.identity.kind).run(
-          jobID: Self.job(from: preparing).id
-        )
+        if rolloutAuthority != nil {
+          try await jobs.requireActiveRolloutBinding(jobID: original.id, now: now())
+        }
+        try await runWorkflow(Self.job(from: preparing))
       } catch DurableJobStoreError.globalConcurrencyReached,
-        DurableJobStoreError.dispatchSuppressed
+        DurableJobStoreError.dispatchSuppressed,
+        DurableJobStoreError.rolloutAuthorityRequired
       {
         return
       } catch DurableJobStoreError.repositoryAlreadyLeased {
@@ -577,6 +877,78 @@ public actor JobCoordinator: SchedulerPassRunner {
         await failJob(original, error: error)
       }
     }
+  }
+
+  private func finalizeRollout(_ rollout: RolloutStatusReport) async throws {
+    guard let rolloutAuthority else { return }
+    let current = try await rolloutAuthority.status(
+      authorizationID: rollout.authorization.id
+    )
+    var boundJobs: [JobRecord] = []
+    boundJobs.reserveCapacity(current.boundJobIDs.count)
+    for id in current.boundJobIDs {
+      if let job = try await jobs.job(id: id) {
+        boundJobs.append(job)
+      }
+    }
+    guard boundJobs.count == current.boundJobIDs.count else {
+      _ = try await rolloutAuthority.markRecoveryRequired(
+        authorizationID: current.authorization.id,
+        reasonCode: "BOUND_JOB_MISSING",
+        now: now()
+      )
+      return
+    }
+
+    let unsettled = current.reservations.filter { $0.state != .settled }
+    if boundJobs.contains(where: Self.requiresReadback)
+      || unsettled.contains(where: Self.requiresReadback)
+    {
+      _ = try await rolloutAuthority.markRecoveryRequired(
+        authorizationID: current.authorization.id,
+        reasonCode: "EFFECT_READBACK_REQUIRED",
+        now: now()
+      )
+      return
+    }
+
+    if current.scope.mode == .exactObject,
+      !failures.filter({ failure in
+        failure.jobID.map(current.boundJobIDs.contains) ?? true
+      }).isEmpty || boundJobs.contains(where: { $0.state == .retryBackoff })
+    {
+      _ = try await rolloutAuthority.fail(
+        authorizationID: current.authorization.id,
+        reasonCode: "EXACT_STAGE_FAILED",
+        now: now()
+      )
+      return
+    }
+
+    let completed = boundJobs.allSatisfy { Self.completed($0, for: current.scope.stage) }
+    let reachedWindowCap =
+      current.scope.mode == .exactObject
+      || current.remainingBudgets.jobs == 0
+    guard completed, reachedWindowCap else { return }
+    guard unsettled.isEmpty else {
+      _ = try await rolloutAuthority.fail(
+        authorizationID: current.authorization.id,
+        reasonCode: "UNSETTLED_EFFECT",
+        now: now()
+      )
+      return
+    }
+
+    let checkpoint = try Self.checkpointSHA256(
+      authorizationID: current.authorization.id,
+      stage: current.scope.stage,
+      jobs: boundJobs
+    )
+    _ = try await rolloutAuthority.settle(
+      authorizationID: rollout.authorization.id,
+      checkpointSHA256: checkpoint,
+      now: now()
+    )
   }
 
   private func failJob(
@@ -655,6 +1027,14 @@ public actor JobCoordinator: SchedulerPassRunner {
     )
   }
 
+  private func runWorkflow(_ job: JobRecord) async throws {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .workflow(jobID: job.id))
+    ) {
+      try await workflows.workflow(for: job.identity.kind).run(jobID: job.id)
+    }
+  }
+
   private func record(job: JobRecord, stage: String, error: Error) async {
     failures.append(
       JobCoordinatorFailure(
@@ -676,6 +1056,127 @@ public actor JobCoordinator: SchedulerPassRunner {
     return lhs.id.uuidString < rhs.id.uuidString
   }
 
+  private static func admitted(
+    _ job: JobRecord,
+    by rollout: RolloutStatusReport?
+  ) -> Bool {
+    guard let rollout else { return true }
+    return rollout.boundJobIDs.contains(job.id)
+      && rollout.authorization.repositoryID == job.identity.repositoryID
+      && rollout.scope.stage.accepts(jobKind: job.identity.kind)
+  }
+
+  private static func repository(
+    _ repository: RepositoryConfiguration,
+    allows kind: JobKind
+  ) -> Bool {
+    guard repository.enabled else { return false }
+    switch kind {
+    case .prReview: return repository.reviewEnabled
+    case .issueTriage: return repository.triageEnabled
+    case .issueImplementation, .complexPlan: return repository.implementationEnabled
+    }
+  }
+
+  private static func completed(
+    _ job: JobRecord,
+    for stage: RolloutWorkflowStage
+  ) -> Bool {
+    if job.state.isTerminal { return true }
+    switch stage {
+    case .implementationPlan:
+      return job.state == .waitingHuman
+        || (job.state == .queued && job.currentStepKind == .orchestrate)
+    case .implementationExecute:
+      return job.state == .queued && job.currentStepKind == .replan
+    case .prReview, .issueTriage, .generatedPRReview:
+      return false
+    }
+  }
+
+  private static func requiresReadback(_ job: JobRecord) -> Bool {
+    [.reconciling, .reconciliationQueued, .awaitingResolution].contains(job.state)
+  }
+
+  private static func requiresReadback(_ reservation: RolloutEffectReservation) -> Bool {
+    [.sendStarted, .observationRequired, .attributed].contains(reservation.state)
+  }
+
+  private static func checkpointSHA256(
+    authorizationID: String,
+    stage: RolloutWorkflowStage,
+    jobs: [JobRecord]
+  ) throws -> String {
+    let receipt = RolloutStageCheckpoint(
+      authorizationID: authorizationID,
+      stage: stage,
+      jobs: jobs.sorted(by: Self.precedes).map {
+        RolloutStageCheckpoint.Job(
+          id: $0.id.uuidString.lowercased(),
+          state: $0.state,
+          attempt: $0.attempt,
+          currentStep: $0.currentStep,
+          currentStepKind: $0.currentStepKind,
+          terminalReason: $0.terminalReason
+        )
+      }
+    )
+    return RolloutCanonicalJSON.sha256(try RolloutCanonicalJSON.encode(receipt))
+  }
+
+  private static func creationBinding(
+    rollout: RolloutStatusReport?,
+    objectNodeID: String,
+    objectNumber: Int,
+    revisionKey: String
+  ) -> RolloutJobCreationBinding? {
+    guard let rollout else { return nil }
+    guard rollout.scope.mode == .finiteWindow,
+      let window = rollout.scope.finiteWindow
+    else {
+      return nil
+    }
+    let candidateSHA256: String
+    if let candidate = window.candidates.first(where: {
+      $0.nodeID == objectNodeID && $0.number == objectNumber
+        && $0.revisionKey == revisionKey
+    }) {
+      candidateSHA256 = candidate.canonicalInputSHA256
+    } else {
+      guard window.allowsFutureObjects,
+        objectNumber > window.observedObjectNumberUpperBound,
+        objectNumber <= window.maximumFutureObjectNumber,
+        let digest = try? RolloutPreviewBuilder.futureCandidateSHA256(
+          scope: rollout.scope,
+          nodeID: objectNodeID,
+          number: objectNumber,
+          revisionKey: revisionKey
+        )
+      else {
+        return nil
+      }
+      candidateSHA256 = digest
+    }
+    return RolloutJobCreationBinding(
+      authorizationID: rollout.authorization.id,
+      workflowStage: rollout.scope.stage,
+      canonicalInputSHA256: candidateSHA256
+    )
+  }
+
+  private static func candidatePrecedes(
+    number lhsNumber: Int,
+    nodeID lhsNodeID: String,
+    revisionKey lhsRevisionKey: String,
+    number rhsNumber: Int,
+    nodeID rhsNodeID: String,
+    revisionKey rhsRevisionKey: String
+  ) -> Bool {
+    if lhsNumber != rhsNumber { return lhsNumber < rhsNumber }
+    if lhsNodeID != rhsNodeID { return lhsNodeID < rhsNodeID }
+    return lhsRevisionKey < rhsRevisionKey
+  }
+
   private static func job(from transition: JobTransitionResult) -> JobRecord {
     switch transition {
     case .applied(let job), .duplicate(let job): job
@@ -687,8 +1188,26 @@ public actor JobCoordinator: SchedulerPassRunner {
   }
 }
 
+private struct RolloutStageCheckpoint: Codable {
+  struct Job: Codable {
+    let id: String
+    let state: JobState
+    let attempt: Int
+    let currentStep: Int
+    let currentStepKind: JobStepKind?
+    let terminalReason: String?
+  }
+
+  let authorizationID: String
+  let stage: RolloutWorkflowStage
+  let jobs: [Job]
+}
+
 private enum JobCoordinatorInternalError: Error {
   case approvalWithoutWaitingJob
   case approvalEvaluatorMissing
   case invalidCanary
+  case invalidRolloutReadback
+  case rolloutReadbackReconcilerMissing
+  case rolloutRepositoryUnavailable
 }

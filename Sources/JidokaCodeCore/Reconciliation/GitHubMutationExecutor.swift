@@ -15,13 +15,16 @@ public enum GitHubMutationExecutorError: Error, Equatable, Sendable {
 public actor GitHubMutationExecutor {
   private let intents: MutationIntentStore
   private let broker: any GitHubMutationSending
+  private let authority: any RolloutEffectAuthorizing
 
   public init(
     intents: MutationIntentStore,
-    broker: any GitHubMutationSending
+    broker: any GitHubMutationSending,
+    authority: any RolloutEffectAuthorizing
   ) {
     self.intents = intents
     self.broker = broker
+    self.authority = authority
   }
 
   public func prepareAndSend(
@@ -55,13 +58,30 @@ public actor GitHubMutationExecutor {
 
     let response: GitHubBrokerResponse
     do {
-      let intentStore = intents
+      let rolloutAuthority = authority
       response = try await broker.performMutation(operation) {
-        _ = try await intentStore.markSendStarted(id: prepared.id, now: now)
+        try await rolloutAuthority.reserveGitHubSendAndMarkStarted(
+          RolloutGitHubSendEffect(
+            jobID: jobID,
+            intentID: prepared.id,
+            mutation: mutation,
+            target: target,
+            expectedStateSHA256: expectedStateDigest,
+            requestSHA256: requestDigest,
+            operation: operation
+          ),
+          now: now
+        )
       }
     } catch {
       if try await intents.intent(id: prepared.id)?.state == .sendStarted {
         _ = try? await intents.markReconcileRequired(id: prepared.id, now: now)
+        try? await authority.recordMutationObservation(
+          intentID: prepared.id,
+          observation: .observationRequired,
+          evidenceSHA256: Self.errorEvidence(error),
+          now: now
+        )
       }
       throw error
     }
@@ -82,6 +102,12 @@ public actor GitHubMutationExecutor {
         evidenceDigest: evidence,
         now: now
       )
+      try await authority.recordMutationObservation(
+        intentID: started.id,
+        observation: .settled,
+        evidenceSHA256: evidence,
+        now: now
+      )
       return GitHubMutationDispatch(
         intent: terminal,
         response: response,
@@ -91,6 +117,12 @@ public actor GitHubMutationExecutor {
       .reconcileRequired, .retryableRead, .escalation:
       let reconciling = try await intents.markReconcileRequired(
         id: started.id,
+        now: now
+      )
+      try await authority.recordMutationObservation(
+        intentID: started.id,
+        observation: .observationRequired,
+        evidenceSHA256: evidence,
         now: now
       )
       return GitHubMutationDispatch(
@@ -123,7 +155,7 @@ public actor GitHubMutationExecutor {
     }
   }
 
-  private static func requestDigest(_ operation: GitHubOperation) throws -> String {
+  static func requestDigest(_ operation: GitHubOperation) throws -> String {
     let request = try GitHubRequestFactory.make(operation).request
     var bytes = Data()
     bytes.append(Data((request.httpMethod ?? "").utf8))
@@ -142,6 +174,10 @@ public actor GitHubMutationExecutor {
     bytes.append(0x0A)
     bytes.append(Data(GitHubMarkerCodec.sha256(response.body).utf8))
     return GitHubMarkerCodec.sha256(bytes)
+  }
+
+  private static func errorEvidence(_ error: any Error) -> String {
+    GitHubMarkerCodec.sha256(Data(String(reflecting: type(of: error)).utf8))
   }
 
   private static func dispositionCode(_ disposition: GitHubResponseDisposition) -> String {

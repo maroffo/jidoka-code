@@ -128,6 +128,7 @@ public enum DurableJobStoreError: Error, Equatable, Sendable {
   case decode(String)
   case globalConcurrencyReached
   case dispatchSuppressed
+  case rolloutAuthorityRequired
   case repositoryAlreadyLeased(UUID)
   case leaseMissing(UUID)
   case leaseOwnedByAnotherJob
@@ -139,6 +140,7 @@ public enum DurableJobStoreError: Error, Equatable, Sendable {
   case activeClaimExists(String)
   case claimNotFound(issueNodeID: String, generation: Int)
   case staleApprovalRequiresAttribution
+  case staleApprovalRequiresCheckpoint
   case maintenanceEvidenceMismatch
   case maintenanceCandidateUnsafe(UUID)
   case maintenanceBatchCollision
@@ -151,13 +153,16 @@ public enum DurableJobStoreError: Error, Equatable, Sendable {
 public actor DurableJobStore {
   let database: SQLiteStore
   private let enforceApplicationDispatchGate: Bool
+  private let enforceRolloutAuthority: Bool
 
   public init(
     database: SQLiteStore,
-    enforceApplicationDispatchGate: Bool = false
+    enforceApplicationDispatchGate: Bool = false,
+    enforceRolloutAuthority: Bool = false
   ) {
     self.database = database
     self.enforceApplicationDispatchGate = enforceApplicationDispatchGate
+    self.enforceRolloutAuthority = enforceRolloutAuthority
   }
 
   public func createJob(
@@ -168,12 +173,29 @@ public actor DurableJobStore {
     priority: JobPriority,
     firstStep: JobStepKind,
     now: Date,
-    requiresDispatchEligibility: Bool = false
+    requiresDispatchEligibility: Bool = false,
+    rolloutBinding: RolloutJobCreationBinding? = nil
   ) async throws -> JobCreationResult {
     try Self.validate(identity: identity, contractVersion: contractVersionUsed)
     return try await database.transaction { database in
       if requiresDispatchEligibility {
         try Self.requireNewDispatchEligibility(database: database)
+      }
+      let rolloutSlot: Int?
+      if enforceRolloutAuthority {
+        guard requiresDispatchEligibility, let rolloutBinding else {
+          throw DurableJobStoreError.rolloutAuthorityRequired
+        }
+        rolloutSlot = try RolloutAuthorityStore.authorizeJobCreation(
+          binding: rolloutBinding,
+          identity: identity,
+          objectNumber: objectNumber,
+          firstStep: firstStep,
+          now: now,
+          database: database
+        )
+      } else {
+        rolloutSlot = nil
       }
       if let disposition = try Self.loadDisposition(identity, database: database),
         disposition.state.suppressesDiscovery
@@ -188,8 +210,8 @@ public actor DurableJobStore {
         INSERT INTO jobs(
           id, repository_id, kind, object_node_id, object_number, revision_key,
           contract_version_used, priority, state, current_step, current_step_kind,
-          attempt, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'discovered', 0, ?, 0, ?, ?)
+          attempt, created_at, updated_at, rollout_generation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'discovered', 0, ?, 0, ?, ?, ?)
         """,
         bindings: [
           .text(idText),
@@ -203,6 +225,7 @@ public actor DurableJobStore {
           .text(firstStep.rawValue),
           .real(now.timeIntervalSince1970),
           .real(now.timeIntervalSince1970),
+          .integer(rolloutSlot == nil ? 0 : 1),
         ]
       )
       _ = try database.execute(
@@ -230,15 +253,145 @@ public actor DurableJobStore {
         event: .enqueue,
         context: JobTransitionContext(now: now, reason: "logical identity discovered")
       )
-      return .created(
-        try Self.apply(
-          effect,
-          to: discovered,
-          eventKey: "create:\(idText)",
-          context: JobTransitionContext(now: now, reason: "logical identity discovered"),
+      let created = try Self.apply(
+        effect,
+        to: discovered,
+        eventKey: "create:\(idText)",
+        context: JobTransitionContext(now: now, reason: "logical identity discovered"),
+        database: database
+      )
+      if let rolloutBinding, let rolloutSlot {
+        try RolloutAuthorityStore.bindCreatedJob(
+          job: created,
+          binding: rolloutBinding,
+          jobSlot: rolloutSlot,
+          now: now,
           database: database
         )
+      }
+      return .created(created)
+    }
+  }
+
+  public func createQuarantinedGeneratedReviewJob(
+    id: UUID = UUID(),
+    parentJobID: UUID,
+    identity: LogicalJobIdentity,
+    objectNumber: Int,
+    contractVersionUsed: String,
+    now: Date
+  ) async throws -> JobCreationResult {
+    try Self.validate(identity: identity, contractVersion: contractVersionUsed)
+    guard identity.kind == .prReview, objectNumber > 0,
+      GitHubInputValidation.validGitSHA(identity.revisionKey)
+    else {
+      throw DurableJobStoreError.rolloutAuthorityRequired
+    }
+    guard enforceRolloutAuthority else {
+      return try await createJob(
+        id: id,
+        identity: identity,
+        objectNumber: objectNumber,
+        contractVersionUsed: contractVersionUsed,
+        priority: .prReview,
+        firstStep: .review,
+        now: now
       )
+    }
+    return try await database.transaction { database in
+      let parent = try Self.loadJob(parentJobID, database: database)
+      guard parent.identity.repositoryID == identity.repositoryID,
+        [.issueImplementation, .complexPlan].contains(parent.identity.kind),
+        parent.state == .reconciling,
+        parent.currentStepKind == .qa
+      else {
+        throw DurableJobStoreError.rolloutAuthorityRequired
+      }
+      let authorizationID = try RolloutAuthorityStore.requireActiveGeneratedReviewParent(
+        jobID: parentJobID,
+        now: now,
+        database: database
+      )
+      if let disposition = try Self.loadDisposition(identity, database: database),
+        disposition.state.suppressesDiscovery
+      {
+        return .suppressed(disposition)
+      }
+
+      let idText = id.uuidString.lowercased()
+      _ = try database.execute(
+        """
+        INSERT INTO jobs(
+          id, repository_id, kind, object_node_id, object_number, revision_key,
+          contract_version_used, priority, state, current_step, current_step_kind,
+          attempt, created_at, updated_at, rollout_generation
+        ) VALUES (?, ?, 'prReview', ?, ?, ?, ?, ?, 'discovered', 0, 'review', 0, ?, ?, 0)
+        """,
+        bindings: [
+          .text(idText),
+          .text(identity.repositoryID.uuidString.lowercased()),
+          .text(identity.objectNodeID),
+          .integer(Int64(objectNumber)),
+          .text(identity.revisionKey),
+          .text(contractVersionUsed),
+          .integer(Int64(JobPriority.prReview.rawValue)),
+          .real(now.timeIntervalSince1970),
+          .real(now.timeIntervalSince1970),
+        ]
+      )
+      _ = try database.execute(
+        """
+        INSERT INTO object_dispositions(
+          repository_id, kind, object_node_id, revision_key, state,
+          contract_version_used, last_job_id, mutation_generation, updated_at
+        ) VALUES (?, 'prReview', ?, ?, 'inFlight', ?, ?, 0, ?)
+        """,
+        bindings: [
+          .text(identity.repositoryID.uuidString.lowercased()),
+          .text(identity.objectNodeID),
+          .text(identity.revisionKey),
+          .text(contractVersionUsed),
+          .text(idText),
+          .real(now.timeIntervalSince1970),
+        ]
+      )
+      let discovered = try Self.loadJob(id, database: database)
+      let context = JobTransitionContext(
+        now: now,
+        reason: "generated review quarantined pending separate rollout authority"
+      )
+      let created = try Self.apply(
+        JobStateMachine.transition(from: .discovered, event: .enqueue, context: context),
+        to: discovered,
+        eventKey: "create-quarantined-review:\(idText)",
+        context: context,
+        database: database
+      )
+      _ = try database.execute(
+        """
+        INSERT INTO rollout_generated_job_links(
+          child_job_id, parent_authorization_id, parent_job_id,
+          repository_id, head_sha, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        bindings: [
+          .text(idText),
+          .text(authorizationID),
+          .text(parentJobID.uuidString.lowercased()),
+          .text(identity.repositoryID.uuidString.lowercased()),
+          .text(identity.revisionKey),
+          .integer(Int64((now.timeIntervalSince1970 * 1_000).rounded(.down))),
+        ]
+      )
+      guard
+        try database.scalarInt(
+          "SELECT COUNT(*) FROM rollout_job_bindings WHERE job_id = ?",
+          bindings: [.text(idText)]
+        ) == 0
+      else {
+        throw DurableJobStoreError.rolloutAuthorityRequired
+      }
+      return .created(created)
     }
   }
 
@@ -247,6 +400,21 @@ public actor DurableJobStore {
       "SELECT * FROM jobs WHERE id = ?",
       bindings: [.text(id.uuidString.lowercased())]
     ).first.map(Self.decodeJob)
+  }
+
+  public func requireActiveRolloutBinding(
+    jobID: UUID,
+    now: Date,
+    recovery: Bool = false
+  ) async throws {
+    try await database.transaction { database in
+      try RolloutAuthorityStore.requireActiveJobBinding(
+        jobID: jobID,
+        now: now,
+        recovery: recovery,
+        database: database
+      )
+    }
   }
 
   public func jobs(nonTerminalOnly: Bool = false) async throws -> [JobRecord] {
@@ -316,11 +484,19 @@ public actor DurableJobStore {
         event: event,
         effect: baseEffect
       )
+      if event == .phaseCheckpoint, enforceRolloutAuthority {
+        try RolloutAuthorityStore.requireActivePhaseCheckpoint(
+          jobID: current.id,
+          now: context.now,
+          database: database
+        )
+      }
       try Self.applyLeaseEffect(
         effect.lease,
         job: current,
         now: context.now,
         enforceApplicationDispatchGate: enforceApplicationDispatchGate,
+        enforceRolloutAuthority: enforceRolloutAuthority,
         database: database
       )
       return .applied(
@@ -473,102 +649,184 @@ public actor DurableJobStore {
           """
         )
       }
-      var recovered: [StartupRecoveryRecord] = []
-      for row in rows {
-        let job = try Self.decodeJob(row)
-        if job.id == preservedCanaryJobID {
-          _ = try database.execute(
-            """
-            INSERT INTO reconciliation_events(
-              job_id, probe, observation, classification, reason, created_at
-            ) VALUES (?, 'startup', ?, ?, 'exact canary topology recovery preserved', ?)
-            """,
-            bindings: [
-              .text(job.id.uuidString.lowercased()),
-              .text(job.state.rawValue),
-              .text(job.state.rawValue),
-              .real(now.timeIntervalSince1970),
-            ]
-          )
-          recovered.append(
-            StartupRecoveryRecord(
-              persistedState: job.state,
-              job: job,
-              scheduleLateChecks: false
-            )
-          )
-          continue
-        }
-        let recovery = JobRecovery.recover(
-          JobRuntimeSnapshot(
-            state: job.state,
-            attempt: job.attempt,
-            currentStep: job.currentStep,
-            notBefore: job.notBefore
-          ),
-          now: now
+      return try Self.applyStartupRecovery(
+        rows: rows,
+        preservedCanaryJobID: preservedCanaryJobID,
+        startupID: startupID,
+        reason: "total recovery matrix",
+        now: now,
+        database: database
+      )
+    }
+  }
+
+  public func recoverRolloutAtStartup(
+    authorizationID: String,
+    now: Date
+  ) async throws -> [StartupRecoveryRecord] {
+    guard RolloutPreviewBuilder.validLowercaseUUID(authorizationID) else {
+      throw DurableJobStoreError.rolloutAuthorityRequired
+    }
+    let startupID = UUID().uuidString.lowercased()
+    return try await database.transaction { database in
+      guard
+        try database.scalarInt(
+          """
+          SELECT COUNT(*)
+          FROM rollout_authorizations AS authorization
+          JOIN app_settings AS settings ON settings.singleton = 1
+          WHERE authorization.id = ?
+            AND authorization.state = 'recoveryRequired'
+            AND settings.paused = 1
+            AND settings.active_rollout_authorization_id = authorization.id
+          """,
+          bindings: [.text(authorizationID)]
+        ) == 1
+      else {
+        throw DurableJobStoreError.rolloutAuthorityRequired
+      }
+      let rows = try database.query(
+        """
+        SELECT job.*
+        FROM rollout_job_bindings AS binding
+        JOIN jobs AS job ON job.id = binding.job_id
+        WHERE binding.authorization_id = ? AND job.rollout_generation = 1
+        ORDER BY job.priority, job.created_at, job.id
+        """,
+        bindings: [.text(authorizationID)]
+      )
+      let bindingCount =
+        try database.scalarInt(
+          "SELECT COUNT(*) FROM rollout_job_bindings WHERE authorization_id = ?",
+          bindings: [.text(authorizationID)]
+        ) ?? 0
+      guard Int64(rows.count) == bindingCount else {
+        throw DurableJobStoreError.rolloutAuthorityRequired
+      }
+      _ = try database.execute(
+        """
+        UPDATE repository_leases SET active = 0
+        WHERE active = 1 AND job_id IN (
+          SELECT job_id FROM rollout_job_bindings WHERE authorization_id = ?
         )
-        var resultingJob = job
-        if recovery.transitionRequired {
-          let eventKey = "startup:\(startupID):\(job.id.uuidString.lowercased())"
-          _ = try database.execute(
-            """
-            UPDATE jobs
-            SET state = ?, attempt = ?, not_before = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            bindings: [
-              .text(recovery.state.rawValue),
-              .integer(Int64(recovery.attempt)),
-              recovery.notBefore.map { .real($0.timeIntervalSince1970) } ?? .null,
-              .real(now.timeIntervalSince1970),
-              .text(job.id.uuidString.lowercased()),
-            ]
-          )
-          _ = try database.execute(
-            """
-            INSERT INTO job_transitions(
-              job_id, event_key, from_state, to_state, reason,
-              attempt_before, attempt_after, step_before, step_after, created_at
-            ) VALUES (?, ?, ?, ?, 'startup recovery', ?, ?, ?, ?, ?)
-            """,
-            bindings: [
-              .text(job.id.uuidString.lowercased()),
-              .text(eventKey),
-              .text(job.state.rawValue),
-              .text(recovery.state.rawValue),
-              .integer(Int64(job.attempt)),
-              .integer(Int64(recovery.attempt)),
-              .integer(Int64(job.currentStep)),
-              .integer(Int64(recovery.currentStep)),
-              .real(now.timeIntervalSince1970),
-            ]
-          )
-          resultingJob = try Self.loadJob(job.id, database: database)
-        }
+        """,
+        bindings: [.text(authorizationID)]
+      )
+      return try Self.applyStartupRecovery(
+        rows: rows,
+        preservedCanaryJobID: nil,
+        startupID: startupID,
+        reason: "scoped rollout recovery matrix",
+        now: now,
+        database: database
+      )
+    }
+  }
+
+  private static func applyStartupRecovery(
+    rows: [SQLiteRow],
+    preservedCanaryJobID: UUID?,
+    startupID: String,
+    reason: String,
+    now: Date,
+    database: isolated SQLiteStore
+  ) throws -> [StartupRecoveryRecord] {
+    var recovered: [StartupRecoveryRecord] = []
+    for row in rows {
+      let job = try decodeJob(row)
+      if job.id == preservedCanaryJobID {
         _ = try database.execute(
           """
           INSERT INTO reconciliation_events(
             job_id, probe, observation, classification, reason, created_at
-          ) VALUES (?, 'startup', ?, ?, 'total recovery matrix', ?)
+          ) VALUES (?, 'startup', ?, ?, 'exact canary topology recovery preserved', ?)
           """,
           bindings: [
             .text(job.id.uuidString.lowercased()),
             .text(job.state.rawValue),
-            .text(recovery.state.rawValue),
+            .text(job.state.rawValue),
             .real(now.timeIntervalSince1970),
           ]
         )
         recovered.append(
           StartupRecoveryRecord(
             persistedState: job.state,
-            job: resultingJob,
-            scheduleLateChecks: recovery.scheduleLateChecks
+            job: job,
+            scheduleLateChecks: false
           )
         )
+        continue
       }
-      return recovered
+      let recovery = JobRecovery.recover(
+        JobRuntimeSnapshot(
+          state: job.state,
+          attempt: job.attempt,
+          currentStep: job.currentStep,
+          notBefore: job.notBefore
+        ),
+        now: now
+      )
+      var resultingJob = job
+      if recovery.transitionRequired {
+        let eventKey = "startup:\(startupID):\(job.id.uuidString.lowercased())"
+        _ = try database.execute(
+          """
+          UPDATE jobs
+          SET state = ?, attempt = ?, not_before = ?, updated_at = ?
+          WHERE id = ?
+          """,
+          bindings: [
+            .text(recovery.state.rawValue),
+            .integer(Int64(recovery.attempt)),
+            recovery.notBefore.map { .real($0.timeIntervalSince1970) } ?? .null,
+            .real(now.timeIntervalSince1970),
+            .text(job.id.uuidString.lowercased()),
+          ]
+        )
+        _ = try database.execute(
+          """
+          INSERT INTO job_transitions(
+            job_id, event_key, from_state, to_state, reason,
+            attempt_before, attempt_after, step_before, step_after, created_at
+          ) VALUES (?, ?, ?, ?, 'startup recovery', ?, ?, ?, ?, ?)
+          """,
+          bindings: [
+            .text(job.id.uuidString.lowercased()),
+            .text(eventKey),
+            .text(job.state.rawValue),
+            .text(recovery.state.rawValue),
+            .integer(Int64(job.attempt)),
+            .integer(Int64(recovery.attempt)),
+            .integer(Int64(job.currentStep)),
+            .integer(Int64(recovery.currentStep)),
+            .real(now.timeIntervalSince1970),
+          ]
+        )
+        resultingJob = try loadJob(job.id, database: database)
+      }
+      _ = try database.execute(
+        """
+        INSERT INTO reconciliation_events(
+          job_id, probe, observation, classification, reason, created_at
+        ) VALUES (?, 'startup', ?, ?, ?, ?)
+        """,
+        bindings: [
+          .text(job.id.uuidString.lowercased()),
+          .text(job.state.rawValue),
+          .text(recovery.state.rawValue),
+          .text(reason),
+          .real(now.timeIntervalSince1970),
+        ]
+      )
+      recovered.append(
+        StartupRecoveryRecord(
+          persistedState: job.state,
+          job: resultingJob,
+          scheduleLateChecks: recovery.scheduleLateChecks
+        )
+      )
     }
+    return recovered
   }
 
   public func beginClaim(
@@ -1247,26 +1505,39 @@ public actor DurableJobStore {
     event: JobEvent,
     effect: JobTransitionEffect
   ) throws -> JobTransitionEffect {
+    if event == .phaseCheckpoint {
+      let atCompletedFreeze =
+        current.state == .executing
+        && current.currentStepKind == .writePlan
+        && effect.stepDelta == 1
+      let atRecoveredBoundary =
+        current.state == .preparing
+        && current.currentStepKind == .orchestrate
+        && effect.stepDelta == 0
+      let atStaleApprovalBoundary =
+        current.state == .reconciling
+        && current.currentStepKind == .consumeStaleApproval
+        && effect.stepDelta == 1
+      guard atCompletedFreeze || atRecoveredBoundary || atStaleApprovalBoundary,
+        effect.to == .queued,
+        effect.lease == .release,
+        effect.nextStep
+          == (atStaleApprovalBoundary ? JobStepKind.replan : JobStepKind.orchestrate)
+      else {
+        throw DurableJobStoreError.stepKindMismatch(
+          expected: current.currentStepKind,
+          actual: .writePlan
+        )
+      }
+    }
     guard current.currentStepKind == .consumeStaleApproval else { return effect }
     if current.state == .executing, event == .localStepCompletedMore {
       throw DurableJobStoreError.staleApprovalRequiresAttribution
     }
-    guard current.state == .reconciling, event == .effectAttributedMore else {
-      return effect
+    if current.state == .reconciling, event == .effectAttributedMore {
+      throw DurableJobStoreError.staleApprovalRequiresCheckpoint
     }
-    return JobTransitionEffect(
-      from: effect.from,
-      to: effect.to,
-      lease: effect.lease,
-      attemptDelta: effect.attemptDelta,
-      stepDelta: effect.stepDelta,
-      deadline: effect.deadline,
-      nextStep: .replan,
-      disposition: effect.disposition,
-      mutationGenerationDelta: effect.mutationGenerationDelta,
-      terminalReason: effect.terminalReason,
-      clearsTerminalReason: effect.clearsTerminalReason
-    )
+    return effect
   }
 
   private static func apply(
@@ -1383,14 +1654,33 @@ public actor DurableJobStore {
     job: JobRecord,
     now: Date,
     enforceApplicationDispatchGate: Bool,
+    enforceRolloutAuthority: Bool,
     database: isolated SQLiteStore
   ) throws {
     switch effect {
     case .none:
       return
     case .acquire, .acquireRecovery:
-      if effect == .acquire, enforceApplicationDispatchGate {
+      if enforceApplicationDispatchGate {
         try requireNewDispatchEligibility(database: database)
+      }
+      if enforceRolloutAuthority {
+        try RolloutAuthorityStore.requireActiveJobBinding(
+          jobID: job.id,
+          now: now,
+          recovery: effect == .acquireRecovery,
+          database: database
+        )
+      }
+      let existing = try database.query(
+        "SELECT * FROM repository_leases WHERE repository_id = ?",
+        bindings: [.text(job.identity.repositoryID.uuidString.lowercased())]
+      ).first
+      if let existing {
+        let active = try integer(existing, "active") == 1
+        if active {
+          throw DurableJobStoreError.repositoryAlreadyLeased(job.identity.repositoryID)
+        }
       }
       let maxConcurrency = Int(
         try database.scalarInt(
@@ -1405,15 +1695,7 @@ public actor DurableJobStore {
       guard activeCount < maxConcurrency else {
         throw DurableJobStoreError.globalConcurrencyReached
       }
-      let existing = try database.query(
-        "SELECT * FROM repository_leases WHERE repository_id = ?",
-        bindings: [.text(job.identity.repositoryID.uuidString.lowercased())]
-      ).first
-      if let existing {
-        let active = try integer(existing, "active") == 1
-        if active {
-          throw DurableJobStoreError.repositoryAlreadyLeased(job.identity.repositoryID)
-        }
+      if existing != nil {
         _ = try database.execute(
           """
           UPDATE repository_leases

@@ -1,0 +1,10 @@
+^D./scripts/tests/test-progressive-production-rollout-preflight.sh
+progressive-production-rollout-preflight tests: PASS credentialReads=0 providerCalls=0 githubMutations=0 gitRemoteReads=0
+./scripts/tests/test-progressive-production-automation.sh
+[0/1] Planning build
+Building for debugging...
+[0/22] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.21s)
+./scripts/tests/test-progressive-production-automation.sh: line 36: printf: write error: Broken pipe
+progressive production acceptance: missing test suite DurableJobStoreTests
+make: *** [jidoka-code-production-automation-acceptance] Error 1

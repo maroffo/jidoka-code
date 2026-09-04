@@ -55,6 +55,7 @@ public actor GitHubWorkflowLabelMutator {
   private let executor: GitHubMutationExecutor
   private let intents: MutationIntentStore
   private let reads: any GitHubMutationReadAPI
+  private let authority: any RolloutEffectAuthorizing
   private let sleeper: any MutationReconciliationSleeper
   private let now: @Sendable () -> Date
 
@@ -62,12 +63,14 @@ public actor GitHubWorkflowLabelMutator {
     executor: GitHubMutationExecutor,
     intents: MutationIntentStore,
     reads: any GitHubMutationReadAPI,
+    authority: any RolloutEffectAuthorizing,
     sleeper: any MutationReconciliationSleeper = SystemMutationReconciliationSleeper(),
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.executor = executor
     self.intents = intents
     self.reads = reads
+    self.authority = authority
     self.sleeper = sleeper
     self.now = now
   }
@@ -328,6 +331,7 @@ public actor GitHubWorkflowLabelMutator {
           evidenceDigest: evidence,
           now: now()
         )
+        try await recordSettlement(escalated, evidenceSHA256: evidence)
         dispatched[dispatched.count - 1] = escalated
         return result(disposition: .escalated, intents: dispatched, evidence: evidence)
       }
@@ -338,6 +342,7 @@ public actor GitHubWorkflowLabelMutator {
         evidenceDigest: evidence,
         now: now()
       )
+      try await recordSettlement(attributed, evidenceSHA256: evidence)
       dispatched[dispatched.count - 1] = attributed
       current = after
     }
@@ -368,9 +373,30 @@ public actor GitHubWorkflowLabelMutator {
     return try await MutationReconciliationRunner(
       store: intents,
       reader: reader,
+      authority: authority,
       sleeper: sleeper,
       now: now
     ).reconcile(intentID: intentID)
+  }
+
+  private func recordSettlement(
+    _ intent: MutationIntentRecord,
+    evidenceSHA256: String
+  ) async throws {
+    if intent.state == .attributed {
+      try await authority.recordMutationObservation(
+        intentID: intent.id,
+        observation: .attributed,
+        evidenceSHA256: evidenceSHA256,
+        now: now()
+      )
+    }
+    try await authority.recordMutationObservation(
+      intentID: intent.id,
+      observation: .settled,
+      evidenceSHA256: evidenceSHA256,
+      now: now()
+    )
   }
 
   private func workflowLabels(

@@ -5,7 +5,7 @@ import Testing
 
 @Suite("Workflow label bootstrap")
 struct GitHubWorkflowLabelBootstrapperTests {
-  @Test("creates only missing labels and preserves existing metadata on every rerun")
+  @Test("creates only missing labels and preserves matching labels on every rerun")
   func bootstrapMissingOnly() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "jidoka-label-bootstrap-\(UUID().uuidString.lowercased())",
@@ -45,10 +45,16 @@ struct GitHubWorkflowLabelBootstrapperTests {
     guard case .created(let job) = creation else { return }
     let api = WorkflowLabelBootstrapAPI()
     let intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     let bootstrapper = GitHubWorkflowLabelBootstrapper(
-      executor: GitHubMutationExecutor(intents: intents, broker: api),
+      executor: GitHubMutationExecutor(
+        intents: intents,
+        broker: api,
+        authority: authority
+      ),
       intents: intents,
       reads: api,
+      authority: authority,
       sleeper: WorkflowLabelBootstrapImmediateSleeper(),
       now: { Date(timeIntervalSince1970: 150_001) }
     )
@@ -70,7 +76,7 @@ struct GitHubWorkflowLabelBootstrapperTests {
     #expect(second.preservedNames.count == 8)
     #expect(second.createdNames.isEmpty)
     #expect(await api.sendCount == 7)
-    #expect(await api.label(named: "agent:ready")?.color == "123456")
+    #expect(await api.label(named: "agent:ready")?.color == "1f883d")
   }
 }
 
@@ -80,8 +86,8 @@ private actor WorkflowLabelBootstrapAPI: GitHubMutationReadAPI, GitHubMutationSe
       id: 1,
       nodeID: "existing-ready",
       name: "agent:ready",
-      color: "123456",
-      description: "owner metadata"
+      color: "1f883d",
+      description: "Ready for an automated implementation claim"
     )
   ]
   private(set) var sendCount = 0
@@ -90,9 +96,9 @@ private actor WorkflowLabelBootstrapAPI: GitHubMutationReadAPI, GitHubMutationSe
 
   func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse {
-    try await beforeSend()
+    _ = try await beforeSend()
     guard case .createRepositoryLabel(_, _, let request) = operation else {
       throw WorkflowLabelBootstrapError.unexpectedOperation
     }

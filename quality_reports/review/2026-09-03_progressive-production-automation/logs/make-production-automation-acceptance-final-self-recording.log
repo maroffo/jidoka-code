@@ -1,0 +1,414 @@
+^D./scripts/tests/test-progressive-production-rollout-preflight.sh
+progressive-production-rollout-preflight tests: PASS credentialReads=0 providerCalls=0 githubMutations=0 gitRemoteReads=0
+./scripts/tests/test-progressive-production-automation.sh
+[0/1] Planning build
+Building for debugging...
+[0/22] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.21s)
+Building for debugging...
+[0/22] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.09s)
+Test Suite 'Selected tests' started at 2026-09-04 01:39:53.963.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 01:39:53.964.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 01:39:53.964.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 01:39:53.964.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Atomic create-only Git publication" started.
+◇ Suite "Versioned application engine protocol" started.
+◇ Suite "Durable scheduler" started.
+◇ Suite "Durable mutation reconciliation" started.
+◇ Suite "Application engine service" started.
+◇ Suite "Pull request review job from exact commits to durable marker" started.
+◇ Suite "Crash-safe approved command executor" started.
+◇ Suite "Rollout release identity attestor" started.
+◇ Suite "Rollout remote preview revalidation" started.
+◇ Suite "Issue triage job from snapshot to durable verdict" started.
+◇ Suite "Durable jobs, dispositions, leases, and recovery" started.
+◇ Suite "Issue implementation job from exact claim to post-open review" started.
+◇ Suite "Progressive rollout authority" started.
+◇ Suite "Rollout Git preview reads" started.
+◇ Suite "GitHub HTTP classification and broker" started.
+◇ Suite "End-to-end scheduler job coordinator" started.
+◇ Test "every post-send outcome reconciles without a blind second create" started.
+◇ Test "concurrent publication for one repository ref is rejected before a second create" started.
+◇ Test "branch traversal, malformed SHA, and missing commit fail before a send" started.
+◇ Test "a ref created before advertisement cannot be fast-forwarded" started.
+◇ Test "race injection preserves the competing ref and never retries automatically" started.
+◇ Test "request and response bind version, identity, and operation" started.
+◇ Test "generation rollover responses bind phase authority and checkpoints" started.
+◇ Test "system reconciliation sleeper rejects invalid durations" started.
+◇ Test "system Git publishes old-zero create, reads exact SHA, and never overwrites" started.
+◇ Test "injected virtual clock drives startup, periodic, wake, and network triggers" started.
+◇ Test "all commands survive a Codable round trip without changing kind" started.
+◇ Test "repository backoff persists 60 through 1800 seconds and resets" started.
+◇ Test "replacement terminal outcomes serialize only closed status and effect shapes" started.
+◇ Test "unknown create absent after the full visibility window escalates" started.
+◇ Test "canary responses require paused exact evidence and checkpoint authority" started.
+◇ Test "delayed visibility attributes exact effects without any second send" started.
+◇ Test "immediate triggers are bounded and overlapping passes coalesce once" started.
+◇ Test "priority order is locked while starvation is observation-only" started.
+◇ Test "pause drops pending triggers and resume schedules one immediate pass" started.
+◇ Test "production XPC handler returns exact envelopes without reflecting credential bytes" started.
+◇ Test "operation-specific policy never retries an unknown non-idempotent create" started.
+◇ Test "startup coordinator persists recovery before scheduling discovery" started.
+◇ Test "readiness regained on wake rebuilds runtime before requesting a pass" started.
+◇ Test "REST and fetched Git commit divergence stops before review or publication" started.
+◇ Test "durable publisher records send epoch and recovers unknown sends read-only" started.
+◇ Test "model catalog refresh is explicit, informational, and fail-closed" started.
+◇ Test "periodic tick is exactly 600 seconds" started.
+◇ Test "generation rollover service keeps phases paused exclusive and checkpointed" started.
+◇ Test "database failures are attributed before and after runtime reload" started.
+◇ Test "schema 9 decodes the immutable schema 7 retry report fixture" started.
+◇ Test "wake and network regain forward only lifecycle scheduler reasons" started.
+◇ Test "topology recovery bypasses a stale attempt review-selection event exactly once" started.
+◇ Test "ambiguous retry requires byte-exact current evidence" started.
+◇ Test "real local Git, review routing, multipart-safe publication, and cleanup complete once" started.
+◇ Test "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test "containment pause remains idempotent and generic resume is denied" started.
+◇ Test "successful startup records its complete ordered tail" started.
+◇ Test "quit waits for the runtime checkpoint and returns durable evidence" started.
+◇ Test "prepared-before-send, send epoch, and terminal evidence persist across reopen" started.
+◇ Test "six crash windows across every operation have one conservative outcome" started.
+◇ Test "an approved-command permit is task-bound and consumed before process creation" started.
+◇ Test "W0: onboarding completion remains paused without rollout authority" started.
+◇ Test "exact execution preview binds the approved waiting-human checkpoint" started.
+◇ Test "inspection failures are normalized to fail-closed rollout drift" started.
+◇ Test "canary service remains paused and binds preview execute and checkpoint" started.
+◇ Test "authorized retry uses a fresh mutation generation after an ambiguous marker send" started.
+◇ Test "an effect followed by lost evidence becomes unknown and never starts again" started.
+◇ Test "typed startup failure preserves its phase and non-fallback error code" started.
+◇ Test "a late exact marker is read-only attributed and recovered without another send" started.
+◇ Test "closing admission after command reservation denies process creation" started.
+◇ Test "finite preview binds the complete deterministic candidate set" started.
+◇ Test "onboarding persists exact prerequisites and never persists token bytes" started.
+◇ Test "an accepted local result settles its exact send-started reservation after restart" started.
+◇ Test "replacement service balances exclusivity when production runtime throws" started.
+◇ Test "an unavailable real log sink cannot change startup authority" started.
+◇ Test "exact triage preview binds issue, labels, and default-branch base" started.
+◇ Test "maintenance responses remain bound to exact scope count and evidence" started.
+◇ Test "consent withdrawal and profile changes durably close dispatch" started.
+◇ Test "a Git send permit is task-bound and consumed before transport" started.
+◇ Test "packaged release identity must match every executable and resource binding" started.
+◇ Test "human input changed during triage discards stale output and reruns before mutation" started.
+◇ Test "reopen advances a durably completed review without rerunning Pi" started.
+◇ Test "an accepted result replays after store reopen without another process effect" started.
+◇ Test "job maintenance requires pause exact evidence checkpoint and cleanup" started.
+◇ Test "fresh stores and workflow recover a completed triage step after SQLite reopen" started.
+◇ Test "input invalidation crash recovers to triage without a false completed mutation" started.
+◇ Test "unsupported versions and malformed request IDs fail closed" started.
+◇ Test "a fresh coordinator recovers an interrupted production review and replays it to success" started.
+◇ Test "exact PR preview binds title, body, ordered commits, and Git narrative" started.
+◇ Test "a sleeping run loop wakes for an immediate trigger" started.
+◇ Test "production helper allowlist covers every non-ServiceManagement command" started.
+◇ Test "late marker after a stale-input rerun uses the paired latest issue revision" started.
+◇ Test "authorized triage retry attributes a newly visible old marker before resend" started.
+◇ Test "Herdr readiness closes dispatch and focus remains an explicit command" started.
+◇ Test "authorized retry attributes the old generation if it becomes visible before resend" started.
+◇ Test "unknown startup failure cannot expand private data into the real log" started.
+◇ Test "maintenance batch rollback is all-or-nothing" started.
+◇ Test "retirement cleanup failure replays committed authority before checkpoint" started.
+◇ Test "startup recovery advances each durably completed triage step exactly once" started.
+◇ Test "marker, exact verdict label, domain labels, disposition, and cleanup complete once" started.
+◇ Test "claim generations persist ready, stale, and approved sequences" started.
+◇ Test "exact pre-boundary retirement is atomic suppresses rediscovery and replays" started.
+◇ Test "startup recovery persists the total matrix before dispatch" started.
+◇ Test "stale approval cannot replan before consume attribution" started.
+◇ Test "resource retry rejects a candidate with durable job-step evidence" started.
+◇ Test "completed steps are append-only, ordinal-bound, and digest-validated" started.
+◇ Test "logical identity suppresses rediscovery across restart and contract bump" started.
+◇ Test "stale base consumes only approval and publishes a replacement complex plan" started.
+◇ Test "deterministic operation property preserves repository and global lease bounds" started.
+◇ Test "interrupted Pi writer with workspace changes blocks and preserves evidence" started.
+◇ Test case passing 1 argument outcomeCase → .noRemoteEffectFailure to "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test case passing 1 argument outcomeCase → .remoteEffectAmbiguous to "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test case passing 1 argument outcomeCase → .q4Prepared to "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test "complex plan releases its claim and workspace, then exact approval resumes a new generation" started.
+◇ Test case passing 1 argument outcomeCase → .q4Enqueued to "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test "only exact resource failures after the boundary are safely requeued" started.
+◇ Test case passing 1 argument outcomeCase → .q4OutcomeAmbiguous to "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test "expiry closes and terminalizes the lane before any fresh effect" started.
+◇ Test "maintenance rejects every active durable authority" started.
+◇ Test case passing 1 argument outcomeCase → .q4Failed to "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test case passing 1 argument outcomeCase → .q4Settled to "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test "preview fetches only the exact base and pull-request head under a finite permit" started.
+◇ Test "ready issue completes claim, plan, implementation, publication, QA, cleanup, and review enqueue" started.
+◇ Test case passing 1 argument outcomeCase → .replacementHostLost to "replacement service checkpoints every typed terminal outcome with balanced exclusivity" started.
+◇ Test "preview rejects duplicate labels and lists larger than their budgets" started.
+◇ Test "repository lease and global semaphore enforce both bounds" started.
+◇ Test "startup sweep finishes cleanup stranded by a terminal crash boundary" started.
+◇ Test "closing read admission after reservation prevents Git transport" started.
+◇ Test "completed complex-plan publication recovers cleanup before returning to human gate" started.
+◇ Test "W0: repository flag drift leaves an already queued job inert" started.
+◇ Test "an exact interrupted provider boundary requires explicit recovery" started.
+◇ Test "maintenance apply requires pause and byte-exact current evidence" started.
+◇ Test "completed blocked publication recovers cleanup before terminal state" started.
+◇ Test "provider admission binds artifact, narrative, resources, and model profile" started.
+◇ Test "exact paused canary admits one repaired PR and bounds every effect" started.
+◇ Test "startup recovery imports durable orchestration evidence before workspace drift blocks" started.
+◇ Test "Pi transport interruption is classified as unknown writer state, never blind retry" started.
+◇ Test "direct canary runs exactly one leased job and never walks the queue" started.
+◇ Test "a closed no-effect canary retry requires a new preview and admission" started.
+◇ Test "effect reservations consume a finite cap and remain immutable" started.
+◇ Test "startup recovery advances each durably completed implementation step exactly once" started.
+◇ Test "attributed and ambiguous dispositions control rediscovery and retry" started.
+◇ Test "the first real scheduler pass recovers an interrupted leased job before discovery" started.
+◇ Test "mixed-case workflow labels use the same canonical eligibility throughout" started.
+◇ Test "marker cap failure rolls back the complete reservation batch" started.
+◇ Test "transition event keys make attempt and step changes exactly once" started.
+◇ Test "stale human input consumes only approval, replans, and returns to plan review" started.
+◇ Test "one pass discovers and dispatches PR, implementation, and triage in locked priority" started.
+◇ Test "planning authority cannot cross the durable simple-plan boundary" started.
+◇ Test "authorized claim retry attributes a newly visible old marker before resend" started.
+◇ Test "concurrent reservations cannot overrun the provider cap" started.
+◇ Test "durable pause atomically rejects discovery creation and new leases" started.
+◇ Test "canonical preview rejects unknown fields and changed bytes" started.
+◇ Test "fresh stores and workflow recover a completed plan after SQLite reopen" started.
+◇ Test "transient workflow failure enters durable backoff instead of terminal block" started.
+◇ Test "activation rejects every stale preview digest" started.
+◇ Test "discovery failure persists repository backoff without terminal skip" started.
+◇ Test "unknown claim marker never sends a workflow-label mutation" started.
+◇ Test "terminal historical evidence does not block a later drain" started.
+◇ Test "recovery that needs a guarded rerun preserves the current step in backoff" started.
+◇ Test "paused legacy passes promote exactly-due and overdue retries but not future deadlines" started.
+◇ Test "the same durable provider run reuses one permit without consuming another slot" started.
+◇ Test "preview is read-only and exact activation is atomic" started.
+◇ Test "W0: an unscoped pass cannot dispatch two serial queued jobs" started.
+◇ Test "generated review activation cannot invent an unlinked child job" started.
+◇ Test "reconciliation dispatch runs before any new discovery read" started.
+◇ Test "W0: pause suppresses unbound recovery as well as discovery" started.
+◇ Test "an exact intentional terminal result settles and pauses its stage" started.
+◇ Test "execution activation cannot invent a job beyond the planning checkpoint" started.
+◇ Test "first finite window admits only its closed future predicate and uses operational expiry" started.
+◇ Test "configuration drift fails and pauses the active lane before another effect" started.
+◇ Test "ambiguous blocked publication retains workspace and does not publish blocked label" started.
+◇ Test "confirmed recovery resumes only the same exact job after every effect settles" started.
+◇ Test "completed approved claim resumes orchestration without replanning" started.
+◇ Test "an exact transient failure closes the lane instead of retrying" started.
+◇ Test "ambiguous complex-plan marker never sends the plan-review label mutation" started.
+◇ Test "revocation denies fresh effects but preserves exact uncertain-effect readback" started.
+◇ Test "stale approval checkpoints into a separately authorized planning step" started.
+◇ Test "a settled local provider result reconciles only its bound reservation" started.
+◇ Test "exact execution evaluates only its bound waiting-human job" started.
+◇ Test "stop enters draining before durable pause and terminalizes only after drain" started.
+◇ Test "restart reattaches only pre-boundary orphan reservations after exact recovery" started.
+◇ Test "issue marker revision and label sends are bound to the live planning step" started.
+◇ Test "send permits are task-bound, single-use transport capabilities" started.
+◇ Test "finite activation requires a same-stage exact receipt" started.
+◇ Test "a rollout job cannot settle an unreserved mutation effect" started.
+◇ Test "startup recovery transforms only the bound rollout job before explicit continuation" started.
+◇ Test "execution start is not misreported as a completed stage" started.
+◇ Test "GitHub reads require the matching task-local scope and settle exactly once" started.
+◇ Test "status and transport failures have operation-specific outcomes" started.
+◇ Test case passing 1 argument kind → .triage to "startup recovery advances each durably completed triage step exactly once" started.
+◇ Test case passing 1 argument kind → .publish to "startup recovery advances each durably completed triage step exactly once" started.
+◇ Test case passing 1 argument kind → .reconcile to "startup recovery advances each durably completed triage step exactly once" started.
+✔ Test "immediate triggers are bounded and overlapping passes coalesce once" passed after 0.218 seconds.
+✔ Test "system reconciliation sleeper rejects invalid durations" passed after 0.220 seconds.
+✔ Test "pause drops pending triggers and resume schedules one immediate pass" passed after 0.234 seconds.
+✔ Test "injected virtual clock drives startup, periodic, wake, and network triggers" passed after 0.234 seconds.
+✔ Test "priority order is locked while starvation is observation-only" passed after 0.244 seconds.
+✔ Test "operation-specific policy never retries an unknown non-idempotent create" passed after 0.244 seconds.
+✔ Test "race injection preserves the competing ref and never retries automatically" passed after 0.244 seconds.
+✔ Test "branch traversal, malformed SHA, and missing commit fail before a send" passed after 0.246 seconds.
+✔ Test "periodic tick is exactly 600 seconds" passed after 0.246 seconds.
+✔ Test "every post-send outcome reconciles without a blind second create" passed after 0.246 seconds.
+✔ Test "request and response bind version, identity, and operation" passed after 0.246 seconds.
+✔ Test "schema 9 decodes the immutable schema 7 retry report fixture" passed after 0.258 seconds.
+✔ Test "production XPC handler returns exact envelopes without reflecting credential bytes" passed after 0.271 seconds.
+✔ Test "canary responses require paused exact evidence and checkpoint authority" passed after 0.281 seconds.
+✔ Test "all commands survive a Codable round trip without changing kind" passed after 0.284 seconds.
+✔ Test "generation rollover responses bind phase authority and checkpoints" passed after 0.285 seconds.
+✔ Test "replacement terminal outcomes serialize only closed status and effect shapes" passed after 0.293 seconds.
+✔ Test "unknown create absent after the full visibility window escalates" passed after 0.293 seconds.
+✔ Test "startup coordinator persists recovery before scheduling discovery" passed after 0.295 seconds.
+✔ Test "delayed visibility attributes exact effects without any second send" passed after 0.295 seconds.
+✔ Test "wake and network regain forward only lifecycle scheduler reasons" passed after 0.296 seconds.
+✔ Test "readiness regained on wake rebuilds runtime before requesting a pass" passed after 0.301 seconds.
+✔ Test "containment pause remains idempotent and generic resume is denied" passed after 0.301 seconds.
+✔ Test "model catalog refresh is explicit, informational, and fail-closed" passed after 0.303 seconds.
+✔ Test "ambiguous retry requires byte-exact current evidence" passed after 0.328 seconds.
+✔ Test "six crash windows across every operation have one conservative outcome" passed after 0.341 seconds.
+✔ Test "repository backoff persists 60 through 1800 seconds and resets" passed after 0.371 seconds.
+✔ Test "durable publisher records send epoch and recovers unknown sends read-only" passed after 0.372 seconds.
+✔ Test "inspection failures are normalized to fail-closed rollout drift" passed after 0.376 seconds.
+◇ Test case passing 1 argument kind → .claimReady to "startup recovery advances each durably completed implementation step exactly once" started.
+◇ Test case passing 1 argument kind → .plan to "startup recovery advances each durably completed implementation step exactly once" started.
+◇ Test case passing 1 argument kind → .writePlan to "startup recovery advances each durably completed implementation step exactly once" started.
+◇ Test case passing 1 argument kind → .orchestrate to "startup recovery advances each durably completed implementation step exactly once" started.
+◇ Test case passing 1 argument kind → .push to "startup recovery advances each durably completed implementation step exactly once" started.
+◇ Test case passing 1 argument kind → .openPullRequest to "startup recovery advances each durably completed implementation step exactly once" started.
+◇ Test case passing 1 argument kind → .linkPullRequest to "startup recovery advances each durably completed implementation step exactly once" started.
+◇ Test case passing 1 argument kind → .qa to "startup recovery advances each durably completed implementation step exactly once" started.
+✔ Test "replacement service checkpoints every typed terminal outcome with balanced exclusivity" with 8 test cases passed after 0.394 seconds.
+✔ Test "successful startup records its complete ordered tail" passed after 0.451 seconds.
+✔ Test "generation rollover service keeps phases paused exclusive and checkpointed" passed after 0.499 seconds.
+✔ Test "quit waits for the runtime checkpoint and returns durable evidence" passed after 0.509 seconds.
+✔ Test "W0: onboarding completion remains paused without rollout authority" passed after 0.509 seconds.
+✔ Test "maintenance responses remain bound to exact scope count and evidence" passed after 0.558 seconds.
+✔ Test "packaged release identity must match every executable and resource binding" passed after 0.558 seconds.
+✔ Test "unsupported versions and malformed request IDs fail closed" passed after 0.636 seconds.
+✔ Test "production helper allowlist covers every non-ServiceManagement command" passed after 0.648 seconds.
+✔ Test "database failures are attributed before and after runtime reload" passed after 0.655 seconds.
+✔ Test "replacement service balances exclusivity when production runtime throws" passed after 0.672 seconds.
+✔ Test "prepared-before-send, send epoch, and terminal evidence persist across reopen" passed after 0.673 seconds.
+✔ Test "typed startup failure preserves its phase and non-fallback error code" passed after 0.673 seconds.
+✔ Test "canary service remains paused and binds preview execute and checkpoint" passed after 0.672 seconds.
+✔ Test "finite preview binds the complete deterministic candidate set" passed after 0.672 seconds.
+✔ Test "consent withdrawal and profile changes durably close dispatch" passed after 0.672 seconds.
+✔ Test "Herdr readiness closes dispatch and focus remains an explicit command" passed after 0.674 seconds.
+✔ Test "claim generations persist ready, stale, and approved sequences" passed after 0.673 seconds.
+✔ Test "maintenance batch rollback is all-or-nothing" passed after 0.673 seconds.
+✔ Test "job maintenance requires pause exact evidence checkpoint and cleanup" passed after 0.674 seconds.
+✔ Test "exact PR preview binds title, body, ordered commits, and Git narrative" passed after 0.677 seconds.
+✔ Test "unknown startup failure cannot expand private data into the real log" passed after 0.677 seconds.
+✔ Test "stale approval cannot replan before consume attribution" passed after 0.676 seconds.
+✔ Test "retirement cleanup failure replays committed authority before checkpoint" passed after 0.710 seconds.
+✔ Test "completed steps are append-only, ordinal-bound, and digest-validated" passed after 0.707 seconds.
+✔ Test "resource retry rejects a candidate with durable job-step evidence" passed after 0.709 seconds.
+✔ Test "closing read admission after reservation prevents Git transport" passed after 0.618 seconds.
+✔ Test "exact pre-boundary retirement is atomic suppresses rediscovery and replays" passed after 0.710 seconds.
+✔ Test "an unavailable real log sink cannot change startup authority" passed after 0.711 seconds.
+✔ Test "startup recovery persists the total matrix before dispatch" passed after 0.710 seconds.
+✔ Test "logical identity suppresses rediscovery across restart and contract bump" passed after 0.774 seconds.
+✔ Test "only exact resource failures after the boundary are safely requeued" passed after 0.700 seconds.
+✔ Test "preview rejects duplicate labels and lists larger than their budgets" passed after 0.685 seconds.
+✔ Test "Pi transport interruption is classified as unknown writer state, never blind retry" passed after 0.667 seconds.
+✔ Test "repository lease and global semaphore enforce both bounds" passed after 0.687 seconds.
+✔ Test "expiry closes and terminalizes the lane before any fresh effect" passed after 0.697 seconds.
+✔ Test "startup sweep finishes cleanup stranded by a terminal crash boundary" passed after 0.687 seconds.
+✔ Test "W0: repository flag drift leaves an already queued job inert" passed after 0.708 seconds.
+✔ Test "maintenance apply requires pause and byte-exact current evidence" passed after 0.699 seconds.
+✔ Test "an exact interrupted provider boundary requires explicit recovery" passed after 0.699 seconds.
+✔ Test "provider admission binds artifact, narrative, resources, and model profile" passed after 0.704 seconds.
+✔ Test "onboarding persists exact prerequisites and never persists token bytes" passed after 0.811 seconds.
+✔ Test "exact paused canary admits one repaired PR and bounds every effect" passed after 0.699 seconds.
+✔ Test "a closed no-effect canary retry requires a new preview and admission" passed after 0.689 seconds.
+✔ Test "direct canary runs exactly one leased job and never walks the queue" passed after 0.689 seconds.
+✔ Test "deterministic operation property preserves repository and global lease bounds" passed after 0.804 seconds.
+✔ Test "effect reservations consume a finite cap and remain immutable" passed after 0.690 seconds.
+✔ Test "attributed and ambiguous dispositions control rediscovery and retry" passed after 0.685 seconds.
+✔ Test "the first real scheduler pass recovers an interrupted leased job before discovery" passed after 0.683 seconds.
+✔ Test "transition event keys make attempt and step changes exactly once" passed after 0.685 seconds.
+✔ Test "marker cap failure rolls back the complete reservation batch" passed after 0.685 seconds.
+✔ Test "planning authority cannot cross the durable simple-plan boundary" passed after 0.685 seconds.
+✔ Test "one pass discovers and dispatches PR, implementation, and triage in locked priority" passed after 0.685 seconds.
+✔ Test "durable pause atomically rejects discovery creation and new leases" passed after 0.686 seconds.
+✔ Test "canonical preview rejects unknown fields and changed bytes" passed after 0.685 seconds.
+✔ Test "activation rejects every stale preview digest" passed after 0.684 seconds.
+✔ Test "discovery failure persists repository backoff without terminal skip" passed after 0.684 seconds.
+✔ Test "transient workflow failure enters durable backoff instead of terminal block" passed after 0.694 seconds.
+✔ Test "maintenance rejects every active durable authority" passed after 0.743 seconds.
+✔ Test "terminal historical evidence does not block a later drain" passed after 0.692 seconds.
+✔ Test "recovery that needs a guarded rerun preserves the current step in backoff" passed after 0.692 seconds.
+✔ Test "paused legacy passes promote exactly-due and overdue retries but not future deadlines" passed after 0.759 seconds.
+✔ Test "W0: an unscoped pass cannot dispatch two serial queued jobs" passed after 0.709 seconds.
+✔ Test "generated review activation cannot invent an unlinked child job" passed after 0.709 seconds.
+✔ Test "preview is read-only and exact activation is atomic" passed after 0.709 seconds.
+✔ Test "the same durable provider run reuses one permit without consuming another slot" passed after 0.756 seconds.
+✔ Test "reconciliation dispatch runs before any new discovery read" passed after 0.709 seconds.
+✔ Test "W0: pause suppresses unbound recovery as well as discovery" passed after 0.710 seconds.
+✔ Test "execution activation cannot invent a job beyond the planning checkpoint" passed after 0.708 seconds.
+✔ Test "an exact intentional terminal result settles and pauses its stage" passed after 0.709 seconds.
+✔ Test "configuration drift fails and pauses the active lane before another effect" passed after 0.707 seconds.
+✔ Test "confirmed recovery resumes only the same exact job after every effect settles" passed after 0.707 seconds.
+✔ Test "first finite window admits only its closed future predicate and uses operational expiry" passed after 0.708 seconds.
+✔ Test "an exact transient failure closes the lane instead of retrying" passed after 0.707 seconds.
+✔ Test "stale approval checkpoints into a separately authorized planning step" passed after 0.707 seconds.
+✔ Test "status and transport failures have operation-specific outcomes" passed after 0.705 seconds.
+✔ Test "revocation denies fresh effects but preserves exact uncertain-effect readback" passed after 0.707 seconds.
+✔ Test "a settled local provider result reconciles only its bound reservation" passed after 0.707 seconds.
+✔ Test "stop enters draining before durable pause and terminalizes only after drain" passed after 0.706 seconds.
+✔ Test "exact execution evaluates only its bound waiting-human job" passed after 0.706 seconds.
+✔ Test "finite activation requires a same-stage exact receipt" passed after 0.705 seconds.
+✔ Test "issue marker revision and label sends are bound to the live planning step" passed after 0.706 seconds.
+✔ Test "a rollout job cannot settle an unreserved mutation effect" passed after 0.705 seconds.
+✔ Test "send permits are task-bound, single-use transport capabilities" passed after 0.706 seconds.
+✔ Suite "Durable mutation reconciliation" passed after 0.896 seconds.
+✔ Suite "Versioned application engine protocol" passed after 0.896 seconds.
+✔ Test "execution start is not misreported as a completed stage" passed after 0.706 seconds.
+✔ Test "startup recovery transforms only the bound rollout job before explicit continuation" passed after 0.706 seconds.
+✔ Test "restart reattaches only pre-boundary orphan reservations after exact recovery" passed after 0.706 seconds.
+✔ Test "GitHub reads require the matching task-local scope and settle exactly once" passed after 0.706 seconds.
+✔ Suite "Rollout release identity attestor" passed after 0.897 seconds.
+✔ Suite "Durable jobs, dispositions, leases, and recovery" passed after 0.941 seconds.
+✔ Suite "Application engine service" passed after 0.941 seconds.
+✔ Suite "End-to-end scheduler job coordinator" passed after 0.944 seconds.
+✔ Test "concurrent publication for one repository ref is rejected before a second create" passed after 1.052 seconds.
+✔ Test "exact execution preview binds the approved waiting-human checkpoint" passed after 1.182 seconds.
+✔ Test "exact triage preview binds issue, labels, and default-branch base" passed after 1.208 seconds.
+◇ Test "redirect policy allows one canonical repository GET on the API host only" started.
+✔ Suite "Rollout remote preview revalidation" passed after 1.354 seconds.
+✔ Test "redirect policy allows one canonical repository GET on the API host only" passed after 0.135 seconds.
+◇ Test "production URLSession transport executes through an offline URLProtocol fixture" started.
+✔ Test "a sleeping run loop wakes for an immediate trigger" passed after 1.698 seconds.
+✔ Suite "Durable scheduler" passed after 1.832 seconds.
+✔ Test "production URLSession transport executes through an offline URLProtocol fixture" passed after 0.213 seconds.
+✔ Test "concurrent reservations cannot overrun the provider cap" passed after 1.890 seconds.
+✔ Suite "Progressive rollout authority" passed after 2.160 seconds.
+◇ Test "the internal read path rejects writes before credential or transport access" started.
+✔ Test "an approved-command permit is task-bound and consumed before process creation" passed after 2.214 seconds.
+✔ Test "closing admission after command reservation denies process creation" passed after 2.335 seconds.
+✔ Test "the internal read path rejects writes before credential or transport access" passed after 0.132 seconds.
+◇ Test "closing read admission after reservation prevents GitHub transport" started.
+✔ Test "closing read admission after reservation prevents GitHub transport" passed after 0.194 seconds.
+✔ Test "a Git send permit is task-bound and consumed before transport" passed after 2.864 seconds.
+◇ Test "broker paginates to exhaustion and attaches the token only to the fixed host" started.
+✔ Test "broker paginates to exhaustion and attaches the token only to the fixed host" passed after 0.134 seconds.
+✔ Test "an effect followed by lost evidence becomes unknown and never starts again" passed after 3.402 seconds.
+✔ Test "reopen advances a durably completed review without rerunning Pi" passed after 3.506 seconds.
+◇ Test "pull request commits paginate in exact API order and reject duplicates" started.
+✔ Test "pull request commits paginate in exact API order and reject duplicates" passed after 0.148 seconds.
+◇ Test "repository redirect requires the expected node identity" started.
+✔ Test "repository redirect requires the expected node identity" passed after 0.059 seconds.
+◇ Test "direct repository reads validate canonical identity and default branch" started.
+✔ Test "direct repository reads validate canonical identity and default branch" passed after 0.111 seconds.
+✔ Test "unknown claim marker never sends a workflow-label mutation" passed after 4.068 seconds.
+◇ Test "oversized and cross-host responses fail closed" started.
+✔ Test "oversized and cross-host responses fail closed" passed after 0.076 seconds.
+✔ Suite "GitHub HTTP classification and broker" passed after 4.429 seconds.
+✔ Test "an accepted local result settles its exact send-started reservation after restart" passed after 4.640 seconds.
+✔ Test "a ref created before advertisement cannot be fast-forwarded" passed after 4.682 seconds.
+✔ Test "REST and fetched Git commit divergence stops before review or publication" passed after 4.856 seconds.
+✔ Test "system Git publishes old-zero create, reads exact SHA, and never overwrites" passed after 4.919 seconds.
+✔ Test "an accepted result replays after store reopen without another process effect" passed after 4.958 seconds.
+✔ Test "preview fetches only the exact base and pull-request head under a finite permit" passed after 4.884 seconds.
+✔ Suite "Atomic create-only Git publication" passed after 4.977 seconds.
+✔ Suite "Crash-safe approved command executor" passed after 4.993 seconds.
+✔ Suite "Rollout Git preview reads" passed after 5.006 seconds.
+✔ Test "a fresh coordinator recovers an interrupted production review and replays it to success" passed after 5.146 seconds.
+✔ Test "topology recovery bypasses a stale attempt review-selection event exactly once" passed after 5.224 seconds.
+✔ Test "authorized retry uses a fresh mutation generation after an ambiguous marker send" passed after 5.413 seconds.
+✔ Test "real local Git, review routing, multipart-safe publication, and cleanup complete once" passed after 5.495 seconds.
+✔ Test "a late exact marker is read-only attributed and recovered without another send" passed after 5.543 seconds.
+✔ Test "ambiguous complex-plan marker never sends the plan-review label mutation" passed after 5.529 seconds.
+✔ Test "completed complex-plan publication recovers cleanup before returning to human gate" passed after 5.688 seconds.
+✔ Test "authorized retry attributes the old generation if it becomes visible before resend" passed after 5.799 seconds.
+✔ Suite "Pull request review job from exact commits to durable marker" passed after 5.812 seconds.
+✔ Test "interrupted Pi writer with workspace changes blocks and preserves evidence" passed after 5.898 seconds.
+✔ Test "marker, exact verdict label, domain labels, disposition, and cleanup complete once" passed after 5.911 seconds.
+✔ Test "fresh stores and workflow recover a completed triage step after SQLite reopen" passed after 6.008 seconds.
+✔ Test "completed blocked publication recovers cleanup before terminal state" passed after 6.083 seconds.
+✔ Test "authorized triage retry attributes a newly visible old marker before resend" passed after 6.209 seconds.
+✔ Test "late marker after a stale-input rerun uses the paired latest issue revision" passed after 6.298 seconds.
+✔ Test "startup recovery advances each durably completed triage step exactly once" with 3 test cases passed after 6.307 seconds.
+✔ Test "ambiguous blocked publication retains workspace and does not publish blocked label" passed after 6.123 seconds.
+✔ Test "human input changed during triage discards stale output and reruns before mutation" passed after 6.460 seconds.
+✔ Test "input invalidation crash recovers to triage without a false completed mutation" passed after 6.701 seconds.
+✔ Suite "Issue triage job from snapshot to durable verdict" passed after 6.701 seconds.
+✔ Test "fresh stores and workflow recover a completed plan after SQLite reopen" passed after 6.663 seconds.
+✔ Test "ready issue completes claim, plan, implementation, publication, QA, cleanup, and review enqueue" passed after 6.728 seconds.
+✔ Test "mixed-case workflow labels use the same canonical eligibility throughout" passed after 6.699 seconds.
+✔ Test "startup recovery imports durable orchestration evidence before workspace drift blocks" passed after 6.832 seconds.
+✔ Test "stale human input consumes only approval, replans, and returns to plan review" passed after 6.824 seconds.
+✔ Test "stale base consumes only approval and publishes a replacement complex plan" passed after 7.056 seconds.
+✔ Test "startup recovery advances each durably completed implementation step exactly once" with 8 test cases passed after 6.959 seconds.
+✔ Test "authorized claim retry attributes a newly visible old marker before resend" passed after 6.980 seconds.
+✔ Test "completed approved claim resumes orchestration without replanning" passed after 7.026 seconds.
+✔ Test "complex plan releases its claim and workspace, then exact approval resumes a new generation" passed after 7.169 seconds.
+✔ Suite "Issue implementation job from exact claim to post-open review" passed after 7.240 seconds.
+✔ Test run with 171 tests in 16 suites passed after 7.240 seconds.
+progressive production automation acceptance: PASS suites=16

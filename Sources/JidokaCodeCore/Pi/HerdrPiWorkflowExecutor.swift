@@ -328,6 +328,7 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
   private let topology: HerdrTopologyCoordinator
   private let primeIntents: (any HerdrTopologyIntentStoring)?
   private let mutationGate: HerdrTopologyMutationGate
+  private let rolloutAuthority: any RolloutEffectAuthorizing
   private let now: @Sendable () -> Date
 
   private var launchAllowed = false
@@ -350,6 +351,7 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     database: SQLiteStore,
     jobs: DurableJobStore,
     configuration: ConfigurationStore,
+    rolloutAuthority: any RolloutEffectAuthorizing,
     now: @escaping @Sendable () -> Date = Date.init
   ) throws {
     let client = HerdrSocketClient(
@@ -379,6 +381,7 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
         sourceURL: FileManager.default.homeDirectoryForCurrentUser
           .appendingPathComponent(".pi/agent/auth.json", isDirectory: false)
       ),
+      rolloutAuthority: rolloutAuthority,
       now: now
     )
   }
@@ -415,6 +418,7 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     launchCheckpoint:
       @escaping @Sendable (HerdrPiWorkflowLaunchCheckpoint) -> Void = { _ in },
     providerCredentials: PiProviderCredentialSnapshotter? = nil,
+    rolloutAuthority: any RolloutEffectAuthorizing,
     now: @escaping @Sendable () -> Date = Date.init
   ) throws {
     guard applicationSupportRoot.isFileURL, applicationSupportRoot.path.hasPrefix("/"),
@@ -496,6 +500,7 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     self.topology = topology
     self.primeIntents = primeIntents
     self.mutationGate = mutationGate
+    self.rolloutAuthority = rolloutAuthority
     self.now = now
   }
 
@@ -4150,10 +4155,31 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     _ request: PiWorkflowExecutionRequest,
     preparer: any PiRPCWorkflowPreparing
   ) async throws -> PiWorkflowExecution {
+    let jobID = try Self.jobID(request.jobID)
+    if let context = RolloutEffectTaskContext.current {
+      guard context.jobID == jobID else {
+        throw HerdrPiWorkflowError.invalidRequest
+      }
+      return try await executeAuthorized(request, preparer: preparer, jobID: jobID)
+    }
+    let mode: RolloutEffectExecutionMode =
+      canaryJobID == jobID ? .historicalCanary(jobID: jobID) : .workflow(jobID: jobID)
+    return try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: mode)
+    ) {
+      try await self.executeAuthorized(request, preparer: preparer, jobID: jobID)
+    }
+  }
+
+  private func executeAuthorized(
+    _ request: PiWorkflowExecutionRequest,
+    preparer: any PiRPCWorkflowPreparing,
+    jobID: UUID
+  ) async throws -> PiWorkflowExecution {
     activeExecutions += 1
     defer { activeExecutions -= 1 }
+    var rolloutPermit: RolloutEffectPermit?
     do {
-      let jobID = try Self.jobID(request.jobID)
       guard canaryJobID == nil || canaryJobID == jobID else {
         throw HerdrPiWorkflowError.launchSuppressed
       }
@@ -4197,12 +4223,39 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
         guard existing.requestSHA256 == prepared.requestSHA256 else {
           throw HerdrPiWorkflowError.requestCollision
         }
-        return try await completeExistingRun(
+        let effect = Self.providerEffect(
+          jobID: jobID,
+          request: request,
+          prepared: prepared,
+          runNonce: existing.runNonce
+        )
+        rolloutPermit = try await rolloutAuthority.reserveProvider(effect, now: now())
+        guard let activeRolloutPermit = rolloutPermit else {
+          throw RolloutAuthorityError.effectAdmissionClosed
+        }
+        try await rolloutAuthority.bindProviderReservation(
+          activeRolloutPermit,
+          effect: effect,
+          runID: existing.id,
+          now: now()
+        )
+        let execution = try await completeExistingRun(
           existing,
           request: request,
           workflowConfiguration: prepared.workflowConfiguration,
-          timeoutSeconds: preparation.timeoutSeconds + preparation.abortGraceSeconds + 5
+          timeoutSeconds: preparation.timeoutSeconds + preparation.abortGraceSeconds + 5,
+          providerPermit: rolloutPermit,
+          providerEffect: effect
         )
+        if let permit = rolloutPermit {
+          try await rolloutAuthority.settleEffect(
+            permit,
+            evidenceSHA256: execution.result.recordSHA256,
+            now: now()
+          )
+          rolloutPermit = nil
+        }
+        return execution
       }
 
       guard !recoveryMode else { throw HerdrPiWorkflowError.recoveryBoundaryReached }
@@ -4221,15 +4274,22 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
           now: now()
         )
       }
+      let runID = "run-\(UUID().uuidString.lowercased())"
+      let runNonce = Self.sha256(Data(UUID().uuidString.lowercased().utf8))
+      let launchAttemptID = "launch-\(UUID().uuidString.lowercased())"
+      let providerEffect = Self.providerEffect(
+        jobID: jobID,
+        request: request,
+        prepared: prepared,
+        runNonce: runNonce
+      )
+      rolloutPermit = try await rolloutAuthority.reserveProvider(providerEffect, now: now())
       let roleHost = try await ensureJobTopology(
         job: job,
         request: request,
         preparation: preparation,
         generation: topologyGeneration
       )
-      let runID = "run-\(UUID().uuidString.lowercased())"
-      let runNonce = Self.sha256(Data(UUID().uuidString.lowercased().utf8))
-      let launchAttemptID = "launch-\(UUID().uuidString.lowercased())"
       let files = try await makeRunFiles(
         runID: runID,
         runNonce: runNonce,
@@ -4265,6 +4325,15 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
         channelPath: files.channelDirectory,
         now: now()
       )
+      guard let activeRolloutPermit = rolloutPermit else {
+        throw RolloutAuthorityError.effectAdmissionClosed
+      }
+      try await rolloutAuthority.bindProviderReservation(
+        activeRolloutPermit,
+        effect: providerEffect,
+        runID: run.id,
+        now: now()
+      )
       let launch = try await runs.prepareLaunch(
         launchAttemptID: launchAttemptID,
         runID: run.id,
@@ -4276,13 +4345,27 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
         now: now()
       )
       guard launchAllowed else { throw HerdrPiWorkflowError.launchSuppressed }
-      let enqueued = try await enqueuePreparedLaunch(launch, run: run)
-      return try await awaitAndSettle(
+      let enqueued = try await enqueuePreparedLaunch(
+        launch,
+        run: run,
+        providerPermit: rolloutPermit,
+        providerEffect: providerEffect
+      )
+      let execution = try await awaitAndSettle(
         run: run,
         launch: enqueued,
         configuration: files.tuiConfiguration,
         timeoutSeconds: preparation.timeoutSeconds + preparation.abortGraceSeconds + 5
       )
+      if let permit = rolloutPermit {
+        try await rolloutAuthority.settleEffect(
+          permit,
+          evidenceSHA256: execution.result.recordSHA256,
+          now: now()
+        )
+        rolloutPermit = nil
+      }
+      return execution
     } catch {
       if error is HerdrSocketClientError || error is HerdrTopologyError
         || error is HerdrTopologyMutationGateError
@@ -4292,6 +4375,42 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
       }
       throw error
     }
+  }
+
+  private static func sessionDirectiveSHA256(
+    _ directive: PiWorkflowSessionDirective
+  ) -> String {
+    let value: String =
+      switch directive {
+      case .fresh:
+        "fresh"
+      case .resume(let sessionID):
+        "resume:\(sessionID)"
+      case .resumeBounded(let sessionID, let boundarySHA256):
+        "resume-bounded:\(sessionID):\(boundarySHA256)"
+      }
+    return sha256(Data(value.utf8))
+  }
+
+  private static func providerEffect(
+    jobID: UUID,
+    request: PiWorkflowExecutionRequest,
+    prepared: PreparedExecution,
+    runNonce: String
+  ) -> RolloutProviderEffect {
+    RolloutProviderEffect(
+      jobID: jobID,
+      workflow: request.workflow,
+      role: request.role,
+      round: request.round,
+      runNonce: runNonce,
+      artifactSHA256: request.artifactSHA256,
+      narrativeSHA256: request.commitNarrativeSHA256,
+      planSHA256: request.frozenPlan?.digest,
+      resourceSHA256: prepared.resourceSHA256,
+      profileSHA256: sha256(Data(prepared.model.argument.utf8)),
+      sessionDirectiveSHA256: sessionDirectiveSHA256(request.sessionDirective)
+    )
   }
 
   private struct PreparedExecution: Sendable {
@@ -4572,7 +4691,9 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     _ run: PiRunRecord,
     request: PiWorkflowExecutionRequest,
     workflowConfiguration _: PiWorkflowRuntimeConfiguration,
-    timeoutSeconds: TimeInterval
+    timeoutSeconds: TimeInterval,
+    providerPermit: RolloutEffectPermit? = nil,
+    providerEffect: RolloutProviderEffect? = nil
   ) async throws -> PiWorkflowExecution {
     guard run.workflow == request.workflow, run.role == request.role,
       run.round == request.round
@@ -4588,7 +4709,12 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     }
     var commandPublishedInThisExecution = false
     if launch.state == .prepared {
-      launch = try await enqueuePreparedLaunch(launch, run: run)
+      launch = try await enqueuePreparedLaunch(
+        launch,
+        run: run,
+        providerPermit: providerPermit,
+        providerEffect: providerEffect
+      )
       commandPublishedInThisExecution = true
     } else if [.failed, .interruptedUnknown].contains(launch.state) {
       guard launch.executionRoleHostID == nil else {
@@ -4629,7 +4755,12 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
       )
     }
     if launch.state == .enqueued, !commandPublishedInThisExecution {
-      try await ensureCommandPublished(launch, run: run)
+      try await ensureCommandPublished(
+        launch,
+        run: run,
+        providerPermit: providerPermit,
+        providerEffect: providerEffect
+      )
     }
     guard [.enqueued, .running, .resultPrepared].contains(launch.state) else {
       throw HerdrPiWorkflowError.resultUnavailable
@@ -4704,7 +4835,9 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
     _ launch: PiRunLaunchRecord,
     run: PiRunRecord,
     using existingLease: HerdrTopologyMutationLease? = nil,
-    credentialPrepared _: Bool = false
+    credentialPrepared _: Bool = false,
+    providerPermit: RolloutEffectPermit? = nil,
+    providerEffect: RolloutProviderEffect? = nil
   ) async throws -> PiRunLaunchRecord {
     guard launch.state == .prepared, launchAllowed else {
       throw HerdrPiWorkflowError.launchSuppressed
@@ -4717,6 +4850,12 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
       }
     }
     try validateReplacementQ4LaunchAuthority(launch: launch, run: run)
+    try await verifyProviderLaunchAuthority(
+      permit: providerPermit,
+      effect: providerEffect,
+      run: run,
+      launch: launch
+    )
     try prepareProviderCredential(run: run, launch: launch)
     var lease: HerdrTopologyMutationLease?
     do {
@@ -4762,6 +4901,154 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
       try removeProviderCredentialIfCommandDefinitelyAbsent(run: run, launch: launch)
       throw error
     }
+  }
+
+  private func verifyProviderLaunchAuthority(
+    permit: RolloutEffectPermit?,
+    effect: RolloutProviderEffect?,
+    run: PiRunRecord,
+    launch: PiRunLaunchRecord
+  ) async throws {
+    if let permit, let effect {
+      guard RolloutEffectTaskContext.current?.jobID == run.jobID,
+        try providerEffectMatchesDurableRun(effect, run: run, launch: launch)
+      else {
+        throw RolloutAuthorityError.effectIdentityMismatch
+      }
+      try await rolloutAuthority.verifyProviderPermit(permit, effect: effect)
+      return
+    }
+    guard permit == nil, effect == nil, launchAllowed, canaryJobID == run.jobID,
+      hasActiveHistoricalProviderAuthority(run: run, launch: launch),
+      try await jobs.hasCanaryPiRoleAuthorization(
+        jobID: run.jobID,
+        workflow: run.workflow,
+        role: run.role,
+        round: run.round
+      )
+    else {
+      throw RolloutAuthorityError.effectIdentityMismatch
+    }
+    let historicalEffect = try durableProviderEffect(run: run, launch: launch)
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .historicalCanary(jobID: run.jobID))
+    ) {
+      let historicalPermit = try await self.rolloutAuthority.reserveProvider(
+        historicalEffect,
+        now: self.now()
+      )
+      try await self.rolloutAuthority.bindProviderReservation(
+        historicalPermit,
+        effect: historicalEffect,
+        runID: run.id,
+        now: self.now()
+      )
+      try await self.rolloutAuthority.verifyProviderPermit(
+        historicalPermit,
+        effect: historicalEffect
+      )
+    }
+  }
+
+  private func hasActiveHistoricalProviderAuthority(
+    run: PiRunRecord,
+    launch: PiRunLaunchRecord
+  ) -> Bool {
+    if let recovery = canaryRecoveryAuthorization,
+      recovery.canary.scope.jobID == run.jobID
+    {
+      return true
+    }
+    if let retry = activeCanaryPiFreshRetry,
+      retry.jobID == run.jobID, retry.runID == run.id
+    {
+      return true
+    }
+    if let rollover = activeGenerationRolloverQ4,
+      rollover.authorization.rollover.jobID == run.jobID,
+      rollover.authorization.rollover.successorRunID == run.id,
+      rollover.authorization.q4.plannedLaunchAttemptID == launch.launchAttemptID
+    {
+      return true
+    }
+    if let replacement = activeCanaryRoleHostReplacement,
+      replacement.authorization.request.retry.recovery.canary.scope.jobID == run.jobID,
+      replacement.candidate.report.runID == run.id,
+      replacement.authorization.request.plannedLaunchAttemptID == launch.launchAttemptID
+    {
+      return true
+    }
+    return false
+  }
+
+  private func providerEffectMatchesDurableRun(
+    _ effect: RolloutProviderEffect,
+    run: PiRunRecord,
+    launch: PiRunLaunchRecord
+  ) throws -> Bool {
+    let durable = try durableProviderEffect(
+      run: run,
+      launch: launch,
+      narrativeSHA256: effect.narrativeSHA256,
+      planSHA256: effect.planSHA256
+    )
+    return effect.jobID == durable.jobID
+      && effect.workflow == durable.workflow
+      && effect.role == durable.role
+      && effect.round == durable.round
+      && effect.runNonce == durable.runNonce
+      && effect.artifactSHA256 == durable.artifactSHA256
+      && effect.narrativeSHA256 == durable.narrativeSHA256
+      && effect.planSHA256 == durable.planSHA256
+      && effect.resourceSHA256 == durable.resourceSHA256
+      && effect.profileSHA256 == durable.profileSHA256
+      && effect.sessionDirectiveSHA256 == durable.sessionDirectiveSHA256
+  }
+
+  private func durableProviderEffect(
+    run: PiRunRecord,
+    launch: PiRunLaunchRecord,
+    narrativeSHA256: String? = nil,
+    planSHA256: String? = nil
+  ) throws -> RolloutProviderEffect {
+    let workflow = try workflowConfiguration(for: run, launch: launch)
+    let configuration = try launchConfiguration(run: run, launch: launch)
+    guard workflow.workflow == run.workflow, workflow.role == run.role,
+      configuration.workflow == run.workflow, configuration.role == run.role,
+      configuration.model.argument == run.model
+    else {
+      throw RolloutAuthorityError.effectIdentityMismatch
+    }
+    let directive: PiWorkflowSessionDirective
+    switch configuration.launchMode {
+    case .fresh:
+      directive = .fresh
+    case .resume:
+      guard let sessionID = configuration.expectedSessionID else {
+        throw RolloutAuthorityError.effectIdentityMismatch
+      }
+      if let boundarySHA256 = configuration.resumeBoundarySHA256 {
+        directive = .resumeBounded(
+          sessionID: sessionID,
+          boundarySHA256: boundarySHA256
+        )
+      } else {
+        directive = .resume(sessionID)
+      }
+    }
+    return RolloutProviderEffect(
+      jobID: run.jobID,
+      workflow: run.workflow,
+      role: run.role,
+      round: run.round,
+      runNonce: run.runNonce,
+      artifactSHA256: workflow.artifactSHA256,
+      narrativeSHA256: narrativeSHA256,
+      planSHA256: planSHA256,
+      resourceSHA256: run.resourceHash,
+      profileSHA256: Self.sha256(Data(run.model.utf8)),
+      sessionDirectiveSHA256: Self.sessionDirectiveSHA256(directive)
+    )
   }
 
   private func validateReplacementQ4LaunchAuthority(
@@ -4959,7 +5246,9 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
 
   private func ensureCommandPublished(
     _ launch: PiRunLaunchRecord,
-    run: PiRunRecord
+    run: PiRunRecord,
+    providerPermit: RolloutEffectPermit? = nil,
+    providerEffect: RolloutProviderEffect? = nil
   ) async throws {
     if launch.executionRoleHostID == nil,
       try await runs.isGenerationRolloverSuccessor(runID: run.id)
@@ -4969,6 +5258,12 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
       }
     }
     try validateReplacementQ4LaunchAuthority(launch: launch, run: run)
+    try await verifyProviderLaunchAuthority(
+      permit: providerPermit,
+      effect: providerEffect,
+      run: run,
+      launch: launch
+    )
     try prepareProviderCredential(run: run, launch: launch)
     let effectiveRoleHostID = launch.executionRoleHostID ?? launch.roleHostID
     do {

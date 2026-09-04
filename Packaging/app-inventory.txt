@@ -64,3 +64,4 @@
 ./Contents/Resources/Spikes/jidoka-local-spikes.mjs
 ./Contents/_CodeSignature
 ./Contents/_CodeSignature/CodeResources
+./Contents/Resources/progressive-production-release.json

@@ -237,6 +237,23 @@ struct JidokaCodeApp: App {
       }
     }
 
+    if arguments.first == "--rollout" {
+      do {
+        try RolloutCLI.write(
+          RolloutCLI.run(arguments: Array(arguments.dropFirst()))
+        )
+        exit(EXIT_SUCCESS)
+      } catch let error as EngineClientError {
+        FileHandle.standardError.write(
+          Data("rollout command failed: \(error.code.rawValue)\n".utf8)
+        )
+        exit(EXIT_FAILURE)
+      } catch {
+        FileHandle.standardError.write(Data("rollout command failed\n".utf8))
+        exit(EXIT_FAILURE)
+      }
+    }
+
     if arguments == ["--preflight"] {
       do {
         let report = try PackagedPreflight.inspect(

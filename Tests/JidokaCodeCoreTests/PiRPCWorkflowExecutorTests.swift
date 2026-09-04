@@ -53,7 +53,10 @@ struct PiRPCWorkflowExecutorTests {
     )
     #expect(object["workflow"] as? String == "issue-triage")
     #expect(object["role"] as? String == "triage")
-    #expect(object["workspaceRoot"] as? String == fixture.workspace.path)
+    #expect(
+      object["workspaceRoot"] as? String
+        == (try PiTUIFileProtocol.canonicalExistingURL(fixture.workspace).path)
+    )
     #expect(await runner.callCount() == 1)
   }
 

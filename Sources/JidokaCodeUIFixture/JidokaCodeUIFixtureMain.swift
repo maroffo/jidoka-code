@@ -58,6 +58,8 @@ private struct UIFixtureAccessibilityContract {
           JidokaAccessibilityID.settingsWindow,
           JidokaAccessibilityID.settingsRepositoryReference,
           JidokaAccessibilityID.settingsRepositoryAdd,
+          JidokaAccessibilityID.rolloutInput,
+          JidokaAccessibilityID.rolloutPreview,
           JidokaAccessibilityID.settingsModelCatalogRefresh,
           "\(JidokaAccessibilityID.settingsModelSelector).review",
           "\(JidokaAccessibilityID.settingsCustomModel).review",
@@ -69,6 +71,9 @@ private struct UIFixtureAccessibilityContract {
           "Repositories",
           "GitHub repository URL or owner and repository",
           "Validate and Add",
+          "Progressive Rollout",
+          "Canonical base64 rollout input",
+          "Build Read-only Preview",
           "Model Profiles",
           "Refresh Pi Models",
           "Maximum concurrent jobs",
@@ -99,7 +104,8 @@ private struct UIFixtureAccessibilityContract {
           JidokaAccessibilityID.ambiguousRecheck,
           JidokaAccessibilityID.ambiguousAuthorize,
           JidokaAccessibilityID.pollNow,
-          JidokaAccessibilityID.pauseResume,
+          JidokaAccessibilityID.rolloutStop,
+          JidokaAccessibilityID.rolloutRecovery,
           JidokaAccessibilityID.settings,
           JidokaAccessibilityID.openLogs,
           JidokaAccessibilityID.quit,
@@ -109,7 +115,8 @@ private struct UIFixtureAccessibilityContract {
           "Recheck Visibility",
           "Authorize Retry",
           "Poll Now",
-          "Pause",
+          "Stop and Drain",
+          "Preview Recovery",
           "Settings",
           "Open Logs",
           "Quit Jidoka Code",
@@ -190,7 +197,7 @@ private actor UIFixtureEngine: EngineClient {
     ])
   private var loginSelected = false
   private var loginStatus = LifecycleServiceStatus.notRegistered
-  private var maxConcurrency = 2
+  private var maxConcurrency = 1
   private var ambiguous: [EngineAmbiguousMutation] = []
   private var revision = 0
   private var rejectCredentialOnce = true
@@ -256,7 +263,7 @@ private actor UIFixtureEngine: EngineClient {
           reviewEnabled: draft.reviewEnabled,
           triageEnabled: draft.triageEnabled,
           implementationEnabled: draft.implementationEnabled,
-          enabled: true
+          enabled: draft.enabled
         )
       ]
     case .updateRepository(let repository):
@@ -272,6 +279,10 @@ private actor UIFixtureEngine: EngineClient {
       paused = value
     case .pollNow:
       break
+    case .previewRollout, .activateRollout, .rolloutStatus, .stopAndDrainRollout,
+      .previewRolloutRecovery, .executeRolloutRecovery, .previewFiniteWindow,
+      .activateFiniteWindow:
+      throw EngineClientError(.invalidCommand)
     case .recheckAmbiguousMutation:
       lateRecheckCount += 1
     case .authorizeRetry(let evidence):
@@ -496,10 +507,9 @@ private enum UIFixtureRunner {
     await app.refresh()
     await engine.setPassRunning(true)
     await app.refresh()
-    await app.togglePaused()
+    await app.pauseForContainment()
     let pausePreservedInFlight = app.state?.paused == true && app.state?.passRunning == true
     await engine.setPassRunning(false)
-    await app.togglePaused()
     await engine.injectAmbiguousMutation()
     await app.refresh()
     let menuSnapshot = AppViewModel(client: engine)

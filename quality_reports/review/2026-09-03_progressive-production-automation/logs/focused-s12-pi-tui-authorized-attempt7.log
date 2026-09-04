@@ -1,0 +1,22 @@
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.10s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+Pi runtime attestation tests: PASS
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.11s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrHost' complete! (0.10s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrFixture' complete! (0.10s)
+evidence=/private/tmp/jidoka-code-progressive-production-automation/build/evidence/jidoka-herdr-s12.4yix81 evidence_manifest_sha256=6101cedb5591f0cb54f8b0bc3271db9eed0d295849bd5c9669ea0b5a4745a9c1
+S12 exact Pi TUI isolated E2E: PASS
+session=jidoka-s12-4yix81 workspace=w2 panes=w2:p2,w2:p3,w2:p4 model=jidoka-fixture/fixture:off provider_calls=2
+fresh_prompt=1 causal_tool_loop=1 recorded_before_crash=1 side_channel_before_crash=0 causal_resume=1 resume_prompt=0 cross_run_resume_boundary=1 cross_run_null_downgrade_blocked=1 result=1 acknowledgement=1 typed_runtime_failure=1 manual_input_context=0 pre_result_input_blocked=1 built_in_input_blocked=1 builder_parity=1 exact_process_group=1 child_process_identity=1 old_pane_removed=1 pane_retained_until_release=1 focus_changes=0 provider_network_measured=1 provider_network=0
+S12 artifacts retained at /private/tmp/jidoka-code-progressive-production-automation/build/evidence/jidoka-herdr-s12.4yix81

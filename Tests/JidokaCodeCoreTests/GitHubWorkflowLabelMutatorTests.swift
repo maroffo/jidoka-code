@@ -51,11 +51,17 @@ struct GitHubWorkflowLabelMutatorTests {
     await fixture.database.close()
     let reopened = try SQLiteStore(databaseURL: fixture.databaseURL)
     let reopenedIntents = MutationIntentStore(database: reopened)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: reopenedIntents)
     await fixture.api.resumeNormally()
     let mutator = GitHubWorkflowLabelMutator(
-      executor: GitHubMutationExecutor(intents: reopenedIntents, broker: fixture.api),
+      executor: GitHubMutationExecutor(
+        intents: reopenedIntents,
+        broker: fixture.api,
+        authority: authority
+      ),
       intents: reopenedIntents,
       reads: fixture.api,
+      authority: authority,
       sleeper: WorkflowLabelImmediateSleeper(),
       now: { Date(timeIntervalSince1970: 110_002) }
     )
@@ -179,15 +185,21 @@ private final class WorkflowLabelFixture: @unchecked Sendable {
     }
     job = value
     intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     api = WorkflowLabelAPI(
       failAfterFirstMutation: failAfterFirstMutation,
       failBeforeSecondMutation: failBeforeSecondMutation,
       failBeforeFirstEffect: failBeforeFirstEffect
     )
     mutator = GitHubWorkflowLabelMutator(
-      executor: GitHubMutationExecutor(intents: intents, broker: api),
+      executor: GitHubMutationExecutor(
+        intents: intents,
+        broker: api,
+        authority: authority
+      ),
       intents: intents,
       reads: api,
+      authority: authority,
       sleeper: WorkflowLabelImmediateSleeper(),
       now: { Date(timeIntervalSince1970: 110_001) }
     )
@@ -238,12 +250,12 @@ private actor WorkflowLabelAPI: GitHubMutationReadAPI, GitHubMutationSending {
 
   func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse {
     if failBeforeSecondMutation, sendCount == 1 {
       throw URLError(.networkConnectionLost)
     }
-    try await beforeSend()
+    _ = try await beforeSend()
     sendCount += 1
     if failBeforeFirstEffect, sendCount == 1 {
       throw URLError(.networkConnectionLost)

@@ -151,7 +151,7 @@ struct EngineServiceTests {
     defer { successFixture.remove() }
     try await successFixture.service.initialize()
     #expect(await successFixture.runtime.reloadValues == [false])
-    #expect(await successFixture.runtime.pauseValues == [false])
+    #expect(await successFixture.runtime.pauseValues == [true])
     #expect(try Data(contentsOf: successLogger.fileURL).isEmpty)
     await successFixture.database.close()
 
@@ -190,7 +190,7 @@ struct EngineServiceTests {
     let initial = try await fixture.service.snapshot()
     #expect(initial.lifecycle == .onboarding)
     #expect(Set(initial.settings.profiles.map(\.role)) == Set(ModelProfileRole.allCases))
-    #expect(initial.settings.maxConcurrency == 2)
+    #expect(initial.settings.maxConcurrency == 1)
     #expect(initial.settings.modelCatalog.models.isEmpty)
     #expect(initial.onboarding.herdr.state == .ready)
 
@@ -218,7 +218,8 @@ struct EngineServiceTests {
     #expect(completed.state.onboarding.credential.account == "octocat")
     #expect(completed.state.settings.repositories.count == 1)
     #expect(await fixture.external.sawCredential)
-    #expect(await fixture.runtime.dispatchValues.last == true)
+    #expect(await fixture.runtime.dispatchValues.last == false)
+    #expect(completed.state.paused)
 
     let persisted = try await fixture.configuration.appConfiguration()
     #expect(persisted.onboardingComplete)
@@ -239,8 +240,8 @@ struct EngineServiceTests {
     }
   }
 
-  @Test("setup completes without a repository and resumes only after one is enabled")
-  func repositoryIndependentOnboarding() async throws {
+  @Test("W0: onboarding completion remains paused without rollout authority")
+  func onboardingCompletionRemainsPaused() async throws {
     let fixture = try await EngineServiceFixture()
     defer { fixture.remove() }
 
@@ -257,8 +258,8 @@ struct EngineServiceTests {
     let completed = try await fixture.service.send(.completeOnboarding)
     #expect(completed.state.lifecycle == .ready)
     #expect(completed.state.settings.repositories.isEmpty)
-    #expect(!completed.state.paused)
-    #expect(!(try await fixture.configuration.appConfiguration().paused))
+    #expect(completed.state.paused)
+    #expect(try await fixture.configuration.appConfiguration().paused)
     #expect(await fixture.runtime.reloadValues.last == false)
 
     let added = try await fixture.service.send(
@@ -273,7 +274,7 @@ struct EngineServiceTests {
       )
     )
     let repository = try #require(added.state.settings.repositories.first)
-    #expect(await fixture.runtime.dispatchValues.last == true)
+    #expect(await fixture.runtime.dispatchValues.last == false)
 
     _ = try await fixture.service.send(
       .updateRepository(
@@ -400,12 +401,12 @@ struct EngineServiceTests {
     await fixture.external.setHerdr(EngineServiceExternalFake.readyHerdr())
     await fixture.service.notifyLifecycleEvent(.wake)
     #expect(await fixture.runtime.reloadValues.count == reloadsBeforeRegain + 1)
-    #expect(await fixture.runtime.reloadValues.last == true)
+    #expect(await fixture.runtime.reloadValues.last == false)
     #expect(await fixture.runtime.lifecycleReasons.last == .wake)
   }
 
-  @Test("pause persists first and leaves an in-flight pass running")
-  func pauseDoesNotInterruptInFlightPass() async throws {
+  @Test("containment pause remains idempotent and generic resume is denied")
+  func containmentPauseAndResumeDenial() async throws {
     let fixture = try await EngineServiceFixture()
     defer { fixture.remove() }
     await fixture.runtime.setPassRunning(true)
@@ -415,13 +416,15 @@ struct EngineServiceTests {
     #expect(response.state.passRunning)
     #expect(try await fixture.configuration.appConfiguration().paused)
     #expect(await fixture.runtime.pauseValues.last == true)
-    #expect(await fixture.runtime.prePauseObservedPersistedValues.last == false)
+    #expect(await fixture.runtime.prePauseObservedPersistedValues.last == true)
     #expect(await fixture.runtime.pauseDrainObservedPersistedValues.last == true)
     #expect(await fixture.runtime.pauseObservedPersistedValues.last == true)
     #expect(await fixture.runtime.prepareCount == 0)
 
-    _ = try await fixture.service.send(.setPaused(false))
-    #expect(!(try await fixture.configuration.appConfiguration().paused))
+    await #expect(throws: EngineClientError(.invalidCommand)) {
+      _ = try await fixture.service.send(.setPaused(false))
+    }
+    #expect(try await fixture.configuration.appConfiguration().paused)
     #expect(await fixture.runtime.pollCount == 0)
   }
 
@@ -809,10 +812,6 @@ struct EngineServiceTests {
       operation: .retireBefore,
       boundaryEpochSeconds: JobMaintenanceScope.authorizedBoundaryEpochSeconds
     )
-    await #expect(throws: EngineClientError(.busy)) {
-      _ = try await fixture.service.send(.previewJobMaintenance(scope))
-    }
-    _ = try await fixture.service.send(.setPaused(true))
     let preview = try await fixture.service.send(.previewJobMaintenance(scope))
     let report = try #require(preview.jobMaintenance)
     #expect(report.candidateCount == 1)

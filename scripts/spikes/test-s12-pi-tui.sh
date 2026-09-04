@@ -292,11 +292,19 @@ const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const root = process.argv[3], prompt = process.argv[4], args = value.argumentValues;
 const extensions = args.flatMap((value, index) => value === "--extension" ? [args[index + 1]] : []);
+const foundationStandardPath = (path) => {
+  if (path === "/private/tmp") return "/tmp";
+  if (path.startsWith("/private/tmp/")) return `/tmp/${path.slice(13)}`;
+  if (path === "/private/var") return "/var";
+  if (path.startsWith("/private/var/")) return `/var/${path.slice(13)}`;
+  return path;
+};
+const resourceRoot = foundationStandardPath(root);
 const expectedExtensions = [
-  `${root}/Resources/Pi/extensions/jidoka-deny-user-bash.js`,
-  `${root}/Resources/Pi/extensions/jidoka-code.ts`,
-  `${root}/Resources/Pi/extensions/jidoka-tui-runtime.ts`,
-  `${root}/scripts/spikes/pi-tui-fixture-provider.ts`,
+  `${resourceRoot}/Resources/Pi/extensions/jidoka-deny-user-bash.js`,
+  `${resourceRoot}/Resources/Pi/extensions/jidoka-code.ts`,
+  `${resourceRoot}/Resources/Pi/extensions/jidoka-tui-runtime.ts`,
+  `${resourceRoot}/scripts/spikes/pi-tui-fixture-provider.ts`,
 ];
 if (value.schemaVersion !== 4 || value.launchAttemptID !== "attempt-s12-triage-0001"
     || value.runID !== "run-s12-triage" || args.includes("--mode") || args.includes(prompt)

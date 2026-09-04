@@ -95,7 +95,8 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
       "-C", source.path, "add", "--", ".githooks", "Makefile", "README.md", "scripts",
     ])
     try await gitFixture.run(["-C", source.path, "commit", "-m", "test: base fixture"])
-    baseSHA = try await gitFixture.output(["-C", source.path, "rev-parse", "HEAD"])
+    let fixtureBaseSHA = try await gitFixture.output(["-C", source.path, "rev-parse", "HEAD"])
+    baseSHA = fixtureBaseSHA
     let remoteURL = try await gitFixture.bareRemote(from: source)
 
     database = try SQLiteStore(
@@ -186,17 +187,21 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
       defaultBranch: repository.defaultBranch,
       localFixtureURL: remoteURL
     )
-    let materialization = try await repositories.materializeWorkspace(
-      jobID: job.id,
-      remote: remote,
-      baseSHA: baseSHA,
-      branch: "agent/issue-21-production-rails",
-      now: Date(timeIntervalSince1970: 130_000)
-    )
+    let materializationJob = job
+    let materializationStore = repositories
+    let materialization = try await withTestRolloutWorkflow(jobID: materializationJob.id) {
+      try await materializationStore.materializeWorkspace(
+        jobID: materializationJob.id,
+        remote: remote,
+        baseSHA: fixtureBaseSHA,
+        branch: "agent/issue-21-production-rails",
+        now: Date(timeIntervalSince1970: 130_000)
+      )
+    }
     workspaceURL = materialization.workspaceURL
     let artifact = Data("{\"fixture\":\"bounded\"}".utf8)
     artifactSHA256 = GitHubMarkerCodec.sha256(artifact)
-    let baseRevision = try BaseRevision(branch: "main", sha: baseSHA)
+    let baseRevision = try BaseRevision(branch: "main", sha: fixtureBaseSHA)
     let issue = GitHubIssue(
       id: 21,
       nodeID: "issue-node-21",
@@ -213,6 +218,7 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
       repository: repository,
       issue: issue,
       comments: [],
+      labels: issue.labels,
       workflowLabels: ["agent:wip"],
       issueRevision: issueRevision,
       baseRevision: baseRevision,
@@ -301,6 +307,15 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
       planPath: prepared.planPath,
       plan: plan
     )
+    let rolloutAuthority = try await activateTestImplementationRollout(
+      database: database,
+      repository: repository,
+      job: materializationJob,
+      plan: plan,
+      workspaceHeadSHA: fixtureBaseSHA,
+      now: Date(timeIntervalSince1970: 130_000),
+      currentTime: { Date(timeIntervalSince1970: 130_002) }
+    )
     let sessionRoot = gitFixture.root.appendingPathComponent("Sessions", isDirectory: true)
     try FileManager.default.createDirectory(
       at: sessionRoot,
@@ -328,10 +343,12 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
       verificationRunner: VerificationCommandRunner(),
       commandRuns: commandRuns,
       commandGate: commandGate,
+      rolloutAuthority: rolloutAuthority,
       importer: WorkspaceImporter(git: gitFixture.git),
       git: gitFixture.git,
       offline: true,
-      timeoutSeconds: 30
+      timeoutSeconds: 30,
+      now: { Date(timeIntervalSince1970: 130_002) }
     )
   }
 
