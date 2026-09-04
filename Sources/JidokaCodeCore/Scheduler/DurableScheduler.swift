@@ -353,7 +353,7 @@ extension RolloutAuthorityStore: RolloutSchedulerAuthorizing {}
 public actor DurableScheduler {
   private let clock: any SchedulerClock
   private let runner: any SchedulerPassRunner
-  private let rolloutAuthority: (any RolloutSchedulerAuthorizing)?
+  private let rolloutAuthority: any RolloutSchedulerAuthorizing
   private var timing: SchedulerTimingState
   private var runGeneration: UInt64 = 0
   private var sleepGeneration: UInt64 = 0
@@ -363,7 +363,7 @@ public actor DurableScheduler {
     clock: any SchedulerClock,
     runner: any SchedulerPassRunner,
     initialNow: Date,
-    rolloutAuthority: (any RolloutSchedulerAuthorizing)?
+    rolloutAuthority: any RolloutSchedulerAuthorizing
   ) {
     self.clock = clock
     self.runner = runner
@@ -373,24 +373,22 @@ public actor DurableScheduler {
 
   public func request(_ reason: SchedulerTriggerReason) async {
     let instant = await clock.now()
-    if let rolloutAuthority {
-      let admission = (try? await rolloutAuthority.schedulerAdmission(now: instant)) ?? .denied
-      switch admission {
-      case .active(let mode):
-        if reason == .manual, mode != .finiteWindow { return }
-      case .readbackOnly:
-        guard reason != .manual && reason != .resume else { return }
-        await runner.runReadbackOnly(
-          pass: SchedulerPass(reasons: [reason], startedAt: instant)
-        )
-        timing.setPaused(true, now: await clock.now())
-        interruptSleep()
-        return
-      case .denied:
-        timing.setPaused(true, now: instant)
-        interruptSleep()
-        return
-      }
+    let admission = (try? await rolloutAuthority.schedulerAdmission(now: instant)) ?? .denied
+    switch admission {
+    case .active(let mode):
+      if reason == .manual, mode != .finiteWindow { return }
+    case .readbackOnly:
+      guard reason != .manual && reason != .resume else { return }
+      await runner.runReadbackOnly(
+        pass: SchedulerPass(reasons: [reason], startedAt: instant)
+      )
+      timing.setPaused(true, now: await clock.now())
+      interruptSleep()
+      return
+    case .denied:
+      timing.setPaused(true, now: instant)
+      interruptSleep()
+      return
     }
     timing.request(reason, now: instant)
     interruptSleep()
@@ -398,9 +396,7 @@ public actor DurableScheduler {
 
   public func setPaused(_ paused: Bool) async {
     let instant = await clock.now()
-    if !paused, let rolloutAuthority,
-      (try? await rolloutAuthority.activeStatus(now: instant)) == nil
-    {
+    if !paused, (try? await rolloutAuthority.activeStatus(now: instant)) == nil {
       return
     }
     timing.setPaused(paused, now: instant)
@@ -410,12 +406,9 @@ public actor DurableScheduler {
   @discardableResult
   public func runDuePass() async -> Bool {
     let now = await clock.now()
-    let admission: RolloutSchedulerAdmission
-    if let rolloutAuthority {
-      admission = (try? await rolloutAuthority.schedulerAdmission(now: now)) ?? .denied
-    } else {
-      admission = .active(.finiteWindow)
-    }
+    // No absent-authority arm: the authority is non-optional, so there is no value of
+    // it that skips the gate. Any failure to read admission is a denial.
+    let admission = (try? await rolloutAuthority.schedulerAdmission(now: now)) ?? .denied
     if admission == .denied {
       timing.setPaused(true, now: now)
       interruptSleep()

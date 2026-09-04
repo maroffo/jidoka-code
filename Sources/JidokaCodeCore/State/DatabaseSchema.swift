@@ -2810,7 +2810,14 @@ public enum DatabaseSchema {
         CREATE TRIGGER repository_leases_rollout_authority_insert
         BEFORE INSERT ON repository_leases
         WHEN NEW.active = 1
-          AND EXISTS (SELECT 1 FROM rollout_authorizations)
+          -- Only an open lane on THIS repository arms the gate. rollout_authorizations
+          -- is append-only, so a global EXISTS would make the first authorization ever
+          -- created a permanent bar on every repository.
+          AND EXISTS (
+            SELECT 1 FROM rollout_authorizations AS open_authorization
+            WHERE open_authorization.repository_id = NEW.repository_id
+              AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM jobs AS job
@@ -2858,7 +2865,23 @@ public enum DatabaseSchema {
         CREATE TRIGGER repository_leases_rollout_authority_update
         BEFORE UPDATE OF repository_id, job_id, heartbeat, active ON repository_leases
         WHEN NEW.active = 1
-          AND EXISTS (SELECT 1 FROM rollout_authorizations)
+          -- A heartbeat continues a lease this repository already holds: same row,
+          -- same job, already active. It grants no admission, so pause and drain
+          -- must not abort it. Reactivation (OLD.active = 0) and any identity change
+          -- are admission and stay gated.
+          AND NOT (
+            OLD.active = 1
+            AND NEW.repository_id = OLD.repository_id
+            AND NEW.job_id = OLD.job_id
+          )
+          -- Only an open lane on THIS repository arms the gate. rollout_authorizations
+          -- is append-only, so a global EXISTS would make the first authorization ever
+          -- created a permanent bar on every repository.
+          AND EXISTS (
+            SELECT 1 FROM rollout_authorizations AS open_authorization
+            WHERE open_authorization.repository_id = NEW.repository_id
+              AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM jobs AS job

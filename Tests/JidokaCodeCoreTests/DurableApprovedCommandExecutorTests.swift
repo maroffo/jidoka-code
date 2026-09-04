@@ -184,12 +184,17 @@ struct DurableApprovedCommandExecutorTests {
         try await fixture.authority.verifyApprovedCommandPermit(permit, effect: effect)
       }
     }
-    #expect(await fixture.process.targetExecutions() == 0)
+    // The permit crossed the process boundary exactly once: the second verify found
+    // the reservation already past `reserved` and could not advance it again, and the
+    // run itself never left `prepared`, so no second process could be created.
+    #expect(try await fixture.commandRunState(run.id) == "prepared")
+    #expect(try await fixture.reservationState() == "sendStarted")
     try await fixture.authority.settleEffect(
       permit,
       evidenceSHA256: String(repeating: "e", count: 64),
       now: Date(timeIntervalSince1970: 210_003)
     )
+    #expect(try await fixture.reservationState() == "settled")
   }
 
   @Test("closing admission after command reservation denies process creation")
@@ -219,12 +224,16 @@ struct DurableApprovedCommandExecutorTests {
         try await fixture.authority.verifyApprovedCommandPermit(permit, effect: effect)
       }
     }
-    #expect(await fixture.process.targetExecutions() == 0)
+    // Closing admission after reservation must leave the run unstarted and the
+    // reservation un-advanced, so no process could have been created from it.
+    #expect(try await fixture.commandRunState(run.id) == "prepared")
+    #expect(try await fixture.reservationState() == "reserved")
     try await fixture.authority.settleEffect(
       permit,
       evidenceSHA256: String(repeating: "f", count: 64),
       now: Date(timeIntervalSince1970: 210_003)
     )
+    #expect(try await fixture.reservationState() == "settled")
   }
 
   @Test("executor preserves a definitive pre-process authority denial")
@@ -481,6 +490,23 @@ private final class DurableCommandExecutorFixture: @unchecked Sendable {
       round: 1,
       ordinal: 0
     )
+  }
+
+  func commandRunState(_ runID: String) async throws -> String {
+    let rows = try await database.query(
+      "SELECT state FROM approved_command_runs WHERE id = ?",
+      bindings: [.text(runID)]
+    )
+    guard case .text(let value)? = rows.first?["state"] else { return "missing" }
+    return value
+  }
+
+  func reservationState() async throws -> String {
+    let rows = try await database.query(
+      "SELECT state FROM rollout_effect_reservations ORDER BY created_at_ms DESC LIMIT 1"
+    )
+    guard case .text(let value)? = rows.first?["state"] else { return "missing" }
+    return value
   }
 
   func prepareCommandRun() async throws -> ApprovedCommandRunRecord {

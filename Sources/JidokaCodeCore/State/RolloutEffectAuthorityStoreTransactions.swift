@@ -628,10 +628,15 @@ extension RolloutAuthorityStore {
     guard changed == 1 else { throw RolloutAuthorityError.invalidStateTransition }
   }
 
-  func requireHistoricalCanary(jobID: UUID) async throws {
+  /// `JobCanaryScope` is historical evidence, never a source of fresh authority.
+  ///
+  /// The return type is `Never` on purpose: it makes every historical-canary branch
+  /// terminal at compile time, so no `return .historicalCanary(...)` can sit beside it
+  /// and no later edit can restore the bypass by re-conditioning a single line. A
+  /// recovery that needs a fresh provider, command, Git, GitHub, or generated-review
+  /// effect must hold an ordinary matching schema-10 `.workflow` authorization.
+  func requireHistoricalCanary(jobID: UUID) async throws -> Never {
     _ = jobID
-    // JobCanaryScope remains historical evidence. Schema-10 rollout authority must
-    // never translate it into permission for a fresh read, process, or send.
     throw RolloutAuthorityError.effectAdmissionClosed
   }
 }
@@ -656,7 +661,6 @@ extension RolloutAuthorityStore {
       jobID == effect.jobID
     {
       try await requireHistoricalCanary(jobID: jobID)
-      return effect.intentIDs.map { _ in .historicalCanary(jobID: jobID) }
     }
     guard case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
       jobID == effect.jobID
@@ -778,8 +782,6 @@ extension RolloutAuthorityStore {
         jobID == effect.jobID
       {
         try await requireHistoricalCanary(jobID: jobID)
-        try await markHistoricalSendStarted(effect: effect, now: now)
-        return .historicalCanary(jobID: jobID)
       }
       throw RolloutAuthorityError.effectIdentityMismatch
     }
@@ -1125,11 +1127,9 @@ extension RolloutAuthorityStore {
         else {
           throw RolloutAuthorityError.effectIdentityMismatch
         }
+        // No `.historicalCanary` arm: the guard before this transaction already threw
+        // for that mode, so only a readback can reach here.
         switch executionContext?.mode {
-        case .historicalCanary(let contextualJobID):
-          guard contextualJobID == jobID else {
-            throw RolloutAuthorityError.effectIdentityMismatch
-          }
         case .readback(let contextualJobID, let contextualIntentID):
           guard contextualJobID == jobID,
             contextualIntentID == intentID,
@@ -1210,24 +1210,6 @@ extension RolloutAuthorityStore {
     if let terminalID { inFlightEffectPermits.remove(terminalID) }
   }
 
-  private func markHistoricalSendStarted(
-    effect: RolloutGitHubSendEffect,
-    now: Date
-  ) async throws {
-    try await database.transaction { database in
-      let intent = try Self.loadIntent(id: effect.intentID, database: database)
-      guard intent.jobID == effect.jobID,
-        intent.operation == effect.mutation,
-        intent.target == effect.target,
-        intent.expectedStateSHA256 == effect.expectedStateSHA256,
-        intent.requestSHA256 == effect.requestSHA256,
-        intent.state == .prepared || intent.state == .retryAllowed
-      else {
-        throw RolloutAuthorityError.effectIdentityMismatch
-      }
-      try Self.markIntentStarted(intent: intent, now: now, database: database)
-    }
-  }
 }
 
 extension RolloutAuthorityStore {

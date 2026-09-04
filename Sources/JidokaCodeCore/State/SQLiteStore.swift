@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SQLite3
 
@@ -42,6 +43,21 @@ public struct SQLiteMigration: Equatable, Sendable {
     self.requiresBackup = requiresBackup
     self.statements = statements
   }
+
+  /// Digest of the exact statements this migration applies.
+  ///
+  /// A stamped `schema_migrations` row records this value so a later binary can
+  /// prove that the database was built by the same migration body it now carries.
+  /// Version and name alone cannot: both stay constant when a migration is edited.
+  public var statementsSHA256: String {
+    var hasher = SHA256()
+    hasher.update(data: Data("v\(version)\u{1F}\(name)\u{1E}".utf8))
+    for statement in statements {
+      hasher.update(data: Data(statement.utf8))
+      hasher.update(data: Data("\u{1E}".utf8))
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+  }
 }
 
 public struct SQLitePragmas: Equatable, Sendable {
@@ -66,6 +82,7 @@ public enum SQLiteStoreError: Error, Equatable, Sendable {
   case closed
   case invalidMigrations(String)
   case migrationTooNew(database: Int, supported: Int)
+  case migrationContentMismatch(version: Int, recorded: String?, expected: String)
   case statementFailed(code: Int32, message: String)
   case transactionAlreadyActive
   case backupFailed(String)
@@ -363,6 +380,13 @@ public actor SQLiteStore {
     }
   }
 
+  /// First migration version whose recorded content digest is mandatory.
+  ///
+  /// Migrations 1 through 9 were applied by released binaries that predate the
+  /// digest column, so their rows legitimately carry no digest. Migration 10 has
+  /// never shipped, so every schema-10 row must prove which body produced it.
+  static let firstContentVerifiedMigrationVersion = 10
+
   private static func bootstrapMigrationTable(_ connection: SQLiteConnection) throws {
     try executeRaw(
       """
@@ -374,6 +398,61 @@ public actor SQLiteStore {
       """,
       connection: connection
     )
+    let columns = try query("PRAGMA table_info(schema_migrations)", connection: connection)
+    let hasDigest = columns.contains { row in
+      if case .text("statements_sha256")? = row["name"] { return true }
+      return false
+    }
+    if !hasDigest {
+      try executeRaw(
+        "ALTER TABLE schema_migrations ADD COLUMN statements_sha256 TEXT",
+        connection: connection
+      )
+    }
+  }
+
+  /// Fail closed when an applied migration's recorded body differs from this binary's.
+  ///
+  /// The migrator only runs `migration.version > current`, so a database stamped at a
+  /// version by a different body would otherwise skip the differences silently and run
+  /// with a schema this binary never wrote.
+  private static func verifyAppliedMigrationContent(
+    _ migrations: [SQLiteMigration],
+    connection: SQLiteConnection
+  ) throws {
+    let applied = try query(
+      "SELECT version, statements_sha256 FROM schema_migrations WHERE version >= ?",
+      bindings: [.integer(Int64(firstContentVerifiedMigrationVersion))],
+      connection: connection
+    )
+    guard !applied.isEmpty else { return }
+    let expectedByVersion = Dictionary(
+      uniqueKeysWithValues: migrations.map { ($0.version, $0.statementsSHA256) }
+    )
+    for row in applied.sorted(by: { lhs, rhs in
+      guard case .integer(let left)? = lhs["version"],
+        case .integer(let right)? = rhs["version"]
+      else { return false }
+      return left < right
+    }) {
+      guard case .integer(let version)? = row["version"] else {
+        throw SQLiteStoreError.unexpectedResult("schema_migrations.version is not an integer")
+      }
+      guard let expected = expectedByVersion[Int(version)] else { continue }
+      let recorded: String?
+      if case .text(let value)? = row["statements_sha256"] {
+        recorded = value
+      } else {
+        recorded = nil
+      }
+      guard recorded == expected else {
+        throw SQLiteStoreError.migrationContentMismatch(
+          version: Int(version),
+          recorded: recorded,
+          expected: expected
+        )
+      }
+    }
   }
 
   private static func runMigrations(
@@ -394,6 +473,7 @@ public actor SQLiteStore {
     guard current <= supported else {
       throw SQLiteStoreError.migrationTooNew(database: current, supported: supported)
     }
+    try verifyAppliedMigrationContent(migrations, connection: connection)
 
     for migration in migrations where migration.version > current {
       if migration.requiresBackup && databaseExistedBeforeOpen {
@@ -412,11 +492,15 @@ public actor SQLiteStore {
           try executeRaw(statement, connection: connection)
         }
         _ = try execute(
-          "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+          """
+          INSERT INTO schema_migrations(version, name, applied_at, statements_sha256)
+          VALUES (?, ?, ?, ?)
+          """,
           bindings: [
             .integer(Int64(migration.version)),
             .text(migration.name),
             .real(Date().timeIntervalSince1970),
+            .text(migration.statementsSHA256),
           ],
           connection: connection
         )

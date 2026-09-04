@@ -176,7 +176,7 @@ struct DurableSchedulerTests {
       clock: clock,
       runner: runner,
       initialNow: initial,
-      rolloutAuthority: nil
+      rolloutAuthority: SchedulerRolloutAuthorityStub(admission: .active(.finiteWindow))
     )
 
     await scheduler.request(.startup)
@@ -205,7 +205,7 @@ struct DurableSchedulerTests {
       clock: clock,
       runner: runner,
       initialNow: initial,
-      rolloutAuthority: nil
+      rolloutAuthority: SchedulerRolloutAuthorityStub(admission: .active(.finiteWindow))
     )
     let loop = Task { await scheduler.run() }
     defer { loop.cancel() }
@@ -264,7 +264,7 @@ struct DurableSchedulerTests {
       clock: clock,
       runner: runner,
       initialNow: fixture.now,
-      rolloutAuthority: nil
+      rolloutAuthority: SchedulerRolloutAuthorityStub(admission: .active(.finiteWindow))
     )
     let startup = StartupCoordinator(jobs: jobs, scheduler: scheduler)
     _ = try await startup.start(now: fixture.now)
@@ -321,6 +321,58 @@ struct DurableSchedulerTests {
       #expect(await runner.readbackPasses().isEmpty)
       #expect((await scheduler.snapshot()).paused)
     }
+  }
+
+  @Test("a due pass that drops to readback-only reconciles and then pauses")
+  func runDuePassReadbackOnlyArm() async throws {
+    let initial = Date(timeIntervalSince1970: 8_000)
+    let clock = VirtualSchedulerClock(now: initial)
+    let runner = RecordingSchedulerRunner()
+    let authority = MutableSchedulerRolloutAuthorityStub(admission: .active(.finiteWindow))
+    let scheduler = DurableScheduler(
+      clock: clock,
+      runner: runner,
+      initialNow: initial,
+      rolloutAuthority: authority
+    )
+
+    // The pass becomes due while the lane is active, then the lane drops to
+    // readback-only before it runs: only runDuePass() can observe that transition.
+    await scheduler.request(.startup)
+    await clock.advance(to: initial.addingTimeInterval(1))
+    await authority.set(.readbackOnly)
+
+    #expect(await scheduler.runDuePass())
+    #expect(await runner.passes().isEmpty)
+    #expect(await runner.readbackPasses().map(\.reasons) == [[.startup]])
+    #expect((await scheduler.snapshot()).paused)
+
+    // Pausing is terminal for the lane: nothing further becomes due.
+    await clock.advance(to: initial.addingTimeInterval(2_000))
+    #expect(!(await scheduler.runDuePass()))
+    #expect(await runner.readbackPasses().count == 1)
+  }
+
+  @Test("an authority that cannot answer denies the due pass instead of running it")
+  func runDuePassDeniesOnAuthorityFailure() async throws {
+    let initial = Date(timeIntervalSince1970: 8_500)
+    let clock = VirtualSchedulerClock(now: initial)
+    let runner = RecordingSchedulerRunner()
+    let authority = MutableSchedulerRolloutAuthorityStub(admission: .active(.finiteWindow))
+    let scheduler = DurableScheduler(
+      clock: clock,
+      runner: runner,
+      initialNow: initial,
+      rolloutAuthority: authority
+    )
+    await scheduler.request(.startup)
+    await clock.advance(to: initial.addingTimeInterval(1))
+    await authority.failNext()
+
+    #expect(!(await scheduler.runDuePass()))
+    #expect(await runner.passes().isEmpty)
+    #expect(await runner.readbackPasses().isEmpty)
+    #expect((await scheduler.snapshot()).paused)
   }
 }
 
@@ -406,6 +458,36 @@ private actor RecordingSchedulerRunner: SchedulerPassRunner {
 
   func passes() -> [SchedulerPass] { recorded }
   func readbackPasses() -> [SchedulerPass] { readbacks }
+}
+
+/// Lets a test change admission between requesting a pass and running it.
+private actor MutableSchedulerRolloutAuthorityStub: RolloutSchedulerAuthorizing {
+  private enum StubError: Error, Sendable { case unavailable }
+
+  private var admission: RolloutSchedulerAdmission
+  private var failing = false
+
+  init(admission: RolloutSchedulerAdmission) {
+    self.admission = admission
+  }
+
+  func set(_ admission: RolloutSchedulerAdmission) {
+    self.admission = admission
+  }
+
+  func failNext() {
+    failing = true
+  }
+
+  func schedulerAdmission(now _: Date) async throws -> RolloutSchedulerAdmission {
+    if failing { throw StubError.unavailable }
+    return admission
+  }
+
+  func activeStatus(now _: Date) async throws -> RolloutStatusReport? {
+    if failing { throw StubError.unavailable }
+    return nil
+  }
 }
 
 private struct SchedulerRolloutAuthorityStub: RolloutSchedulerAuthorizing {

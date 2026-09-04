@@ -116,6 +116,146 @@ struct RolloutRemotePreviewRevalidatorTests {
     }
     await fixture.database.close()
   }
+
+  // Audit of the 27 `previewDrift` guards in RolloutRemotePreviewRevalidator.
+  //
+  // Driven by an independent mutation: the canonical round-trip, authenticated
+  // identity, repository identity, transport failure, repository-label inventory
+  // (count, duplicate node, duplicate name, changed definition, expected set),
+  // existing-job binding, pull-request identity, commit derivation, exact PR object
+  // digests, issue identity and default-branch reference, triage object digests,
+  // workflow-label expectations, and the finite candidate set with its observed
+  // object-number upper bound.
+  //
+  // Not independently drivable from a valid preview, and therefore second-line
+  // defensive arms: the review-stage missing-label guard, which the preview builder
+  // already refuses to produce (asserted below); the stage arms whose callers have
+  // already switched on stage; the malformed-binding arms whose inputs the builder
+  // cannot emit; the workflow-label default arm for a stage/step pair the builder
+  // never produces; and the non-positive object numbers GitHub discovery cannot
+  // return. Reaching any of those needs a hand-forged preview, which the canonical
+  // round-trip guard rejects first.
+
+  @Test("a preview whose canonical bytes no longer round-trip is rejected")
+  func canonicalRoundTripDrift() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    let preview = try fixture.exactPreview()
+    try await fixture.revalidator.revalidate(preview)
+
+    let text = try #require(String(data: preview.canonicalJSON, encoding: .utf8))
+    let tampered = RolloutPreview(
+      payload: preview.payload,
+      canonicalJSON: Data(
+        text.replacingOccurrences(of: "\"bundleBuild\":3", with: "\"bundleBuild\":4").utf8
+      ),
+      sha256: preview.sha256
+    )
+    await #expect(throws: RolloutAuthorityError.previewDrift) {
+      try await fixture.revalidator.revalidate(tampered)
+    }
+    await fixture.database.close()
+  }
+
+  @Test("a transport failure during revalidation is drift, never a pass")
+  func transportFailureIsDrift() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    let preview = try fixture.exactPreview()
+    try await fixture.revalidator.revalidate(preview)
+
+    await fixture.api.failNextRepositoryRead()
+    await #expect(throws: RolloutAuthorityError.previewDrift) {
+      try await fixture.revalidator.revalidate(preview)
+    }
+    await fixture.database.close()
+  }
+
+  @Test("repository-label inventory drift is rejected in every shape")
+  func repositoryLabelInventoryDrift() async throws {
+    for drift in RepositoryLabelInventoryDrift.allCases {
+      let fixture = try await RolloutRemotePreviewFixture()
+      let preview = try await fixture.exactTriagePreview()
+      try await fixture.revalidator.revalidate(preview)
+      switch drift {
+      case .duplicateNodeID:
+        await fixture.api.duplicateFirstRepositoryLabelNodeID()
+      case .duplicateName:
+        await fixture.api.duplicateFirstRepositoryLabelName()
+      }
+      await #expect(throws: RolloutAuthorityError.previewDrift, "\(drift)") {
+        try await fixture.revalidator.revalidate(preview)
+      }
+      await fixture.database.close()
+      fixture.remove()
+    }
+  }
+
+  @Test("a review-stage preview cannot be built with missing labels at all")
+  func reviewStageRejectsMissingLabels() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    // The builder is the enforcing edge here: a review stage carrying label creates
+    // never becomes a preview, so the revalidator's own missing-label guard is a
+    // second line that no valid preview can reach.
+    #expect(throws: RolloutAuthorityError.invalidEffectEnvelope) {
+      _ = try fixture.exactPreview(missingLabels: [
+        RolloutLabelDefinition(name: "agent:ready", color: "0e8a16", description: "ready")
+      ])
+    }
+    await fixture.database.close()
+  }
+
+  @Test("issue identity and default-branch reference drift are rejected")
+  func issueIdentityDrift() async throws {
+    for drift in IssueIdentityDrift.allCases {
+      let fixture = try await RolloutRemotePreviewFixture()
+      let preview = try await fixture.exactTriagePreview()
+      try await fixture.revalidator.revalidate(preview)
+      switch drift {
+      case .closed:
+        await fixture.api.replaceIssue(state: "closed")
+      case .becamePullRequest:
+        await fixture.api.replaceIssue(asPullRequest: true)
+      case .missingBranchReference:
+        await fixture.api.removeBranchReference()
+      }
+      await #expect(throws: RolloutAuthorityError.previewDrift, "\(drift)") {
+        try await fixture.revalidator.revalidate(preview)
+      }
+      await fixture.database.close()
+      fixture.remove()
+    }
+  }
+
+  @Test("a finite window binds its observed object-number upper bound")
+  func finiteObservedUpperBoundDrift() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    await fixture.api.appendPullRequest(fixture.pullRequest(number: 8, suffix: "8"))
+    let preview = try await fixture.finitePreview()
+    try await fixture.revalidator.revalidate(preview)
+
+    // A draft PR is not a candidate, so the candidate set is unchanged; only the
+    // observed upper bound moves. The window must still refuse to run.
+    await fixture.api.appendPullRequest(
+      fixture.pullRequest(number: 12, suffix: "12", draft: true))
+    await #expect(throws: RolloutAuthorityError.previewDrift) {
+      try await fixture.revalidator.revalidate(preview)
+    }
+    await fixture.database.close()
+  }
+}
+
+private enum RepositoryLabelInventoryDrift: CaseIterable {
+  case duplicateNodeID
+  case duplicateName
+}
+
+private enum IssueIdentityDrift: CaseIterable {
+  case closed
+  case becamePullRequest
+  case missingBranchReference
 }
 
 private final class RolloutRemotePreviewFixture: @unchecked Sendable {
@@ -299,7 +439,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     )
   }
 
-  func exactPreview() throws -> RolloutPreview {
+  func exactPreview(missingLabels: [RolloutLabelDefinition] = []) throws -> RolloutPreview {
     let pullRequest = Self.makePullRequest(
       number: 10,
       suffix: "preview",
@@ -357,7 +497,8 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
           priority: .prReview,
           firstStep: .review,
           currentStep: JobStepKind.review.rawValue
-        )
+        ),
+        missingLabels: missingLabels
       )
     )
   }
@@ -529,13 +670,14 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     )
   }
 
-  func pullRequest(number: Int, suffix: String) -> GitHubPullRequest {
+  func pullRequest(number: Int, suffix: String, draft: Bool = false) -> GitHubPullRequest {
     Self.makePullRequest(
       number: number,
       suffix: suffix,
       baseSHA: baseSHA,
       headSHA: String(repeating: String(String(number).suffix(1)), count: 40),
-      user: GitHubUser(id: 42, nodeID: "U_preview", login: "owner")
+      user: GitHubUser(id: 42, nodeID: "U_preview", login: "owner"),
+      draft: draft
     )
   }
 
@@ -637,7 +779,8 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
   private func previewInput(
     scope: RolloutScope,
     jobs: Int,
-    jobBinding: RolloutJobBinding?
+    jobBinding: RolloutJobBinding?,
+    missingLabels: [RolloutLabelDefinition] = []
   ) -> RolloutPreviewInput {
     let digest = String(repeating: "a", count: 64)
     return RolloutPreviewInput(
@@ -692,7 +835,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
         outsideScopeRecoveryItemCount: 0,
         outsideScopeMutationItemCount: 0
       ),
-      missingLabels: [],
+      missingLabels: missingLabels,
       commands: [],
       jobBinding: jobBinding,
       createdAtMilliseconds: 1_000,
@@ -705,7 +848,8 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     suffix: String,
     baseSHA: String,
     headSHA: String,
-    user: GitHubUser
+    user: GitHubUser,
+    draft: Bool = false
   ) -> GitHubPullRequest {
     let pullRepository = GitHubPullRepository(
       id: 7,
@@ -717,7 +861,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
       nodeID: number == 10 ? "PR_preview" : "PR_\(suffix)",
       number: number,
       state: "open",
-      draft: false,
+      draft: draft,
       title: "Preview \(suffix)",
       body: "body \(suffix)",
       htmlURL: "https://github.com/owner/repo/pull/\(number)",
@@ -748,6 +892,8 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
   private var commentsValue: [GitHubComment] = []
   private var repositoryLabelsValue: [GitHubLabel]
   private var branchSHA: String
+  private var branchReferenceAvailable = true
+  private var repositoryReadFails = false
 
   init(
     identity: GitHubUser,
@@ -774,8 +920,9 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
     owner _: String,
     repository _: String,
     expectedNodeID _: String?
-  ) -> GitHubRepository {
-    repositoryValue
+  ) throws -> GitHubRepository {
+    if repositoryReadFails { throw RolloutRemotePreviewTestError.fixture }
+    return repositoryValue
   }
 
   func listPullRequests(owner _: String, repository _: String) -> [GitHubPullRequest] {
@@ -832,7 +979,8 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
     repository _: String,
     branch _: String
   ) -> GitHubReference? {
-    GitHubReference(
+    guard branchReferenceAvailable else { return nil }
+    return GitHubReference(
       ref: "refs/heads/main",
       nodeID: "REF_main",
       object: GitHubGitObject(
@@ -936,6 +1084,57 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
 
   func removeLastRepositoryLabel() {
     _ = repositoryLabelsValue.popLast()
+  }
+
+  func duplicateFirstRepositoryLabelNodeID() {
+    guard let first = repositoryLabelsValue.first else { return }
+    repositoryLabelsValue.append(
+      GitHubLabel(
+        id: first.id + 9_000,
+        nodeID: first.nodeID,
+        name: "duplicate-node-\(first.id)",
+        color: first.color,
+        description: first.description
+      )
+    )
+  }
+
+  func duplicateFirstRepositoryLabelName() {
+    guard let first = repositoryLabelsValue.first else { return }
+    repositoryLabelsValue.append(
+      GitHubLabel(
+        id: first.id + 8_000,
+        nodeID: "\(first.nodeID)-duplicate-name",
+        name: first.name,
+        color: first.color,
+        description: first.description
+      )
+    )
+  }
+
+  func replaceIssue(state: String? = nil, asPullRequest: Bool? = nil) {
+    issueValue = GitHubIssue(
+      id: issueValue.id,
+      nodeID: issueValue.nodeID,
+      number: issueValue.number,
+      state: state ?? issueValue.state,
+      title: issueValue.title,
+      body: issueValue.body,
+      user: issueValue.user,
+      labels: issueLabelsValue,
+      createdAt: issueValue.createdAt,
+      pullRequest: (asPullRequest ?? (issueValue.pullRequest != nil))
+        ? GitHubIssuePullMarker(url: "https://api.github.com/repos/owner/repo/pulls/1")
+        : nil
+    )
+  }
+
+  func removeBranchReference() {
+    branchReferenceAvailable = false
+  }
+
+  func failNextRepositoryRead() {
+    repositoryReadFails = true
   }
 
   func setWorkflowLabels(_ names: Set<String>) {

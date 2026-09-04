@@ -339,6 +339,119 @@ struct SQLiteStoreTests {
     }
   }
 
+  @Test("a schema-10 database stamped by an unshipped migration body fails closed")
+  func schemaTenStampedByAnotherBodyFailsClosed() async throws {
+    let migration = try productionSchemaTenMigration()
+    let fixture = try await PopulatedSchemaNineFixture.make()
+    defer { fixture.remove() }
+
+    // Exactly the shape a database carries after eb01640: version 10, the same
+    // migration name, and no recorded content digest, because that binary had none.
+    let unshipped = SQLiteMigration(
+      version: migration.version,
+      name: migration.name,
+      requiresBackup: false,
+      statements: ["CREATE TABLE unshipped_schema_ten_marker (id TEXT PRIMARY KEY) STRICT"]
+    )
+    let stamped = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaNineMigrations + [unshipped]
+    )
+    #expect(try await stamped.schemaVersion() == 10)
+    await stamped.close()
+
+    #expect(
+      throws: SQLiteStoreError.migrationContentMismatch(
+        version: 10,
+        recorded: unshipped.statementsSHA256,
+        expected: migration.statementsSHA256
+      )
+    ) {
+      _ = try SQLiteStore(databaseURL: fixture.databaseURL, migrations: DatabaseSchema.migrations)
+    }
+
+    // The refusal is read-only: no statement of the real migration 10 ran, and the
+    // database is still exactly what the other body left behind.
+    let untouched = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaNineMigrations + [unshipped]
+    )
+    #expect(
+      try await untouched.scalarInt(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'rollout_authorizations'"
+      ) == 0
+    )
+    #expect(
+      try await untouched.scalarInt(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'unshipped_schema_ten_marker'"
+      ) == 1
+    )
+    #expect(
+      try await historicalRows(in: untouched, snapshot: fixture.snapshot) == fixture.snapshot.rows)
+    await untouched.close()
+
+    // eb01640 predates the digest column entirely, so its schema-10 row carries no
+    // digest at all. That absence must be a refusal, not a silent pass.
+    let legacy = try await PopulatedSchemaNineFixture.make()
+    defer { legacy.remove() }
+    let legacyStamped = try SQLiteStore(
+      databaseURL: legacy.databaseURL,
+      migrations: schemaNineMigrations + [unshipped]
+    )
+    try await clearRecordedMigrationDigest(in: legacyStamped, version: 10)
+    await legacyStamped.close()
+    #expect(
+      throws: SQLiteStoreError.migrationContentMismatch(
+        version: 10,
+        recorded: nil,
+        expected: migration.statementsSHA256
+      )
+    ) {
+      _ = try SQLiteStore(databaseURL: legacy.databaseURL, migrations: DatabaseSchema.migrations)
+    }
+  }
+
+  @Test("applied migrations record their body digest and reopen idempotently")
+  func appliedMigrationsRecordContentDigest() async throws {
+    let fixture = try await PopulatedSchemaNineFixture.make()
+    defer { fixture.remove() }
+
+    // Migrations 1 through 9 shipped in binaries that had no digest column, so a real
+    // schema-9 database has nine blank rows. Blank below version 10 must still migrate.
+    let beforeUpgrade = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaNineMigrations
+    )
+    for version in 1...9 {
+      try await clearRecordedMigrationDigest(in: beforeUpgrade, version: version)
+    }
+    #expect(
+      try await beforeUpgrade.scalarInt(
+        "SELECT COUNT(*) FROM schema_migrations WHERE statements_sha256 IS NULL"
+      ) == 9
+    )
+    await beforeUpgrade.close()
+
+    let upgraded = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: DatabaseSchema.migrations
+    )
+    let recorded = try await upgraded.query(
+      "SELECT statements_sha256 FROM schema_migrations WHERE version = 10"
+    )
+    let expected = try productionSchemaTenMigration().statementsSHA256
+    #expect(recorded.first?["statements_sha256"] == .text(expected))
+    await upgraded.close()
+
+    let reopened = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: DatabaseSchema.migrations
+    )
+    #expect(try await reopened.schemaVersion() == 10)
+    #expect(reopened.migrationBackups.isEmpty)
+    await reopened.close()
+  }
+
   @Test(
     "production schema 9 to 10 rolls back after every exact migration statement",
     arguments: schemaTenStatementCuts
@@ -563,9 +676,12 @@ private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
 private let expectedSchemaNineMigrationDigest =
   "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
 private let expectedSchemaTenMigrationDigest =
-  "178bd8eba193b221f6d9fb3f61579457b5d0bf01b5d347b02a686fa0f720d923"
+  "bf0ab2562655fc647c3778abc7e6c9a5b7773920a7be7d549e50ec7fd11159e2"
+// Widened when `schema_migrations` gained `statements_sha256`: the snapshot projects
+// every column of every table, so one added column moves the digest. The historical
+// row values themselves are unchanged and still compared row-for-row above.
 private let expectedPopulatedSchemaEightDigest =
-  "a8ceef8e29c5b2bed740a52be3912457543a176ca299538ae3714685b8233992"
+  "95265886128c0fd7691d3c5b9e683dc98bac25e5ce8594ac00c31599478f64d8"
 private let v9AddedObjects: Set<String> = [
   "app_settings_generation_rollover_delete_denied",
   "app_settings_generation_rollover_insert_resume_denied",
@@ -1070,6 +1186,30 @@ private func productionSchemaTenMigration() throws -> SQLiteMigration {
   #expect(migration.statements.count == schemaTenStatementCuts.count)
   #expect(migrationDigest(migration) == expectedSchemaTenMigrationDigest)
   return migration
+}
+
+/// Reproduce a row written before `schema_migrations.statements_sha256` existed.
+///
+/// The table is append-only by trigger, so the guard is lifted for exactly this edit
+/// and restored immediately: the test needs the historical shape, not a lasting hole.
+private func clearRecordedMigrationDigest(
+  in database: SQLiteStore,
+  version: Int
+) async throws {
+  try await database.execute("DROP TRIGGER schema_migrations_no_update")
+  try await database.execute(
+    "UPDATE schema_migrations SET statements_sha256 = NULL WHERE version = ?",
+    bindings: [.integer(Int64(version))]
+  )
+  try await database.execute(
+    """
+    CREATE TRIGGER schema_migrations_no_update
+    BEFORE UPDATE ON schema_migrations
+    BEGIN
+      SELECT RAISE(ABORT, 'schema_migrations is append-only');
+    END
+    """
+  )
 }
 
 private func migrationDigest(_ migration: SQLiteMigration) -> String {

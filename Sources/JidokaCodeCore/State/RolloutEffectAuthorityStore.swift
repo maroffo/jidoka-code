@@ -41,7 +41,6 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
       )
     case .historicalCanary(let jobID):
       try await requireHistoricalCanary(jobID: jobID)
-      return .historicalCanary(jobID: jobID)
     }
   }
 
@@ -63,7 +62,6 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
         throw RolloutAuthorityError.effectIdentityMismatch
       }
       try await requireHistoricalCanary(jobID: jobID)
-      return
     }
     let permitID: String
     switch permit {
@@ -260,7 +258,6 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
       jobID == effect.jobID
     {
       try await requireHistoricalCanary(jobID: jobID)
-      return .historicalCanary(jobID: jobID)
     }
     guard case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
       jobID == effect.jobID
@@ -304,7 +301,6 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
         throw RolloutAuthorityError.effectIdentityMismatch
       }
       try await requireHistoricalCanary(jobID: jobID)
-      return
     }
     let permitID: String
     switch permit {
@@ -419,7 +415,6 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
       jobID == effect.jobID
     {
       try await requireHistoricalCanary(jobID: jobID)
-      return .historicalCanary(jobID: jobID)
     }
     guard case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
       jobID == effect.jobID
@@ -475,7 +470,6 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
         throw RolloutAuthorityError.effectIdentityMismatch
       }
       try await requireHistoricalCanary(jobID: jobID)
-      return
     }
     guard effectAdmissionOpen,
       case .reservation(let id) = permit,
@@ -538,7 +532,6 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
         throw RolloutAuthorityError.effectIdentityMismatch
       }
       try await requireHistoricalCanary(jobID: jobID)
-      return
     }
     guard effectAdmissionOpen,
       case .reservation(let id) = permit,

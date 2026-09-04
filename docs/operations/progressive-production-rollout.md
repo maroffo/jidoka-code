@@ -29,6 +29,37 @@ disabled with all workflow flags off. `Poll now` is valid only for an active fin
 Schema 10 treats every historical `JobCanaryScope` as retained evidence only. It cannot admit
 a fresh provider, command, Git, GitHub, lease, Pi launch, or generated-review effect.
 
+## Schema-10 migration identity
+
+Schema 10 has never shipped. While this branch was in review its migration body was edited more
+than once, and the migrator only applies migrations whose version exceeds the recorded maximum:
+a database already stamped at version 10 by an earlier body would otherwise skip every later
+change silently and run on a schema this binary never wrote.
+
+`schema_migrations` therefore records `statements_sha256`, the digest of the exact statements
+each applied migration ran, and opening a database verifies it for every applied migration from
+version 10 upward. A mismatch, or a schema-10 row with no digest at all, fails closed before any
+statement runs:
+
+```
+migrationContentMismatch(version: 10, recorded: <digest or nil>, expected: <digest>)
+```
+
+Versions 1 through 9 shipped in binaries that predate the column, so their blank rows are
+expected and are not verified.
+
+**Operator action when this fires.** It means the database was created by a pre-release build of
+this branch, so it is a development or CI database, never a production one: production has never
+been migrated past schema 9. Delete that development database and let the binary recreate it, or
+restore the schema-9 backup taken before the bad migration and re-migrate. Do not edit
+`schema_migrations` with `sqlite3` to silence the error, and never delete a user's database
+automatically — the message names the mismatch so a person can decide.
+
+No source-controlled check persists such a database. There is no CI workflow in this repository,
+and every check that creates one (`swift test`, `scripts/tests/test-progressive-production-rollout-preflight.sh`,
+`scripts/tests/test-production-readiness-preflight.sh`) builds it under a fresh `mktemp -d`
+removed by an `EXIT` trap.
+
 ## Preserved state
 
 Migration and rollout operation preserve every historical job, run, result, mutation intent,
@@ -41,10 +72,44 @@ expiry, or revocation. Each readback is bound to the original mutation intent, r
 object, target, and the operation-specific lookup class. Every fresh read outside that exact
 readback, provider launch, command, send, ref creation, or child launch is denied.
 
-The database independently enforces active repository leases. Once any rollout authorization
-exists, an inserted, reactivated, or renewed lease must name the generation-1 job bound to the
-current unpaused authorization, repository, stage, enabled workflow, and nonterminal phase.
-Application-only checks are not sufficient authority.
+The database independently enforces active repository leases. While a repository has an open
+authorization (`active`, `draining`, or `recoveryRequired`), an inserted or reactivated lease on
+that repository must name the generation-1 job bound to the current unpaused authorization,
+stage, enabled workflow, and nonterminal phase. Application-only checks are not sufficient
+authority.
+
+The gate is scoped to the repository and to open lanes on purpose. `rollout_authorizations` is
+append-only, so a gate armed by the mere existence of any row would make the first authorization
+ever created a permanent bar on every repository, including repositories a rollout never
+touched. Closing a lane (`settled`, `revoked`, `expired`, `failed`) therefore disarms it again,
+and the closed row stays as evidence.
+
+A heartbeat on a lease the repository already holds is a continuation, not admission: same row,
+same job, already active. It stays possible while the application is paused and while the lane
+is draining, because pausing is the mandatory first step of closing a lane and a drain that
+could not heartbeat would abort itself. Reactivating a released lease, moving a lease to another
+job, and taking a fresh lease all remain admission and stay gated.
+
+## Generated-review quarantine
+
+A successful implementation creates its PR-review child job with `rollout_generation = 0`. That
+is deliberate quarantine, not an oversight: the parent's implementation authority must not
+silently buy four more provider sessions and another published comment. The child stays durable
+and queued and cannot be leased while a lane is open on its repository, until a separate
+`generatedPRReview` preview and authorization bind it and promote it to generation 1.
+
+The consequence to plan for: if no further authorization is ever issued, that child job stays
+queued forever. It is inert, not lost. Close it by authorizing the generated review, or leave it
+queued; never hand it authority by editing `rollout_generation` directly.
+
+## Usage-ledger retention
+
+`rollout_authorization_usage` is an append-only running total, one row per reserved effect, read
+only at its latest sequence. It is never pruned, including for closed authorizations: the chain
+is the audit trail that shows how each budget was spent, and deleting rows would both destroy
+that evidence and break the running-total invariant that makes cap enforcement constant-time.
+Growth is bounded by the budgets themselves, whose schema ceiling is 10,000 reservations per
+authorization, so the table cannot grow without a corresponding authorized effect.
 
 ## Source-only qualification
 

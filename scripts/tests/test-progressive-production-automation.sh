@@ -12,6 +12,8 @@ trap 'rm -f "$TEST_LOG"' EXIT
 
 readonly -a REQUIRED_SUITES=(
     RolloutAuthorityStoreTests
+    RolloutLeaseAuthorityTests
+    HistoricalCanaryEffectDenialTests
     RolloutRemotePreviewRevalidatorTests
     RolloutReleaseIdentityAttestorTests
     GitRolloutPreviewTests

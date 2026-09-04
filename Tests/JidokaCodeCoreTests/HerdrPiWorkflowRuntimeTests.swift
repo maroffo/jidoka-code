@@ -7,7 +7,6 @@ import Testing
 
 private let replacementFixtureAccessSecret = String(repeating: "a", count: 32)
 private let replacementFixtureRefreshSecret = String(repeating: "b", count: 32)
-private let schemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
 
 private func replacementPaneTokensSHA256(_ tokens: [String: String]) throws -> String {
   if tokens["run_id"] == "drifted-run" { return String(repeating: "e", count: 64) }
@@ -375,8 +374,7 @@ struct HerdrPiWorkflowRuntimeTests {
   @Test("paused exact canary creates topology and one durable Pi launch")
   func pausedExactCanaryCreatesTopologyAndRun() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
-      kind: .prReview,
-      migrations: schemaNineMigrations
+      kind: .prReview
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let jobID = fixture.jobID.uuidString.lowercased()
@@ -384,15 +382,18 @@ struct HerdrPiWorkflowRuntimeTests {
     let authorization = String(repeating: "a", count: 64)
     let narrativeDigest = String(repeating: "c", count: 64)
     let prefix = "canary:\(authorization):m2:"
-    _ = try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
+    // Production order: the lane takes its lease while running, and is paused after.
+    // Pausing first would be a lease admitted under a closed gate, which the schema
+    // now refuses outright.
     _ = try await fixture.database.execute(
       """
       INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
       VALUES (?, ?, 1, 10, 1)
       """,
       bindings: [.text(repositoryID), .text(jobID)]
+    )
+    _ = try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
     )
     _ = try await fixture.database.execute(
       """
@@ -455,10 +456,10 @@ struct HerdrPiWorkflowRuntimeTests {
   @Test("explicit recovery preserves unknown intent and resumes only the same no-Pi canary")
   func explicitUnknownTopologyRecovery() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
       timeoutSeconds: 1,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let jobID = fixture.jobID.uuidString.lowercased()
@@ -474,9 +475,6 @@ struct HerdrPiWorkflowRuntimeTests {
       previewEvidenceSHA256: String(repeating: "b", count: 64)
     )
     let prefix = "canary:\(canary.authorizationSHA256):m8:"
-    _ = try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
     try await fixture.configuration.setProfile(
       ModelProfileConfiguration(
         role: .review,
@@ -486,12 +484,16 @@ struct HerdrPiWorkflowRuntimeTests {
       ),
       now: Date(timeIntervalSince1970: 9)
     )
+    // Production order: lease first while running, pause afterwards.
     _ = try await fixture.database.execute(
       """
       INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
       VALUES (?, ?, 1, 10, 1)
       """,
       bindings: [.text(repositoryID), .text(jobID)]
+    )
+    _ = try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
     )
     _ = try await fixture.database.execute(
       """
@@ -2117,9 +2119,9 @@ struct HerdrPiWorkflowRuntimeTests {
     restartState: GenerationRolloverRestartLaunchState
   ) async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
@@ -2473,9 +2475,9 @@ struct HerdrPiWorkflowRuntimeTests {
   @Test("generation rollover resumes after a binding and one-host restart cut")
   func generationRolloverResumesPartialTopology() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
@@ -2581,16 +2583,16 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
-    "schema 9 replacement denies one-field q4 backing drift before remote effects",
+    "historical replacement denies one-field q4 backing drift before remote effects",
     arguments: ReplacementQ4BackingDrift.allCases
   )
   func roleHostReplacementRejectsQ4BackingDrift(
     drift: ReplacementQ4BackingDrift
   ) async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
@@ -2647,16 +2649,16 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
-    "schema 9 replacement revalidates q4 at send and first remote-effect boundaries",
+    "historical replacement revalidates q4 at send and first remote-effect boundaries",
     arguments: ReplacementQ4AuthorityBoundary.allCases
   )
   func roleHostReplacementRevalidatesQ4AtEffectBoundaries(
     boundary: ReplacementQ4AuthorityBoundary
   ) async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let probe = ReplacementCheckpointProbe(failingAt: nil)
@@ -2734,14 +2736,14 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
-    "schema 9 replacement rejects every authorized q4 digest drift before credentials",
+    "historical replacement rejects every authorized q4 digest drift before credentials",
     arguments: Array(0..<7)
   )
   func roleHostReplacementRejectsAuthorizedQ4DigestDrift(field: Int) async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
@@ -2788,10 +2790,10 @@ struct HerdrPiWorkflowRuntimeTests {
     #expect(replacementPostPreviewDriftCases.count == 51)
     #expect(Set(replacementPostPreviewDriftCases.map(\.name)).count == 51)
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
       fastRuntime: true,
-      isolatedResourceRoot: true,
-      migrations: schemaNineMigrations
+      isolatedResourceRoot: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let probe = ReplacementCheckpointProbe(failingAt: nil)
@@ -3005,9 +3007,20 @@ struct HerdrPiWorkflowRuntimeTests {
         try driftPrivateFile(credential)
       }
     case .pausedState:
+      // Schema 10 refuses `paused = 0` outright without an active authorization, so
+      // this drift cannot even be staged through the ordinary write. Prove that first,
+      // then stage it behind the explicit test-only seam so the replacement path is
+      // still exercised against a drifted pause.
+      await #expect(throws: SQLiteStoreError.self) {
+        try await fixture.database.execute(
+          "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+        )
+      }
+      let restoreResumeDenial = try await fixture.liftDurableResumeDenial()
       _ = try await fixture.database.execute(
         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
       )
+      try await restoreResumeDenial()
     case .activeCanary:
       _ = try await fixture.database.execute(
         "UPDATE jobs SET state = 'blocked' WHERE id = ?",
@@ -3033,9 +3046,9 @@ struct HerdrPiWorkflowRuntimeTests {
     #expect(replacementPreCutoverFaultCases.count == 28)
     #expect(Set(replacementPreCutoverFaultCases.map(\.name)).count == 28)
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let checkpoint: HerdrRoleHostReplacementCheckpoint?
@@ -3187,9 +3200,9 @@ struct HerdrPiWorkflowRuntimeTests {
   @Test("credential cleanup failure is exact and bounded before send-start authority")
   func roleHostReplacementCleanupFailureIsExact() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let probe = ReplacementCheckpointProbe(failingAt: nil)
@@ -3237,12 +3250,12 @@ struct HerdrPiWorkflowRuntimeTests {
     )
   }
 
-  @Test("schema 9 replacement retires only architecture and publishes exact q4")
+  @Test("historical replacement retires only architecture and publishes exact q4")
   func roleHostReplacementHappyPathIsIsolated() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let probe = ReplacementCheckpointProbe(failingAt: nil)
@@ -3497,12 +3510,12 @@ struct HerdrPiWorkflowRuntimeTests {
     #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
   }
 
-  @Test("schema 9 replacement ambiguity is terminal and cannot replay")
+  @Test("historical replacement ambiguity is terminal and cannot replay")
   func roleHostReplacementAmbiguityIsTerminal() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let probe = ReplacementCheckpointProbe(failingAt: .replacementLaunched)
@@ -3593,12 +3606,12 @@ struct HerdrPiWorkflowRuntimeTests {
     )
   }
 
-  @Test("schema 9 terminal replacement ambiguity preserves isolation after reopen")
+  @Test("historical terminal replacement ambiguity preserves isolation after reopen")
   func roleHostReplacementTerminalUnknownCloseReopenIsolation() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let checkpoint = ReplacementCheckpointProbe(failingAt: .replacementLaunched)
@@ -3659,8 +3672,7 @@ struct HerdrPiWorkflowRuntimeTests {
 
     await fixture.database.close()
     let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials,
-      migrations: schemaNineMigrations
+      providerCredentials: incident.providerCredentials
     )
     try await reopened.runtime.recoverDurableState()
     let firstRecovery = try await reopened.jobs.recoverAtStartup(
@@ -3728,12 +3740,12 @@ struct HerdrPiWorkflowRuntimeTests {
     await reopened.database.close()
   }
 
-  @Test("schema 9 reconstructs prepared q4 after restart without replay authority")
+  @Test("historical replacement reconstructs prepared q4 after restart without replay authority")
   func roleHostReplacementCrashRecoveryIsIdempotent() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let cutoverProbe = ReplacementCheckpointProbe(failingAt: .cutoverCommitted)
@@ -3841,16 +3853,16 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
-    "schema 9 close and reopen preserves prepared and enqueued q4",
+    "historical replacement close and reopen preserves prepared and enqueued q4",
     arguments: ReplacementRestartLaunchState.allCases
   )
   func roleHostReplacementCloseReopenRecovery(
     state: ReplacementRestartLaunchState
   ) async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let staged = try await stageReplacementRestart(fixture: fixture, state: state)
@@ -3905,8 +3917,7 @@ struct HerdrPiWorkflowRuntimeTests {
 
     await fixture.database.close()
     let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials,
-      migrations: schemaNineMigrations
+      providerCredentials: incident.providerCredentials
     )
     try await reopened.runtime.recoverDurableState()
     let recoveredJobs = try await reopened.jobs.recoverAtStartup(
@@ -3981,12 +3992,12 @@ struct HerdrPiWorkflowRuntimeTests {
     await reopened.database.close()
   }
 
-  @Test("schema 9 known pre-effect failure is durable and has no replay authority")
+  @Test("historical replacement known pre-effect failure is durable and has no replay authority")
   func roleHostReplacementPreparedIntentRestartContinuesOriginalReceipt() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
@@ -4040,8 +4051,7 @@ struct HerdrPiWorkflowRuntimeTests {
 
     await fixture.database.close()
     let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials,
-      migrations: schemaNineMigrations
+      providerCredentials: incident.providerCredentials
     )
     try await reopened.runtime.recoverDurableState()
     let recovered = try await reopened.jobs.recoverAtStartup(
@@ -4088,12 +4098,12 @@ struct HerdrPiWorkflowRuntimeTests {
     await reopened.database.close()
   }
 
-  @Test("schema 9 sent replacement intent becomes unknown once after reopen")
+  @Test("historical replacement sent intent becomes unknown once after reopen")
   func roleHostReplacementSentIntentRestartIsTerminal() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
@@ -4141,8 +4151,7 @@ struct HerdrPiWorkflowRuntimeTests {
 
     await fixture.database.close()
     let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials,
-      migrations: schemaNineMigrations
+      providerCredentials: incident.providerCredentials
     )
     try await reopened.runtime.recoverDurableState()
     let unknownIntent = try await reopened.database.query(
@@ -4200,9 +4209,9 @@ struct HerdrPiWorkflowRuntimeTests {
   @Test("production reload keeps paused replacement recovery dispatch closed")
   func productionReloadPreservesPausedReplacement() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let staged = try await stageReplacementRestart(fixture: fixture, state: .prepared)
@@ -4332,8 +4341,7 @@ struct HerdrPiWorkflowRuntimeTests {
   func exactCanaryStartupRecoveryPreservesUnrelatedDurableState() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
       kind: .prReview,
-      fastRuntime: true,
-      migrations: schemaNineMigrations
+      fastRuntime: true
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     await fixture.herdr.enableDistinctRoleHostIdentities()
@@ -4362,9 +4370,7 @@ struct HerdrPiWorkflowRuntimeTests {
     let jobID = fixture.jobID.uuidString.lowercased()
     let prefix = "canary:\(canary.authorizationSHA256):m8:"
     let recoveryEvidenceSHA256 = String(repeating: "c", count: 64)
-    _ = try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
+    // Production order: lease first while running, pause afterwards.
     _ = try await fixture.database.execute(
       """
       INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
@@ -4374,6 +4380,9 @@ struct HerdrPiWorkflowRuntimeTests {
         .text(fixture.repositoryID.uuidString.lowercased()),
         .text(jobID),
       ]
+    )
+    _ = try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
     )
     let canaryTransitions: [(String, String, String, Double)] = [
       (prefix + "admit:" + jobID, "queued", "leased", 10),
@@ -5890,6 +5899,10 @@ private struct HerdrPiRuntimeFixture: Sendable {
   let workflowContext: PiJobWorkflowContext
 
   static func make(
+    // Historical JobCanaryScope incidents are generation-0 preserved evidence. They run
+    // on full schema 10, but deliberately without an open rollout lane, because no
+    // schema-10 authorization ever bound them.
+    activateRollout: Bool = true,
     kind: JobKind = .issueTriage,
     timeoutSeconds: TimeInterval = 30,
     fastRuntime: Bool = false,
@@ -5917,7 +5930,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
       kind: kind
     )
     let configuration = ConfigurationStore(database: database)
-    if try await database.schemaVersion() == 10 {
+    if activateRollout, try await database.schemaVersion() == 10 {
       try await activateSchema10RuntimeAdmission(
         database: database,
         configuration: configuration,
@@ -6265,6 +6278,36 @@ private struct HerdrPiRuntimeFixture: Sendable {
     )
   }
 
+  /// Test-only seam for seeding durable rows that predate the schema-10 resume guard.
+  ///
+  /// Schema 10 refuses `paused = 0` without an active authorization, and these
+  /// historical fixtures deliberately have none. The guard is dropped from its own
+  /// recorded SQL and restored byte-for-byte by the returned closure, so no production
+  /// path and no later assertion runs without it.
+  func liftDurableResumeDenial() async throws -> @Sendable () async throws -> Void {
+    let names = [
+      "app_settings_rollout_scope_required",
+      "app_settings_rollout_insert_scope_required",
+    ]
+    var recorded: [String] = []
+    for name in names {
+      let rows = try await database.query(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        bindings: [.text(name)]
+      )
+      guard case .text(let sql)? = rows.first?["sql"] else { continue }
+      recorded.append(sql)
+      try await database.execute("DROP TRIGGER \(name)")
+    }
+    let database = self.database
+    let restore = recorded
+    return {
+      for sql in restore {
+        try await database.execute(sql)
+      }
+    }
+  }
+
   func reopenReplacementRuntime(
     providerCredentials: PiProviderCredentialSnapshotter? = nil,
     migrations: [SQLiteMigration] = DatabaseSchema.migrations,
@@ -6347,9 +6390,6 @@ private struct HerdrPiRuntimeFixture: Sendable {
       previewEvidenceSHA256: String(repeating: "b", count: 64)
     )
     let prefix = "canary:\(canary.authorizationSHA256):m8:"
-    _ = try await database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
     try await configuration.setProfile(
       ModelProfileConfiguration(
         role: .review,
@@ -6359,12 +6399,16 @@ private struct HerdrPiRuntimeFixture: Sendable {
       ),
       now: Date(timeIntervalSince1970: 9)
     )
+    // Production order: lease first while running, pause afterwards.
     _ = try await database.execute(
       """
       INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
       VALUES (?, ?, 1, 10, 1)
       """,
       bindings: [.text(repository), .text(job)]
+    )
+    _ = try await database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
     )
     _ = try await database.execute(
       """
@@ -7046,6 +7090,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
       try await database.scalarInt(
         "SELECT paused FROM app_settings WHERE singleton = 1"
       ) ?? 0
+    let restoreResumeDenial = try await liftDurableResumeDenial()
     _ = try await database.execute(
       "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
     )
@@ -7081,6 +7126,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
       "UPDATE app_settings SET paused = ? WHERE singleton = 1",
       bindings: [.integer(priorPaused)]
     )
+    try await restoreResumeDenial()
     _ = try await database.execute(
       """
       INSERT INTO approved_command_runs(
