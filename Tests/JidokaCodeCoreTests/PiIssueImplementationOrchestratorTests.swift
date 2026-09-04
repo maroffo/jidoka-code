@@ -118,7 +118,7 @@ private final class ProductionOrchestratorFixture: @unchecked Sendable {
       repository,
       now: Date(timeIntervalSince1970: 130_000)
     )
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     commandRuns = ApprovedCommandRunStore(database: database)
     commandGate = ApprovedCommandExecutionGate()
     await commandGate.open()

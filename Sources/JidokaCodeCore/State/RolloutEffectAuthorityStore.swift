@@ -1089,7 +1089,7 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
     database: isolated SQLiteStore
   ) throws {
     let changed = try database.execute(
-      "UPDATE rollout_effect_reservations SET state = 'sendStarted', updated_at_ms = ? WHERE id = ? AND state = 'reserved'",
+      "UPDATE rollout_effect_reservations SET state = 'sendStarted', updated_at_ms = MAX(updated_at_ms, ?) WHERE id = ? AND state = 'reserved'",
       bindings: [
         .integer(milliseconds(now)), .text(reservation.id),
       ]

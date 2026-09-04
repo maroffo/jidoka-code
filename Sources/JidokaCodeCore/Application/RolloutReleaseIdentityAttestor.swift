@@ -13,6 +13,8 @@ struct RolloutPackagedReleaseIdentity: Codable, Equatable, Sendable {
   let bundleVersion: String
   let bundleBuild: Int
   let helperSHA256: String
+  let askPassSHA256: String
+  let pushGuardSHA256: String
   let herdrHostSHA256: String
   let databaseSchemaVersion: Int
   let engineProtocolVersion: Int
@@ -24,13 +26,15 @@ struct RolloutPackagedReleaseIdentity: Codable, Equatable, Sendable {
     _ expected: RolloutReleaseIdentity,
     applicationSHA256: String
   ) -> Bool {
-    manifestSchemaVersion == 1
+    manifestSchemaVersion == 2
       && sourceCommit == expected.sourceCommit
       && sourceTree == expected.sourceTree
       && bundleVersion == expected.bundleVersion
       && bundleBuild == expected.bundleBuild
       && applicationSHA256 == expected.applicationSHA256
       && helperSHA256 == expected.helperSHA256
+      && askPassSHA256 == expected.askPassSHA256
+      && pushGuardSHA256 == expected.pushGuardSHA256
       && herdrHostSHA256 == expected.herdrHostSHA256
       && databaseSchemaVersion == expected.schemaVersion
       && engineProtocolVersion == expected.engineProtocolVersion
@@ -95,12 +99,14 @@ struct ProductionRolloutReleaseIdentityRevalidator: RolloutReleaseIdentityRevali
     )
     let declaredDigests = [
       declared.helperSHA256,
+      declared.askPassSHA256,
+      declared.pushGuardSHA256,
       declared.herdrHostSHA256,
       declared.runtimeManifestSHA256,
       declared.runtimeTreeSHA256,
       declared.workflowResourcesSHA256,
     ]
-    guard declared.manifestSchemaVersion == 1,
+    guard declared.manifestSchemaVersion == 2,
       GitHubInputValidation.validGitSHA(declared.sourceCommit),
       GitHubInputValidation.validGitSHA(declared.sourceTree),
       declared.bundleVersion == "0.2.0",
@@ -155,6 +161,20 @@ struct ProductionRolloutReleaseIdentityRevalidator: RolloutReleaseIdentityRevali
         maximumBytes: 128 * 1_048_576
       )
     )
+    let askPassSHA256 = sha256(
+      try readRegularFile(
+        runtimeConfiguration.askPassExecutable,
+        containedIn: application,
+        maximumBytes: 128 * 1_048_576
+      )
+    )
+    let pushGuardSHA256 = sha256(
+      try readRegularFile(
+        runtimeConfiguration.pushGuardExecutable,
+        containedIn: application,
+        maximumBytes: 128 * 1_048_576
+      )
+    )
     let herdrHostSHA256 = sha256(
       try readRegularFile(
         runtimeConfiguration.herdrHostExecutable,
@@ -174,6 +194,8 @@ struct ProductionRolloutReleaseIdentityRevalidator: RolloutReleaseIdentityRevali
       resourceRoot: runtimeConfiguration.piResourceRoot
     )
     guard helperSHA256 == declared.helperSHA256,
+      askPassSHA256 == declared.askPassSHA256,
+      pushGuardSHA256 == declared.pushGuardSHA256,
       herdrHostSHA256 == declared.herdrHostSHA256,
       runtimeIdentity.manifestSHA256 == declared.runtimeManifestSHA256,
       runtimeIdentity.authoritySHA256 == declared.runtimeTreeSHA256,

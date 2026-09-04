@@ -223,8 +223,10 @@ capture_source_identity() {
 generate_release_identity_manifest() {
     local bundle_build
     local bundle_version
+    local ask_pass_sha256
     local helper_sha256
     local herdr_host_sha256
+    local push_guard_sha256
     local runtime_identity_sha256="$1"
     local runtime_manifest_sha256
     local workflow_resources_sha256
@@ -244,6 +246,12 @@ generate_release_identity_manifest() {
     bundle_build="$(/usr/bin/plutil -extract CFBundleVersion raw "$CONTENTS/Info.plist")"
     helper_sha256="$(
         /usr/bin/shasum -a 256 "$ENGINE_EXECUTABLE" | /usr/bin/awk '{print $1}'
+    )"
+    ask_pass_sha256="$(
+        /usr/bin/shasum -a 256 "$ASKPASS_EXECUTABLE" | /usr/bin/awk '{print $1}'
+    )"
+    push_guard_sha256="$(
+        /usr/bin/shasum -a 256 "$PUSH_GUARD_EXECUTABLE" | /usr/bin/awk '{print $1}'
     )"
     herdr_host_sha256="$(
         /usr/bin/shasum -a 256 "$HERDR_HOST_EXECUTABLE" | /usr/bin/awk '{print $1}'
@@ -272,6 +280,8 @@ generate_release_identity_manifest() {
         "$bundle_version" \
         "$bundle_build" \
         "$helper_sha256" \
+        "$ask_pass_sha256" \
+        "$push_guard_sha256" \
         "$herdr_host_sha256" \
         "10" \
         "12" \

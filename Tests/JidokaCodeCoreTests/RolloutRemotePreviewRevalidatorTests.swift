@@ -3,20 +3,47 @@ import Testing
 
 @testable import JidokaCodeCore
 
+private enum ExactPullRequestDrift: CaseIterable {
+  case identityID
+  case identityLogin
+  case repositoryNode
+  case repositoryOwner
+  case repositoryName
+  case defaultBranch
+  case pullRequestState
+  case pullRequestDraft
+  case pullRequestTitle
+  case pullRequestBody
+  case pullRequestHead
+  case pullRequestBaseRef
+  case pullRequestBaseSHA
+  case restCommitOrder
+  case fetchedBase
+  case fetchedHead
+  case fetchedCommits
+  case fetchedNarrative
+}
+
+private enum TriageLabelDrift {
+  case issueLabels
+  case repositoryLabels
+}
+
 @Suite("Rollout remote preview revalidation")
 struct RolloutRemotePreviewRevalidatorTests {
-  @Test("exact PR preview binds title, body, ordered commits, and Git narrative")
-  func exactPullRequestDrift() async throws {
-    let fixture = try await RolloutRemotePreviewFixture()
-    defer { fixture.remove() }
-    let preview = try fixture.exactPreview()
-    try await fixture.revalidator.revalidate(preview)
-
-    await fixture.api.replacePullRequest(body: "changed after preview")
-    await #expect(throws: RolloutAuthorityError.previewDrift) {
+  @Test("exact PR preview rejects every independently drifted remote binding")
+  func exactPullRequestDriftMatrix() async throws {
+    for drift in ExactPullRequestDrift.allCases {
+      let fixture = try await RolloutRemotePreviewFixture()
+      let preview = try fixture.exactPreview()
       try await fixture.revalidator.revalidate(preview)
+      await fixture.apply(drift)
+      await #expect(throws: RolloutAuthorityError.previewDrift, "\(drift)") {
+        try await fixture.revalidator.revalidate(preview)
+      }
+      await fixture.database.close()
+      fixture.remove()
     }
-    await fixture.database.close()
   }
 
   @Test("finite preview binds the complete deterministic candidate set")
@@ -46,6 +73,26 @@ struct RolloutRemotePreviewRevalidatorTests {
       try await fixture.revalidator.revalidate(preview)
     }
     await fixture.database.close()
+  }
+
+  @Test("exact triage preview rejects issue-label and repository-label drift")
+  func exactTriageLabelDrift() async throws {
+    for drift in [TriageLabelDrift.issueLabels, .repositoryLabels] {
+      let fixture = try await RolloutRemotePreviewFixture()
+      let preview = try await fixture.exactTriagePreview()
+      try await fixture.revalidator.revalidate(preview)
+      switch drift {
+      case .issueLabels:
+        await fixture.api.setWorkflowLabels(["agent:ready"])
+      case .repositoryLabels:
+        await fixture.api.removeLastRepositoryLabel()
+      }
+      await #expect(throws: RolloutAuthorityError.previewDrift, "\(drift)") {
+        try await fixture.revalidator.revalidate(preview)
+      }
+      await fixture.database.close()
+      fixture.remove()
+    }
   }
 
   @Test("exact execution preview binds the approved waiting-human checkpoint")
@@ -79,6 +126,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
   let intents: MutationIntentStore
   let reviewedRevisions: ReviewedRevisionStore
   let api: RolloutRemotePreviewAPIFake
+  let git: RolloutPreviewGitFake
   let revalidator: RolloutRemotePreviewRevalidator
   let job: JobRecord
   let triageJob: JobRecord
@@ -109,7 +157,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
       repository,
       now: Date(timeIntervalSince1970: 1_000)
     )
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       id: UUID(),
       identity: LogicalJobIdentity(
@@ -233,17 +281,18 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
       subject: "feat: bounded preview",
       patchSHA256: patchSHA256
     )
+    git = RolloutPreviewGitFake(
+      derivation: PullRequestCommitDerivation(
+        baseSHA: baseSHA,
+        headSHA: headSHA,
+        commitSHAs: [headSHA],
+        narrative: [narrative]
+      )
+    )
     revalidator = RolloutRemotePreviewRevalidator(
       identity: api,
       api: api,
-      git: RolloutPreviewGitFake(
-        derivation: PullRequestCommitDerivation(
-          baseSHA: baseSHA,
-          headSHA: headSHA,
-          commitSHAs: [headSHA],
-          narrative: [narrative]
-        )
-      ),
+      git: git,
       jobs: jobs,
       intents: intents,
       reviewedRevisions: reviewedRevisions
@@ -490,6 +539,61 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     )
   }
 
+  func apply(_ drift: ExactPullRequestDrift) async {
+    let alternateGitSHA = String(repeating: "4", count: 40)
+    switch drift {
+    case .identityID:
+      await api.setIdentity(GitHubUser(id: 43, nodeID: "U_preview", login: "owner"))
+    case .identityLogin:
+      await api.setIdentity(GitHubUser(id: 42, nodeID: "U_preview", login: "other"))
+    case .repositoryNode:
+      await api.replaceRepository(nodeID: "R_redirected")
+    case .repositoryOwner:
+      await api.replaceRepository(ownerLogin: "other")
+    case .repositoryName:
+      await api.replaceRepository(name: "other")
+    case .defaultBranch:
+      await api.replaceRepository(defaultBranch: "trunk")
+    case .pullRequestState:
+      await api.replacePullRequest(state: "closed")
+    case .pullRequestDraft:
+      await api.replacePullRequest(draft: true)
+    case .pullRequestTitle:
+      await api.replacePullRequest(title: "changed after preview")
+    case .pullRequestBody:
+      await api.replacePullRequest(body: "changed after preview")
+    case .pullRequestHead:
+      await api.replacePullRequest(headSHA: alternateGitSHA)
+    case .pullRequestBaseRef:
+      await api.replacePullRequest(baseRef: "trunk")
+    case .pullRequestBaseSHA:
+      await api.replacePullRequest(baseSHA: alternateGitSHA)
+    case .restCommitOrder:
+      await api.setPullRequestCommits([alternateGitSHA, headSHA])
+    case .fetchedBase:
+      await git.replace(
+        derivation(baseSHA: alternateGitSHA, headSHA: headSHA, commits: [headSHA])
+      )
+    case .fetchedHead:
+      await git.replace(
+        derivation(baseSHA: baseSHA, headSHA: alternateGitSHA, commits: [headSHA])
+      )
+    case .fetchedCommits:
+      await git.replace(
+        derivation(baseSHA: baseSHA, headSHA: headSHA, commits: [alternateGitSHA])
+      )
+    case .fetchedNarrative:
+      await git.replace(
+        derivation(
+          baseSHA: baseSHA,
+          headSHA: headSHA,
+          commits: [headSHA],
+          patchSHA256: String(repeating: "5", count: 64)
+        )
+      )
+    }
+  }
+
   func remove() {
     try? FileManager.default.removeItem(at: root)
   }
@@ -508,6 +612,28 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     )
   }
 
+  private func derivation(
+    baseSHA: String,
+    headSHA: String,
+    commits: [String],
+    patchSHA256: String? = nil
+  ) -> PullRequestCommitDerivation {
+    PullRequestCommitDerivation(
+      baseSHA: baseSHA,
+      headSHA: headSHA,
+      commitSHAs: commits,
+      narrative: [
+        PiCommitNarrativeEntry(
+          ordinal: 0,
+          sha: self.headSHA,
+          parentSHAs: [self.baseSHA],
+          subject: "feat: bounded preview",
+          patchSHA256: patchSHA256 ?? self.patchSHA256
+        )
+      ]
+    )
+  }
+
   private func previewInput(
     scope: RolloutScope,
     jobs: Int,
@@ -522,6 +648,8 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
         bundleBuild: 3,
         applicationSHA256: digest,
         helperSHA256: digest,
+        askPassSHA256: digest,
+        pushGuardSHA256: digest,
         herdrHostSHA256: digest,
         schemaVersion: 10,
         engineProtocolVersion: 12,
@@ -611,14 +739,15 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
 private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
   RolloutPreviewRepositoryReading
 {
-  private let identityValue: GitHubUser
-  private let repositoryValue: GitHubRepository
+  private var identityValue: GitHubUser
+  private var repositoryValue: GitHubRepository
   private var pullRequestsValue: [GitHubPullRequest]
+  private var pullRequestCommitsValue: [GitHubPullRequestCommit]
   private var issueValue: GitHubIssue
   private var issueLabelsValue: [GitHubLabel]
   private var commentsValue: [GitHubComment] = []
-  private let repositoryLabelsValue: [GitHubLabel]
-  private let branchSHA: String
+  private var repositoryLabelsValue: [GitHubLabel]
+  private var branchSHA: String
 
   init(
     identity: GitHubUser,
@@ -632,6 +761,7 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
     identityValue = identity
     repositoryValue = repository
     pullRequestsValue = pullRequests
+    pullRequestCommitsValue = [GitHubPullRequestCommit(sha: String(repeating: "2", count: 40))]
     issueValue = issue
     issueLabelsValue = issueLabels
     repositoryLabelsValue = repositoryLabels
@@ -668,7 +798,7 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
     repository _: String,
     number _: Int
   ) -> [GitHubPullRequestCommit] {
-    [GitHubPullRequestCommit(sha: String(repeating: "2", count: 40))]
+    pullRequestCommitsValue
   }
 
   func listIssues(owner _: String, repository _: String) -> [GitHubIssue] { [issueValue] }
@@ -716,21 +846,67 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
     repositoryLabelsValue
   }
 
-  func replacePullRequest(body: String) {
+  func setIdentity(_ identity: GitHubUser) {
+    identityValue = identity
+  }
+
+  func replaceRepository(
+    nodeID: String? = nil,
+    ownerLogin: String? = nil,
+    name: String? = nil,
+    defaultBranch: String? = nil
+  ) {
+    let owner = GitHubUser(
+      id: repositoryValue.owner.id,
+      nodeID: repositoryValue.owner.nodeID,
+      login: ownerLogin ?? repositoryValue.owner.login
+    )
+    let resolvedName = name ?? repositoryValue.name
+    repositoryValue = GitHubRepository(
+      id: repositoryValue.id,
+      nodeID: nodeID ?? repositoryValue.nodeID,
+      name: resolvedName,
+      fullName: "\(owner.login)/\(resolvedName)",
+      defaultBranch: defaultBranch ?? repositoryValue.defaultBranch,
+      owner: owner
+    )
+  }
+
+  func replacePullRequest(
+    state: String? = nil,
+    draft: Bool? = nil,
+    title: String? = nil,
+    body: String? = nil,
+    headSHA: String? = nil,
+    baseRef: String? = nil,
+    baseSHA: String? = nil
+  ) {
     guard let current = pullRequestsValue.first else { return }
     pullRequestsValue[0] = GitHubPullRequest(
       id: current.id,
       nodeID: current.nodeID,
       number: current.number,
-      state: current.state,
-      draft: current.draft,
-      title: current.title,
-      body: body,
+      state: state ?? current.state,
+      draft: draft ?? current.draft,
+      title: title ?? current.title,
+      body: body ?? current.body,
       htmlURL: current.htmlURL,
       user: current.user,
-      head: current.head,
-      base: current.base
+      head: GitHubPullReference(
+        ref: current.head.ref,
+        sha: headSHA ?? current.head.sha,
+        repository: current.head.repository
+      ),
+      base: GitHubPullReference(
+        ref: baseRef ?? current.base.ref,
+        sha: baseSHA ?? current.base.sha,
+        repository: current.base.repository
+      )
     )
+  }
+
+  func setPullRequestCommits(_ shas: [String]) {
+    pullRequestCommitsValue = shas.map { GitHubPullRequestCommit(sha: $0) }
   }
 
   func appendPullRequest(_ pullRequest: GitHubPullRequest) {
@@ -758,6 +934,10 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
 
   func currentPullRequests() -> [GitHubPullRequest] { pullRequestsValue }
 
+  func removeLastRepositoryLabel() {
+    _ = repositoryLabelsValue.popLast()
+  }
+
   func setWorkflowLabels(_ names: Set<String>) {
     let domain = issueLabelsValue.filter {
       !$0.name.lowercased().hasPrefix("agent:")
@@ -780,8 +960,12 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
   }
 }
 
-private struct RolloutPreviewGitFake: RolloutPreviewGitInspecting {
-  let derivation: PullRequestCommitDerivation
+private actor RolloutPreviewGitFake: RolloutPreviewGitInspecting {
+  private var derivation: PullRequestCommitDerivation
+
+  init(derivation: PullRequestCommitDerivation) {
+    self.derivation = derivation
+  }
 
   func derivePullRequest(
     repository _: RolloutRepositoryIdentity,
@@ -791,6 +975,10 @@ private struct RolloutPreviewGitFake: RolloutPreviewGitInspecting {
     jobID _: UUID
   ) -> PullRequestCommitDerivation {
     derivation
+  }
+
+  func replace(_ derivation: PullRequestCommitDerivation) {
+    self.derivation = derivation
   }
 }
 

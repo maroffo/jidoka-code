@@ -167,8 +167,21 @@ actor DurableApprovedCommandExecutor: PiApprovedCommandExecuting {
           processBoundaryCrossed = true
           evidence = try await runner.executePrepared(preparedExecution)
         } catch {
-          _ = try? await store.markUnknown(runID: run.id)
-          throw ApprovedCommandRunStoreError.outcomeUnknown(run.id)
+          let launchError = error
+          if processBoundaryCrossed {
+            _ = try? await store.markUnknown(runID: run.id)
+            throw ApprovedCommandRunStoreError.outcomeUnknown(run.id)
+          }
+          do {
+            run = try await store.recordLaunchDenied(runID: run.id)
+          } catch {
+            _ = try? await store.markUnknown(
+              runID: run.id,
+              detailCode: "LAUNCH_DENIAL_RECORD_UNKNOWN"
+            )
+            throw ApprovedCommandRunStoreError.outcomeUnknown(run.id)
+          }
+          throw launchError
         }
         do {
           _ = try await store.accept(runID: run.id, evidence: evidence)

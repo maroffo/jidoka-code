@@ -1075,6 +1075,8 @@ release_identity_regenerated="$TEMP_ROOT/progressive-production-release.json"
         "$SOURCE_APP/Contents/Info.plist")" \
     "$(/usr/bin/plutil -extract CFBundleVersion raw "$SOURCE_APP/Contents/Info.plist")" \
     "$(/usr/bin/shasum -a 256 "$SOURCE_ENGINE" | /usr/bin/awk '{print $1}')" \
+    "$(/usr/bin/shasum -a 256 "$SOURCE_ASKPASS" | /usr/bin/awk '{print $1}')" \
+    "$(/usr/bin/shasum -a 256 "$SOURCE_PUSH_GUARD" | /usr/bin/awk '{print $1}')" \
     "$(/usr/bin/shasum -a 256 "$SOURCE_HERDR_HOST" | /usr/bin/awk '{print $1}')" \
     "10" \
     "12" \

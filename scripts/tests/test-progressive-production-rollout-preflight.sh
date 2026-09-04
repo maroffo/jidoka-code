@@ -82,6 +82,30 @@ source_after="$({
 readonly source_after
 [[ "$source_after" == "$source_before" ]] || fail "static preflight changed source inputs"
 
+readonly PATH_FAILURE_RUNTIME="$TEST_ROOT/path-failure-runtime"
+/bin/mkdir -p "$PATH_FAILURE_RUNTIME/node/bin"
+{
+    printf '%s\n' '#!/bin/bash'
+    # Expansion belongs to the generated validator.
+    # shellcheck disable=SC2016
+    printf '%s\n' 'if [[ "${!#}" == "--paths" ]]; then exit 91; fi'
+    printf 'exec %q "$@"\n' "$NODE"
+} >"$PATH_FAILURE_RUNTIME/node/bin/node"
+/bin/chmod 0755 "$PATH_FAILURE_RUNTIME/node/bin/node"
+rc=0
+(
+    cd /
+    /usr/bin/env -i \
+        JIDOKA_RELEASE_RUNTIME_ROOT="$PATH_FAILURE_RUNTIME" \
+        /bin/bash "$PREFLIGHT" \
+        --stage static \
+        --source-root "$ROOT" \
+        --expected "$EXPECTED"
+) >"$TEST_ROOT/path-failure-stdout" 2>"$TEST_ROOT/path-failure-stderr" || rc=$?
+expect_rc 65 "$rc" "required-path validator failure"
+/usr/bin/grep -Fq 'expected-release path validation failed' \
+    "$TEST_ROOT/path-failure-stderr" || fail "required-path failure was not preserved"
+
 manifest="$("$NODE" "$RELEASE_MANIFEST_GENERATOR" \
     "$(printf '1%.0s' {1..40})" \
     "$(printf '2%.0s' {1..40})" \
@@ -89,17 +113,19 @@ manifest="$("$NODE" "$RELEASE_MANIFEST_GENERATOR" \
     "3" \
     "$(printf 'b%.0s' {1..64})" \
     "$(printf 'c%.0s' {1..64})" \
-    "10" \
-    "12" \
     "$(printf 'd%.0s' {1..64})" \
     "$(printf 'e%.0s' {1..64})" \
-    "$(printf 'f%.0s' {1..64})")"
+    "10" \
+    "12" \
+    "$(printf 'f%.0s' {1..64})" \
+    "$(printf '6%.0s' {1..64})" \
+    "$(printf '7%.0s' {1..64})")"
 readonly manifest
-expected_manifest="{\"bundleBuild\":3,\"bundleVersion\":\"0.2.0\",\"databaseSchemaVersion\":10,\"engineProtocolVersion\":12,\"helperSHA256\":\"$(printf 'b%.0s' {1..64})\",\"herdrHostSHA256\":\"$(printf 'c%.0s' {1..64})\",\"manifestSchemaVersion\":1,\"runtimeManifestSHA256\":\"$(printf 'd%.0s' {1..64})\",\"runtimeTreeSHA256\":\"$(printf 'e%.0s' {1..64})\",\"sourceCommit\":\"$(printf '1%.0s' {1..40})\",\"sourceTree\":\"$(printf '2%.0s' {1..40})\",\"workflowResourcesSHA256\":\"$(printf 'f%.0s' {1..64})\"}"
+expected_manifest="{\"askPassSHA256\":\"$(printf 'c%.0s' {1..64})\",\"bundleBuild\":3,\"bundleVersion\":\"0.2.0\",\"databaseSchemaVersion\":10,\"engineProtocolVersion\":12,\"helperSHA256\":\"$(printf 'b%.0s' {1..64})\",\"herdrHostSHA256\":\"$(printf 'e%.0s' {1..64})\",\"manifestSchemaVersion\":2,\"pushGuardSHA256\":\"$(printf 'd%.0s' {1..64})\",\"runtimeManifestSHA256\":\"$(printf 'f%.0s' {1..64})\",\"runtimeTreeSHA256\":\"$(printf '6%.0s' {1..64})\",\"sourceCommit\":\"$(printf '1%.0s' {1..40})\",\"sourceTree\":\"$(printf '2%.0s' {1..40})\",\"workflowResourcesSHA256\":\"$(printf '7%.0s' {1..64})\"}"
 readonly expected_manifest
 [[ "$manifest" == "$expected_manifest" ]] || fail "release manifest is not canonical"
 if "$NODE" "$RELEASE_MANIFEST_GENERATOR" \
-    malformed malformed 0.2.0 3 x x 10 12 x x x >/dev/null 2>&1
+    malformed malformed 0.2.0 3 x x x x 10 12 x x x >/dev/null 2>&1
 then
     fail "release manifest generator accepted malformed identities"
 fi

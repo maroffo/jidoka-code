@@ -26,6 +26,8 @@ the append-only parent-child record.
 
 There is no Resume operation and no production allow-all authority. New repositories start
 disabled with all workflow flags off. `Poll now` is valid only for an active finite window.
+Schema 10 treats every historical `JobCanaryScope` as retained evidence only. It cannot admit
+a fresh provider, command, Git, GitHub, lease, Pi launch, or generated-review effect.
 
 ## Preserved state
 
@@ -38,6 +40,11 @@ Already-started uncertain GitHub and Git effects may be reconciled read-only aft
 expiry, or revocation. Each readback is bound to the original mutation intent, repository,
 object, target, and the operation-specific lookup class. Every fresh read outside that exact
 readback, provider launch, command, send, ref creation, or child launch is denied.
+
+The database independently enforces active repository leases. Once any rollout authorization
+exists, an inserted, reactivated, or renewed lease must name the generation-1 job bound to the
+current unpaused authorization, repository, stage, enabled workflow, and nonterminal phase.
+Application-only checks are not sufficient authority.
 
 ## Source-only qualification
 
@@ -82,10 +89,11 @@ A timeout, stale log, partial run, malformed command, or zero-test run is a fail
 `.cleanupFailed` occurs, retain that log and investigate the process identity and cleanup race.
 A later quiet run does not replace the failure evidence.
 
-The package source embeds `Contents/Resources/progressive-production-release.json` immediately
-before the outer application signature. It contains the exact source commit/tree, package,
-helper, Herdr host, schema, protocol, runtime, and workflow-resource identities. Helper and
-Herdr host digests cover their final signed bytes. The final application digest is deliberately
+The package source embeds manifest schema 2 at
+`Contents/Resources/progressive-production-release.json` immediately before the outer
+application signature. It contains the exact source commit/tree, package, helper, askpass,
+push-guard, Herdr host, schema, protocol, runtime, and workflow-resource identities. Nested
+executable digests cover their final signed bytes. The final application digest is deliberately
 not stored inside its own sealed resource manifest because that would be circular: changing the
 manifest changes the application signature and therefore the executable bytes. Instead, W7
 freezes the final signed application digest as external package evidence, the activation binds
@@ -177,6 +185,12 @@ label or approved-command list that exceeds its corresponding budget is invalid.
 Git send authority is reserved atomically with `markSendStarted`. Commands bind order, command
 definition, frozen plan, workspace head, and round. Provider permits bind workflow, role,
 round, nonce, artifact, plan, narrative, resource, profile, and session directive.
+
+Budget consumption is append-only. Every reservation appends one cumulative usage-ledger row
+inside the same transaction; admission and status read only the latest row. The database budget
+triggers use the same latest-row rule, so authorization cost does not grow with reservation
+history. Reservation identity and creation time are immutable, and an update timestamp may
+advance only together with a valid state transition.
 
 ## Planning and execution handoff
 

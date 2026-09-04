@@ -304,7 +304,7 @@ private final class ApprovedCommandStoreFixture: @unchecked Sendable {
       repository,
       now: Date(timeIntervalSince1970: 200_000)
     )
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let creation = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repositoryID,

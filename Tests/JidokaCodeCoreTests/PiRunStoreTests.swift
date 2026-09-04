@@ -3073,8 +3073,10 @@ struct PiRunStoreTests {
   func replacementStateRejectsForgedAuthorizationDigest() async throws {
     let valid = try await ReplacementCutoverFixture.make(prepareIntent: false)
     defer { try? FileManager.default.removeItem(at: valid.root) }
-    let validState = try await DurableJobStore(database: valid.database)
-      .canaryRoleHostReplacementState(request: valid.replacementAuthorization.request)
+    let validState = try await DurableJobStore(
+      database: valid.database, enforceRolloutAuthority: false
+    )
+    .canaryRoleHostReplacementState(request: valid.replacementAuthorization.request)
     #expect(validState.replacementHost == nil)
     #expect(validState.replacementLaunch == nil)
 
@@ -3094,7 +3096,7 @@ struct PiRunStoreTests {
       ) == forgedDigest
     )
     await #expect(throws: DurableJobStoreError.canaryRecoveryRequired) {
-      _ = try await DurableJobStore(database: forged.database)
+      _ = try await DurableJobStore(database: forged.database, enforceRolloutAuthority: false)
         .canaryRoleHostReplacementState(request: forged.replacementAuthorization.request)
     }
   }
@@ -3281,17 +3283,17 @@ struct PiRunStoreTests {
     let fixture = try await ReplacementCutoverFixture.make(sendIntentStarted: false)
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     #expect(
-      try await DurableJobStore(database: fixture.database)
+      try await DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
         .canaryRoleHostReplacementTerminalReport(
           request: fixture.replacementAuthorization.request
         ) == nil
     )
-    _ = try await DurableJobStore(database: fixture.database)
+    _ = try await DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
       .canaryRoleHostReplacementState(request: fixture.replacementAuthorization.request)
     await fixture.database.close()
 
     let reopened = try schemaNinePiDatabase(at: fixture.databaseURL)
-    let jobs = DurableJobStore(database: reopened)
+    let jobs = DurableJobStore(database: reopened, enforceRolloutAuthority: false)
     #expect(
       try await jobs.canaryRoleHostReplacementTerminalReport(
         request: fixture.replacementAuthorization.request
@@ -3399,7 +3401,7 @@ struct PiRunStoreTests {
 
     await fixture.database.close()
     let reopened = try schemaNinePiDatabase(at: fixture.databaseURL)
-    let jobs = DurableJobStore(database: reopened)
+    let jobs = DurableJobStore(database: reopened, enforceRolloutAuthority: false)
     let report = try #require(
       try await jobs.canaryRoleHostReplacementTerminalReport(
         request: fixture.replacementAuthorization.request

@@ -143,19 +143,20 @@ private final class PullRequestPublisherFixture: @unchecked Sendable {
       ),
       now: Date(timeIntervalSince1970: 140_000)
     )
-    let creation = try await DurableJobStore(database: database).createJob(
-      identity: LogicalJobIdentity(
-        repositoryID: repositoryID,
-        kind: .issueImplementation,
-        objectNodeID: "issue-node",
-        revisionKey: String(repeating: "a", count: 64)
-      ),
-      objectNumber: 1,
-      contractVersionUsed: "w6-test",
-      priority: .issueImplementation,
-      firstStep: .openPullRequest,
-      now: Date(timeIntervalSince1970: 140_000)
-    )
+    let creation = try await DurableJobStore(database: database, enforceRolloutAuthority: false)
+      .createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repositoryID,
+          kind: .issueImplementation,
+          objectNodeID: "issue-node",
+          revisionKey: String(repeating: "a", count: 64)
+        ),
+        objectNumber: 1,
+        contractVersionUsed: "w6-test",
+        priority: .issueImplementation,
+        firstStep: .openPullRequest,
+        now: Date(timeIntervalSince1970: 140_000)
+      )
     guard case .created(let job) = creation else {
       throw PullRequestPublisherFixtureError.suppressed
     }

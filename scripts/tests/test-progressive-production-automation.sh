@@ -39,9 +39,7 @@ for suite in "${REQUIRED_SUITES[@]}"; do
     fi
 done
 
-filter="$(IFS='|'; printf '%s' "${REQUIRED_SUITES[*]}")"
-readonly filter
-/usr/bin/xcrun swift test --filter "$filter" 2>&1 | /usr/bin/tee "$TEST_LOG"
+/usr/bin/xcrun swift test 2>&1 | /usr/bin/tee "$TEST_LOG"
 /usr/bin/grep -Eq 'Test run with [1-9][0-9]* tests? in [1-9][0-9]* suites? passed' \
     "$TEST_LOG" || {
     printf 'progressive production acceptance: missing positive nonzero test summary\n' >&2

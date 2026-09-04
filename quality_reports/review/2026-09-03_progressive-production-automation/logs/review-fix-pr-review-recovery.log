@@ -1,0 +1,37 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Emitting module JidokaCodeCoreTests
+[4/5] Compiling JidokaCodeCoreTests PullRequestReviewJobWorkflowTests.swift
+[4/6] Write Objects.LinkFileList
+[5/6] Linking JidokaCodePackageTests
+Build complete! (4.27s)
+Test Suite 'Selected tests' started at 2026-09-04 12:01:52.271.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 12:01:52.273.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 12:01:52.273.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 12:01:52.273.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Pull request review job from exact commits to durable marker" started.
+◇ Test "authorized retry attributes the old generation if it becomes visible before resend" started.
+◇ Test "authorized retry uses a fresh mutation generation after an ambiguous marker send" started.
+◇ Test "real local Git, review routing, multipart-safe publication, and cleanup complete once" started.
+◇ Test "a fresh coordinator stops an interrupted production review for explicit recovery" started.
+◇ Test "topology recovery bypasses a stale attempt review-selection event exactly once" started.
+◇ Test "reopen advances a durably completed review without rerunning Pi" started.
+◇ Test "REST and fetched Git commit divergence stops before review or publication" started.
+◇ Test "a late exact marker is read-only attributed and recovered without another send" started.
+✔ Test "a fresh coordinator stops an interrupted production review for explicit recovery" passed after 0.886 seconds.
+✔ Test "reopen advances a durably completed review without rerunning Pi" passed after 1.103 seconds.
+✔ Test "REST and fetched Git commit divergence stops before review or publication" passed after 1.229 seconds.
+✔ Test "topology recovery bypasses a stale attempt review-selection event exactly once" passed after 1.359 seconds.
+✔ Test "real local Git, review routing, multipart-safe publication, and cleanup complete once" passed after 1.359 seconds.
+✔ Test "authorized retry attributes the old generation if it becomes visible before resend" passed after 1.361 seconds.
+✔ Test "a late exact marker is read-only attributed and recovered without another send" passed after 1.362 seconds.
+✔ Test "authorized retry uses a fresh mutation generation after an ambiguous marker send" passed after 1.362 seconds.
+✔ Suite "Pull request review job from exact commits to durable marker" passed after 1.362 seconds.
+✔ Test run with 8 tests in 1 suite passed after 1.362 seconds.

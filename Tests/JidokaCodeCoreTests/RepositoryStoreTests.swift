@@ -48,7 +48,7 @@ struct RepositoryStoreTests {
       configuration,
       now: Date(timeIntervalSince1970: 1_000)
     )
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let creation = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repositoryID,
@@ -225,7 +225,7 @@ struct RepositoryStoreTests {
       repository,
       now: Date(timeIntervalSince1970: 1)
     )
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let creation = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repository.id,

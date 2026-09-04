@@ -96,9 +96,25 @@ public actor GitHubGitCredentialProvider: GitCredentialSessionProviding {
     let executableValues = try askPassExecutable.resourceValues(forKeys: [
       .isExecutableKey, .isRegularFileKey, .isSymbolicLinkKey,
     ])
+    let executableDirectory = askPassExecutable.deletingLastPathComponent()
+    let executableDirectoryValues = try executableDirectory.resourceValues(forKeys: [
+      .isDirectoryKey, .isSymbolicLinkKey,
+    ])
+    var executableStatus = stat()
+    var executableDirectoryStatus = stat()
     guard executableValues.isExecutable == true,
       executableValues.isRegularFile == true,
-      executableValues.isSymbolicLink != true
+      executableValues.isSymbolicLink != true,
+      executableDirectoryValues.isDirectory == true,
+      executableDirectoryValues.isSymbolicLink != true,
+      lstat(askPassExecutable.path, &executableStatus) == 0,
+      lstat(executableDirectory.path, &executableDirectoryStatus) == 0,
+      (executableStatus.st_mode & S_IFMT) == S_IFREG,
+      (executableDirectoryStatus.st_mode & S_IFMT) == S_IFDIR,
+      (executableStatus.st_mode & 0o022) == 0,
+      (executableDirectoryStatus.st_mode & 0o022) == 0,
+      [uid_t(0), geteuid()].contains(executableStatus.st_uid),
+      [uid_t(0), geteuid()].contains(executableDirectoryStatus.st_uid)
     else {
       throw GitAskPassError.credentialRejected
     }

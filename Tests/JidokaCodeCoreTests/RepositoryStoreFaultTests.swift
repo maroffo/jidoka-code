@@ -53,7 +53,7 @@ struct RepositoryStoreFaultTests {
     _ = try await withTestRolloutWorkflow(jobID: mirrorReadJobID) {
       try await store.ensureMirror(remote: remote)
     }
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
 
     for (index, failureCall) in [7, 8, 12, 15].enumerated() {
       let creation = try await jobs.createJob(

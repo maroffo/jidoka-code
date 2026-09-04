@@ -218,7 +218,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
       enabled: true
     )
     try await configuration.upsertRepository(repository, now: now)
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repository.id,
@@ -334,7 +334,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
       databaseURL: gitFixture.root.appendingPathComponent("state.sqlite3")
     )
     let reopenedConfiguration = ConfigurationStore(database: reopenedDatabase)
-    let reopenedJobs = DurableJobStore(database: reopenedDatabase)
+    let reopenedJobs = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let reopenedRepositories = try RepositoryStore(
       rootURL: gitFixture.root.appendingPathComponent("ApplicationSupport", isDirectory: true),
       database: reopenedDatabase,

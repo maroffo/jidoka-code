@@ -166,6 +166,12 @@ extension RolloutAuthorityStore {
         }
         return (try Self.text(row, "id"), false)
       }
+      try Self.requireBudget(
+        authorizationID: binding.authorizationID,
+        kind: kind,
+        cost: cost,
+        database: database
+      )
       _ = try database.execute(
         """
         INSERT INTO rollout_effect_reservations(
@@ -274,6 +280,16 @@ extension RolloutAuthorityStore {
       try Self.validateDiscovery(
         operation: effect.operation, stage: stage, scope: preview.payload.scope)
       let authorizationID = try Self.text(row, "id")
+      try Self.requireBudget(
+        authorizationID: authorizationID,
+        kind: .githubRead,
+        cost: RolloutEffectCost(
+          githubReadRequests: 1,
+          githubReadPages: 1,
+          githubReadBytes: effect.maximumResponseBytes
+        ),
+        database: database
+      )
       let ordinal = Int(
         try database.scalarInt(
           "SELECT COUNT(*) FROM rollout_scope_read_reservations WHERE authorization_id = ?",
@@ -378,6 +394,16 @@ extension RolloutAuthorityStore {
       if let row = existing.first {
         return (try Self.text(row, "id"), true)
       }
+      try Self.requireBudget(
+        authorizationID: authorizationID,
+        kind: .githubRead,
+        cost: RolloutEffectCost(
+          githubReadRequests: 1,
+          githubReadPages: 1,
+          githubReadBytes: effect.maximumResponseBytes
+        ),
+        database: database
+      )
       let ordinal = Int(
         try database.scalarInt(
           "SELECT COUNT(*) FROM rollout_readback_reservations WHERE source_reservation_id = ?",
@@ -481,6 +507,12 @@ extension RolloutAuthorityStore {
       if let row = existing.first {
         return (try Self.text(row, "id"), true)
       }
+      try Self.requireBudget(
+        authorizationID: authorizationID,
+        kind: .gitRemoteRead,
+        cost: RolloutEffectCost(gitRemoteReads: 1),
+        database: database
+      )
       let ordinal = Int(
         try database.scalarInt(
           "SELECT COUNT(*) FROM rollout_git_readback_reservations WHERE source_reservation_id = ?",
@@ -514,6 +546,66 @@ extension RolloutAuthorityStore {
     return .gitReadback(id: reservation.0)
   }
 
+  static func requireBudget(
+    authorizationID: String,
+    kind: RolloutEffectKind,
+    cost: RolloutEffectCost,
+    database: isolated SQLiteStore
+  ) throws {
+    guard
+      let row = try database.query(
+        """
+        SELECT budget.github_read_requests AS budget_github_read_requests,
+          budget.github_read_pages AS budget_github_read_pages,
+          budget.github_read_bytes AS budget_github_read_bytes,
+          budget.git_remote_reads AS budget_git_remote_reads,
+          budget.provider_sessions AS budget_provider_sessions,
+          budget.approved_commands AS budget_approved_commands,
+          budget.marker_parts AS budget_marker_parts,
+          budget.label_writes AS budget_label_writes,
+          budget.branch_creates AS budget_branch_creates,
+          budget.pull_request_creates AS budget_pull_request_creates,
+          budget.github_sends AS budget_github_sends,
+          budget.git_sends AS budget_git_sends,
+          usage.github_read_requests, usage.github_read_pages,
+          usage.github_read_bytes, usage.git_remote_reads,
+          usage.provider_sessions, usage.approved_commands, usage.marker_parts,
+          usage.label_writes, usage.branch_creates, usage.pull_request_creates,
+          usage.github_sends, usage.git_sends
+        FROM rollout_authorization_budgets AS budget
+        JOIN rollout_authorization_usage AS usage
+          ON usage.authorization_id = budget.authorization_id
+        WHERE budget.authorization_id = ?
+        ORDER BY usage.sequence DESC LIMIT 1
+        """,
+        bindings: [.text(authorizationID)]
+      ).first
+    else {
+      throw RolloutAuthorityError.effectIdentityMismatch
+    }
+    let comparisons: [(String, String, Int64)] = [
+      ("github_read_requests", "budget_github_read_requests", Int64(cost.githubReadRequests)),
+      ("github_read_pages", "budget_github_read_pages", Int64(cost.githubReadPages)),
+      ("github_read_bytes", "budget_github_read_bytes", cost.githubReadBytes),
+      ("git_remote_reads", "budget_git_remote_reads", Int64(cost.gitRemoteReads)),
+      ("provider_sessions", "budget_provider_sessions", Int64(cost.providerSessions)),
+      ("approved_commands", "budget_approved_commands", Int64(cost.approvedCommands)),
+      ("marker_parts", "budget_marker_parts", Int64(cost.markerParts)),
+      ("label_writes", "budget_label_writes", Int64(cost.labelWrites)),
+      ("branch_creates", "budget_branch_creates", Int64(cost.branchCreates)),
+      (
+        "pull_request_creates", "budget_pull_request_creates",
+        Int64(cost.pullRequestCreates)
+      ),
+      ("github_sends", "budget_github_sends", Int64(cost.githubSends)),
+      ("git_sends", "budget_git_sends", Int64(cost.gitSends)),
+    ]
+    for (usageColumn, budgetColumn, increment) in comparisons
+    where try integer(row, usageColumn) + increment > integer(row, budgetColumn) {
+      throw RolloutAuthorityError.budgetExceeded(kind)
+    }
+  }
+
   func settleReadTable(
     table: String,
     id: String,
@@ -528,7 +620,7 @@ extension RolloutAuthorityStore {
       throw RolloutAuthorityError.effectIdentityMismatch
     }
     let changed = try await database.execute(
-      "UPDATE \(table) SET state = 'settled', evidence_sha256 = ?, updated_at_ms = ? WHERE id = ? AND state = 'reserved'",
+      "UPDATE \(table) SET state = 'settled', evidence_sha256 = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE id = ? AND state = 'reserved'",
       bindings: [
         .text(evidenceSHA256), .integer(Self.milliseconds(now)), .text(id),
       ]
@@ -537,9 +629,10 @@ extension RolloutAuthorityStore {
   }
 
   func requireHistoricalCanary(jobID: UUID) async throws {
-    guard try await DurableJobStore(database: database).unresolvedCanaryJobID() == jobID else {
-      throw RolloutAuthorityError.effectAdmissionClosed
-    }
+    _ = jobID
+    // JobCanaryScope remains historical evidence. Schema-10 rollout authority must
+    // never translate it into permission for a fresh read, process, or send.
+    throw RolloutAuthorityError.effectAdmissionClosed
   }
 }
 
@@ -1093,7 +1186,7 @@ extension RolloutAuthorityStore {
         }
       guard allowed else { throw RolloutAuthorityError.invalidStateTransition }
       _ = try database.execute(
-        "UPDATE rollout_effect_reservations SET state = ?, updated_at_ms = ? WHERE id = ? AND state = ?",
+        "UPDATE rollout_effect_reservations SET state = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE id = ? AND state = ?",
         bindings: [
           .text(target.rawValue), .integer(Self.milliseconds(now)), .text(id),
           .text(current.rawValue),
@@ -1144,7 +1237,7 @@ extension RolloutAuthorityStore {
     database: isolated SQLiteStore
   ) throws {
     let changed = try database.execute(
-      "UPDATE rollout_effect_reservations SET state = 'observationRequired', updated_at_ms = ? WHERE id = ? AND state = 'sendStarted'",
+      "UPDATE rollout_effect_reservations SET state = 'observationRequired', updated_at_ms = MAX(updated_at_ms, ?) WHERE id = ? AND state = 'sendStarted'",
       bindings: [
         .integer(milliseconds(now)), .text(reservation.id),
       ]
@@ -1664,6 +1757,12 @@ extension RolloutAuthorityStore {
     nowMilliseconds: Int64,
     database: isolated SQLiteStore
   ) throws {
+    try requireBudget(
+      authorizationID: request.authorizationID,
+      kind: request.kind,
+      cost: request.cost,
+      database: database
+    )
     _ = try database.execute(
       """
       INSERT INTO rollout_effect_reservations(
@@ -1693,7 +1792,7 @@ extension RolloutAuthorityStore {
   ) throws {
     try markIntentStarted(intent: intent, now: now, database: database)
     let changed = try database.execute(
-      "UPDATE rollout_effect_reservations SET state = 'sendStarted', updated_at_ms = ? WHERE id = ? AND state = 'reserved'",
+      "UPDATE rollout_effect_reservations SET state = 'sendStarted', updated_at_ms = MAX(updated_at_ms, ?) WHERE id = ? AND state = 'reserved'",
       bindings: [
         .integer(milliseconds(now)), .text(reservationID),
       ]

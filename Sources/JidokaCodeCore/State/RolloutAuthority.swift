@@ -131,6 +131,8 @@ public struct RolloutReleaseIdentity: Codable, Equatable, Sendable {
   public let bundleBuild: Int
   public let applicationSHA256: String
   public let helperSHA256: String
+  public let askPassSHA256: String
+  public let pushGuardSHA256: String
   public let herdrHostSHA256: String
   public let schemaVersion: Int
   public let engineProtocolVersion: Int
@@ -150,6 +152,8 @@ public struct RolloutReleaseIdentity: Codable, Equatable, Sendable {
     bundleBuild: Int,
     applicationSHA256: String,
     helperSHA256: String,
+    askPassSHA256: String,
+    pushGuardSHA256: String,
     herdrHostSHA256: String,
     schemaVersion: Int,
     engineProtocolVersion: Int,
@@ -168,6 +172,8 @@ public struct RolloutReleaseIdentity: Codable, Equatable, Sendable {
     self.bundleBuild = bundleBuild
     self.applicationSHA256 = applicationSHA256
     self.helperSHA256 = helperSHA256
+    self.askPassSHA256 = askPassSHA256
+    self.pushGuardSHA256 = pushGuardSHA256
     self.herdrHostSHA256 = herdrHostSHA256
     self.schemaVersion = schemaVersion
     self.engineProtocolVersion = engineProtocolVersion
@@ -806,6 +812,8 @@ public enum RolloutPreviewBuilder {
     let digests = [
       release.applicationSHA256,
       release.helperSHA256,
+      release.askPassSHA256,
+      release.pushGuardSHA256,
       release.herdrHostSHA256,
       release.runtimeManifestSHA256,
       release.runtimeTreeSHA256,

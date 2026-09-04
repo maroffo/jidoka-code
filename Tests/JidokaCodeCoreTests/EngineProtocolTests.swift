@@ -1171,6 +1171,8 @@ private func engineRolloutProtocolFixture() throws -> EngineRolloutProtocolFixtu
     bundleBuild: 3,
     applicationSHA256: digest,
     helperSHA256: digest,
+    askPassSHA256: digest,
+    pushGuardSHA256: digest,
     herdrHostSHA256: digest,
     schemaVersion: 10,
     engineProtocolVersion: 12,

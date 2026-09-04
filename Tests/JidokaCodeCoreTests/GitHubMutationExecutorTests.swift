@@ -301,7 +301,7 @@ private final class MutationExecutorFixture: @unchecked Sendable {
         .real(now.timeIntervalSince1970),
       ]
     )
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repositoryID,

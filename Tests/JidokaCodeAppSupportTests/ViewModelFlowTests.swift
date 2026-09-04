@@ -759,6 +759,8 @@ private actor AppSupportEngineFake: EngineClient {
       bundleBuild: 1,
       applicationSHA256: digest,
       helperSHA256: String(repeating: "b", count: 64),
+      askPassSHA256: String(repeating: "b", count: 64),
+      pushGuardSHA256: String(repeating: "b", count: 64),
       herdrHostSHA256: String(repeating: "c", count: 64),
       schemaVersion: 10,
       engineProtocolVersion: 12,

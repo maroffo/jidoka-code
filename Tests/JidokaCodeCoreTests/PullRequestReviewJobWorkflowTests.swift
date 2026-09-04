@@ -175,6 +175,7 @@ struct PullRequestReviewJobWorkflowTests {
         complexPlan: reopened.workflow
       ),
       contractVersion: "w6-test",
+      rolloutAuthority: nil,
       now: { Date(timeIntervalSince1970: 90_001) }
     )
 
@@ -189,8 +190,8 @@ struct PullRequestReviewJobWorkflowTests {
     await reopened.database.close()
   }
 
-  @Test("a fresh coordinator recovers an interrupted production review and replays it to success")
-  func startupRecoveryReplay() async throws {
+  @Test("a fresh coordinator stops an interrupted production review for explicit recovery")
+  func startupRecoveryRequiresExplicitAuthorization() async throws {
     let fixture = try await PullRequestReviewJobFixture()
     defer { fixture.remove() }
     _ = try await activateTestPullRequestRollout(
@@ -212,6 +213,10 @@ struct PullRequestReviewJobWorkflowTests {
       issueImplementation: reopened.workflow,
       complexPlan: reopened.workflow
     )
+    let reopenedAuthority = RolloutAuthorityStore(
+      database: reopened.database,
+      now: { Date(timeIntervalSince1970: 90_001) }
+    )
     let coordinator = JobCoordinator(
       configuration: reopened.configuration,
       discovery: GitHubDiscovery(
@@ -224,28 +229,20 @@ struct PullRequestReviewJobWorkflowTests {
       schedulerPersistence: SchedulerPersistence(database: reopened.database),
       workflows: registry,
       contractVersion: "w6-test",
+      rolloutAuthority: reopenedAuthority,
+      rolloutReadbacks: PullRequestNoopRolloutReadback(),
       now: { Date(timeIntervalSince1970: 90_001) }
     )
 
     await coordinator.run(
       pass: SchedulerPass(reasons: [.startup], startedAt: fixture.now)
     )
-    #expect(try await reopened.jobs.job(id: fixture.job.id)?.state == .retryBackoff)
+    #expect(try await reopened.jobs.job(id: fixture.job.id)?.state == .reconciliationQueued)
     #expect(try await reopened.jobs.activeLeases().isEmpty)
-    try await reopened.database.execute(
-      "UPDATE jobs SET not_before = ? WHERE id = ?",
-      bindings: [
-        .real(fixture.now.addingTimeInterval(-1).timeIntervalSince1970),
-        .text(fixture.job.id.uuidString.lowercased()),
-      ]
-    )
-
-    await coordinator.run(
-      pass: SchedulerPass(reasons: [.manual], startedAt: fixture.now)
-    )
-
-    #expect(try await reopened.jobs.job(id: fixture.job.id)?.state == .succeeded)
-    #expect(await fixture.api.createCommentCount == 1)
+    #expect(try await reopened.configuration.snapshot().app.paused)
+    #expect(try await reopenedAuthority.activeAuthorization()?.state == .recoveryRequired)
+    #expect((await coordinator.snapshot()).failures.isEmpty)
+    #expect(await fixture.api.createCommentCount == 0)
     await reopened.database.close()
   }
 
@@ -253,14 +250,6 @@ struct PullRequestReviewJobWorkflowTests {
   func topologyRecoveryReviewSelection() async throws {
     let fixture = try await PullRequestReviewJobFixture()
     defer { fixture.remove() }
-    _ = try await activateTestPullRequestRollout(
-      database: fixture.database,
-      repository: fixture.repository,
-      job: fixture.job,
-      baseSHA: fixture.pullRequest.base.sha,
-      headSHA: fixture.pullRequest.head.sha,
-      now: fixture.now
-    )
     let jobID = fixture.job.id.uuidString.lowercased()
     let scope = JobCanaryScope(
       jobID: fixture.job.id,
@@ -312,19 +301,6 @@ struct PullRequestReviewJobWorkflowTests {
         now: fixture.now
       )
     }
-    try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
-    )
-    await #expect(throws: DurableJobStoreError.canaryRecoveryRequired) {
-      _ = try await fixture.jobs.selectCanaryReviewAfterTopologyRecovery(
-        jobID: fixture.job.id,
-        recoveryEvidenceSHA256: evidenceSHA256,
-        now: fixture.now
-      )
-    }
-    try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
     try await fixture.database.execute(
       "UPDATE repository_leases SET heartbeat = 7 WHERE job_id = ? AND active = 1",
       bindings: [.text(jobID)]
@@ -429,6 +405,10 @@ struct PullRequestReviewJobWorkflowTests {
   }
 }
 
+private struct PullRequestNoopRolloutReadback: RolloutStartedEffectReconciling {
+  func reconcileStartedEffects(now _: Date) async throws {}
+}
+
 private final class PullRequestReviewJobFixture: @unchecked Sendable {
   let root: URL
   let gitFixture: GitTestRoot
@@ -482,7 +462,7 @@ private final class PullRequestReviewJobFixture: @unchecked Sendable {
       enabled: true
     )
     try await configuration.upsertRepository(repository, now: now)
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repository.id,
@@ -579,7 +559,7 @@ private final class PullRequestReviewJobFixture: @unchecked Sendable {
       databaseURL: root.appendingPathComponent("state.sqlite3")
     )
     let reopenedConfiguration = ConfigurationStore(database: reopenedDatabase)
-    let reopenedJobs = DurableJobStore(database: reopenedDatabase)
+    let reopenedJobs = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let reopenedRepositories = try RepositoryStore(
       rootURL: root.appendingPathComponent("ApplicationSupport", isDirectory: true),
       database: reopenedDatabase,

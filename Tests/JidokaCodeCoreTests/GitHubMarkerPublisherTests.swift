@@ -295,19 +295,20 @@ private final class MarkerPublisherFixture: @unchecked Sendable {
       ),
       now: now
     )
-    let created = try await DurableJobStore(database: database).createJob(
-      identity: LogicalJobIdentity(
-        repositoryID: repositoryID,
-        kind: .prReview,
-        objectNodeID: "pr-node",
-        revisionKey: String(repeating: "a", count: 40)
-      ),
-      objectNumber: 1,
-      contractVersionUsed: "w6-test",
-      priority: .prReview,
-      firstStep: .review,
-      now: now
-    )
+    let created = try await DurableJobStore(database: database, enforceRolloutAuthority: false)
+      .createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repositoryID,
+          kind: .prReview,
+          objectNodeID: "pr-node",
+          revisionKey: String(repeating: "a", count: 40)
+        ),
+        objectNumber: 1,
+        contractVersionUsed: "w6-test",
+        priority: .prReview,
+        firstStep: .review,
+        now: now
+      )
     guard case .created(let job) = created else {
       throw MarkerPublisherFixtureError.suppressed
     }

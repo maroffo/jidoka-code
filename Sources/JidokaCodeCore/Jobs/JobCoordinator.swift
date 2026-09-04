@@ -227,7 +227,7 @@ public actor JobCoordinator: SchedulerPassRunner {
     schedulerPersistence: SchedulerPersistence,
     workflows: JobWorkflowRegistry,
     contractVersion: String,
-    rolloutAuthority: RolloutAuthorityStore? = nil,
+    rolloutAuthority: RolloutAuthorityStore?,
     rolloutReadbacks: (any RolloutStartedEffectReconciling)? = nil,
     failureClassifier: any JobWorkflowFailureClassifying = DefaultJobWorkflowFailureClassifier(),
     newDispatchAllowed: @escaping @Sendable () async -> Bool = { true },

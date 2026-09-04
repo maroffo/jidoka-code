@@ -1401,7 +1401,7 @@ private final class EngineServiceFixture: @unchecked Sendable {
       .appendingPathComponent("jidoka-engine-\(UUID().uuidString)", isDirectory: true)
     database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
     configuration = ConfigurationStore(database: database)
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     intents = MutationIntentStore(database: database)
     external = EngineServiceExternalFake()
     runtime = EngineServiceRuntimeFake()

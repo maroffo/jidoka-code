@@ -1712,6 +1712,18 @@ public enum DatabaseSchema {
       statements: [
         "DROP TRIGGER app_settings_generation_rollover_resume_denied",
         "DROP TRIGGER app_settings_generation_rollover_insert_resume_denied",
+        "DROP TRIGGER approved_command_run_state_transition",
+        """
+        CREATE TRIGGER approved_command_run_state_transition
+        BEFORE UPDATE OF state ON approved_command_runs
+        WHEN NEW.state IS NOT OLD.state AND NOT (
+          (OLD.state = 'prepared' AND NEW.state IN ('started', 'superseded'))
+          OR (OLD.state = 'started' AND NEW.state IN ('resultAccepted', 'unknown', 'superseded'))
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid approved command transition');
+        END
+        """,
         "ALTER TABLE jobs ADD COLUMN rollout_generation INTEGER NOT NULL DEFAULT 0 CHECK (rollout_generation IN (0, 1))",
         """
         CREATE TABLE rollout_authorizations (
@@ -1819,6 +1831,12 @@ public enum DatabaseSchema {
           helper_sha256 TEXT NOT NULL CHECK (
             length(helper_sha256) = 64 AND helper_sha256 NOT GLOB '*[^0-9a-f]*'
           ),
+          ask_pass_sha256 TEXT NOT NULL CHECK (
+            length(ask_pass_sha256) = 64 AND ask_pass_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          push_guard_sha256 TEXT NOT NULL CHECK (
+            length(push_guard_sha256) = 64 AND push_guard_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
           herdr_host_sha256 TEXT NOT NULL CHECK (
             length(herdr_host_sha256) = 64 AND herdr_host_sha256 NOT GLOB '*[^0-9a-f]*'
           ),
@@ -1924,6 +1942,48 @@ public enum DatabaseSchema {
           github_sends INTEGER NOT NULL CHECK (github_sends BETWEEN 0 AND 256),
           git_sends INTEGER NOT NULL CHECK (git_sends BETWEEN 0 AND 32)
         ) STRICT
+        """,
+        """
+        CREATE TABLE rollout_authorization_usage (
+          authorization_id TEXT NOT NULL
+            REFERENCES rollout_authorizations(id) ON DELETE RESTRICT,
+          sequence INTEGER NOT NULL CHECK (sequence >= 0),
+          source_kind TEXT NOT NULL CHECK (source_kind IN (
+            'activation', 'effect', 'scopeRead', 'githubReadback', 'gitReadback'
+          )),
+          source_id TEXT NOT NULL CHECK (length(source_id) BETWEEN 1 AND 256),
+          github_read_requests INTEGER NOT NULL CHECK (github_read_requests >= 0),
+          github_read_pages INTEGER NOT NULL CHECK (github_read_pages >= 0),
+          github_read_bytes INTEGER NOT NULL CHECK (github_read_bytes >= 0),
+          git_remote_reads INTEGER NOT NULL CHECK (git_remote_reads >= 0),
+          provider_sessions INTEGER NOT NULL CHECK (provider_sessions >= 0),
+          approved_commands INTEGER NOT NULL CHECK (approved_commands >= 0),
+          marker_parts INTEGER NOT NULL CHECK (marker_parts >= 0),
+          label_writes INTEGER NOT NULL CHECK (label_writes >= 0),
+          branch_creates INTEGER NOT NULL CHECK (branch_creates >= 0),
+          pull_request_creates INTEGER NOT NULL CHECK (pull_request_creates >= 0),
+          github_sends INTEGER NOT NULL CHECK (github_sends >= 0),
+          git_sends INTEGER NOT NULL CHECK (git_sends >= 0),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          PRIMARY KEY(authorization_id, sequence),
+          UNIQUE(authorization_id, source_kind, source_id)
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE TRIGGER rollout_authorization_usage_seed
+        AFTER INSERT ON rollout_authorizations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          ) VALUES (
+            NEW.id, 0, 'activation', NEW.id,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NEW.activated_at_ms
+          );
+        END
         """,
         """
         CREATE TRIGGER rollout_authorization_scopes_exact_insert
@@ -2636,6 +2696,8 @@ public enum DatabaseSchema {
         appendOnlyTrigger(table: "rollout_authorization_scopes", operation: "DELETE"),
         appendOnlyTrigger(table: "rollout_authorization_budgets", operation: "UPDATE"),
         appendOnlyTrigger(table: "rollout_authorization_budgets", operation: "DELETE"),
+        appendOnlyTrigger(table: "rollout_authorization_usage", operation: "UPDATE"),
+        appendOnlyTrigger(table: "rollout_authorization_usage", operation: "DELETE"),
         appendOnlyTrigger(table: "rollout_authorization_events", operation: "UPDATE"),
         appendOnlyTrigger(table: "rollout_authorization_events", operation: "DELETE"),
         appendOnlyTrigger(table: "rollout_window_candidates", operation: "UPDATE"),
@@ -2644,6 +2706,202 @@ public enum DatabaseSchema {
         appendOnlyTrigger(table: "rollout_job_bindings", operation: "DELETE"),
         appendOnlyTrigger(table: "rollout_job_input_snapshots", operation: "UPDATE"),
         appendOnlyTrigger(table: "rollout_job_input_snapshots", operation: "DELETE"),
+        """
+        CREATE TRIGGER rollout_effect_reservations_usage_append
+        AFTER INSERT ON rollout_effect_reservations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          )
+          SELECT NEW.authorization_id, usage.sequence + 1, 'effect', NEW.id,
+            usage.github_read_requests + NEW.github_read_requests,
+            usage.github_read_pages + NEW.github_read_pages,
+            usage.github_read_bytes + NEW.github_read_bytes,
+            usage.git_remote_reads + NEW.git_remote_reads,
+            usage.provider_sessions + NEW.provider_sessions,
+            usage.approved_commands + NEW.approved_commands,
+            usage.marker_parts + NEW.marker_parts,
+            usage.label_writes + NEW.label_writes,
+            usage.branch_creates + NEW.branch_creates,
+            usage.pull_request_creates + NEW.pull_request_creates,
+            usage.github_sends + NEW.github_sends,
+            usage.git_sends + NEW.git_sends,
+            NEW.created_at_ms
+          FROM rollout_authorization_usage AS usage
+          WHERE usage.authorization_id = NEW.authorization_id
+          ORDER BY usage.sequence DESC LIMIT 1;
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_scope_read_reservations_usage_append
+        AFTER INSERT ON rollout_scope_read_reservations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          )
+          SELECT NEW.authorization_id, usage.sequence + 1, 'scopeRead', NEW.id,
+            usage.github_read_requests + NEW.github_read_requests,
+            usage.github_read_pages + NEW.github_read_pages,
+            usage.github_read_bytes + NEW.github_read_bytes,
+            usage.git_remote_reads, usage.provider_sessions, usage.approved_commands,
+            usage.marker_parts, usage.label_writes, usage.branch_creates,
+            usage.pull_request_creates, usage.github_sends, usage.git_sends,
+            NEW.created_at_ms
+          FROM rollout_authorization_usage AS usage
+          WHERE usage.authorization_id = NEW.authorization_id
+          ORDER BY usage.sequence DESC LIMIT 1;
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_readback_reservations_usage_append
+        AFTER INSERT ON rollout_readback_reservations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          )
+          SELECT NEW.authorization_id, usage.sequence + 1, 'githubReadback', NEW.id,
+            usage.github_read_requests + NEW.github_read_requests,
+            usage.github_read_pages + NEW.github_read_pages,
+            usage.github_read_bytes + NEW.github_read_bytes,
+            usage.git_remote_reads, usage.provider_sessions, usage.approved_commands,
+            usage.marker_parts, usage.label_writes, usage.branch_creates,
+            usage.pull_request_creates, usage.github_sends, usage.git_sends,
+            NEW.created_at_ms
+          FROM rollout_authorization_usage AS usage
+          WHERE usage.authorization_id = NEW.authorization_id
+          ORDER BY usage.sequence DESC LIMIT 1;
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_git_readback_reservations_usage_append
+        AFTER INSERT ON rollout_git_readback_reservations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          )
+          SELECT NEW.authorization_id, usage.sequence + 1, 'gitReadback', NEW.id,
+            usage.github_read_requests, usage.github_read_pages, usage.github_read_bytes,
+            usage.git_remote_reads + NEW.git_remote_reads,
+            usage.provider_sessions, usage.approved_commands, usage.marker_parts,
+            usage.label_writes, usage.branch_creates, usage.pull_request_creates,
+            usage.github_sends, usage.git_sends, NEW.created_at_ms
+          FROM rollout_authorization_usage AS usage
+          WHERE usage.authorization_id = NEW.authorization_id
+          ORDER BY usage.sequence DESC LIMIT 1;
+        END
+        """,
+        """
+        CREATE TRIGGER repository_leases_rollout_authority_insert
+        BEFORE INSERT ON repository_leases
+        WHEN NEW.active = 1
+          AND EXISTS (SELECT 1 FROM rollout_authorizations)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jobs AS job
+            JOIN rollout_job_bindings AS binding ON binding.job_id = job.id
+            JOIN rollout_authorizations AS authorization
+              ON authorization.id = binding.authorization_id
+            JOIN repositories AS repository ON repository.id = job.repository_id
+            JOIN app_settings AS settings ON settings.singleton = 1
+            WHERE job.id = NEW.job_id
+              AND job.repository_id = NEW.repository_id
+              AND binding.repository_id = NEW.repository_id
+              AND authorization.repository_id = NEW.repository_id
+              AND authorization.workflow_stage = binding.workflow_stage
+              AND authorization.state = 'active'
+              AND authorization.expires_at_ms > CAST(NEW.heartbeat * 1000 AS INTEGER)
+              AND job.rollout_generation = 1
+              AND job.state NOT IN ('succeeded', 'blocked')
+              AND NOT (
+                binding.workflow_stage = 'implementationPlan'
+                AND job.current_step_kind = 'orchestrate'
+              )
+              AND NOT (
+                binding.workflow_stage = 'implementationExecute'
+                AND job.current_step_kind = 'replan'
+              )
+              AND repository.enabled = 1
+              AND (
+                (binding.workflow_stage IN ('prReview', 'generatedPRReview')
+                  AND job.kind = 'prReview' AND repository.review_enabled = 1) OR
+                (binding.workflow_stage = 'issueTriage'
+                  AND job.kind = 'issueTriage' AND repository.triage_enabled = 1) OR
+                (binding.workflow_stage IN ('implementationPlan', 'implementationExecute')
+                  AND job.kind IN ('issueImplementation', 'complexPlan')
+                  AND repository.implementation_enabled = 1)
+              )
+              AND settings.paused = 0
+              AND settings.max_concurrency = 1
+              AND settings.active_rollout_authorization_id = authorization.id
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'active repository lease lacks rollout authority');
+        END
+        """,
+        """
+        CREATE TRIGGER repository_leases_rollout_authority_update
+        BEFORE UPDATE OF repository_id, job_id, heartbeat, active ON repository_leases
+        WHEN NEW.active = 1
+          AND EXISTS (SELECT 1 FROM rollout_authorizations)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jobs AS job
+            JOIN rollout_job_bindings AS binding ON binding.job_id = job.id
+            JOIN rollout_authorizations AS authorization
+              ON authorization.id = binding.authorization_id
+            JOIN repositories AS repository ON repository.id = job.repository_id
+            JOIN app_settings AS settings ON settings.singleton = 1
+            WHERE job.id = NEW.job_id
+              AND job.repository_id = NEW.repository_id
+              AND binding.repository_id = NEW.repository_id
+              AND authorization.repository_id = NEW.repository_id
+              AND authorization.workflow_stage = binding.workflow_stage
+              AND authorization.state = 'active'
+              AND authorization.expires_at_ms > CAST(NEW.heartbeat * 1000 AS INTEGER)
+              AND job.rollout_generation = 1
+              AND job.state NOT IN ('succeeded', 'blocked')
+              AND NOT (
+                binding.workflow_stage = 'implementationPlan'
+                AND job.current_step_kind = 'orchestrate'
+              )
+              AND NOT (
+                binding.workflow_stage = 'implementationExecute'
+                AND job.current_step_kind = 'replan'
+              )
+              AND repository.enabled = 1
+              AND (
+                (binding.workflow_stage IN ('prReview', 'generatedPRReview')
+                  AND job.kind = 'prReview' AND repository.review_enabled = 1) OR
+                (binding.workflow_stage = 'issueTriage'
+                  AND job.kind = 'issueTriage' AND repository.triage_enabled = 1) OR
+                (binding.workflow_stage IN ('implementationPlan', 'implementationExecute')
+                  AND job.kind IN ('issueImplementation', 'complexPlan')
+                  AND repository.implementation_enabled = 1)
+              )
+              AND settings.paused = 0
+              AND settings.max_concurrency = 1
+              AND settings.active_rollout_authorization_id = authorization.id
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'active repository lease lacks rollout authority');
+        END
+        """,
         """
         CREATE TRIGGER rollout_job_bindings_exact_authority
         BEFORE INSERT ON rollout_job_bindings
@@ -2810,6 +3068,16 @@ public enum DatabaseSchema {
           SELECT RAISE(ABORT, 'invalid rollout effect reservation state transition');
         END
         """,
+        """
+        CREATE TRIGGER rollout_effect_reservations_updated_at_monotonic
+        BEFORE UPDATE ON rollout_effect_reservations
+        WHEN NEW.updated_at_ms < OLD.updated_at_ms OR (
+          NEW.updated_at_ms != OLD.updated_at_ms AND NEW.state = OLD.state
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout effect timestamp changes only with monotonic state');
+        END
+        """,
         appendOnlyTrigger(table: "rollout_effect_reservations", operation: "DELETE"),
         """
         CREATE TRIGGER rollout_scope_read_reservations_identity_immutable
@@ -2834,6 +3102,16 @@ public enum DatabaseSchema {
           SELECT RAISE(ABORT, 'invalid rollout scope read settlement');
         END
         """,
+        """
+        CREATE TRIGGER rollout_scope_read_reservations_updated_at_monotonic
+        BEFORE UPDATE ON rollout_scope_read_reservations
+        WHEN NEW.updated_at_ms < OLD.updated_at_ms OR (
+          NEW.updated_at_ms != OLD.updated_at_ms AND NEW.state = OLD.state
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout scope read timestamp changes only with monotonic state');
+        END
+        """,
         appendOnlyTrigger(table: "rollout_scope_read_reservations", operation: "DELETE"),
         """
         CREATE TRIGGER rollout_scope_read_reservations_active_finite_scope
@@ -2843,6 +3121,14 @@ public enum DatabaseSchema {
           FROM rollout_authorizations AS authorization
           JOIN rollout_authorization_budgets AS budget
             ON budget.authorization_id = authorization.id
+          JOIN rollout_authorization_usage AS usage
+            ON usage.authorization_id = authorization.id
+            AND usage.sequence = (
+              SELECT latest.sequence
+              FROM rollout_authorization_usage AS latest
+              WHERE latest.authorization_id = authorization.id
+              ORDER BY latest.sequence DESC LIMIT 1
+            )
           JOIN app_settings AS settings ON settings.singleton = 1
           WHERE authorization.id = NEW.authorization_id
             AND authorization.state = 'active'
@@ -2850,36 +3136,12 @@ public enum DatabaseSchema {
             AND authorization.expires_at_ms > NEW.created_at_ms
             AND settings.paused = 0
             AND settings.active_rollout_authorization_id = authorization.id
-            AND (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + NEW.github_read_requests <= budget.github_read_requests
-            AND (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + NEW.github_read_pages <= budget.github_read_pages
-            AND (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + NEW.github_read_bytes <= budget.github_read_bytes
+            AND usage.github_read_requests + NEW.github_read_requests
+              <= budget.github_read_requests
+            AND usage.github_read_pages + NEW.github_read_pages
+              <= budget.github_read_pages
+            AND usage.github_read_bytes + NEW.github_read_bytes
+              <= budget.github_read_bytes
         )
         BEGIN
           SELECT RAISE(ABORT, 'rollout scope read exceeds active finite budget');
@@ -2910,6 +3172,16 @@ public enum DatabaseSchema {
           SELECT RAISE(ABORT, 'invalid rollout readback settlement');
         END
         """,
+        """
+        CREATE TRIGGER rollout_readback_reservations_updated_at_monotonic
+        BEFORE UPDATE ON rollout_readback_reservations
+        WHEN NEW.updated_at_ms < OLD.updated_at_ms OR (
+          NEW.updated_at_ms != OLD.updated_at_ms AND NEW.state = OLD.state
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout readback timestamp changes only with monotonic state');
+        END
+        """,
         appendOnlyTrigger(table: "rollout_readback_reservations", operation: "DELETE"),
         """
         CREATE TRIGGER rollout_readback_reservations_exact_started_effect
@@ -2921,6 +3193,14 @@ public enum DatabaseSchema {
             ON authorization.id = source.authorization_id
           JOIN rollout_authorization_budgets AS budget
             ON budget.authorization_id = authorization.id
+          JOIN rollout_authorization_usage AS usage
+            ON usage.authorization_id = authorization.id
+            AND usage.sequence = (
+              SELECT latest.sequence
+              FROM rollout_authorization_usage AS latest
+              WHERE latest.authorization_id = authorization.id
+              ORDER BY latest.sequence DESC LIMIT 1
+            )
           JOIN app_settings AS settings ON settings.singleton = 1
           WHERE source.id = NEW.source_reservation_id
             AND source.authorization_id = NEW.authorization_id
@@ -2934,36 +3214,12 @@ public enum DatabaseSchema {
                 'draining', 'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
               ) AND settings.paused = 1)
             )
-            AND (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + NEW.github_read_requests <= budget.github_read_requests
-            AND (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + NEW.github_read_pages <= budget.github_read_pages
-            AND (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + NEW.github_read_bytes <= budget.github_read_bytes
+            AND usage.github_read_requests + NEW.github_read_requests
+              <= budget.github_read_requests
+            AND usage.github_read_pages + NEW.github_read_pages
+              <= budget.github_read_pages
+            AND usage.github_read_bytes + NEW.github_read_bytes
+              <= budget.github_read_bytes
         )
         BEGIN
           SELECT RAISE(ABORT, 'rollout readback lacks an exact started effect or budget');
@@ -2992,6 +3248,16 @@ public enum DatabaseSchema {
           SELECT RAISE(ABORT, 'invalid rollout Git readback settlement');
         END
         """,
+        """
+        CREATE TRIGGER rollout_git_readback_reservations_updated_at_monotonic
+        BEFORE UPDATE ON rollout_git_readback_reservations
+        WHEN NEW.updated_at_ms < OLD.updated_at_ms OR (
+          NEW.updated_at_ms != OLD.updated_at_ms AND NEW.state = OLD.state
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout Git readback timestamp changes only with monotonic state');
+        END
+        """,
         appendOnlyTrigger(table: "rollout_git_readback_reservations", operation: "DELETE"),
         """
         CREATE TRIGGER rollout_git_readback_reservations_exact_started_effect
@@ -3003,6 +3269,14 @@ public enum DatabaseSchema {
             ON authorization.id = source.authorization_id
           JOIN rollout_authorization_budgets AS budget
             ON budget.authorization_id = authorization.id
+          JOIN rollout_authorization_usage AS usage
+            ON usage.authorization_id = authorization.id
+            AND usage.sequence = (
+              SELECT latest.sequence
+              FROM rollout_authorization_usage AS latest
+              WHERE latest.authorization_id = authorization.id
+              ORDER BY latest.sequence DESC LIMIT 1
+            )
           JOIN app_settings AS settings ON settings.singleton = 1
           WHERE source.id = NEW.source_reservation_id
             AND source.authorization_id = NEW.authorization_id
@@ -3017,13 +3291,8 @@ public enum DatabaseSchema {
                 'draining', 'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
               ) AND settings.paused = 1)
             )
-            AND (SELECT COALESCE(SUM(git_remote_reads), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(git_remote_reads), 0)
-                 FROM rollout_git_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + NEW.git_remote_reads <= budget.git_remote_reads
+            AND usage.git_remote_reads + NEW.git_remote_reads
+              <= budget.git_remote_reads
         )
         BEGIN
           SELECT RAISE(ABORT, 'rollout Git readback lacks an exact started effect or budget');
@@ -3037,6 +3306,14 @@ public enum DatabaseSchema {
           FROM rollout_authorizations AS authorization
           JOIN rollout_authorization_budgets AS budget
             ON budget.authorization_id = authorization.id
+          JOIN rollout_authorization_usage AS usage
+            ON usage.authorization_id = authorization.id
+            AND usage.sequence = (
+              SELECT latest.sequence
+              FROM rollout_authorization_usage AS latest
+              WHERE latest.authorization_id = authorization.id
+              ORDER BY latest.sequence DESC LIMIT 1
+            )
           JOIN app_settings AS settings ON settings.singleton = 1
           WHERE authorization.id = NEW.authorization_id
             AND authorization.state = 'active'
@@ -3059,75 +3336,25 @@ public enum DatabaseSchema {
                   'githubMutation'
                 ))
             )
-            AND (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_requests), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.github_read_requests
+            AND usage.github_read_requests + NEW.github_read_requests
               <= budget.github_read_requests
-            AND (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_pages), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.github_read_pages
+            AND usage.github_read_pages + NEW.github_read_pages
               <= budget.github_read_pages
-            AND (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_scope_read_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(github_read_bytes), 0)
-                 FROM rollout_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.github_read_bytes
+            AND usage.github_read_bytes + NEW.github_read_bytes
               <= budget.github_read_bytes
-            AND (SELECT COALESCE(SUM(git_remote_reads), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id)
-              + (SELECT COALESCE(SUM(git_remote_reads), 0)
-                 FROM rollout_git_readback_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.git_remote_reads
+            AND usage.git_remote_reads + NEW.git_remote_reads
               <= budget.git_remote_reads
-            AND (SELECT COALESCE(SUM(provider_sessions), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.provider_sessions
+            AND usage.provider_sessions + NEW.provider_sessions
               <= budget.provider_sessions
-            AND (SELECT COALESCE(SUM(approved_commands), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.approved_commands
+            AND usage.approved_commands + NEW.approved_commands
               <= budget.approved_commands
-            AND (SELECT COALESCE(SUM(marker_parts), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.marker_parts
-              <= budget.marker_parts
-            AND (SELECT COALESCE(SUM(label_writes), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.label_writes
-              <= budget.label_writes
-            AND (SELECT COALESCE(SUM(branch_creates), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.branch_creates
-              <= budget.branch_creates
-            AND (SELECT COALESCE(SUM(pull_request_creates), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.pull_request_creates
+            AND usage.marker_parts + NEW.marker_parts <= budget.marker_parts
+            AND usage.label_writes + NEW.label_writes <= budget.label_writes
+            AND usage.branch_creates + NEW.branch_creates <= budget.branch_creates
+            AND usage.pull_request_creates + NEW.pull_request_creates
               <= budget.pull_request_creates
-            AND (SELECT COALESCE(SUM(github_sends), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.github_sends
-              <= budget.github_sends
-            AND (SELECT COALESCE(SUM(git_sends), 0)
-                 FROM rollout_effect_reservations
-                 WHERE authorization_id = NEW.authorization_id) + NEW.git_sends
-              <= budget.git_sends
+            AND usage.github_sends + NEW.github_sends <= budget.github_sends
+            AND usage.git_sends + NEW.git_sends <= budget.git_sends
         )
         BEGIN
           SELECT RAISE(ABORT, 'rollout effect exceeds active stage or budget');

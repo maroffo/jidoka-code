@@ -1,0 +1,15 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/22] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.20s)
+Test Suite 'Selected tests' started at 2026-09-04 11:29:19.997.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 11:29:19.998.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 11:29:19.998.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 11:29:19.998.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+warning: No matching test cases were run

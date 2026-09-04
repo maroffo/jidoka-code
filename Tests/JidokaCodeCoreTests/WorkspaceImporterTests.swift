@@ -36,7 +36,7 @@ struct WorkspaceImporterTests {
       configuration,
       now: Date(timeIntervalSince1970: 2_000)
     )
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let creation = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repositoryID,

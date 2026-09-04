@@ -445,6 +445,12 @@ public actor RolloutAuthorityStore {
       else {
         throw RolloutAuthorityError.authorizationNotActive(request.authorizationID)
       }
+      try Self.requireBudget(
+        authorizationID: request.authorizationID,
+        kind: request.kind,
+        cost: request.cost,
+        database: database
+      )
       _ = try database.execute(
         """
         INSERT INTO rollout_effect_reservations(
@@ -513,7 +519,7 @@ public actor RolloutAuthorityStore {
         throw RolloutAuthorityError.invalidStateTransition
       }
       _ = try database.execute(
-        "UPDATE rollout_effect_reservations SET state = ?, updated_at_ms = ? WHERE id = ?",
+        "UPDATE rollout_effect_reservations SET state = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE id = ?",
         bindings: [
           .text(target.rawValue),
           .integer(Self.milliseconds(now)),
@@ -1666,7 +1672,8 @@ extension RolloutAuthorityStore {
         current_step, finite_predicate_version, finite_candidates_sha256,
         finite_candidate_count,
         source_commit, source_tree, bundle_version, bundle_build,
-        application_sha256, helper_sha256, herdr_host_sha256,
+        application_sha256, helper_sha256, ask_pass_sha256, push_guard_sha256,
+        herdr_host_sha256,
         schema_version, engine_protocol_version,
         runtime_manifest_sha256, runtime_tree_sha256, model_profiles_sha256,
         workflow_resources_sha256, github_account, github_author_id,
@@ -1680,7 +1687,7 @@ extension RolloutAuthorityStore {
         command_plan_sha256, command_count,
         effect_envelope_sha256, preview_json
       ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
@@ -1714,6 +1721,8 @@ extension RolloutAuthorityStore {
         .integer(Int64(payload.releaseIdentity.bundleBuild)),
         .text(payload.releaseIdentity.applicationSHA256),
         .text(payload.releaseIdentity.helperSHA256),
+        .text(payload.releaseIdentity.askPassSHA256),
+        .text(payload.releaseIdentity.pushGuardSHA256),
         .text(payload.releaseIdentity.herdrHostSHA256),
         .integer(Int64(payload.releaseIdentity.schemaVersion)),
         .integer(Int64(payload.releaseIdentity.engineProtocolVersion)),
@@ -2156,64 +2165,33 @@ extension RolloutAuthorityStore {
       bindings: [.text(authorizationID)]
     )
     let reservations = try reservationRows.map(decodeReservation)
-    var usage = reservations.reduce(
-      RolloutBudgets(
-        jobs: boundJobs.count,
-        githubReadRequests: 0,
-        githubReadPages: 0,
-        githubReadBytes: 0,
-        gitRemoteReads: 0,
-        providerSessions: 0,
-        approvedCommands: 0,
-        markerParts: 0,
-        labelWrites: 0,
-        branchCreates: 0,
-        pullRequestCreates: 0,
-        githubSends: 0,
-        gitSends: 0
-      )
-    ) { partial, reservation in
-      add(partial, reservation.request.cost.asBudgets)
+    guard
+      let usageRow = try database.query(
+        """
+        SELECT * FROM rollout_authorization_usage
+        WHERE authorization_id = ?
+        ORDER BY sequence DESC LIMIT 1
+        """,
+        bindings: [.text(authorizationID)]
+      ).first
+    else {
+      throw RolloutAuthorityError.decode("rollout usage ledger")
     }
-    if let readUsage = try database.query(
-      """
-      SELECT
-        (SELECT COALESCE(SUM(github_read_requests), 0)
-         FROM rollout_scope_read_reservations WHERE authorization_id = ?) +
-        (SELECT COALESCE(SUM(github_read_requests), 0)
-         FROM rollout_readback_reservations WHERE authorization_id = ?) AS requests,
-        (SELECT COALESCE(SUM(github_read_pages), 0)
-         FROM rollout_scope_read_reservations WHERE authorization_id = ?) +
-        (SELECT COALESCE(SUM(github_read_pages), 0)
-         FROM rollout_readback_reservations WHERE authorization_id = ?) AS pages,
-        (SELECT COALESCE(SUM(github_read_bytes), 0)
-         FROM rollout_scope_read_reservations WHERE authorization_id = ?) +
-        (SELECT COALESCE(SUM(github_read_bytes), 0)
-         FROM rollout_readback_reservations WHERE authorization_id = ?) AS bytes,
-        (SELECT COALESCE(SUM(git_remote_reads), 0)
-         FROM rollout_git_readback_reservations WHERE authorization_id = ?) AS git_reads
-      """,
-      bindings: Array(repeating: .text(authorizationID), count: 7)
-    ).first {
-      usage = add(
-        usage,
-        RolloutBudgets(
-          jobs: 0,
-          githubReadRequests: Int(try integer(readUsage, "requests")),
-          githubReadPages: Int(try integer(readUsage, "pages")),
-          githubReadBytes: try integer(readUsage, "bytes"),
-          gitRemoteReads: Int(try integer(readUsage, "git_reads")),
-          providerSessions: 0,
-          approvedCommands: 0,
-          markerParts: 0,
-          labelWrites: 0,
-          branchCreates: 0,
-          pullRequestCreates: 0,
-          githubSends: 0,
-          gitSends: 0
-        )
-      )
-    }
+    let usage = RolloutBudgets(
+      jobs: boundJobs.count,
+      githubReadRequests: Int(try integer(usageRow, "github_read_requests")),
+      githubReadPages: Int(try integer(usageRow, "github_read_pages")),
+      githubReadBytes: try integer(usageRow, "github_read_bytes"),
+      gitRemoteReads: Int(try integer(usageRow, "git_remote_reads")),
+      providerSessions: Int(try integer(usageRow, "provider_sessions")),
+      approvedCommands: Int(try integer(usageRow, "approved_commands")),
+      markerParts: Int(try integer(usageRow, "marker_parts")),
+      labelWrites: Int(try integer(usageRow, "label_writes")),
+      branchCreates: Int(try integer(usageRow, "branch_creates")),
+      pullRequestCreates: Int(try integer(usageRow, "pull_request_creates")),
+      githubSends: Int(try integer(usageRow, "github_sends")),
+      gitSends: Int(try integer(usageRow, "git_sends"))
+    )
     let events = try database.query(
       """
       SELECT * FROM rollout_authorization_events
@@ -2233,24 +2211,6 @@ extension RolloutAuthorityStore {
       boundJobIDs: boundJobs,
       reservations: reservations,
       events: events
-    )
-  }
-
-  private static func add(_ lhs: RolloutBudgets, _ rhs: RolloutBudgets) -> RolloutBudgets {
-    RolloutBudgets(
-      jobs: lhs.jobs + rhs.jobs,
-      githubReadRequests: lhs.githubReadRequests + rhs.githubReadRequests,
-      githubReadPages: lhs.githubReadPages + rhs.githubReadPages,
-      githubReadBytes: lhs.githubReadBytes + rhs.githubReadBytes,
-      gitRemoteReads: lhs.gitRemoteReads + rhs.gitRemoteReads,
-      providerSessions: lhs.providerSessions + rhs.providerSessions,
-      approvedCommands: lhs.approvedCommands + rhs.approvedCommands,
-      markerParts: lhs.markerParts + rhs.markerParts,
-      labelWrites: lhs.labelWrites + rhs.labelWrites,
-      branchCreates: lhs.branchCreates + rhs.branchCreates,
-      pullRequestCreates: lhs.pullRequestCreates + rhs.pullRequestCreates,
-      githubSends: lhs.githubSends + rhs.githubSends,
-      gitSends: lhs.gitSends + rhs.gitSends
     )
   }
 

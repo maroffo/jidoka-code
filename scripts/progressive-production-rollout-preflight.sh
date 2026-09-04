@@ -111,12 +111,16 @@ readonly EXPECTED_MAX_CONCURRENCY
 EXPECTED_POLICY_VERSION="$(expected_raw release.rolloutPolicyVersion)"
 readonly EXPECTED_POLICY_VERSION
 
+REQUIRED_SOURCE_PATHS="$(
+    "$NODE" "$VALIDATOR" "$EXPECTED" "$EXPECTED_SCHEMA" --paths
+)" || fail 65 "expected-release path validation failed"
+readonly REQUIRED_SOURCE_PATHS
 while IFS= read -r relative_path; do
     [[ -n "$relative_path" ]] || fail 65 "required source path is empty"
     candidate="$SOURCE_ROOT/$relative_path"
     [[ -f "$candidate" && ! -L "$candidate" ]] || \
         fail 66 "required source file is unavailable: $relative_path"
-done < <("$NODE" "$VALIDATOR" "$EXPECTED" "$EXPECTED_SCHEMA" --paths)
+done <<<"$REQUIRED_SOURCE_PATHS"
 
 readonly SOURCE_INFO="$SOURCE_ROOT/Packaging/Info.plist"
 [[ "$("$TOOL_PLUTIL" -extract CFBundleShortVersionString raw "$SOURCE_INFO")" == \

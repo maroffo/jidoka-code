@@ -100,6 +100,53 @@ struct RolloutAuthorityStoreTests {
     }
   }
 
+  @Test("activation rejects a confirmed digest that differs from canonical preview bytes")
+  func activationRejectsPreviewDigestMismatch() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let preview = try await fixture.authority.preview(input: input)
+
+    await #expect(throws: RolloutAuthorityError.previewDigestMismatch) {
+      try await fixture.authority.activate(
+        approvedCanonicalJSON: preview.canonicalJSON,
+        confirmedSHA256: String(repeating: "f", count: 64),
+        recomputedInput: input,
+        authorizationID: fixture.authorizationID,
+        now: fixture.now.addingTimeInterval(1)
+      )
+    }
+
+    #expect(
+      try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_authorizations") == 0)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+  }
+
+  @Test("activation rejects a canonical preview at its exact expiry boundary")
+  func activationRejectsExpiredPreview() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let preview = try await fixture.authority.preview(input: input)
+    let expiry = Date(
+      timeIntervalSince1970: Double(input.expiresAtMilliseconds) / 1_000
+    )
+
+    await #expect(throws: RolloutAuthorityError.previewExpired) {
+      try await fixture.authority.activate(
+        approvedCanonicalJSON: preview.canonicalJSON,
+        confirmedSHA256: preview.sha256,
+        recomputedInput: input,
+        authorizationID: fixture.authorizationID,
+        now: expiry
+      )
+    }
+
+    #expect(
+      try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_authorizations") == 0)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+  }
+
   @Test("preview rejects duplicate labels and lists larger than their budgets")
   func previewEffectListsFitBudgets() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
@@ -164,6 +211,113 @@ struct RolloutAuthorityStoreTests {
     #expect(try await fixture.database.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
   }
 
+  @Test("database lease triggers reject an unbound quarantined generated review")
+  func repositoryLeaseRequiresRolloutBinding() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let seed = DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
+    let parentRevision = String(repeating: "9", count: 64)
+    guard
+      case .created = try await seed.createJob(
+        id: fixture.jobID,
+        identity: LogicalJobIdentity(
+          repositoryID: fixture.repositoryID,
+          kind: .issueImplementation,
+          objectNodeID: "I_fixture_rollout",
+          revisionKey: parentRevision
+        ),
+        objectNumber: 17,
+        contractVersionUsed: "implementation-v1",
+        priority: .issueImplementation,
+        firstStep: .orchestrate,
+        now: fixture.now
+      )
+    else {
+      Issue.record("parent rollout job was unexpectedly suppressed")
+      return
+    }
+    let input = try await fixture.missingExecutionPreviewInput()
+    let preview = try await fixture.authority.preview(input: input)
+    _ = try await fixture.authority.activate(
+      approvedCanonicalJSON: preview.canonicalJSON,
+      confirmedSHA256: preview.sha256,
+      recomputedInput: input,
+      authorizationID: fixture.authorizationID,
+      now: fixture.now.addingTimeInterval(1)
+    )
+    try await fixture.database.execute(
+      "UPDATE jobs SET state = 'reconciling', current_step = 4, current_step_kind = 'qa' WHERE id = ?",
+      bindings: [.text(fixture.jobID.uuidString.lowercased())]
+    )
+    let childID = UUID()
+    let childRevision = String(repeating: "8", count: 40)
+    guard
+      case .created = try await DurableJobStore(
+        database: fixture.database,
+        enforceRolloutAuthority: true
+      ).createQuarantinedGeneratedReviewJob(
+        id: childID,
+        parentJobID: fixture.jobID,
+        identity: LogicalJobIdentity(
+          repositoryID: fixture.repositoryID,
+          kind: .prReview,
+          objectNodeID: "PR_generated_quarantine",
+          revisionKey: childRevision
+        ),
+        objectNumber: 18,
+        contractVersionUsed: "generated-review-v1",
+        now: fixture.now.addingTimeInterval(2)
+      )
+    else {
+      Issue.record("generated review was unexpectedly suppressed")
+      return
+    }
+
+    await #expect(throws: SQLiteStoreError.self) {
+      try await fixture.database.execute(
+        """
+        INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
+        VALUES (?, ?, 1, ?, 1)
+        """,
+        bindings: [
+          .text(fixture.repositoryID.uuidString.lowercased()),
+          .text(childID.uuidString.lowercased()),
+          .real(fixture.now.addingTimeInterval(3).timeIntervalSince1970),
+        ]
+      )
+    }
+    #expect(
+      try await fixture.database.execute(
+        """
+        INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
+        VALUES (?, ?, 1, ?, 1)
+        """,
+        bindings: [
+          .text(fixture.repositoryID.uuidString.lowercased()),
+          .text(fixture.jobID.uuidString.lowercased()),
+          .real(fixture.now.addingTimeInterval(3).timeIntervalSince1970),
+        ]
+      ) == 1
+    )
+    try await fixture.database.execute(
+      "UPDATE repository_leases SET active = 0 WHERE repository_id = ?",
+      bindings: [.text(fixture.repositoryID.uuidString.lowercased())]
+    )
+    await #expect(throws: SQLiteStoreError.self) {
+      try await fixture.database.execute(
+        """
+        UPDATE repository_leases SET job_id = ?, generation = generation + 1,
+          heartbeat = ?, active = 1 WHERE repository_id = ?
+        """,
+        bindings: [
+          .text(childID.uuidString.lowercased()),
+          .real(fixture.now.addingTimeInterval(4).timeIntervalSince1970),
+          .text(fixture.repositoryID.uuidString.lowercased()),
+        ]
+      )
+    }
+  }
+
   @Test("execution activation cannot invent a job beyond the planning checkpoint")
   func executionRequiresDurablePlannedJob() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
@@ -187,7 +341,7 @@ struct RolloutAuthorityStoreTests {
   func exactExecutionDispatchesWaitingApproval() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
     defer { fixture.remove() }
-    let jobs = DurableJobStore(database: fixture.database)
+    let jobs = DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       id: fixture.jobID,
       identity: LogicalJobIdentity(
@@ -250,7 +404,7 @@ struct RolloutAuthorityStoreTests {
       enforceApplicationDispatchGate: true,
       enforceRolloutAuthority: true
     )
-    let seed = DurableJobStore(database: fixture.database)
+    let seed = DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
     let created = try await seed.createJob(
       id: fixture.jobID,
       identity: LogicalJobIdentity(
@@ -454,7 +608,7 @@ struct RolloutAuthorityStoreTests {
     let fixture = try await RolloutAuthorityFixture.make()
     defer { fixture.remove() }
     _ = try await fixture.missingExecutionPreviewInput()
-    let jobs = DurableJobStore(database: fixture.database)
+    let jobs = DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       id: fixture.jobID,
       identity: LogicalJobIdentity(
@@ -750,6 +904,14 @@ struct RolloutAuthorityStoreTests {
         now: fixture.now.addingTimeInterval(2)
       )
       #expect(replay.id == first.id)
+      if ordinal == 0 {
+        await #expect(throws: SQLiteStoreError.self) {
+          try await fixture.database.execute(
+            "UPDATE rollout_effect_reservations SET updated_at_ms = updated_at_ms + 1 WHERE id = ?",
+            bindings: [.text(first.id)]
+          )
+        }
+      }
       _ = try await fixture.authority.settleReservation(
         id: first.id,
         attributed: false,
@@ -757,7 +919,7 @@ struct RolloutAuthorityStoreTests {
         now: fixture.now.addingTimeInterval(3)
       )
     }
-    await #expect(throws: SQLiteStoreError.self) {
+    await #expect(throws: RolloutAuthorityError.budgetExceeded(.providerSession)) {
       try await fixture.authority.reserveEffect(
         fixture.providerRequest(ordinal: 4),
         now: fixture.now.addingTimeInterval(4)
@@ -768,11 +930,48 @@ struct RolloutAuthorityStoreTests {
         authorizationID: fixture.authorizationID.uuidString.lowercased()
       ).remainingBudgets.providerSessions == 0
     )
+    #expect(
+      try await fixture.database.scalarInt(
+        "SELECT COUNT(*) FROM rollout_authorization_usage WHERE authorization_id = ?",
+        bindings: [.text(fixture.authorizationID.uuidString.lowercased())]
+      ) == 5
+    )
+    #expect(
+      try await fixture.database.scalarInt(
+        """
+        SELECT provider_sessions FROM rollout_authorization_usage
+        WHERE authorization_id = ? ORDER BY sequence DESC LIMIT 1
+        """,
+        bindings: [.text(fixture.authorizationID.uuidString.lowercased())]
+      ) == 4
+    )
+    #expect(
+      try await fixture.database.scalarInt(
+        """
+        SELECT COUNT(*) FROM sqlite_master
+        WHERE type = 'trigger' AND name LIKE 'rollout_%reservations_%'
+          AND upper(sql) LIKE '%SUM(%'
+        """
+      ) == 0
+    )
     await #expect(throws: SQLiteStoreError.self) {
       try await fixture.database.execute(
         "UPDATE rollout_authorization_budgets SET provider_sessions = 5"
       )
     }
+    #expect(
+      try await fixture.database.scalarInt(
+        """
+        SELECT COUNT(*) FROM sqlite_master
+        WHERE type = 'trigger' AND name IN (
+          'rollout_effect_reservations_updated_at_monotonic',
+          'rollout_scope_read_reservations_updated_at_monotonic',
+          'rollout_readback_reservations_updated_at_monotonic',
+          'rollout_git_readback_reservations_updated_at_monotonic'
+        )
+        """
+      ) == 4
+    )
     await #expect(throws: SQLiteStoreError.self) {
       try await fixture.database.execute("DELETE FROM rollout_effect_reservations")
     }
@@ -1046,7 +1245,7 @@ struct RolloutAuthorityStoreTests {
       intentIDs.append(intent.id)
     }
 
-    await #expect(throws: SQLiteStoreError.self) {
+    await #expect(throws: RolloutAuthorityError.budgetExceeded(.markerBatch)) {
       try await withTestRolloutWorkflow(jobID: fixture.jobID) {
         _ = try await fixture.authority.reserveMarkerBatch(
           fixture.markerBatch(intentIDs: intentIDs, documentSHA256: documentSHA256),
@@ -1722,7 +1921,7 @@ struct RolloutAuthorityStoreTests {
       )
     )
 
-    let historicalJobs = DurableJobStore(database: fixture.database)
+    let historicalJobs = DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
     let historicalID = UUID()
     _ = try await historicalJobs.createJob(
       id: historicalID,
@@ -2046,6 +2245,8 @@ private struct RolloutAuthorityFixture {
         bundleBuild: 3,
         applicationSHA256: digest,
         helperSHA256: digest,
+        askPassSHA256: digest,
+        pushGuardSHA256: digest,
         herdrHostSHA256: digest,
         schemaVersion: 10,
         engineProtocolVersion: 12,
@@ -2162,6 +2363,8 @@ private struct RolloutAuthorityFixture {
         bundleBuild: 3,
         applicationSHA256: digest,
         helperSHA256: digest,
+        askPassSHA256: digest,
+        pushGuardSHA256: digest,
         herdrHostSHA256: digest,
         schemaVersion: 10,
         engineProtocolVersion: 12,
@@ -2297,6 +2500,8 @@ private struct RolloutAuthorityFixture {
         bundleBuild: 3,
         applicationSHA256: digest,
         helperSHA256: digest,
+        askPassSHA256: digest,
+        pushGuardSHA256: digest,
         herdrHostSHA256: digest,
         schemaVersion: 10,
         engineProtocolVersion: 12,
@@ -2380,7 +2585,8 @@ private struct RolloutAuthorityFixture {
     let workflow = RolloutCoordinatorWorkflow(jobs: jobs, mode: workflowMode, now: now)
     let repositories = try RepositoryStore(
       rootURL: root.appendingPathComponent("ApplicationSupport", isDirectory: true),
-      database: database
+      database: database,
+      transport: SystemGitTransport()
     )
     let coordinator = JobCoordinator(
       configuration: ConfigurationStore(database: database),

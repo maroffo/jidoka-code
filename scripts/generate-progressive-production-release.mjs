@@ -3,8 +3,8 @@ function fail(message) {
   process.exit(1);
 }
 
-if (process.argv.length !== 13) {
-  fail("expected 11 manifest values");
+if (process.argv.length !== 15) {
+  fail("expected 13 manifest values");
 }
 
 const [
@@ -13,6 +13,8 @@ const [
   bundleVersion,
   bundleBuildText,
   helperSHA256,
+  askPassSHA256,
+  pushGuardSHA256,
   herdrHostSHA256,
   databaseSchemaVersionText,
   engineProtocolVersionText,
@@ -29,6 +31,8 @@ if (!sha1.test(sourceCommit) || !sha1.test(sourceTree)) {
 if (
   ![
     helperSHA256,
+    askPassSHA256,
+    pushGuardSHA256,
     herdrHostSHA256,
     runtimeManifestSHA256,
     runtimeTreeSHA256,
@@ -45,13 +49,15 @@ if (databaseSchemaVersionText !== "10" || engineProtocolVersionText !== "12") {
 }
 
 const manifest = {
+  askPassSHA256,
   bundleBuild: Number(bundleBuildText),
   bundleVersion,
   databaseSchemaVersion: Number(databaseSchemaVersionText),
   engineProtocolVersion: Number(engineProtocolVersionText),
   helperSHA256,
   herdrHostSHA256,
-  manifestSchemaVersion: 1,
+  manifestSchemaVersion: 2,
+  pushGuardSHA256,
   runtimeManifestSHA256,
   runtimeTreeSHA256,
   sourceCommit,

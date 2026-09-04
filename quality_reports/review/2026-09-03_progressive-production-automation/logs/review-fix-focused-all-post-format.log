@@ -1,0 +1,178 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/22] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.22s)
+Test Suite 'Selected tests' started at 2026-09-04 11:34:26.535.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 11:34:26.535.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 11:34:26.535.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 11:34:26.535.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Crash-safe approved command executor" started.
+◇ Suite "Rollout release identity attestor" started.
+◇ Suite "Durable scheduler" started.
+◇ Test "an accepted local result settles its exact send-started reservation after restart" started.
+◇ Suite "Atomic create-only Git publication" started.
+◇ Test "closing admission after command reservation denies process creation" started.
+◇ Test "a Git send permit is task-bound and consumed before transport" started.
+◇ Test "an effect followed by lost evidence becomes unknown and never starts again" started.
+◇ Test "an accepted result replays after store reopen without another process effect" started.
+◇ Test "packaged release identity must match every executable and resource binding" started.
+◇ Suite "One-shot Git askpass capability" started.
+◇ Test "an approved-command permit is task-bound and consumed before process creation" started.
+◇ Test "periodic tick is exactly 600 seconds" started.
+◇ Test "executor preserves a definitive pre-process authority denial" started.
+◇ Suite "Progressive rollout authority" started.
+◇ Test "immediate triggers are bounded and overlapping passes coalesce once" started.
+◇ Test "rollout admission selects active, readback-only, denied, and error paths" started.
+◇ Test "startup coordinator persists recovery before scheduling discovery" started.
+◇ Test "repository backoff persists 60 through 1800 seconds and resets" started.
+◇ Test "pause drops pending triggers and resume schedules one immediate pass" started.
+◇ Test "a sleeping run loop wakes for an immediate trigger" started.
+◇ Test "priority order is locked while starvation is observation-only" started.
+◇ Test "system Git publishes old-zero create, reads exact SHA, and never overwrites" started.
+◇ Test "race injection preserves the competing ref and never retries automatically" started.
+◇ Test "injected virtual clock drives startup, periodic, wake, and network triggers" started.
+◇ Test "concurrent publication for one repository ref is rejected before a second create" started.
+◇ Test "durable publisher records send epoch and recovers unknown sends read-only" started.
+◇ Test "branch traversal, malformed SHA, and missing commit fail before a send" started.
+◇ Test "a ref created before advertisement cannot be fast-forwarded" started.
+◇ Test "every post-send outcome reconciles without a blind second create" started.
+◇ Suite "Rollout remote preview revalidation" started.
+◇ Test "durable publisher denial leaves a prepared intent and performs no Git send" started.
+◇ Test "inspection failures are normalized to fail-closed rollout drift" started.
+◇ Test "brokered credential is host-bound, one-shot, and absent from disk and environment" started.
+◇ Test "activation rejects a canonical preview at its exact expiry boundary" started.
+◇ Test "planning authority cannot cross the durable simple-plan boundary" started.
+◇ Test "issue marker revision and label sends are bound to the live planning step" started.
+◇ Test "the same durable provider run reuses one permit without consuming another slot" started.
+◇ Test "provider admission binds artifact, narrative, resources, and model profile" started.
+◇ Test "preview rejects duplicate labels and lists larger than their budgets" started.
+◇ Test "an exact transient failure closes the lane instead of retrying" started.
+◇ Test "expiry closes and terminalizes the lane before any fresh effect" started.
+◇ Test "activation rejects every stale preview digest" started.
+◇ Test "startup recovery transforms only the bound rollout job before explicit continuation" started.
+◇ Test "stale approval checkpoints into a separately authorized planning step" started.
+◇ Test "concurrent reservations cannot overrun the provider cap" started.
+◇ Test "confirmed recovery resumes only the same exact job after every effect settles" started.
+◇ Test "terminal historical evidence does not block a later drain" started.
+◇ Test "activation rejects a confirmed digest that differs from canonical preview bytes" started.
+◇ Test "revocation denies fresh effects but preserves exact uncertain-effect readback" started.
+◇ Test "finite activation requires a same-stage exact receipt" started.
+◇ Test "preview is read-only and exact activation is atomic" started.
+◇ Test "execution activation cannot invent a job beyond the planning checkpoint" started.
+◇ Test "a settled local provider result reconciles only its bound reservation" started.
+◇ Test "effect reservations consume a finite cap and remain immutable" started.
+◇ Test "configuration drift fails and pauses the active lane before another effect" started.
+◇ Test "send permits are task-bound, single-use transport capabilities" started.
+◇ Test "database lease triggers reject an unbound quarantined generated review" started.
+◇ Test "marker cap failure rolls back the complete reservation batch" started.
+◇ Test "exact execution evaluates only its bound waiting-human job" started.
+◇ Test "an exact interrupted provider boundary requires explicit recovery" started.
+◇ Test "an exact intentional terminal result settles and pauses its stage" started.
+◇ Test "generated review activation cannot invent an unlinked child job" started.
+◇ Test "execution start is not misreported as a completed stage" started.
+◇ Test "first finite window admits only its closed future predicate and uses operational expiry" started.
+◇ Test "GitHub reads require the matching task-local scope and settle exactly once" started.
+◇ Test "restart reattaches only pre-boundary orphan reservations after exact recovery" started.
+◇ Test "a rollout job cannot settle an unreserved mutation effect" started.
+◇ Test "stop enters draining before durable pause and terminalizes only after drain" started.
+✔ Test "immediate triggers are bounded and overlapping passes coalesce once" passed after 0.001 seconds.
+✔ Test "periodic tick is exactly 600 seconds" passed after 0.001 seconds.
+✔ Test "pause drops pending triggers and resume schedules one immediate pass" passed after 0.001 seconds.
+✔ Test "rollout admission selects active, readback-only, denied, and error paths" passed after 0.001 seconds.
+◇ Test "canonical preview rejects unknown fields and changed bytes" started.
+✔ Test "priority order is locked while starvation is observation-only" passed after 0.001 seconds.
+✔ Test "injected virtual clock drives startup, periodic, wake, and network triggers" passed after 0.001 seconds.
+◇ Test "exact triage preview binds issue, labels, and default-branch base" started.
+◇ Test "exact triage preview rejects issue-label and repository-label drift" started.
+◇ Test "exact PR preview rejects every independently drifted remote binding" started.
+◇ Test "finite preview binds the complete deterministic candidate set" started.
+◇ Test "exact execution preview binds the approved waiting-human checkpoint" started.
+✔ Test "packaged release identity must match every executable and resource binding" passed after 0.004 seconds.
+✔ Test "race injection preserves the competing ref and never retries automatically" passed after 0.165 seconds.
+✔ Test "inspection failures are normalized to fail-closed rollout drift" passed after 0.187 seconds.
+✔ Test "branch traversal, malformed SHA, and missing commit fail before a send" passed after 0.188 seconds.
+✔ Test "every post-send outcome reconciles without a blind second create" passed after 0.200 seconds.
+✔ Test "durable publisher denial leaves a prepared intent and performs no Git send" passed after 0.249 seconds.
+✔ Test "preview rejects duplicate labels and lists larger than their budgets" passed after 0.249 seconds.
+✔ Test "activation rejects a canonical preview at its exact expiry boundary" passed after 0.249 seconds.
+✔ Test "startup coordinator persists recovery before scheduling discovery" passed after 0.250 seconds.
+✔ Test "planning authority cannot cross the durable simple-plan boundary" passed after 0.249 seconds.
+✔ Test "expiry closes and terminalizes the lane before any fresh effect" passed after 0.249 seconds.
+✔ Test "activation rejects every stale preview digest" passed after 0.249 seconds.
+✔ Test "issue marker revision and label sends are bound to the live planning step" passed after 0.250 seconds.
+✔ Test "an exact transient failure closes the lane instead of retrying" passed after 0.250 seconds.
+✔ Test "the same durable provider run reuses one permit without consuming another slot" passed after 0.250 seconds.
+✔ Test "provider admission binds artifact, narrative, resources, and model profile" passed after 0.250 seconds.
+✔ Test "startup recovery transforms only the bound rollout job before explicit continuation" passed after 0.250 seconds.
+✔ Test "stale approval checkpoints into a separately authorized planning step" passed after 0.250 seconds.
+✔ Test "durable publisher records send epoch and recovers unknown sends read-only" passed after 0.251 seconds.
+✔ Test "repository backoff persists 60 through 1800 seconds and resets" passed after 0.251 seconds.
+✔ Test "activation rejects a confirmed digest that differs from canonical preview bytes" passed after 0.250 seconds.
+✔ Test "finite activation requires a same-stage exact receipt" passed after 0.250 seconds.
+✔ Test "execution activation cannot invent a job beyond the planning checkpoint" passed after 0.250 seconds.
+✔ Test "terminal historical evidence does not block a later drain" passed after 0.250 seconds.
+✔ Test "confirmed recovery resumes only the same exact job after every effect settles" passed after 0.250 seconds.
+✔ Test "revocation denies fresh effects but preserves exact uncertain-effect readback" passed after 0.250 seconds.
+✔ Test "preview is read-only and exact activation is atomic" passed after 0.250 seconds.
+✔ Test "effect reservations consume a finite cap and remain immutable" passed after 0.250 seconds.
+✔ Test "configuration drift fails and pauses the active lane before another effect" passed after 0.250 seconds.
+✔ Test "database lease triggers reject an unbound quarantined generated review" passed after 0.250 seconds.
+✔ Test "a settled local provider result reconciles only its bound reservation" passed after 0.250 seconds.
+✔ Test "send permits are task-bound, single-use transport capabilities" passed after 0.250 seconds.
+✔ Test "exact execution evaluates only its bound waiting-human job" passed after 0.250 seconds.
+✔ Test "marker cap failure rolls back the complete reservation batch" passed after 0.250 seconds.
+✔ Test "an exact interrupted provider boundary requires explicit recovery" passed after 0.250 seconds.
+✔ Test "an exact intentional terminal result settles and pauses its stage" passed after 0.250 seconds.
+✔ Test "generated review activation cannot invent an unlinked child job" passed after 0.250 seconds.
+✔ Test "a rollout job cannot settle an unreserved mutation effect" passed after 0.250 seconds.
+✔ Test "canonical preview rejects unknown fields and changed bytes" passed after 0.250 seconds.
+✔ Test "GitHub reads require the matching task-local scope and settle exactly once" passed after 0.250 seconds.
+✔ Suite "Rollout release identity attestor" passed after 0.252 seconds.
+✔ Test "execution start is not misreported as a completed stage" passed after 0.250 seconds.
+✔ Test "stop enters draining before durable pause and terminalizes only after drain" passed after 0.250 seconds.
+✔ Test "brokered credential is host-bound, one-shot, and absent from disk and environment" passed after 0.251 seconds.
+✔ Test "concurrent publication for one repository ref is rejected before a second create" passed after 0.251 seconds.
+◇ Test "built askpass executable consumes the capability without token argv or env" started.
+✔ Test "first finite window admits only its closed future predicate and uses operational expiry" passed after 0.268 seconds.
+✔ Test "a sleeping run loop wakes for an immediate trigger" passed after 0.270 seconds.
+✔ Suite "Durable scheduler" passed after 0.271 seconds.
+✔ Test "concurrent reservations cannot overrun the provider cap" passed after 0.272 seconds.
+✔ Test "restart reattaches only pre-boundary orphan reservations after exact recovery" passed after 0.272 seconds.
+✔ Suite "Progressive rollout authority" passed after 0.274 seconds.
+✔ Test "exact triage preview binds issue, labels, and default-branch base" passed after 0.276 seconds.
+✔ Test "exact execution preview binds the approved waiting-human checkpoint" passed after 0.302 seconds.
+✔ Test "finite preview binds the complete deterministic candidate set" passed after 0.302 seconds.
+✔ Test "exact triage preview rejects issue-label and repository-label drift" passed after 0.333 seconds.
+✔ Test "an approved-command permit is task-bound and consumed before process creation" passed after 0.876 seconds.
+✔ Test "executor preserves a definitive pre-process authority denial" passed after 0.903 seconds.
+✔ Test "built askpass executable consumes the capability without token argv or env" passed after 0.656 seconds.
+◇ Test "partial clients cannot hold the one-shot server past its deadline" started.
+✔ Test "exact PR preview rejects every independently drifted remote binding" passed after 1.091 seconds.
+✔ Suite "Rollout remote preview revalidation" passed after 1.093 seconds.
+✔ Test "closing admission after command reservation denies process creation" passed after 1.136 seconds.
+✔ Test "a Git send permit is task-bound and consumed before transport" passed after 1.138 seconds.
+✔ Test "an accepted local result settles its exact send-started reservation after restart" passed after 1.358 seconds.
+✔ Test "an effect followed by lost evidence becomes unknown and never starts again" passed after 1.391 seconds.
+✔ Test "system Git publishes old-zero create, reads exact SHA, and never overwrites" passed after 1.485 seconds.
+✔ Test "a ref created before advertisement cannot be fast-forwarded" passed after 1.512 seconds.
+✔ Suite "Atomic create-only Git publication" passed after 1.513 seconds.
+✔ Test "an accepted result replays after store reopen without another process effect" passed after 1.624 seconds.
+✔ Suite "Crash-safe approved command executor" passed after 1.625 seconds.
+✔ Test "partial clients cannot hold the one-shot server past its deadline" passed after 1.001 seconds.
+◇ Test "wrong nonce or remote consumes the capability without releasing a token" started.
+✔ Test "wrong nonce or remote consumes the capability without releasing a token" passed after 0.001 seconds.
+◇ Test "production-length Application Support paths fit one-shot askpass sockets" started.
+✔ Test "production-length Application Support paths fit one-shot askpass sockets" passed after 0.001 seconds.
+◇ Test "occupied socket names are preserved while a fresh name is bound" started.
+✔ Test "occupied socket names are preserved while a fresh name is bound" passed after 0.001 seconds.
+◇ Test "unsafe socket directories and remote identities fail before token release" started.
+✔ Test "unsafe socket directories and remote identities fail before token release" passed after 0.001 seconds.
+◇ Test "writable askpass executables and parent directories are rejected" started.
+✔ Test "writable askpass executables and parent directories are rejected" passed after 0.001 seconds.
+✔ Suite "One-shot Git askpass capability" passed after 1.915 seconds.
+✔ Test run with 75 tests in 7 suites passed after 1.916 seconds.

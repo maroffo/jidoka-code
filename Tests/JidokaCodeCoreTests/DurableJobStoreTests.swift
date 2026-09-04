@@ -39,7 +39,7 @@ struct DurableJobStoreTests {
 
     await fixture.database.close()
     let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let reopened = DurableJobStore(database: reopenedDatabase)
+    let reopened = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let afterRestart = try await reopened.createJob(
       identity: identity,
       contractVersionUsed: "app-and-skill-v99",
@@ -518,7 +518,7 @@ struct DurableJobStoreTests {
 
     await fixture.database.close()
     let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let reopened = DurableJobStore(database: reopenedDatabase)
+    let reopened = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let recoveryRecords = try await reopened.recoverAtStartup(now: now)
     #expect(try await reopened.activeLeases().isEmpty)
     let awaitingRecord = try #require(
@@ -768,7 +768,9 @@ struct DurableJobStoreTests {
 
     await fixture.database.close()
     let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let reopened = try await DurableJobStore(database: reopenedDatabase).applyMaintenance(
+    let reopened = try await DurableJobStore(
+      database: reopenedDatabase, enforceRolloutAuthority: false
+    ).applyMaintenance(
       authorization,
       now: Date(timeIntervalSince1970: TimeInterval(boundary + 3_000))
     )
@@ -1069,6 +1071,30 @@ struct DurableJobStoreTests {
     #expect(try await fixture.jobs.job(id: candidate.id)?.state == .leased)
     #expect(try await fixture.jobs.job(id: untouched.id)?.state == .queued)
     #expect(try await fixture.jobs.activeLeases().map(\.jobID) == [candidate.id])
+    let rolloutAuthority = RolloutAuthorityStore(database: fixture.database)
+    let historicalContext = RolloutEffectExecutionContext(
+      mode: .historicalCanary(jobID: candidate.id)
+    )
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await RolloutEffectTaskContext.$current.withValue(historicalContext) {
+        try await rolloutAuthority.reserveGitHubRead(
+          RolloutGitHubReadEffect(
+            operation: .pullRequest(
+              owner: "owner",
+              repository: "repo-\(repositoryID.uuidString.lowercased())",
+              number: 42
+            ),
+            maximumResponseBytes: 4_096,
+            context: historicalContext
+          ),
+          now: fixture.now
+        )
+      }
+    }
+    #expect(
+      try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_effect_reservations")
+        == 0
+    )
     await #expect(throws: DurableJobStoreError.canaryUnsafe(candidate.id)) {
       _ = try await fixture.jobs.previewCanary(
         scope: scope,
@@ -1637,7 +1663,7 @@ private final class JobStoreFixture: @unchecked Sendable {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     databaseURL = root.appendingPathComponent("jidoka-code.sqlite3")
     database = try SQLiteStore(databaseURL: databaseURL)
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
   }
 
   func remove() {

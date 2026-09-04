@@ -318,6 +318,59 @@ struct GitAskPassTests {
       }
     }
   }
+
+  @Test("writable askpass executables and parent directories are rejected")
+  func rejectsWritableAskPassChain() throws {
+    let root = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let socketDirectory = root.appendingPathComponent("sockets", isDirectory: true)
+    let helpers = root.appendingPathComponent("helpers", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: socketDirectory,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    try FileManager.default.createDirectory(
+      at: helpers,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    let executable = helpers.appendingPathComponent("JidokaCodeAskPass")
+    try writeExecutable(executable, "#!/bin/sh\nexit 0\n")
+    let broker = GitHubBroker(
+      tokenProvider: AskPassTokenProvider(token: Data(repeating: 0x74, count: 32)),
+      transport: UnusedAskPassHTTPTransport(),
+      readAuthority: ExplicitTestRolloutEffectAuthority()
+    )
+
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o722],
+      ofItemAtPath: executable.path
+    )
+    #expect(throws: GitAskPassError.credentialRejected) {
+      _ = try GitHubGitCredentialProvider(
+        broker: broker,
+        socketDirectory: socketDirectory,
+        askPassExecutable: executable
+      )
+    }
+
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o700],
+      ofItemAtPath: executable.path
+    )
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o722],
+      ofItemAtPath: helpers.path
+    )
+    #expect(throws: GitAskPassError.credentialRejected) {
+      _ = try GitHubGitCredentialProvider(
+        broker: broker,
+        socketDirectory: socketDirectory,
+        askPassExecutable: executable
+      )
+    }
+  }
 }
 
 private func withGitCredentialCarrier<Value: Sendable>(

@@ -407,7 +407,7 @@ struct ConfigurationStoreTests {
         now: now
       )
     }
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let first = try await createConfigurationJob(
       jobs: jobs,
       repositoryID: firstRepository,

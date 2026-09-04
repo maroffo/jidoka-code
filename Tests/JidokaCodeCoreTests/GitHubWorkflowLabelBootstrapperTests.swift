@@ -29,19 +29,20 @@ struct GitHubWorkflowLabelBootstrapperTests {
       ),
       now: Date(timeIntervalSince1970: 150_000)
     )
-    let creation = try await DurableJobStore(database: database).createJob(
-      identity: LogicalJobIdentity(
-        repositoryID: repositoryID,
-        kind: .issueTriage,
-        objectNodeID: "issue-node",
-        revisionKey: "initial-triage"
-      ),
-      objectNumber: 1,
-      contractVersionUsed: "w6-test",
-      priority: .triage,
-      firstStep: .triage,
-      now: Date(timeIntervalSince1970: 150_000)
-    )
+    let creation = try await DurableJobStore(database: database, enforceRolloutAuthority: false)
+      .createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repositoryID,
+          kind: .issueTriage,
+          objectNodeID: "issue-node",
+          revisionKey: "initial-triage"
+        ),
+        objectNumber: 1,
+        contractVersionUsed: "w6-test",
+        priority: .triage,
+        firstStep: .triage,
+        now: Date(timeIntervalSince1970: 150_000)
+      )
     guard case .created(let job) = creation else { return }
     let api = WorkflowLabelBootstrapAPI()
     let intents = MutationIntentStore(database: database)

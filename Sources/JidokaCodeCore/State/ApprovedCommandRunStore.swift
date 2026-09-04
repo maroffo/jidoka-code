@@ -490,6 +490,48 @@ public actor ApprovedCommandRunStore {
     }
   }
 
+  @discardableResult
+  func recordLaunchDenied(
+    runID: String,
+    detailCode: String = "LAUNCH_DENIED_BEFORE_PROCESS"
+  ) async throws -> ApprovedCommandRunRecord {
+    guard Self.validRunID(runID), Self.validDetailCode(detailCode) else {
+      throw ApprovedCommandRunStoreError.invalidRecord
+    }
+    let timestamp = now()
+    return try await database.transaction { database in
+      let run = try Self.requireRun(runID, database: database)
+      if run.state == .superseded { return run }
+      guard run.state == .started else {
+        if run.state == .unknown {
+          throw ApprovedCommandRunStoreError.outcomeUnknown(runID)
+        }
+        throw ApprovedCommandRunStoreError.invalidTransition
+      }
+      let changed = try database.execute(
+        """
+        UPDATE approved_command_runs
+        SET state = 'superseded', updated_at = ?
+        WHERE id = ? AND state = 'started'
+        """,
+        bindings: [
+          .real(timestamp.timeIntervalSince1970),
+          .text(runID),
+        ]
+      )
+      guard changed == 1 else { throw ApprovedCommandRunStoreError.invalidTransition }
+      try Self.appendEvent(
+        runID: runID,
+        kind: .superseded,
+        recordSHA256: nil,
+        detailCode: detailCode,
+        at: timestamp,
+        database: database
+      )
+      return try Self.requireRun(runID, database: database)
+    }
+  }
+
   public func recoverAtStartup() async throws -> [ApprovedCommandRunRecord] {
     let timestamp = now()
     return try await database.transaction { database in

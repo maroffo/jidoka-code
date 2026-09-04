@@ -158,7 +158,7 @@ public actor DurableJobStore {
   public init(
     database: SQLiteStore,
     enforceApplicationDispatchGate: Bool = false,
-    enforceRolloutAuthority: Bool = false
+    enforceRolloutAuthority: Bool
   ) {
     self.database = database
     self.enforceApplicationDispatchGate = enforceApplicationDispatchGate

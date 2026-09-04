@@ -240,19 +240,20 @@ struct GitPublicationTests {
       ),
       now: Date(timeIntervalSince1970: 4_000)
     )
-    let creation = try await DurableJobStore(database: database).createJob(
-      identity: LogicalJobIdentity(
-        repositoryID: repositoryID,
-        kind: .issueImplementation,
-        objectNodeID: "I_intent",
-        revisionKey: "claim-1"
-      ),
-      objectNumber: 6,
-      contractVersionUsed: "v1",
-      priority: .issueImplementation,
-      firstStep: .publish,
-      now: Date(timeIntervalSince1970: 4_000)
-    )
+    let creation = try await DurableJobStore(database: database, enforceRolloutAuthority: false)
+      .createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repositoryID,
+          kind: .issueImplementation,
+          objectNodeID: "I_intent",
+          revisionKey: "claim-1"
+        ),
+        objectNumber: 6,
+        contractVersionUsed: "v1",
+        priority: .issueImplementation,
+        firstStep: .publish,
+        now: Date(timeIntervalSince1970: 4_000)
+      )
     let job = try #require(createdPublicationJob(creation))
     let intents = MutationIntentStore(database: database)
     let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
@@ -394,6 +395,75 @@ struct GitPublicationTests {
         == .reconcileRequired
     )
     #expect(await unreadableTransport.createCount() == 1)
+  }
+
+  @Test("durable publisher denial leaves a prepared intent and performs no Git send")
+  func durablePublisherDenial() async throws {
+    let fixture = try GitTestRoot(prefix: "jidoka-publication-denied")
+    defer { fixture.remove() }
+    let database = try SQLiteStore(
+      databaseURL: fixture.root.appendingPathComponent("state.sqlite3")
+    )
+    let repositoryID = UUID()
+    try await ConfigurationStore(database: database).upsertRepository(
+      RepositoryConfiguration(
+        id: repositoryID,
+        nodeID: "R_denied",
+        owner: "owner",
+        name: "repo",
+        defaultBranch: "main",
+        reviewEnabled: true,
+        triageEnabled: true,
+        implementationEnabled: true,
+        enabled: true
+      ),
+      now: Date(timeIntervalSince1970: 4_100)
+    )
+    let creation = try await DurableJobStore(
+      database: database,
+      enforceRolloutAuthority: false
+    ).createJob(
+      identity: LogicalJobIdentity(
+        repositoryID: repositoryID,
+        kind: .issueImplementation,
+        objectNodeID: "I_denied",
+        revisionKey: "claim-denied"
+      ),
+      objectNumber: 7,
+      contractVersionUsed: "v1",
+      priority: .issueImplementation,
+      firstStep: .publish,
+      now: Date(timeIntervalSince1970: 4_100)
+    )
+    let job = try #require(createdPublicationJob(creation))
+    let intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
+    await authority.closeAdmission()
+    let transport = FaultPublicationTransport(behavior: .successExact)
+    let request = GitBranchPublicationRequest(
+      jobID: job.id,
+      idempotencyKey: String(repeating: "6", count: 64),
+      branch: "agent/issue-7-denied",
+      exactSHA: String(repeating: "f", count: 40),
+      expectedStateDigest: String(repeating: "7", count: 64)
+    )
+
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await DurableGitPublisher(
+        intents: intents,
+        transport: transport,
+        authority: authority
+      ).publishCreateOnly(
+        request: request,
+        remote: try fixtureRemote(repositoryID: repositoryID),
+        repository: fixture.root,
+        now: Date(timeIntervalSince1970: 4_101)
+      )
+    }
+
+    #expect(await transport.createCount() == 0)
+    #expect(try await intents.intent(idempotencyKey: request.idempotencyKey)?.state == .prepared)
+    await database.close()
   }
 
   @Test("every post-send outcome reconciles without a blind second create")

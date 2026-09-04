@@ -167,19 +167,20 @@ private final class WorkflowLabelFixture: @unchecked Sendable {
       ),
       now: now
     )
-    let created = try await DurableJobStore(database: database).createJob(
-      identity: LogicalJobIdentity(
-        repositoryID: repositoryID,
-        kind: .issueImplementation,
-        objectNodeID: "issue-node",
-        revisionKey: String(repeating: "a", count: 64)
-      ),
-      objectNumber: 1,
-      contractVersionUsed: "w6-test",
-      priority: .issueImplementation,
-      firstStep: .claimReady,
-      now: now
-    )
+    let created = try await DurableJobStore(database: database, enforceRolloutAuthority: false)
+      .createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repositoryID,
+          kind: .issueImplementation,
+          objectNodeID: "issue-node",
+          revisionKey: String(repeating: "a", count: 64)
+        ),
+        objectNumber: 1,
+        contractVersionUsed: "w6-test",
+        priority: .issueImplementation,
+        firstStep: .claimReady,
+        now: now
+      )
     guard case .created(let value) = created else {
       throw WorkflowLabelFixtureError.suppressed
     }

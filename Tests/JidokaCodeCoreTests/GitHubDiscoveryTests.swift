@@ -241,7 +241,7 @@ private final class DiscoveryFixture: @unchecked Sendable {
         .real(now.timeIntervalSince1970),
       ]
     )
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     reviewed = ReviewedRevisionStore(database: database)
   }
 

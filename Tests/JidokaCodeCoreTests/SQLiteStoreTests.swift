@@ -557,13 +557,13 @@ struct SQLiteStoreTests {
 
 private let schemaEightMigrations = Array(DatabaseSchema.migrations.prefix(8))
 private let schemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
-private let schemaTenStatementCuts = Array(1...74)
+private let schemaTenStatementCuts = Array(1...90)
 private let schemaEightRunID = "run-schema8-architecture"
 private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
 private let expectedSchemaNineMigrationDigest =
   "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
 private let expectedSchemaTenMigrationDigest =
-  "0c411528a84fa412eeee2d359571fa6df21b2355b044620e3342def88ec95099"
+  "178bd8eba193b221f6d9fb3f61579457b5d0bf01b5d347b02a686fa0f720d923"
 private let expectedPopulatedSchemaEightDigest =
   "a8ceef8e29c5b2bed740a52be3912457543a176ca299538ae3714685b8233992"
 private let v9AddedObjects: Set<String> = [

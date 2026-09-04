@@ -343,14 +343,17 @@ public protocol SchedulerPassRunner: Sendable {
   func runReadbackOnly(pass: SchedulerPass) async
 }
 
-extension SchedulerPassRunner {
-  public func runReadbackOnly(pass _: SchedulerPass) async {}
+public protocol RolloutSchedulerAuthorizing: Sendable {
+  func schedulerAdmission(now: Date) async throws -> RolloutSchedulerAdmission
+  func activeStatus(now: Date) async throws -> RolloutStatusReport?
 }
+
+extension RolloutAuthorityStore: RolloutSchedulerAuthorizing {}
 
 public actor DurableScheduler {
   private let clock: any SchedulerClock
   private let runner: any SchedulerPassRunner
-  private let rolloutAuthority: RolloutAuthorityStore?
+  private let rolloutAuthority: (any RolloutSchedulerAuthorizing)?
   private var timing: SchedulerTimingState
   private var runGeneration: UInt64 = 0
   private var sleepGeneration: UInt64 = 0
@@ -360,7 +363,7 @@ public actor DurableScheduler {
     clock: any SchedulerClock,
     runner: any SchedulerPassRunner,
     initialNow: Date,
-    rolloutAuthority: RolloutAuthorityStore? = nil
+    rolloutAuthority: (any RolloutSchedulerAuthorizing)?
   ) {
     self.clock = clock
     self.runner = runner

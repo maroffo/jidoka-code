@@ -227,6 +227,41 @@ struct DurableApprovedCommandExecutorTests {
     )
   }
 
+  @Test("executor preserves a definitive pre-process authority denial")
+  func executorDenialDoesNotBecomeUnknown() async throws {
+    let fixture = try await DurableCommandExecutorFixture(failAfterFirstEffect: false)
+    defer { fixture.remove() }
+    let process = FaultAfterEffectProcess(
+      targetExecutable: fixture.workspace.appendingPathComponent("scripts/effect").path,
+      failAfterFirstEffect: false,
+      beforeSecondHead: { await fixture.authority.closeAdmission() }
+    )
+    let executor = DurableApprovedCommandExecutor(
+      job: fixture.job,
+      store: fixture.store,
+      gate: fixture.gate,
+      runner: VerificationCommandRunner(
+        process: process,
+        homeDirectory: fixture.root.path,
+        temporaryDirectory: fixture.root.path
+      ),
+      authority: fixture.authority,
+      workspace: fixture.workspace,
+      now: { Date(timeIntervalSince1970: 210_002) }
+    )
+
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await fixture.executeBootstrap(using: executor)
+    }
+    #expect(await process.targetExecutions() == 0)
+    #expect(try fixture.effectCount() == 0)
+    let run = try #require(try await fixture.store.runs(jobID: fixture.job.id).first)
+    #expect(run.state == .superseded)
+    #expect(
+      try await fixture.authority.latestStatus()?.reservations.first?.state == .settled
+    )
+  }
+
   @Test("a Git send permit is task-bound and consumed before transport")
   func gitSendPermitIsSingleUse() async throws {
     let fixture = try await DurableCommandExecutorFixture(failAfterFirstEffect: false)
@@ -333,7 +368,7 @@ private final class DurableCommandExecutorFixture: @unchecked Sendable {
       repository,
       now: Date(timeIntervalSince1970: 210_000)
     )
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let creation = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repositoryID,
@@ -549,15 +584,28 @@ private actor FaultAfterEffectProcess: GitProcessExecuting {
   private let underlying = BoundedProcessRunner()
   private let targetExecutable: String
   private let failAfterFirstEffect: Bool
+  private let beforeSecondHead: (@Sendable () async -> Void)?
   private var targetCount = 0
+  private var headCount = 0
   private var faultDelivered = false
 
-  init(targetExecutable: String, failAfterFirstEffect: Bool) {
+  init(
+    targetExecutable: String,
+    failAfterFirstEffect: Bool,
+    beforeSecondHead: (@Sendable () async -> Void)? = nil
+  ) {
     self.targetExecutable = targetExecutable
     self.failAfterFirstEffect = failAfterFirstEffect
+    self.beforeSecondHead = beforeSecondHead
   }
 
   func run(_ request: GitProcessRequest) async throws -> GitProcessResult {
+    if request.executable.path == "/usr/bin/git",
+      request.arguments.suffix(3) == ["rev-parse", "--verify", "HEAD"]
+    {
+      headCount += 1
+      if headCount == 2 { await beforeSecondHead?() }
+    }
     let result = try await underlying.run(request)
     guard request.executable.path == targetExecutable else { return result }
     targetCount += 1
