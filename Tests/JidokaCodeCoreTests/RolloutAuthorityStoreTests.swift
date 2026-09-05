@@ -1057,6 +1057,344 @@ struct RolloutAuthorityStoreTests {
     }
   }
 
+  @Test("usage ledger refuses every single-fault forgery of a seed or append row")
+  func usageLedgerRefusesSingleFaultForgeries() async throws {
+    // `usageInsertCannotForgeBudget` proves the gate exists; this test proves each of
+    // its conjuncts is load-bearing. A row that is wrong in several ways at once cannot
+    // say which predicate refused it, so every forgery below is the exact honest row
+    // with one field changed. Honest sources are consumed by their own AFTER INSERT
+    // triggers in the same statement, so handing a single-fault row to the gate needs
+    // those test-database triggers lifted first; they are restored before the end.
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let authorizationID = fixture.authorizationID.uuidString.lowercased()
+    let counters = [
+      "github_read_requests", "github_read_pages", "github_read_bytes", "git_remote_reads",
+      "provider_sessions", "approved_commands", "marker_parts", "label_writes",
+      "branch_creates", "pull_request_creates", "github_sends", "git_sends",
+    ]
+    func usageCount() async throws -> Int64? {
+      try await fixture.database.scalarInt(
+        "SELECT COUNT(*) FROM rollout_authorization_usage WHERE authorization_id = ?",
+        bindings: [.text(authorizationID)]
+      )
+    }
+    func insertUsage(
+      sequence: Int64, kind: String, sourceID: String,
+      totals: [String: Int64], createdAtMilliseconds: Int64
+    ) async throws {
+      let placeholders = counters.map { _ in "?" }.joined(separator: ", ")
+      try await fixture.database.execute(
+        """
+        INSERT INTO rollout_authorization_usage(
+          authorization_id, sequence, source_kind, source_id,
+          \(counters.joined(separator: ", ")), created_at_ms
+        ) VALUES (?, ?, ?, ?, \(placeholders), ?)
+        """,
+        bindings: [.text(authorizationID), .integer(sequence), .text(kind), .text(sourceID)]
+          + counters.map { .integer(totals[$0] ?? 0) } + [.integer(createdAtMilliseconds)]
+      )
+    }
+    func integers(_ sql: String, bindings: [SQLiteValue]) async throws -> [String: Int64] {
+      let rows = try await fixture.database.query(sql, bindings: bindings)
+      let row = try #require(rows.first)
+      var values: [String: Int64] = [:]
+      for column in row.columns {
+        if case .integer(let integer)? = row[column] { values[column] = integer }
+      }
+      return values
+    }
+    typealias Forgery = (
+      label: String, sequence: Int64, kind: String, sourceID: String,
+      totals: [String: Int64], createdAtMilliseconds: Int64
+    )
+    func expectRefused(_ forgeries: [Forgery], leaving expectedCount: Int64) async throws {
+      for forgery in forgeries {
+        await #expect(throws: SQLiteStoreError.self, "\(forgery.label)") {
+          try await insertUsage(
+            sequence: forgery.sequence, kind: forgery.kind, sourceID: forgery.sourceID,
+            totals: forgery.totals, createdAtMilliseconds: forgery.createdAtMilliseconds
+          )
+        }
+        #expect(try await usageCount() == expectedCount, "\(forgery.label)")
+      }
+    }
+
+    // Seed branch: the honest seed trigger is the only writer of sequence 0 and runs in
+    // the same transaction as the authorization row, so a forged seed can only be tried
+    // by replacing that trigger. Each replacement emits the honest seed with one field
+    // changed; activation must then fail atomically and leave no authorization behind.
+    typealias SeedFault = (
+      label: String, sequence: String, kind: String, sourceID: String, counter: String?,
+      createdAt: String
+    )
+    var seedFaults: [SeedFault] = [
+      ("seed sequence", "1", "'activation'", "NEW.id", nil, "NEW.activated_at_ms"),
+      ("seed source_kind", "0", "'effect'", "NEW.id", nil, "NEW.activated_at_ms"),
+      ("seed source_id", "0", "'activation'", "'forged-seed'", nil, "NEW.activated_at_ms"),
+      ("seed created_at_ms", "0", "'activation'", "NEW.id", nil, "NEW.activated_at_ms + 1"),
+    ]
+    for counter in counters {
+      seedFaults.append(
+        ("seed \(counter)", "0", "'activation'", "NEW.id", counter, "NEW.activated_at_ms"))
+    }
+    try await fixture.withTriggersLifted(["rollout_authorization_usage_seed"]) {
+      for fault in seedFaults {
+        let values = counters.map { $0 == fault.counter ? "1" : "0" }.joined(separator: ", ")
+        try await fixture.database.execute(
+          """
+          CREATE TRIGGER test_forged_usage_seed
+          AFTER INSERT ON rollout_authorizations
+          BEGIN
+            INSERT INTO rollout_authorization_usage(
+              authorization_id, sequence, source_kind, source_id,
+              \(counters.joined(separator: ", ")), created_at_ms
+            ) VALUES (
+              NEW.id, \(fault.sequence), \(fault.kind), \(fault.sourceID), \(values),
+              \(fault.createdAt)
+            );
+          END
+          """
+        )
+        await #expect(throws: SQLiteStoreError.self, "\(fault.label)") {
+          try await fixture.activate()
+        }
+        #expect(
+          try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_authorizations")
+            == 0, "\(fault.label)")
+        #expect(try await usageCount() == 0, "\(fault.label)")
+        try await fixture.database.execute("DROP TRIGGER test_forged_usage_seed")
+      }
+    }
+    // With the honest seed restored, activation writes the exact zero row.
+    try await fixture.activate()
+    #expect(try await usageCount() == 1)
+
+    // Append branch: with the effect append lifted, reservations leave unconsumed sources.
+    try await fixture.withTriggersLifted(["rollout_effect_reservations_usage_append"]) {
+      let first = try await fixture.authority.reserveEffect(
+        fixture.providerRequest(ordinal: 0),
+        reservationID: fixture.reservationIDs[0],
+        now: fixture.now.addingTimeInterval(2)
+      )
+      let second = try await fixture.authority.reserveEffect(
+        fixture.providerRequest(ordinal: 1),
+        reservationID: fixture.reservationIDs[1],
+        now: fixture.now.addingTimeInterval(3)
+      )
+      #expect(try await usageCount() == 1)
+      func exactAppend(
+        of sourceID: String, after previous: [String: Int64]
+      ) async throws -> (totals: [String: Int64], createdAtMilliseconds: Int64) {
+        let source = try await integers(
+          "SELECT * FROM rollout_effect_reservations WHERE id = ?", bindings: [.text(sourceID)]
+        )
+        var totals: [String: Int64] = [:]
+        for counter in counters {
+          totals[counter] = (previous[counter] ?? 0) + (source[counter] ?? 0)
+        }
+        return (totals, try #require(source["created_at_ms"]))
+      }
+      let seed = try await integers(
+        "SELECT * FROM rollout_authorization_usage WHERE authorization_id = ? AND sequence = 0",
+        bindings: [.text(authorizationID)]
+      )
+      let exact = try await exactAppend(of: first.id, after: seed)
+      #expect(exact.totals["provider_sessions"] == 1)
+      var appendForgeries: [Forgery] = [
+        ("append sequence gap", 2, "effect", first.id, exact.totals, exact.createdAtMilliseconds),
+        ("append source_kind", 1, "scopeRead", first.id, exact.totals, exact.createdAtMilliseconds),
+        (
+          "append source_id", 1, "effect", "forged-source", exact.totals,
+          exact.createdAtMilliseconds
+        ),
+        (
+          "append created_at_ms", 1, "effect", first.id, exact.totals,
+          exact.createdAtMilliseconds + 1
+        ),
+      ]
+      for counter in counters {
+        var totals = exact.totals
+        totals[counter, default: 0] += 1
+        appendForgeries.append(
+          ("append \(counter)", 1, "effect", first.id, totals, exact.createdAtMilliseconds))
+      }
+      try await expectRefused(appendForgeries, leaving: 1)
+      try await insertUsage(
+        sequence: 1, kind: "effect", sourceID: first.id,
+        totals: exact.totals, createdAtMilliseconds: exact.createdAtMilliseconds
+      )
+      #expect(try await usageCount() == 2)
+      // A source is consumed once for good: the ledger's UNIQUE key refuses a second
+      // citation even when the arithmetic is exact.
+      let twice = try await exactAppend(of: first.id, after: exact.totals)
+      try await expectRefused(
+        [
+          (
+            "append same source twice", 2, "effect", first.id, twice.totals,
+            twice.createdAtMilliseconds
+          )
+        ],
+        leaving: 2
+      )
+      let next = try await exactAppend(of: second.id, after: exact.totals)
+      try await insertUsage(
+        sequence: 2, kind: "effect", sourceID: second.id,
+        totals: next.totals, createdAtMilliseconds: next.createdAtMilliseconds
+      )
+      #expect(try await usageCount() == 3)
+    }
+
+    // With the honest triggers restored, the store's own append continues the sequence.
+    let third = try await fixture.authority.reserveEffect(
+      fixture.providerRequest(ordinal: 2),
+      reservationID: fixture.reservationIDs[2],
+      now: fixture.now.addingTimeInterval(4)
+    )
+    #expect(try await usageCount() == 4)
+    #expect(
+      try await fixture.database.scalarText(
+        """
+        SELECT source_id FROM rollout_authorization_usage
+        WHERE authorization_id = ? AND sequence = 3
+        """,
+        bindings: [.text(authorizationID)]
+      ) == third.id
+    )
+    #expect(
+      try await fixture.authority.status(authorizationID: authorizationID)
+        .remainingBudgets.providerSessions == 1
+    )
+    #expect(
+      try await fixture.database.scalarInt(
+        """
+        SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (
+          'rollout_authorization_usage_seed', 'rollout_effect_reservations_usage_append'
+        )
+        """
+      ) == 2
+    )
+  }
+
+  @Test("an unpaused open lane cannot change state even below the store")
+  func openLaneCloseRequiresPauseAtTheSQLLevel() async throws {
+    // `transitionLane` always pauses first, so the Swift path no longer reaches the
+    // guard. This pins the guard itself: the same UPDATE is refused while resumed and
+    // admitted once paused, so the pause conjunct is the deciding one.
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    try await fixture.activate()
+    let authorizationID = fixture.authorizationID.uuidString.lowercased()
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 0)
+    let transition = """
+      UPDATE rollout_authorizations
+      SET state = 'draining', updated_at_ms = updated_at_ms + 1
+      WHERE id = ?
+      """
+    func laneState() async throws -> String? {
+      try await fixture.database.scalarText(
+        "SELECT state FROM rollout_authorizations WHERE id = ?",
+        bindings: [.text(authorizationID)]
+      )
+    }
+    do {
+      try await fixture.database.execute(transition, bindings: [.text(authorizationID)])
+      Issue.record("an unpaused active lane entered draining")
+    } catch let error as SQLiteStoreError {
+      #expect(
+        error
+          == .statementFailed(
+            code: 19, message: "rollout lane must pause before terminal transition")
+      )
+    }
+    #expect(try await laneState() == "active")
+    try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1, updated_at = ? WHERE singleton = 1",
+      bindings: [.real(fixture.now.addingTimeInterval(5).timeIntervalSince1970)]
+    )
+    try await fixture.database.execute(transition, bindings: [.text(authorizationID)])
+    #expect(try await laneState() == "draining")
+  }
+
+  @Test("the GitHub and Git readback gates share one lane-and-pause clause")
+  func readbackTriggersShareTheLaneClause() throws {
+    // The two readback triggers hand-duplicate the lane clause, as the lease pair does.
+    // The lease pair's byte-equality test (`bothTriggersShareTheSameGate`) is the
+    // accepted remedy for that drift risk; this is the same remedy for this pair.
+    let migration = try #require(DatabaseSchema.migrations.first { $0.version == 10 })
+    func laneClause(of triggerName: String) throws -> String {
+      let statement = try #require(
+        migration.statements.first { $0.contains("CREATE TRIGGER \(triggerName)") },
+        "\(triggerName) statement"
+      )
+      let start = try #require(
+        statement.range(of: "AND source.state IN ('sendStarted', 'observationRequired')"),
+        "\(triggerName) source state"
+      )
+      let end = try #require(
+        statement.range(of: "AND usage.", range: start.upperBound..<statement.endIndex),
+        "\(triggerName) budget clause"
+      )
+      return String(statement[start.lowerBound..<end.lowerBound])
+    }
+    let github = try laneClause(of: "rollout_readback_reservations_exact_started_effect")
+    let git = try laneClause(of: "rollout_git_readback_reservations_exact_started_effect")
+    #expect(github == git)
+    #expect(github.contains("authorization.state = 'active' AND settings.paused = 0"))
+    #expect(github.contains("AND settings.paused = 1"))
+    for state in [
+      "'draining'", "'recoveryRequired'", "'settled'", "'revoked'", "'expired'",
+      "'failed'",
+    ] {
+      #expect(github.contains(state), "\(state)")
+    }
+    #expect(github.count > 300)
+  }
+
+  @Test("a workflow-issued provider permit is inert under a historical canary context")
+  func workflowProviderPermitIsInertUnderHistoricalContext() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    try await fixture.activate()
+    try await fixture.setJob(state: .runningPi, currentStep: 0, kind: .review)
+    let effect = fixture.providerEffect(ordinal: 0)
+    let runID = try await fixture.prepareProviderRun(effect)
+    let permit = try await withTestRolloutWorkflow(jobID: fixture.jobID) {
+      try await fixture.authority.reserveProvider(effect, now: fixture.now.addingTimeInterval(2))
+    }
+    guard case .reservation(let reservationID) = permit else {
+      Issue.record("provider reservation did not issue a durable permit: \(permit)")
+      return
+    }
+    func reservationState() async throws -> String? {
+      try await fixture.database.scalarText(
+        "SELECT state FROM rollout_effect_reservations WHERE id = ?",
+        bindings: [.text(reservationID)]
+      )
+    }
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .historicalCanary(jobID: fixture.jobID))
+    ) {
+      await #expect(throws: RolloutAuthorityError.effectAdmissionClosed, "bind") {
+        try await fixture.authority.bindProviderReservation(
+          permit, effect: effect, runID: runID, now: fixture.now.addingTimeInterval(3)
+        )
+      }
+      await #expect(throws: RolloutAuthorityError.effectAdmissionClosed, "verify") {
+        try await fixture.authority.verifyProviderPermit(permit, effect: effect)
+      }
+    }
+    #expect(try await reservationState() == "reserved")
+    // The same permit still serves the workflow that issued it.
+    try await withTestRolloutWorkflow(jobID: fixture.jobID) {
+      try await fixture.authority.bindProviderReservation(
+        permit, effect: effect, runID: runID, now: fixture.now.addingTimeInterval(3)
+      )
+      try await fixture.authority.verifyProviderPermit(permit, effect: effect)
+    }
+    #expect(try await reservationState() == "sendStarted")
+  }
+
   @Test("concurrent reservations cannot overrun the provider cap")
   func concurrentReservationsStayWithinCap() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
@@ -2631,6 +2969,39 @@ private struct RolloutAuthorityFixture {
       authorizationID: authorizationID,
       now: now.addingTimeInterval(1)
     )
+  }
+
+  /// Test-only seam: run `body` with the named test-database triggers dropped, then
+  /// recreate each from its own recorded SQL. Restoration covers the throwing path so a
+  /// failed body cannot leave later assertions in this fixture passing vacuously.
+  func withTriggersLifted(_ names: [String], _ body: () async throws -> Void) async throws {
+    var recorded: [String] = []
+    for name in names {
+      let rows = try await database.query(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        bindings: [.text(name)]
+      )
+      guard case .text(let sql)? = rows.first?["sql"] else {
+        throw RolloutAuthorityError.decode("test trigger \(name)")
+      }
+      recorded.append(sql)
+      try await database.execute("DROP TRIGGER \(name)")
+    }
+    do {
+      try await body()
+    } catch {
+      for sql in recorded {
+        do {
+          try await database.execute(sql)
+        } catch let restoreError {
+          Issue.record("lifted trigger was not restored: \(restoreError)")
+        }
+      }
+      throw error
+    }
+    for sql in recorded {
+      try await database.execute(sql)
+    }
   }
 
   func setJob(

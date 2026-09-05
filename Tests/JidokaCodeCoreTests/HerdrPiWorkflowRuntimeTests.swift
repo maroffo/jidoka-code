@@ -1607,6 +1607,10 @@ struct HerdrPiWorkflowRuntimeTests {
     await preSendRestart.beginCanaryLaunchAdmission(jobID: fixture.jobID)
     let commandsBeforeQ4 = await fixture.herdr.launchedCommands()
     let successorLaunchesBefore = try await fixture.runStore.launches(runID: successorRunID)
+    // Denied at `verifyProviderLaunchAuthority`, reached with no provider permit: the
+    // Q4 rollover path never reserves one, so the executor reports the missing permit
+    // as an identity mismatch rather than the admission closure that the earlier
+    // `.historicalCanary` guard raises for ordinary canary execution.
     await #expect(throws: RolloutAuthorityError.effectIdentityMismatch) {
       try await preSendRestart.executeCanaryGenerationRolloverQ4(
         preSendCandidate, authorization: q4Authorization

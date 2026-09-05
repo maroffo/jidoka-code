@@ -127,6 +127,45 @@ struct GitRolloutPreviewTests {
     #expect(await runner.executions() == 0)
     #expect(await authority.waitForDrain(until: Date(timeIntervalSince1970: 1)))
   }
+
+  @Test("a failed Git read keeps the transport error primary when settlement also fails")
+  func failedReadSettlementKeepsTransportErrorPrimary() async throws {
+    let fixture = try GitTestRoot(prefix: "jidoka-rollout-preview-settle-failure")
+    defer { fixture.remove() }
+    let jobID = UUID()
+    let remote = try GitRemoteRepository(
+      repositoryID: UUID(),
+      nodeID: "R_rollout_settle_failure",
+      owner: "owner",
+      name: "repository",
+      defaultBranch: "main",
+      localFixtureURL: fixture.root.appendingPathComponent("remote.git")
+    )
+    let authority = ExplicitTestRolloutEffectAuthority(failGitReadSettlement: true)
+    let runner = NeverGitProcessRunner()
+    let transport = SystemGitTransport(
+      runner: runner,
+      homeDirectory: fixture.root.path,
+      temporaryDirectory: fixture.root.path,
+      rolloutReadAuthority: authority
+    )
+
+    await #expect(throws: GitProcessError.invalidLimits) {
+      try await RolloutEffectTaskContext.$current.withValue(
+        RolloutEffectExecutionContext(mode: .workflow(jobID: jobID))
+      ) {
+        try await transport.cloneMirror(
+          remote: remote,
+          destination: fixture.root.appendingPathComponent("mirror.git"),
+          credentials: nil
+        )
+      }
+    }
+    #expect(await runner.executions() == 1)
+    // The reservation stays consumed and unsettled: a failed settlement never
+    // replenishes read authority, and it never masks the transport error.
+    #expect(await authority.waitForDrain(until: Date(timeIntervalSince1970: 1)) == false)
+  }
 }
 
 private actor NeverGitProcessRunner: GitProcessExecuting {

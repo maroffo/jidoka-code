@@ -29,6 +29,13 @@ disabled with all workflow flags off. `Poll now` is valid only for an active fin
 Schema 10 treats every historical `JobCanaryScope` as retained evidence only. It cannot admit
 a fresh provider, command, Git, GitHub, lease, Pi launch, or generated-review effect.
 
+Migration 10 drops the schema-9 guards `app_settings_generation_rollover_resume_denied` and
+`app_settings_generation_rollover_insert_resume_denied`. Their replacement is
+`app_settings_rollout_scope_required`: `paused = 0` now needs one active rollout lane bound to
+the exact scope, which is stricter than "no resume while a generation rollover is pending". The
+Q4 rollover launch authority still requires `paused = 1`, so no rollover can launch while a lane
+is resumed (plan decision E20).
+
 ## Schema-10 migration identity
 
 Schema 10 has never shipped. While this branch was in review its migration body was edited more

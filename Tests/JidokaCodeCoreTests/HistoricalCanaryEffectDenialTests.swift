@@ -136,6 +136,55 @@ struct HistoricalCanaryEffectDenialTests {
     await fixture.database.close()
   }
 
+  @Test("the double keeps workflow-issued permits inert under a historical context")
+  func doubleDeniesWorkflowPermitsUnderHistoricalContext() async throws {
+    // Parity with the store for permits that were legitimately issued to a workflow:
+    // verifying or binding them under a historical canary context is refused with the
+    // store's error, and the same permits still serve the workflow that issued them.
+    let fixture = try await HistoricalCanaryFixture()
+    defer { fixture.remove() }
+    let double = ExplicitTestRolloutEffectAuthority(
+      intents: MutationIntentStore(database: fixture.database))
+    let provider = fixture.providerEffect()
+    let command = fixture.commandEffect()
+    let gitSend = fixture.gitSendEffect()
+    let workflow = RolloutEffectExecutionContext(mode: .workflow(jobID: fixture.jobID))
+    let permits = try await RolloutEffectTaskContext.$current.withValue(workflow) {
+      (
+        provider: try await double.reserveProvider(provider, now: fixture.now),
+        command: try await double.reserveApprovedCommand(command, now: fixture.now),
+        gitSend: try await double.reserveGitSendAndMarkStarted(gitSend, now: fixture.now)
+      )
+    }
+
+    try await fixture.asHistoricalCanary {
+      await #expect(throws: RolloutAuthorityError.effectAdmissionClosed, "verify provider") {
+        try await double.verifyProviderPermit(permits.provider, effect: provider)
+      }
+      await #expect(throws: RolloutAuthorityError.effectAdmissionClosed, "bind provider") {
+        try await double.bindProviderReservation(
+          permits.provider, effect: provider, runID: "run", now: fixture.now)
+      }
+      await #expect(throws: RolloutAuthorityError.effectAdmissionClosed, "bind command") {
+        try await double.bindApprovedCommandReservation(
+          permits.command, effect: command, runID: "run", now: fixture.now)
+      }
+      await #expect(throws: RolloutAuthorityError.effectIdentityMismatch, "verify gitSend") {
+        try await double.verifyGitSendPermit(permits.gitSend, effect: gitSend)
+      }
+    }
+
+    try await RolloutEffectTaskContext.$current.withValue(workflow) {
+      try await double.verifyProviderPermit(permits.provider, effect: provider)
+      try await double.bindProviderReservation(
+        permits.provider, effect: provider, runID: "run", now: fixture.now)
+      try await double.bindApprovedCommandReservation(
+        permits.command, effect: command, runID: "run", now: fixture.now)
+      try await double.verifyGitSendPermit(permits.gitSend, effect: gitSend)
+    }
+    await fixture.database.close()
+  }
+
   // `RolloutEffectPermit.historicalCanary` is deliberately kept so historical rows and
   // permits keep decoding. The compiler enforces that: this file would not build
   // without the case. There is no test for it, because asserting that a value built one

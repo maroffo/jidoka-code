@@ -1,0 +1,108 @@
+[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+error: emit-module command failed with exit code 1 (use -v to see invocation)
+[3/10] Compiling JidokaCodeCoreTests GitRolloutPreviewTests.swift
+[4/10] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:5184:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+5182 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+5183 |       ) ?? 0
+5184 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+5185 |       _ = try await database.execute(
+5186 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[5/10] Compiling JidokaCodeCoreTests HistoricalCanaryEffectDenialTests.swift
+[6/10] Compiling JidokaCodeCoreTests RolloutEffectAuthorityTestSupport.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutEffectAuthorityTestSupport.swift:104:9: warning: no 'async' operations occur within 'await' expression
+102 |     // as a store whose settlement transaction failed would leave it.
+103 |     if failGitReadSettlement { throw RolloutAuthorityError.effectIdentityMismatch }
+104 |     try await settleEffect(permit, evidenceSHA256: evidenceSHA256, now: now)
+    |         `- warning: no 'async' operations occur within 'await' expression
+105 |   }
+106 | 
+[7/10] Emitting module JidokaCodeCoreTests
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1128:36: error: value of optional type 'Int64?' must be unwrapped to a value of type 'Int64'
+1126 |       #expect(try await usageCount() == 0)
+1127 |       let activatedAt = Int64(
+1128 |         try await fixture.database.scalarInt(
+     |                                    |- error: value of optional type 'Int64?' must be unwrapped to a value of type 'Int64'
+     |                                    |- note: coalesce using '??' to provide a default when the optional value contains 'nil'
+     |                                    `- note: force-unwrap using '!' to abort execution if the optional value contains 'nil'
+1129 |           "SELECT activated_at_ms FROM rollout_authorizations WHERE id = ?",
+1130 |           bindings: [.text(authorizationID)]
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1100:17: warning: no calls to throwing functions occur within 'try' expression
+1098 |     func integers(_ sql: String, bindings: [SQLiteValue]) async throws -> [String: Int64] {
+1099 |       let rows = try await fixture.database.query(sql, bindings: bindings)
+1100 |       let row = try #require(rows.first)
+     |                 `- warning: no calls to throwing functions occur within 'try' expression
+1101 |       var values: [String: Int64] = [:]
+1102 |       for column in row.columns {
+[8/10] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1077:11: error: cannot convert return expression of type 'Int64?' to return type 'Int'
+1075 |     ]
+1076 |     func usageCount() async throws -> Int {
+1077 |       try await fixture.database.scalarInt(
+     |           `- error: cannot convert return expression of type 'Int64?' to return type 'Int'
+1078 |         "SELECT COUNT(*) FROM rollout_authorization_usage WHERE authorization_id = ?",
+1079 |         bindings: [.text(authorizationID)]
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1128:36: error: value of optional type 'Int64?' must be unwrapped to a value of type 'Int64'
+1126 |       #expect(try await usageCount() == 0)
+1127 |       let activatedAt = Int64(
+1128 |         try await fixture.database.scalarInt(
+     |                                    |- error: value of optional type 'Int64?' must be unwrapped to a value of type 'Int64'
+     |                                    |- note: coalesce using '??' to provide a default when the optional value contains 'nil'
+     |                                    `- note: force-unwrap using '!' to abort execution if the optional value contains 'nil'
+1129 |           "SELECT activated_at_ms FROM rollout_authorizations WHERE id = ?",
+1130 |           bindings: [.text(authorizationID)]
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1316:39: error: cannot convert value of type 'String' to expected argument type 'Comment?'
+1314 |       "'failed'"]
+1315 |     {
+1316 |       #expect(github.contains(state), state)
+     |                                       `- error: cannot convert value of type 'String' to expected argument type 'Comment?'
+1317 |     }
+1318 |     #expect(github.count > 300)
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1342:5: warning: no calls to throwing functions occur within 'try' expression
+1340 |       )
+1341 |     }
+1342 |     try await RolloutEffectTaskContext.$current.withValue(
+     |     `- warning: no calls to throwing functions occur within 'try' expression
+1343 |       RolloutEffectExecutionContext(mode: .historicalCanary(jobID: fixture.jobID))
+1344 |     ) {
+[9/10] Compiling JidokaCodeCoreTests SQLiteStoreTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/SQLiteStoreTests.swift:326:58: error: cannot convert value of type 'String' to expected argument type 'Comment?'
+ 324 |       "app_settings_rollout_scope_required", "app_settings_rollout_insert_scope_required",
+ 325 |     ] {
+ 326 |       #expect(upgradedObjectNames.contains(replacement), replacement)
+     |                                                          `- error: cannot convert value of type 'String' to expected argument type 'Comment?'
+ 327 |     }
+ 328 |     try await assertDatabaseIntegrity(upgraded)
+[10/34] Compiling JidokaCodeCoreTests WorkspaceImporterTests.swift
+[11/34] Compiling JidokaCodeCoreTests WorkspaceApprovedCommandExecutorTests.swift
+[12/34] Compiling JidokaCodeCoreTests DurableApprovedCommandExecutorTests.swift
+[13/34] Compiling JidokaCodeCoreTests GitAskPassTests.swift
+[14/34] Compiling JidokaCodeCoreTests GitHubMutationExecutorTests.swift
+[15/34] Compiling JidokaCodeCoreTests GitHubPullRequestPublisherTests.swift
+[16/34] Compiling JidokaCodeCoreTests GitHubWorkflowLabelBootstrapperTests.swift
+[17/34] Compiling JidokaCodeCoreTests GitHubWorkflowLabelMutatorTests.swift
+[18/34] Compiling JidokaCodeCoreTests SubmoduleManagerTests.swift
+[19/34] Compiling JidokaCodeCoreTests RepositoryStoreTests.swift
+[20/34] Compiling JidokaCodeCoreTests VerificationCommandRunnerTests.swift
+[21/34] Compiling JidokaCodeCoreTests PiIssueImplementationOrchestratorTests.swift
+[22/34] Compiling JidokaCodeCoreTests PullRequestReviewJobWorkflowTests.swift
+[23/34] Compiling JidokaCodeCoreTests RepositoryStoreFaultTests.swift
+[24/34] Compiling JidokaCodeCoreTests GitPushGuardTests.swift
+[25/34] Compiling JidokaCodeCoreTests GitTestSupport.swift
+[26/34] Compiling JidokaCodeCoreTests GitProcessTests.swift
+[27/34] Compiling JidokaCodeCoreTests GitPublicationTests.swift
+[28/34] Compiling JidokaCodeCoreTests MutationReconcilerTests.swift
+[29/34] Compiling JidokaCodeCoreTests IssueImplementationJobWorkflowTests.swift
+[30/34] Compiling JidokaCodeCoreTests IssueTriageJobWorkflowTests.swift
+[31/34] Compiling JidokaCodeCoreTests GitHubHTTPTests.swift
+[32/34] Compiling JidokaCodeCoreTests GitHubMarkerPublisherTests.swift
+[33/34] Compiling JidokaCodeCoreTests PullRequestCommitDeriverTests.swift
+BUILD_EXIT=1

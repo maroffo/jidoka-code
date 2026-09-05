@@ -315,11 +315,22 @@ struct SQLiteStoreTests {
         "SELECT COUNT(*) FROM jobs WHERE rollout_generation != 0"
       ) == 0
     )
+    // Migration 10 replaces the schema-9 rollover-resume guards: resume now requires an
+    // active rollout lane, and the Q4 rollover launch authority still requires pause, so
+    // no rollover can launch while a lane runs (plan decision E20).
+    let upgradedObjectNames = try await schemaObjectNames(in: upgraded)
+    #expect(upgradedObjectNames.isDisjoint(with: v10RemovedObjects))
+    for replacement in [
+      "app_settings_rollout_scope_required", "app_settings_rollout_insert_scope_required",
+    ] {
+      #expect(upgradedObjectNames.contains(replacement), "\(replacement)")
+    }
     try await assertDatabaseIntegrity(upgraded)
     await upgraded.close()
 
     let backup = try SQLiteStore(databaseURL: backupURL, migrations: schemaNineMigrations)
     #expect(try await backup.schemaVersion() == 9)
+    #expect(try await schemaObjectNames(in: backup).isSuperset(of: v10RemovedObjects))
     #expect(
       try await historicalRows(in: backup, snapshot: fixture.snapshot) == fixture.snapshot.rows)
     try await assertDatabaseIntegrity(backup)
@@ -778,6 +789,10 @@ private let v9AddedObjects: Set<String> = [
   "herdr_pi_run_rollovers",
   "pi_run_launches_one_active_execution_host_idx",
   "pi_runs_generation_rollover_insert_authority",
+  "app_settings_generation_rollover_resume_denied",
+]
+private let v10RemovedObjects: Set<String> = [
+  "app_settings_generation_rollover_insert_resume_denied",
   "app_settings_generation_rollover_resume_denied",
 ]
 

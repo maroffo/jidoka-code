@@ -16,6 +16,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
 
   private let intents: MutationIntentStore?
   private let closeAfterGitReadReservation: Bool
+  private let failGitReadSettlement: Bool
   private var admissionOpen = true
   private var permits: [String: PermitKind] = [:]
   private var verifiedReadPermits: Set<String> = []
@@ -24,10 +25,12 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
 
   init(
     intents: MutationIntentStore? = nil,
-    closeAfterGitReadReservation: Bool = false
+    closeAfterGitReadReservation: Bool = false,
+    failGitReadSettlement: Bool = false
   ) {
     self.intents = intents
     self.closeAfterGitReadReservation = closeAfterGitReadReservation
+    self.failGitReadSettlement = failGitReadSettlement
   }
 
   func reserveGitHubRead(
@@ -90,6 +93,17 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     }
   }
 
+  func settleGitRemoteRead(
+    _ permit: RolloutEffectPermit,
+    evidenceSHA256: String,
+    now: Date
+  ) async throws {
+    // Opt-in failure for the transport's failure path: the permit stays outstanding,
+    // as a store whose settlement transaction failed would leave it.
+    if failGitReadSettlement { throw RolloutAuthorityError.effectIdentityMismatch }
+    try await settleEffect(permit, evidenceSHA256: evidenceSHA256, now: now)
+  }
+
   func reserveProvider(
     _ effect: RolloutProviderEffect,
     now _: Date
@@ -115,6 +129,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
       }
       throw RolloutAuthorityError.effectAdmissionClosed
     }
+    try denyHistoricalContext()
     try require(permit, expected: .provider)
   }
 
@@ -135,6 +150,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
       }
       throw RolloutAuthorityError.effectAdmissionClosed
     }
+    try denyHistoricalContext()
     try require(permit, expected: .provider)
   }
 
@@ -169,6 +185,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     runID: String,
     now _: Date
   ) throws {
+    try denyHistoricalContext()
     guard admissionOpen, !runID.isEmpty else {
       throw RolloutAuthorityError.effectAdmissionClosed
     }
@@ -260,6 +277,9 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ permit: RolloutEffectPermit,
     effect _: RolloutGitSendEffect
   ) throws {
+    if case .historicalCanary = RolloutEffectTaskContext.current?.mode {
+      throw RolloutAuthorityError.effectIdentityMismatch
+    }
     try require(permit, expected: .gitSend)
   }
 
