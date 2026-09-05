@@ -2638,9 +2638,14 @@ public enum DatabaseSchema {
         -- Deliberately not conditioned on repository_leases being empty. A rollout
         -- binds a job that is already in flight -- an implementationExecute lane is
         -- only previewable once that job has produced its plan artifacts -- so the
-        -- bound job legitimately holds the lease at activation time. The lease
-        -- admitted before the lane opened is bounded instead by the continuation
-        -- exemption below, which only exempts a lease the open lane actually binds.
+        -- bound job legitimately holds the lease at activation time.
+        --
+        -- What this means for a lease the new lane does not bind: it keeps the row.
+        -- Production writes repository_leases only to acquire (a generation bump,
+        -- which is admission and is gated) and to release (active = 0, ungated), and
+        -- nothing expires a lease by heartbeat age, so such a job runs to completion
+        -- and releases normally. It gains no rollout authority while it does: every
+        -- effect is bound through rollout_job_bindings, where it has no row.
         BEGIN
           SELECT RAISE(ABORT, 'rollout authorization activation requires paused empty scope');
         END
@@ -2895,13 +2900,18 @@ public enum DatabaseSchema {
           -- mandatory first step of closing a lane, and a drain that could not
           -- heartbeat would abort itself.
           --
-          -- The exemption is bounded by an open lane that binds THIS job. Once the
-          -- lane is terminal there is nothing left to continue, and an unbounded
-          -- exemption would let a lease advance its heartbeat past the finite window
-          -- its authorization declared. Requiring the binding is what keeps ordinary
-          -- generation-0 work from riding out a rollout it was never part of: such a
-          -- lease was admitted before the lane opened, so the gate never saw it, and
-          -- without the binding conjunct it would stay exempt for the lane's life.
+          -- Scope, stated honestly: no production code emits this shape today.
+          -- DurableJobStore.heartbeat is public API with no caller in Sources, and
+          -- every production write to repository_leases is either acquisition (a
+          -- generation bump, gated below) or release (active = 0, excluded by
+          -- WHEN NEW.active = 1). This exemption therefore keeps the store's public
+          -- contract coherent and bounds a future heartbeat writer; it is not an
+          -- operative bound on a live lease, and nothing here expires one.
+          --
+          -- Given that it exists, it is bounded by an open lane that binds THIS job,
+          -- so it cannot become a way for ordinary generation-0 work to inherit a
+          -- rollout it was never part of, and cannot carry a lease past the finite
+          -- window its authorization declared.
           --
           -- Reactivation (OLD.active = 0), a generation bump, and any identity
           -- change are admission, not continuation, and stay gated.

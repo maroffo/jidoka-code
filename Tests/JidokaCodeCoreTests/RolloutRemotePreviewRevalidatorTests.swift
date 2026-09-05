@@ -136,9 +136,14 @@ struct RolloutRemotePreviewRevalidatorTests {
   //     (`builderRefusesMissingJobBinding`);
   //   - the non-positive object number, refused by the object selector itself
   //     (`builderRefusesNonPositiveObjectNumber`);
-  //   - the stage arms whose callers have already switched on stage, and the
-  //     workflow-label default arm for a stage/step pair the builder never emits.
-  //     Both are unreachable by construction rather than by validation.
+  //   - the finite-window stage arms, refused by the builder for any stage other than
+  //     the two it accepts (`builderRefusesFiniteWindowAtExactOnlyStages`);
+  //   - the workflow-label default arm, refused by `RolloutAuthority.validCurrentStep`,
+  //     whose whitelist is exactly that switch's case set
+  //     (`builderRefusesAStepTheLabelSwitchDoesNotCover`).
+  // An earlier version of this comment called the last two unreachable "by
+  // construction rather than by validation". That was wrong: they are refused by a
+  // validating edge like the others, so they are asserted at it like the others.
   // Reaching any of them at the revalidator would need a hand-forged preview, which
   // the canonical round-trip guard rejects first.
 
@@ -229,10 +234,39 @@ struct RolloutRemotePreviewRevalidatorTests {
   func builderRefusesNonPositiveObjectNumber() async throws {
     let fixture = try await RolloutRemotePreviewFixture()
     defer { fixture.remove() }
-    #expect(throws: (any Error).self) {
+    #expect(throws: RolloutAuthorityError.invalidObjectSelector) {
       _ = try fixture.exactPreview(objectNumber: 0)
     }
     await fixture.database.close()
+  }
+
+  @Test("the builder refuses a step the workflow-label switch does not cover")
+  func builderRefusesAStepTheLabelSwitchDoesNotCover() async throws {
+    // The workflow-label switch's `default:` arm exists for a stage/step pair outside
+    // its case set. `RolloutAuthority.validCurrentStep` enumerates exactly that set
+    // per stage and refuses anything else, so the arm cannot be reached from a built
+    // preview. `.replan` belongs to `implementationPlan`, never to `prReview`.
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    #expect(throws: RolloutAuthorityError.invalidObjectSelector) {
+      _ = try fixture.exactPreview(currentStep: .replan)
+    }
+    await fixture.database.close()
+  }
+
+  @Test("the builder refuses a finite window at the exact-only stages")
+  func builderRefusesFiniteWindowAtExactOnlyStages() async throws {
+    // `validateFinite`'s `.implementationExecute, .generatedPRReview` arm is one the
+    // revalidator can never see, because no preview at those stages can be built in
+    // finite-window mode at all.
+    for stage in [RolloutWorkflowStage.implementationExecute, .generatedPRReview] {
+      let fixture = try await RolloutRemotePreviewFixture()
+      await #expect(throws: RolloutAuthorityError.invalidFiniteWindow, "\(stage)") {
+        _ = try await fixture.finitePreview(stage: stage)
+      }
+      await fixture.database.close()
+      fixture.remove()
+    }
   }
 
   @Test("issue identity and default-branch reference drift are rejected")
@@ -471,7 +505,8 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
   func exactPreview(
     missingLabels: [RolloutLabelDefinition] = [],
     objectNumber: Int? = nil,
-    jobBinding: RolloutJobBinding?? = nil
+    jobBinding: RolloutJobBinding?? = nil,
+    currentStep: JobStepKind = .review
   ) throws -> RolloutPreview {
     let pullRequest = Self.makePullRequest(
       number: 10,
@@ -510,7 +545,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
         derivation.narrative,
         baseSHA: baseSHA
       ),
-      currentStep: JobStepKind.review.rawValue
+      currentStep: currentStep.rawValue
     )
     return try RolloutPreviewBuilder.make(
       previewInput(
@@ -530,18 +565,20 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
             contractVersion: job.contractVersionUsed,
             priority: .prReview,
             firstStep: .review,
-            currentStep: JobStepKind.review.rawValue
+            currentStep: currentStep.rawValue
           ),
         missingLabels: missingLabels
       )
     )
   }
 
-  func finitePreview() async throws -> RolloutPreview {
+  func finitePreview(
+    stage: RolloutWorkflowStage = .prReview
+  ) async throws -> RolloutPreview {
     let pullRequests = await api.currentPullRequests()
     let emptyScope = RolloutScope(
       mode: .finiteWindow,
-      stage: .prReview,
+      stage: stage,
       repository: rolloutRepository,
       object: nil,
       finiteWindow: RolloutFiniteWindowSelector(
@@ -570,7 +607,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     }
     let scope = RolloutScope(
       mode: .finiteWindow,
-      stage: .prReview,
+      stage: stage,
       repository: rolloutRepository,
       object: nil,
       finiteWindow: RolloutFiniteWindowSelector(

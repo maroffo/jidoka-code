@@ -155,10 +155,25 @@ struct RolloutLeaseAuthorityTests {
       try await fixture.setPaused(true)
       try await fixture.setAuthorizationState(state)
 
-      await #expect(throws: SQLiteStoreError.self, "\(state)") {
+      // The lane's own bound job. It is generation 1, so the gate arms on the
+      // generation disjunct and the loop state cannot change the verdict here.
+      await #expect(throws: SQLiteStoreError.self, "bound, \(state)") {
         try await fixture.insertLease(repositoryID: fixture.repositoryA, jobID: bound.id)
       }
-      #expect(try await fixture.activeLeaseCount() == 0, "\(state)")
+      #expect(try await fixture.activeLeaseCount() == 0, "bound, \(state)")
+
+      // An unbound generation-0 job is the case that actually pins the loop: nothing
+      // but the lane's state can arm the gate for it. Without this the 'draining' and
+      // 'recoveryRequired' literals could be deleted from the arming predicate and
+      // every test in this suite would still pass, which is exactly what a mutation
+      // run showed before this arm existed.
+      let ordinary = try await fixture.createJob(
+        repositoryID: fixture.repositoryA, revision: "rev-ord-\(state)")
+      #expect(try await fixture.rolloutGeneration(jobID: ordinary.id) == 0, "\(state)")
+      await #expect(throws: SQLiteStoreError.self, "unbound, \(state)") {
+        try await fixture.insertLease(repositoryID: fixture.repositoryA, jobID: ordinary.id)
+      }
+      #expect(try await fixture.activeLeaseCount() == 0, "unbound, \(state)")
       await fixture.database.close()
       fixture.remove()
     }
@@ -270,6 +285,16 @@ struct RolloutLeaseAuthorityTests {
       // while the lane is running, so what must be proved is that it is *gated*
       // rather than exempt — under pause it has to abort where a plain heartbeat,
       // which changes no identity, still succeeds.
+      //
+      // What this test does and does not pin, measured rather than assumed: deleting
+      // `NEW.generation = OLD.generation` from the exemption fails the generation
+      // case. Deleting `NEW.job_id = OLD.job_id` or `NEW.repository_id =
+      // OLD.repository_id` fails nothing, because the exemption's own binding
+      // subquery already keys on `open_binding.job_id = NEW.job_id` and
+      // `open_authorization.repository_id = NEW.repository_id` and subsumes them.
+      // The two conjuncts are kept as local, readable statements of intent that do
+      // not depend on the subquery's shape; the drift cases below assert the
+      // behaviour, which is what matters, not which conjunct produces it.
       if drift == .generation {
         try await fixture.setPaused(true)
         try await fixture.jobs.heartbeat(jobID: bound.id, now: fixture.now.addingTimeInterval(5))
@@ -334,6 +359,32 @@ struct RolloutLeaseAuthorityTests {
     #expect(try await fixture.leaseJobID() == bound.id)
     #expect(try await fixture.activeLeaseCount() == 1)
     await fixture.database.close()
+  }
+
+  @Test("the insert and update gates share a byte-identical arming and binding tail")
+  func bothTriggersShareTheSameGate() async throws {
+    // The two triggers hand-duplicate 67 lines. Factoring them into one emitter would
+    // restructure a security trigger, so the duplication stays and this test carries
+    // the risk it creates instead: silent drift between the copies. A mismatch here
+    // fails at test time rather than at database-open time via the migration digest.
+    let migration = try #require(DatabaseSchema.migrations.first { $0.version == 10 })
+    let marker = "-- The gate arms on either half, and needs both to stay honest."
+
+    func gateTail(of triggerName: String) throws -> String {
+      let statement = try #require(
+        migration.statements.first { $0.contains("CREATE TRIGGER \(triggerName)") },
+        "\(triggerName) statement"
+      )
+      let range = try #require(statement.range(of: marker), "\(triggerName) marker")
+      return String(statement[range.lowerBound...])
+    }
+
+    let insert = try gateTail(of: "repository_leases_rollout_authority_insert")
+    let update = try gateTail(of: "repository_leases_rollout_authority_update")
+    #expect(insert == update)
+    // Guard the guard: a marker that stopped matching would make both sides empty.
+    #expect(insert.contains("active repository lease lacks rollout authority"))
+    #expect(insert.count > 2_000)
   }
 
   @Test("a missing lease still reports a typed error rather than a raw SQLite abort")

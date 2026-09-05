@@ -6292,7 +6292,14 @@ private struct HerdrPiRuntimeFixture: Sendable {
       try await restore()
       return value
     } catch {
-      try? await restore()
+      do {
+        try await restore()
+      } catch let restoreError {
+        // The body's error is the one worth propagating, but a failed restore leaves
+        // the guard dropped and every later assertion in this fixture vacuous, so it
+        // must not vanish. Record it and let the original error surface.
+        Issue.record("durable resume guard was not restored: \(restoreError)")
+      }
       throw error
     }
   }

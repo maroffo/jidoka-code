@@ -735,7 +735,7 @@ private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
 private let expectedSchemaNineMigrationDigest =
   "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
 private let expectedSchemaTenMigrationDigest =
-  "115d612da27955c9139586c9609e4a0455c79c25d7a3ecc348d7699aea1309d6"
+  "818156e514db70ace3e9b2127bb7217a2f09a0af429bb23754f9195f0d467c3b"
 // Widened when `schema_migrations` gained `statements_sha256`: the snapshot projects
 // every column of every table, so one added column moves the digest. The historical
 // row values themselves are unchanged and still compared row-for-row above.

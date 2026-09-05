@@ -36,10 +36,12 @@ than once, and the migrator only applies migrations whose version exceeds the re
 a database already stamped at version 10 by an earlier body would otherwise skip every later
 change silently and run on a schema this binary never wrote.
 
-`schema_migrations` therefore records `statements_sha256`, the digest of the exact statements
-each applied migration ran, and opening a database verifies it for every migration that declares
+`schema_migrations` therefore records `statements_sha256`, the digest of an applied migration's
+version, name, backup requirement and exact ordered statements. Recomputing it from the statement
+bodies alone gives a different value, so use `SQLiteMigration.statementsSHA256` rather than
+hashing the SQL by hand. Opening a database verifies the digest for every migration that declares
 `verifiesContent`. A mismatch, or a verified row with no digest at all, fails closed before any
-statement runs and before this binary writes anything to the database:
+migration statement runs:
 
 ```
 migrationContentMismatch(version: 10, recorded: <digest or nil>, expected: <digest>)
@@ -51,6 +53,13 @@ recorded body is a pre-release database", belongs to migration 10 and is false f
 A floor would silently extend the operator action below to a future migration where deleting the
 database would be exactly the wrong advice. Versions 1 through 9 shipped in binaries that predate
 the column, so their blank rows are expected and are not verified.
+
+Before that guard the connection is configured (`PRAGMA journal_mode = WAL`, `PRAGMA
+foreign_keys = ON`) and the ledger table is created if absent. Both are no-ops on any database
+that can be refused, since a database stamped at version 10 already has a ledger, so the refusal
+adds no schema and no rows. What the guard promises is that no migration statement and no digest
+column is written to a database this binary is about to reject; it does not promise the file is
+opened read-only.
 
 **Operator action when this fires.** It means the database was created by a pre-release build of
 this branch, so it is a development or CI database, never a production one: production has never
@@ -91,19 +100,29 @@ touched. Closing a lane (`settled`, `revoked`, `expired`, `failed`) disarms the 
 and the closed row stays as evidence.
 
 A heartbeat on a lease the repository already holds is a continuation, not admission: same row,
-same job, same fencing generation, already active. It stays possible while the application is
-paused and while the lane is draining, because pausing is the mandatory first step of closing a
-lane and a drain that could not heartbeat would abort itself. The exemption applies only while an
-open lane on that repository actually binds the leased job, so a generation-0 lease admitted
-before the lane opened does not ride the rollout out: its next heartbeat is refused and the lease
-expires. Reactivating a released lease, bumping the fencing generation, moving a lease to another
-job, and taking a fresh lease all remain admission and stay gated.
+same job, same fencing generation, already active. The schema exempts it, so pausing and draining
+cannot abort it: pausing is the mandatory first step of closing a lane, and a drain that could not
+heartbeat would abort itself. The exemption applies only while an open lane on that repository
+actually binds the leased job. Reactivating a released lease, bumping the fencing generation,
+moving a lease to another job, and taking a fresh lease all remain admission and stay gated.
+
+Note what that exemption is and is not. No production code emits a continuation heartbeat today:
+`DurableJobStore.heartbeat` is public API with no caller in `Sources`, every production write to
+`repository_leases` is either acquisition (a generation bump, which is gated) or release, and
+nothing expires a lease by heartbeat age. The exemption keeps the store's public contract coherent
+and bounds a future heartbeat writer. It is not a mechanism that reclaims a live lease.
 
 Activating a lane deliberately does not require the repository to be lease-free. A rollout binds
 a job that is already in flight (an `implementationExecute` lane is only previewable once that
 job has produced its plan artifacts), so the bound job legitimately holds the lease at activation
-time. The continuation rule above, not an activation-time emptiness check, is what bounds a lease
-the lane does not bind.
+time.
+
+**What happens to an ordinary job holding the lease when a lane opens.** Nothing evicts it. It
+keeps the lease, runs to completion and releases normally, and it acquires no rollout authority
+while it does: every effect is bound through `rollout_job_bindings`, where it has no row. Because
+`max_concurrency` is one, the lane's own bound job cannot take the lease until that release, which
+is why the documented sequence is to pause and let in-flight work finish before activating. If you
+need the lane to start immediately, wait for the release rather than editing the lease.
 
 ## Generated-review quarantine
 
