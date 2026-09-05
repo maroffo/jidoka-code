@@ -7,12 +7,13 @@ import Testing
 
 @Suite("Historical canary effect denial")
 struct HistoricalCanaryEffectDenialTests {
-  @Test("a historical canary context cannot reserve any fresh effect")
-  func historicalCanaryCannotReserve() async throws {
+  @Test("a historical canary context cannot reserve any fresh effect", arguments: [false, true])
+  func historicalCanaryCannotReserve(useDouble: Bool) async throws {
     let fixture = try await HistoricalCanaryFixture()
     defer { fixture.remove() }
     let jobID = fixture.jobID
-    let authority = fixture.authority
+    let authority: any RolloutEffectAuthorizing =
+      useDouble ? ExplicitTestRolloutEffectAuthority() : fixture.authority
 
     try await fixture.asHistoricalCanary {
       await #expect(throws: RolloutAuthorityError.effectAdmissionClosed, "githubRead") {
@@ -41,11 +42,7 @@ struct HistoricalCanaryEffectDenialTests {
     await fixture.database.close()
   }
 
-  // Review finding M3 (PR #18): the shared explicit double grants a historical-canary provider
-  // permit that `RolloutAuthorityStore.reserveProvider` always denies, so the executor's canary
-  // launch branch is exercised only against a double that contradicts production. The known-issue
-  // wrapper keeps the suite green while the finding is open and fails once the double is aligned,
-  // at which point the wrapper must be removed.
+  // The shared unit double must preserve production's historical-canary denial.
   @Test("the explicit test double denies a historical canary provider reservation like the store")
   func explicitDoubleMatchesStoreForCanaryProvider() async throws {
     let fixture = try await HistoricalCanaryFixture()
@@ -53,22 +50,22 @@ struct HistoricalCanaryEffectDenialTests {
     let double = ExplicitTestRolloutEffectAuthority()
 
     try await fixture.asHistoricalCanary {
-      await withKnownIssue(
-        "PR #18 review M3: ExplicitTestRolloutEffectAuthority grants canary provider permits"
-      ) {
-        await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
-          _ = try await double.reserveProvider(fixture.providerEffect(), now: fixture.now)
-        }
+      await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+        _ = try await double.reserveProvider(fixture.providerEffect(), now: fixture.now)
       }
     }
     await fixture.database.close()
   }
 
-  @Test("a historical canary send is denied and marks no intent as started")
-  func historicalCanarySendMarksNothing() async throws {
+  @Test(
+    "a historical canary send is denied and marks no intent as started", arguments: [false, true])
+  func historicalCanarySendMarksNothing(useDouble: Bool) async throws {
     let fixture = try await HistoricalCanaryFixture()
     defer { fixture.remove() }
-    let authority = fixture.authority
+    let authority: any RolloutEffectAuthorizing =
+      useDouble
+      ? ExplicitTestRolloutEffectAuthority(intents: MutationIntentStore(database: fixture.database))
+      : fixture.authority
     #expect(try await fixture.intentState() == "prepared")
 
     try await fixture.asHistoricalCanary {
@@ -89,11 +86,12 @@ struct HistoricalCanaryEffectDenialTests {
     await fixture.database.close()
   }
 
-  @Test("a historical canary permit cannot be verified or settled")
-  func historicalCanaryCannotVerifyOrSettle() async throws {
+  @Test("a historical canary permit cannot be verified or settled", arguments: [false, true])
+  func historicalCanaryCannotVerifyOrSettle(useDouble: Bool) async throws {
     let fixture = try await HistoricalCanaryFixture()
     defer { fixture.remove() }
-    let authority = fixture.authority
+    let authority: any RolloutEffectAuthorizing =
+      useDouble ? ExplicitTestRolloutEffectAuthority() : fixture.authority
     let permit = RolloutEffectPermit.historicalCanary(jobID: fixture.jobID)
 
     try await fixture.asHistoricalCanary {
@@ -113,7 +111,7 @@ struct HistoricalCanaryEffectDenialTests {
         try await authority.verifyGitHubSendPermit(
           permit, operation: fixture.githubSendEffect().operation)
       }
-      await #expect(throws: RolloutAuthorityError.self, "verify gitSend") {
+      await #expect(throws: RolloutAuthorityError.effectIdentityMismatch, "verify gitSend") {
         try await authority.verifyGitSendPermit(permit, effect: fixture.gitSendEffect())
       }
       await #expect(throws: RolloutAuthorityError.effectAdmissionClosed, "settle") {
@@ -142,6 +140,55 @@ struct HistoricalCanaryEffectDenialTests {
   // permits keep decoding. The compiler enforces that: this file would not build
   // without the case. There is no test for it, because asserting that a value built one
   // line earlier equals itself would exercise synthesized Equatable and nothing else.
+}
+
+@Suite("Explicit command authority double")
+struct ExplicitCommandAuthorityDoubleTests {
+  @Test("command reservation requires the workflow identity and every effect field")
+  func commandReservationParity() async throws {
+    let fixture = try await HistoricalCanaryFixture()
+    defer { fixture.remove() }
+    let double = ExplicitTestRolloutEffectAuthority()
+    let valid = fixture.commandEffect()
+    await #expect(throws: RolloutAuthorityError.effectIdentityMismatch) {
+      _ = try await double.reserveApprovedCommand(valid, now: fixture.now)
+    }
+    await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .workflow(jobID: UUID()))
+    ) {
+      await #expect(throws: RolloutAuthorityError.effectIdentityMismatch) {
+        _ = try await double.reserveApprovedCommand(valid, now: fixture.now)
+      }
+    }
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .workflow(jobID: fixture.jobID))
+    ) {
+      for field in ["command", "definition", "plan", "head", "round", "ordinal"] {
+        let invalid = RolloutApprovedCommandEffect(
+          jobID: valid.jobID,
+          commandID: field == "command" ? "" : valid.commandID,
+          definitionSHA256: field == "definition" ? "invalid" : valid.definitionSHA256,
+          planSHA256: field == "plan" ? "invalid" : valid.planSHA256,
+          workspaceHeadSHA: field == "head" ? "invalid" : valid.workspaceHeadSHA,
+          phase: valid.phase, round: field == "round" ? 4 : valid.round,
+          ordinal: field == "ordinal" ? -1 : valid.ordinal
+        )
+        let authorities: [any RolloutEffectAuthorizing] = [double, fixture.authority]
+        for authority in authorities {
+          await #expect(throws: RolloutAuthorityError.effectIdentityMismatch, "\(field)") {
+            _ = try await authority.reserveApprovedCommand(invalid, now: fixture.now)
+          }
+        }
+      }
+      let permit = try await double.reserveApprovedCommand(valid, now: fixture.now)
+      try await double.verifyApprovedCommandPermit(permit, effect: valid)
+      try await double.settleEffect(
+        permit, evidenceSHA256: String(repeating: "e", count: 64), now: fixture.now
+      )
+      #expect(await double.waitForDrain(until: fixture.now))
+    }
+    await fixture.database.close()
+  }
 }
 
 private final class HistoricalCanaryFixture: @unchecked Sendable {

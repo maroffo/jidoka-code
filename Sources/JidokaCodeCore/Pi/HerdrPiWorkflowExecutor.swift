@@ -4212,6 +4212,12 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
       }
       let topologyGeneration = try await topologyGeneration(for: job.id)
 
+      // Historical evidence can replay a settled result above, but cannot prepare,
+      // retry or republish a provider launch, even from an existing durable slot.
+      if case .historicalCanary = RolloutEffectTaskContext.current?.mode {
+        throw RolloutAuthorityError.effectAdmissionClosed
+      }
+
       if let existing = try await runs.runForSlot(
         jobID: jobID,
         workflow: request.workflow,
@@ -4918,67 +4924,9 @@ public actor HerdrPiWorkflowRuntime: PiWorkflowExecutorBuilding {
       try await rolloutAuthority.verifyProviderPermit(permit, effect: effect)
       return
     }
-    guard permit == nil, effect == nil, launchAllowed, canaryJobID == run.jobID,
-      hasActiveHistoricalProviderAuthority(run: run, launch: launch),
-      try await jobs.hasCanaryPiRoleAuthorization(
-        jobID: run.jobID,
-        workflow: run.workflow,
-        role: run.role,
-        round: run.round
-      )
-    else {
-      throw RolloutAuthorityError.effectIdentityMismatch
-    }
-    let historicalEffect = try durableProviderEffect(run: run, launch: launch)
-    try await RolloutEffectTaskContext.$current.withValue(
-      RolloutEffectExecutionContext(mode: .historicalCanary(jobID: run.jobID))
-    ) {
-      let historicalPermit = try await self.rolloutAuthority.reserveProvider(
-        historicalEffect,
-        now: self.now()
-      )
-      try await self.rolloutAuthority.bindProviderReservation(
-        historicalPermit,
-        effect: historicalEffect,
-        runID: run.id,
-        now: self.now()
-      )
-      try await self.rolloutAuthority.verifyProviderPermit(
-        historicalPermit,
-        effect: historicalEffect
-      )
-    }
-  }
-
-  private func hasActiveHistoricalProviderAuthority(
-    run: PiRunRecord,
-    launch: PiRunLaunchRecord
-  ) -> Bool {
-    if let recovery = canaryRecoveryAuthorization,
-      recovery.canary.scope.jobID == run.jobID
-    {
-      return true
-    }
-    if let retry = activeCanaryPiFreshRetry,
-      retry.jobID == run.jobID, retry.runID == run.id
-    {
-      return true
-    }
-    if let rollover = activeGenerationRolloverQ4,
-      rollover.authorization.rollover.jobID == run.jobID,
-      rollover.authorization.rollover.successorRunID == run.id,
-      rollover.authorization.q4.plannedLaunchAttemptID == launch.launchAttemptID
-    {
-      return true
-    }
-    if let replacement = activeCanaryRoleHostReplacement,
-      replacement.authorization.request.retry.recovery.canary.scope.jobID == run.jobID,
-      replacement.candidate.report.runID == run.id,
-      replacement.authorization.request.plannedLaunchAttemptID == launch.launchAttemptID
-    {
-      return true
-    }
-    return false
+    // A historical canary permit is decode-only, never a substitute for the
+    // ordinary schema-10 provider reservation required at this boundary.
+    throw RolloutAuthorityError.effectIdentityMismatch
   }
 
   private func providerEffectMatchesDurableRun(

@@ -4,6 +4,7 @@
 import ctypes
 import os
 import sys
+import tempfile
 import time
 
 
@@ -65,17 +66,18 @@ def main() -> int:
         f"{process_id} {information.pbi_start_tvsec} "
         f"{information.pbi_start_tvusec}\n"
     ).encode("ascii")
-    descriptor = os.open(
-        sys.argv[1],
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        0o600,
+    # Publish only a complete record, preserving create-only semantics and mode 0600.
+    descriptor, pending_record = tempfile.mkstemp(
+        prefix="identity-pending-", dir=os.path.dirname(os.path.abspath(sys.argv[1]))
     )
     try:
         if os.write(descriptor, record) != len(record):
             return 74
         os.fsync(descriptor)
+        os.link(pending_record, sys.argv[1])
     finally:
         os.close(descriptor)
+        os.unlink(pending_record)
 
     os.close(0)
     os.close(1)

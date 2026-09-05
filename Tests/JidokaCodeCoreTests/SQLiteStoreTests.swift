@@ -729,13 +729,13 @@ struct SQLiteStoreTests {
 
 private let schemaEightMigrations = Array(DatabaseSchema.migrations.prefix(8))
 private let schemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
-private let schemaTenStatementCuts = Array(1...90)
+private let schemaTenStatementCuts = Array(1...91)
 private let schemaEightRunID = "run-schema8-architecture"
 private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
 private let expectedSchemaNineMigrationDigest =
   "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
 private let expectedSchemaTenMigrationDigest =
-  "b54582b347dd86372c8c0a5119061e7568ef47845df8b71b95ada4eacf73772e"
+  "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991"
 // Widened when `schema_migrations` gained `statements_sha256`: the snapshot projects
 // every column of every table, so one added column moves the digest. The historical
 // row values themselves are unchanged and still compared row-for-row above.
@@ -1235,7 +1235,7 @@ private func productionSchemaNineMigration() throws -> SQLiteMigration {
 }
 
 private func productionSchemaTenMigration() throws -> SQLiteMigration {
-  #expect(DatabaseSchema.migrations.count == 10)
+  #expect(DatabaseSchema.migrations.count >= 10)
   let migration = try #require(
     DatabaseSchema.migrations.first(where: { $0.version == 10 })
   )

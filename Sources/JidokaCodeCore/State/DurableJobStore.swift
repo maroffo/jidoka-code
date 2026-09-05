@@ -135,6 +135,7 @@ public enum DurableJobStoreError: Error, Equatable, Sendable {
   case invalidDigest
   case stepOrdinalMismatch(expected: Int, actual: Int)
   case stepKindMismatch(expected: JobStepKind?, actual: JobStepKind)
+  case invalidPhaseCheckpoint(state: JobState, step: JobStepKind?)
   case completedStepCollision(jobID: UUID, ordinal: Int)
   case retryDeadlineNotReached
   case activeClaimExists(String)
@@ -1524,9 +1525,8 @@ public actor DurableJobStore {
         effect.nextStep
           == (atStaleApprovalBoundary ? JobStepKind.replan : JobStepKind.orchestrate)
       else {
-        throw DurableJobStoreError.stepKindMismatch(
-          expected: current.currentStepKind,
-          actual: .writePlan
+        throw DurableJobStoreError.invalidPhaseCheckpoint(
+          state: current.state, step: current.currentStepKind
         )
       }
     }

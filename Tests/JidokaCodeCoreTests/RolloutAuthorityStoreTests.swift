@@ -5,6 +5,41 @@ import Testing
 
 @Suite("Progressive rollout authority")
 struct RolloutAuthorityStoreTests {
+  @Test("exact activation refuses another job's disposition without rewriting history")
+  func existingDispositionRefusesAnotherExactJob() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let jobs = DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
+    let identity = LogicalJobIdentity(
+      repositoryID: fixture.repositoryID, kind: .prReview,
+      objectNodeID: "PR_fixture_rollout", revisionKey: String(repeating: "1", count: 40)
+    )
+    let creation = try await jobs.createJob(
+      identity: identity, objectNumber: 17, contractVersionUsed: "pr-review-v1",
+      priority: .prReview, firstStep: .review, now: fixture.now
+    )
+    guard case .created(let priorJob) = creation else {
+      Issue.record("fixture must create the prior job")
+      return
+    }
+    let disposition = try await jobs.disposition(for: identity)
+    let input = try await fixture.previewInput()
+    let preview = try await fixture.authority.preview(input: input)
+    await #expect(throws: RolloutAuthorityError.previewDrift) {
+      _ = try await fixture.authority.activate(
+        approvedCanonicalJSON: preview.canonicalJSON, confirmedSHA256: preview.sha256,
+        recomputedInput: input, authorizationID: fixture.authorizationID,
+        now: fixture.now.addingTimeInterval(1)
+      )
+    }
+    #expect(try await jobs.disposition(for: identity) == disposition)
+    #expect(try await jobs.job(id: priorJob.id) == priorJob)
+    #expect(try await jobs.job(id: fixture.jobID) == nil)
+    #expect(
+      try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_authorizations") == 0)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+  }
+
   @Test("preview is read-only and exact activation is atomic")
   func previewAndActivation() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
@@ -977,6 +1012,51 @@ struct RolloutAuthorityStoreTests {
     }
   }
 
+  @Test("usage INSERT cannot reset a consumed cap, skip sequence or invent a source")
+  func usageInsertCannotForgeBudget() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    try await fixture.activate()
+    for ordinal in 0..<4 {
+      _ = try await fixture.authority.reserveEffect(
+        fixture.providerRequest(ordinal: ordinal),
+        now: fixture.now.addingTimeInterval(2)
+      )
+    }
+    // These are disposable fixture writes exercising the database's future-writer boundary.
+    // All non-provider counters stay unchanged, isolating the reset of the consumed cap.
+    for (sequence, source, consumed) in [
+      (5, "forged-reset", 0), (6, "forged-gap", 4),
+      (5, "forged-source", 4),
+    ] {
+      await #expect(throws: SQLiteStoreError.self) {
+        try await fixture.database.execute(
+          """
+          INSERT INTO rollout_authorization_usage
+          SELECT authorization_id, ?, 'effect', ?, github_read_requests,
+            github_read_pages, github_read_bytes, git_remote_reads, ?, approved_commands,
+            marker_parts, label_writes, branch_creates, pull_request_creates,
+            github_sends, git_sends, created_at_ms
+          FROM rollout_authorization_usage WHERE sequence = 4
+          """,
+          bindings: [.integer(Int64(sequence)), .text(source), .integer(Int64(consumed))]
+        )
+      }
+    }
+    #expect(
+      try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_authorization_usage") == 5)
+    #expect(
+      try await fixture.authority.status(
+        authorizationID: fixture.authorizationID.uuidString.lowercased()
+      ).remainingBudgets.providerSessions == 0
+    )
+    await #expect(throws: RolloutAuthorityError.budgetExceeded(.providerSession)) {
+      try await fixture.authority.reserveEffect(
+        fixture.providerRequest(ordinal: 4), now: fixture.now.addingTimeInterval(3)
+      )
+    }
+  }
+
   @Test("concurrent reservations cannot overrun the provider cap")
   func concurrentReservationsStayWithinCap() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
@@ -1761,7 +1841,7 @@ struct RolloutAuthorityStoreTests {
     }
   }
 
-  @Test("stop enters draining before durable pause and terminalizes only after drain")
+  @Test("stop pauses durably with draining and terminalizes only after drain")
   func stopDrainOrderingIsDurable() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
     defer { fixture.remove() }
@@ -1773,7 +1853,7 @@ struct RolloutAuthorityStoreTests {
       now: fixture.now.addingTimeInterval(2)
     )
     #expect(draining.authorization.state == .draining)
-    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 0)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
     #expect(
       try await fixture.database.scalarText(
         "SELECT active_rollout_authorization_id FROM app_settings"
@@ -2933,17 +3013,385 @@ private struct RolloutNoReadAPI: GitHubReadAPI {
   }
 }
 
+@Suite("Production rollout operator commands")
+struct ProductionRolloutOperatorTests {
+  @Test("preview and activation enforce paused, exclusive and checkpoint boundaries")
+  func previewAndActivationBoundaries() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let harness = try RolloutOperatorHarness(
+      fixture: fixture, expectedRelease: input.releaseIdentity)
+    let runtime = harness.runtime
+    await #expect(throws: EngineClientError(.busy)) { try await runtime.previewRollout(input) }
+    await runtime.setPaused(true)
+    let preview = try await runtime.previewRollout(input)
+    #expect(
+      try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_authorizations") == 0)
+    let request = RolloutActivationRequest(
+      authorizationID: fixture.authorizationID, approvedCanonicalJSON: preview.canonicalJSON,
+      confirmedSHA256: preview.sha256
+    )
+    try await runtime.beginExclusiveOperation()
+    await #expect(throws: EngineClientError(.busy)) { try await runtime.previewRollout(input) }
+    await #expect(throws: EngineClientError(.busy)) { try await runtime.activateRollout(request) }
+    await runtime.endExclusiveOperation()
+    let report = try await runtime.activateRollout(request)
+    #expect(report.authorization.state == .active)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 0)
+    #expect(await runtime.timingSnapshot()?.paused == false)
+    #expect(await harness.scheduler.pauses == [true, false])
+    await #expect(throws: EngineClientError(.busy)) { try await runtime.activateRollout(request) }
+    await runtime.setPaused(true)
+    try await runtime.prepareForCheckpoint()
+    await #expect(throws: EngineClientError(.busy)) { try await runtime.previewRollout(input) }
+    await #expect(throws: EngineClientError(.busy)) { try await runtime.activateRollout(request) }
+  }
+
+  @Test("stop closes actual dispatch and command gates and pauses the scheduler")
+  func stopClosesAdmission() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let harness = try RolloutOperatorHarness(
+      fixture: fixture, expectedRelease: input.releaseIdentity)
+    let report = try await harness.activate(input, authorizationID: fixture.authorizationID)
+    #expect(await harness.dispatch.value())
+    let lease = try await harness.commands.acquire()
+    await harness.commands.release(lease)
+    let stop = RolloutStopRequest(
+      authorizationID: report.authorization.id, previewSHA256: report.authorization.previewSHA256,
+      timeoutMilliseconds: 1_000
+    )
+    await #expect(throws: EngineClientError(.staleEvidence)) {
+      try await harness.runtime.stopAndDrainRollout(
+        RolloutStopRequest(
+          authorizationID: stop.authorizationID, previewSHA256: String(repeating: "f", count: 64),
+          timeoutMilliseconds: 1_000
+        )
+      )
+    }
+    #expect(await harness.dispatch.value())
+    let stopped = try await harness.runtime.stopAndDrainRollout(stop)
+    #expect(stopped.authorization.state == .revoked)
+    #expect(stopped.authorization.terminalReason == "OPERATOR_STOPPED")
+    #expect(await harness.runtime.timingSnapshot()?.paused == true)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(await harness.dispatch.value() == false)
+    await #expect(throws: ApprovedCommandRunStoreError.launchSuppressed) {
+      try await harness.commands.acquire()
+    }
+    await #expect(throws: EngineClientError(.staleEvidence)) {
+      try await harness.runtime.stopAndDrainRollout(stop)
+    }
+  }
+
+  @Test("a busy command times out into recovery without reopening admission")
+  func drainTimeoutAndRecovery() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let harness = try RolloutOperatorHarness(
+      fixture: fixture, expectedRelease: input.releaseIdentity)
+    let active = try await harness.activate(input, authorizationID: fixture.authorizationID)
+    let lease = try await harness.commands.acquire()
+    let stopping = Task {
+      try await harness.runtime.stopAndDrainRollout(
+        RolloutStopRequest(
+          authorizationID: active.authorization.id,
+          previewSHA256: active.authorization.previewSHA256,
+          timeoutMilliseconds: 1_000
+        )
+      )
+    }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while await harness.dispatch.value(), ContinuousClock.now < deadline {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(await harness.dispatch.value() == false)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(
+      try await fixture.database.scalarText("SELECT state FROM rollout_authorizations")
+        == "draining")
+    await #expect(throws: ApprovedCommandRunStoreError.launchSuppressed) {
+      try await harness.commands.acquire()
+    }
+    let report = try await stopping.value
+    await harness.commands.release(lease)
+    #expect(report.authorization.state == .recoveryRequired)
+    #expect(report.events.last?.reasonCode == "DRAIN_TIMEOUT")
+    #expect(await harness.runtime.timingSnapshot()?.paused == true)
+    let request = RolloutRecoveryRequest(
+      authorizationID: report.authorization.id, previewSHA256: report.authorization.previewSHA256
+    )
+    let before = try await harness.runtime.rolloutStatus()
+    let preview = try await harness.runtime.previewRolloutRecovery(request)
+    #expect(try await harness.runtime.rolloutStatus() == before)
+    #expect(preview.payload.action == .readbackThenContinueExact)
+    let authorization = RolloutRecoveryAuthorization(
+      approvedCanonicalJSON: preview.canonicalJSON, confirmedSHA256: preview.sha256
+    )
+    // The service holds exclusivity and keeps dispatch shut through the checkpoint.
+    try await harness.runtime.beginExclusiveOperation()
+    let resumed = try await harness.runtime.executeRolloutRecovery(authorization)
+    #expect(resumed.authorization.state == .active)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 0)
+    #expect(await harness.dispatch.value() == false)
+    #expect(await harness.runtime.timingSnapshot()?.paused == true)
+    await harness.runtime.endExclusiveOperation()
+    await harness.runtime.setPaused(false)
+    await harness.runtime.setDispatchAllowed(true)
+    #expect(await harness.dispatch.value())
+    #expect(await harness.runtime.timingSnapshot()?.paused == false)
+  }
+
+  @Test("recovery rejects unpaused, expired and drifted evidence")
+  func recoveryRejectsStaleEvidence() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let harness = try RolloutOperatorHarness(
+      fixture: fixture, expectedRelease: input.releaseIdentity)
+    let active = try await harness.activate(input, authorizationID: fixture.authorizationID)
+    let reservation = try await fixture.authority.reserveEffect(
+      fixture.providerRequest(ordinal: 0), now: fixture.now.addingTimeInterval(2)
+    )
+    _ = try await fixture.authority.markRecoveryRequired(
+      authorizationID: active.authorization.id, reasonCode: "TEST_INTERRUPTION",
+      now: fixture.now.addingTimeInterval(5)
+    )
+    let request = RolloutRecoveryRequest(
+      authorizationID: active.authorization.id, previewSHA256: active.authorization.previewSHA256
+    )
+    await #expect(throws: EngineClientError(.staleEvidence)) {
+      try await harness.runtime.previewRolloutRecovery(request)
+    }
+    await harness.runtime.setPaused(true)
+    let preview = try await harness.runtime.previewRolloutRecovery(request)
+    let authorization = RolloutRecoveryAuthorization(
+      approvedCanonicalJSON: preview.canonicalJSON, confirmedSHA256: preview.sha256
+    )
+    let expired = try RolloutOperatorHarness(
+      fixture: fixture, expectedRelease: input.releaseIdentity,
+      now: fixture.now.addingTimeInterval(601)
+    )
+    await expired.runtime.setPaused(true)
+    await #expect(throws: EngineClientError(.staleEvidence)) {
+      try await expired.runtime.executeRolloutRecovery(authorization)
+    }
+    _ = try await fixture.authority.settleReservation(
+      id: reservation.id, attributed: false, evidenceSHA256: String(repeating: "e", count: 64),
+      now: fixture.now.addingTimeInterval(4)
+    )
+    await #expect(throws: EngineClientError(.staleEvidence)) {
+      try await harness.runtime.executeRolloutRecovery(authorization)
+    }
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(await harness.dispatch.value() == false)
+  }
+
+  @Test("release mismatch and local identity drift leave operator admission closed")
+  func releaseAndStatusDrift() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let harness = try RolloutOperatorHarness(fixture: fixture, expectedRelease: nil)
+    await harness.runtime.setPaused(true)
+    await #expect(throws: RolloutAuthorityError.previewDrift) {
+      try await harness.runtime.previewRollout(input)
+    }
+    let good = try RolloutOperatorHarness(fixture: fixture, expectedRelease: input.releaseIdentity)
+    _ = try await good.activate(input, authorizationID: fixture.authorizationID)
+    let repository = input.scope.repository
+    try await ConfigurationStore(database: fixture.database).upsertRepository(
+      RepositoryConfiguration(
+        id: fixture.repositoryID, nodeID: repository.nodeID, owner: repository.owner,
+        name: repository.name, defaultBranch: repository.defaultBranch,
+        reviewEnabled: repository.reviewEnabled, triageEnabled: repository.triageEnabled,
+        implementationEnabled: repository.implementationEnabled, enabled: false
+      ),
+      now: fixture.now.addingTimeInterval(6)
+    )
+    let failed = try await good.runtime.rolloutStatus()
+    #expect(failed?.authorization.state == .failed)
+    #expect(failed?.authorization.terminalReason == "CONFIGURATION_DRIFT")
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(await good.runtime.timingSnapshot()?.paused == true)
+    #expect(await good.dispatch.value() == false)
+    await #expect(throws: ApprovedCommandRunStoreError.launchSuppressed) {
+      try await good.commands.acquire()
+    }
+  }
+}
+
+private struct RolloutOperatorHarness {
+  let runtime: ProductionEngineJobRuntime
+  let dispatch = EngineDispatchGate()
+  let commands = ApprovedCommandExecutionGate()
+  let scheduler = RolloutOperatorSchedulerProbe()
+
+  init(fixture: RolloutAuthorityFixture, expectedRelease: RolloutReleaseIdentity?, now: Date? = nil)
+    throws
+  {
+    let scheduler = self.scheduler
+    let date = now ?? fixture.now.addingTimeInterval(5)
+    runtime = ProductionEngineJobRuntime(
+      runtimeConfiguration: try ProductionEngineRuntimeConfiguration(
+        applicationSupportRoot: fixture.root, piResourceRoot: fixture.root,
+        askPassExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+        pushGuardExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+        herdrHostExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+        herdrSocketURL: fixture.root.appendingPathComponent("unused.sock"),
+        contractVersion: "fixture-v1"
+      ),
+      database: fixture.database, configuration: ConfigurationStore(database: fixture.database),
+      jobs: DurableJobStore(database: fixture.database, enforceRolloutAuthority: true),
+      intents: MutationIntentStore(database: fixture.database),
+      herdrReadiness: RolloutOperatorReadyHerdr(), ownershipRuntime: nil,
+      reloadComposition: ProductionEngineReloadComposition(
+        setSchedulerPaused: { await scheduler.setPaused($0) },
+        recoverCoordinatorAtStartup: {}, runStartupPass: { _ in }, requestStartup: {},
+        schedulerSnapshot: { await scheduler.snapshot() }
+      ),
+      rolloutReleaseIdentity: RolloutOperatorReleaseIdentity(expected: expectedRelease),
+      dispatchGate: dispatch, commandGate: commands, now: { date }
+    )
+  }
+
+  func activate(_ input: RolloutPreviewInput, authorizationID: UUID) async throws
+    -> RolloutStatusReport
+  {
+    await runtime.setPaused(true)
+    let preview = try await runtime.previewRollout(input)
+    let report = try await runtime.activateRollout(
+      RolloutActivationRequest(
+        authorizationID: authorizationID, approvedCanonicalJSON: preview.canonicalJSON,
+        confirmedSHA256: preview.sha256
+      )
+    )
+    await runtime.setPaused(false)
+    await runtime.setDispatchAllowed(true)
+    return report
+  }
+}
+
+private actor RolloutOperatorSchedulerProbe {
+  private(set) var pauses: [Bool] = []
+  func setPaused(_ value: Bool) { pauses.append(value) }
+  func snapshot() -> SchedulerTimingSnapshot {
+    SchedulerTimingSnapshot(
+      paused: pauses.last ?? false, passRunning: false, pendingReasons: [],
+      dueAt: nil, nextPeriodicAt: Date(timeIntervalSince1970: 20_000)
+    )
+  }
+}
+
+private struct RolloutOperatorReadyHerdr: HerdrRuntimeReadinessChecking {
+  func preflight() async -> EngineHerdrStatus { EngineHerdrStatus(state: .ready) }
+}
+
+private struct RolloutOperatorReleaseIdentity: RolloutReleaseIdentityRevalidating {
+  let expected: RolloutReleaseIdentity?
+  func requireCurrent(_ actual: RolloutReleaseIdentity) async throws {
+    guard actual == expected else { throw RolloutAuthorityError.previewDrift }
+  }
+}
+
 private struct RolloutNoReadback: RolloutStartedEffectReconciling {
   func reconcileStartedEffects(now _: Date) async throws {}
 }
 
-// Review finding M1 (PR #18): while a lane is draining the database holds `state = 'draining'`
-// with `app_settings.paused = 0`, which satisfies neither disjunct of the readback insert
-// triggers, so the readback of a send-started mutation is refused with an untyped SQLite abort
-// although `waitForDrain` waits on exactly that mutation. The known-issue wrapper keeps the suite
-// green while the finding is open and fails once either layer is fixed, at which point the
-// wrapper must be removed.
+// Drain closes fresh admission durably while preserving exact started-effect readback.
 extension RolloutAuthorityStoreTests {
+  @Test("a started branch publication can read back during drain without fresh send authority")
+  func gitReadbackDuringDrain() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let seed = try await fixture.missingExecutionPreviewInput()
+    _ = try await DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
+      .createJob(
+        id: fixture.jobID,
+        identity: LogicalJobIdentity(
+          repositoryID: fixture.repositoryID, kind: .issueImplementation,
+          objectNodeID: "I_fixture_rollout", revisionKey: String(repeating: "9", count: 64)
+        ),
+        objectNumber: 17, contractVersionUsed: "implementation-v1",
+        priority: .issueImplementation, firstStep: .orchestrate, now: fixture.now
+      )
+    // Refresh local evidence after creating the existing implementation job.
+    let current = try await fixture.missingExecutionPreviewInput()
+    let input = RolloutPreviewInput(
+      releaseIdentity: current.releaseIdentity, scope: current.scope,
+      budgets: RolloutBudgets(
+        jobs: 1, githubReadRequests: 0, githubReadPages: 0, githubReadBytes: 0,
+        gitRemoteReads: 1, providerSessions: 0, approvedCommands: 0,
+        markerParts: 0, labelWrites: 0, branchCreates: 1, pullRequestCreates: 0,
+        githubSends: 0, gitSends: 1
+      ),
+      inventory: current.inventory, missingLabels: [], commands: [],
+      jobBinding: current.jobBinding, createdAtMilliseconds: seed.createdAtMilliseconds,
+      expiresAtMilliseconds: seed.expiresAtMilliseconds
+    )
+    let preview = try await fixture.authority.preview(input: input)
+    _ = try await fixture.authority.activate(
+      approvedCanonicalJSON: preview.canonicalJSON, confirmedSHA256: preview.sha256,
+      recomputedInput: input, authorizationID: fixture.authorizationID,
+      now: fixture.now.addingTimeInterval(1)
+    )
+    try await fixture.setJob(state: .executing, currentStep: 2, kind: .push)
+    let digest = String(repeating: "a", count: 64)
+    let target = "R_fixture_rollout:refs/heads/agent/issue-17-fixture"
+    let intents = MutationIntentStore(database: fixture.database)
+    let intent = try await intents.prepare(
+      jobID: fixture.jobID, idempotencyKey: digest, operation: .publishBranch,
+      target: target, expectedStateDigest: digest, requestDigest: digest,
+      now: fixture.now.addingTimeInterval(2)
+    )
+    let send = RolloutGitSendEffect(
+      jobID: fixture.jobID, intentID: intent.id, repositoryID: fixture.repositoryID,
+      repositoryNodeID: "R_fixture_rollout", branch: "agent/issue-17-fixture",
+      exactSHA: String(repeating: "1", count: 40), target: target,
+      expectedStateSHA256: digest, requestSHA256: digest
+    )
+    _ = try await withTestRolloutWorkflow(jobID: fixture.jobID) {
+      try await fixture.authority.reserveGitSendAndMarkStarted(
+        send, now: fixture.now.addingTimeInterval(3)
+      )
+    }
+    #expect(try await intents.intent(id: intent.id)?.state == .sendStarted)
+    _ = try await fixture.authority.beginDrain(
+      authorizationID: fixture.authorizationID.uuidString.lowercased(),
+      reasonCode: "OPERATOR_STOP_REQUESTED", now: fixture.now.addingTimeInterval(4)
+    )
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    let read = RolloutGitRemoteReadEffect(
+      jobID: fixture.jobID, repositoryID: fixture.repositoryID,
+      repositoryNodeID: "R_fixture_rollout", operation: .readReference, target: target
+    )
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .readback(jobID: fixture.jobID, intentID: intent.id))
+    ) {
+      let permit = try await fixture.authority.reserveGitRemoteRead(
+        read, now: fixture.now.addingTimeInterval(5)
+      )
+      guard case .gitReadback = permit else {
+        Issue.record("expected exact Git readback permit")
+        return
+      }
+      try await fixture.authority.verifyGitRemoteReadPermit(permit, effect: read)
+      try await fixture.authority.settleEffect(
+        permit, evidenceSHA256: digest, now: fixture.now.addingTimeInterval(6)
+      )
+    }
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      try await withTestRolloutWorkflow(jobID: fixture.jobID) {
+        try await fixture.authority.reserveGitSendAndMarkStarted(
+          send, now: fixture.now.addingTimeInterval(7)
+        )
+      }
+    }
+  }
+
   @Test("a send-started mutation's readback is reservable while the lane is draining")
   func readbackDuringDrain() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
@@ -2993,7 +3441,7 @@ extension RolloutAuthorityStoreTests {
       now: fixture.now.addingTimeInterval(5)
     )
     #expect(draining.authorization.state == .draining)
-    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 0)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
 
     let readbackContext = RolloutEffectExecutionContext(
       mode: .readback(jobID: fixture.jobID, intentID: intent.id)
@@ -3008,18 +3456,28 @@ extension RolloutAuthorityStoreTests {
       maximumResponseBytes: 4_096,
       context: readbackContext
     )
-    await withKnownIssue(
-      "PR #18 review M1: readback insert triggers deny the drain window (draining, paused = 0)"
-    ) {
-      let permit = try await RolloutEffectTaskContext.$current.withValue(readbackContext) {
-        try await fixture.authority.reserveGitHubRead(
-          readbackEffect,
-          now: fixture.now.addingTimeInterval(6)
+    let permit = try await RolloutEffectTaskContext.$current.withValue(readbackContext) {
+      try await fixture.authority.reserveGitHubRead(
+        readbackEffect,
+        now: fixture.now.addingTimeInterval(6)
+      )
+    }
+    guard case .readback = permit else {
+      Issue.record("unexpected permit kind during drain: \(permit)")
+      return
+    }
+    try await RolloutEffectTaskContext.$current.withValue(readbackContext) {
+      try await fixture.authority.verifyGitHubReadPermit(permit, effect: readbackEffect)
+    }
+    try await fixture.authority.settleGitHubRead(
+      permit, evidenceSHA256: String(repeating: "e", count: 64),
+      now: fixture.now.addingTimeInterval(7)
+    )
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      try await withTestRolloutWorkflow(jobID: fixture.jobID) {
+        try await fixture.authority.reserveProvider(
+          fixture.providerEffect(ordinal: 0), now: fixture.now.addingTimeInterval(8)
         )
-      }
-      guard case .readback = permit else {
-        Issue.record("unexpected permit kind during drain: \(permit)")
-        return
       }
     }
   }

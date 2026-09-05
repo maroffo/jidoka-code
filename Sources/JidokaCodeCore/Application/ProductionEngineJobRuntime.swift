@@ -80,7 +80,7 @@ public struct ProductionEngineRuntimeConfiguration: Sendable {
   #endif
 }
 
-private actor EngineDispatchGate {
+actor EngineDispatchGate {
   private var allowed = false
 
   func set(_ value: Bool) {
@@ -97,6 +97,7 @@ struct ProductionEngineReloadComposition: Sendable {
   let recoverCoordinatorAtStartup: @Sendable () async throws -> Void
   let runStartupPass: @Sendable (SchedulerPass) async -> Void
   let requestStartup: @Sendable () async -> Void
+  var schedulerSnapshot: @Sendable () async -> SchedulerTimingSnapshot? = { nil }
 }
 
 struct ProductionRoleHostReplacementCandidate: Sendable {
@@ -149,10 +150,10 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   private let intents: MutationIntentStore
   private let rolloutAuthority: RolloutAuthorityStore
   private let rolloutReleaseIdentity: any RolloutReleaseIdentityRevalidating
-  private let dispatchGate = EngineDispatchGate()
+  private let dispatchGate: EngineDispatchGate
   private let herdrReadiness: any HerdrRuntimeReadinessChecking
   private let commandRuns: ApprovedCommandRunStore
-  private let commandGate = ApprovedCommandExecutionGate()
+  private let commandGate: ApprovedCommandExecutionGate
   private let clock: any SchedulerClock
   private let logger: any EngineEventLogging
   private let now: @Sendable () -> Date
@@ -180,6 +181,8 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.runtimeConfiguration = runtimeConfiguration
+    dispatchGate = EngineDispatchGate()
+    commandGate = ApprovedCommandExecutionGate()
     self.database = database
     self.configuration = configuration
     self.jobs = jobs
@@ -208,6 +211,8 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     reloadComposition: ProductionEngineReloadComposition,
     roleHostReplacementBoundary: ProductionRoleHostReplacementBoundary? = nil,
     rolloutReleaseIdentity: (any RolloutReleaseIdentityRevalidating)? = nil,
+    dispatchGate: EngineDispatchGate = EngineDispatchGate(),
+    commandGate: ApprovedCommandExecutionGate = ApprovedCommandExecutionGate(),
     clock: any SchedulerClock = SystemSchedulerClock(),
     logger: any EngineEventLogging = NullEngineEventLogger(),
     now: @escaping @Sendable () -> Date = Date.init
@@ -227,6 +232,8 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       ?? ProductionRolloutReleaseIdentityRevalidator(
         runtimeConfiguration: runtimeConfiguration
       )
+    self.dispatchGate = dispatchGate
+    self.commandGate = commandGate
     commandRuns = ApprovedCommandRunStore(database: database, now: now)
     self.clock = clock
     self.logger = logger
@@ -373,7 +380,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
 
   public func setPaused(_ paused: Bool) async {
     self.paused = paused
-    await components?.scheduler.setPaused(paused)
+    await setSchedulerPaused(paused)
     await applyDispatchGate()
   }
 
@@ -396,11 +403,8 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     guard paused, exclusiveOperations == 0, !checkpointing else {
       throw EngineClientError(.busy)
     }
-    let mode = try RolloutPreviewBuilder.parseCanonical(
-      request.approvedCanonicalJSON
-    ).payload.scope.mode
-    try request.validate(mode: mode)
     let approved = try RolloutPreviewBuilder.parseCanonical(request.approvedCanonicalJSON)
+    try request.validate(mode: approved.payload.scope.mode)
     try await validateRolloutPlanBindings(RolloutPreviewBuilder.input(from: approved.payload))
     try await rolloutReleaseIdentity.requireCurrent(approved.payload.releaseIdentity)
     let report = try await rolloutAuthority.activate(
@@ -411,7 +415,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       now: now()
     )
     paused = false
-    await components?.scheduler.setPaused(false)
+    await setSchedulerPaused(false)
     return report
   }
 
@@ -470,13 +474,13 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       do {
         _ = try await rolloutAuthority.activeStatus(now: now())
       } catch RolloutAuthorityError.previewDrift {
-        _ = try await rolloutAuthority.markRecoveryRequired(
-          authorizationID: latest.authorization.id,
-          reasonCode: "LOCAL_IDENTITY_DRIFT",
-          now: now()
-        )
+        // activeStatus already recorded the terminal CONFIGURATION_DRIFT failure.
+        // Never attempt a second transition out of that terminal state.
+      }
+      if try await rolloutAuthority.latestStatus()?.authorization.state != .active {
+        await prepareForPause()
         paused = true
-        await components?.scheduler.setPaused(true)
+        await setSchedulerPaused(true)
       }
     }
     return try await rolloutAuthority.latestStatus()
@@ -502,7 +506,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     await ownershipRuntime?.closeLaunchAdmission()
     await commandGate.close()
     paused = true
-    await components?.scheduler.setPaused(true)
+    await setSchedulerPaused(true)
 
     let deadline = ContinuousClock.now.advanced(
       by: .milliseconds(request.timeoutMilliseconds)
@@ -512,7 +516,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       let effectsDrained = await rolloutAuthority.waitForDrain(
         until: now().addingTimeInterval(0.05)
       )
-      let schedulerBusy = await components?.scheduler.snapshot().passRunning == true
+      let schedulerBusy = await timingSnapshot()?.passRunning == true
       let herdrBusy = await ownershipRuntime?.isBusy() == true
       let commandBusy = await commandGate.isBusy()
       if effectsDrained, !schedulerBusy, !herdrBusy, !commandBusy {
@@ -562,6 +566,8 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     let nowMilliseconds = Int64(now().timeIntervalSince1970 * 1_000)
     guard nowMilliseconds >= approved.payload.createdAtMilliseconds,
       nowMilliseconds < approved.payload.expiresAtMilliseconds,
+      approved.payload.action != .readbackThenContinueExact
+        || nowMilliseconds < approved.payload.authorizationExpiresAtMilliseconds,
       let current = try await rolloutAuthority.latestStatus(),
       current.authorization.id == approved.payload.authorizationID,
       current.authorization.previewSHA256 == approved.payload.previewSHA256
@@ -1283,7 +1289,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   public func waitUntilIdle() async throws {
     let deadline = ProcessInfo.processInfo.systemUptime + Self.idleWaitLimitSeconds
     while true {
-      let schedulerBusy = await components?.scheduler.snapshot().passRunning == true
+      let schedulerBusy = await timingSnapshot()?.passRunning == true
       let herdrBusy = await ownershipRuntime?.isBusy() == true
       let commandBusy = await commandGate.isBusy()
       guard schedulerBusy || herdrBusy || commandBusy || exclusiveOperations > 0 else { return }
@@ -1295,7 +1301,18 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
   }
 
   public func timingSnapshot() async -> SchedulerTimingSnapshot? {
-    await components?.scheduler.snapshot()
+    if let reloadComposition {
+      return await reloadComposition.schedulerSnapshot()
+    }
+    return await components?.scheduler.snapshot()
+  }
+
+  private func setSchedulerPaused(_ paused: Bool) async {
+    if let reloadComposition {
+      await reloadComposition.setSchedulerPaused(paused)
+    } else {
+      await components?.scheduler.setPaused(paused)
+    }
   }
 
   public func coordinatorSnapshot() async -> JobCoordinatorSnapshot? {
@@ -1355,7 +1372,7 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
 
   private func waitUntilSchedulerIdle() async throws {
     let deadline = ProcessInfo.processInfo.systemUptime + Self.idleWaitLimitSeconds
-    while await components?.scheduler.snapshot().passRunning == true {
+    while await timingSnapshot()?.passRunning == true {
       guard ProcessInfo.processInfo.systemUptime < deadline else {
         throw EngineClientError(.timedOut)
       }

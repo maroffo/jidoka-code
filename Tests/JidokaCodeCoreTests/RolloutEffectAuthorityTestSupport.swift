@@ -34,6 +34,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ effect: RolloutGitHubReadEffect,
     now _: Date
   ) throws -> RolloutEffectPermit {
+    try denyHistoricalContext()
     guard admissionOpen, !effect.operation.kind.isWrite, effect.maximumResponseBytes > 0 else {
       throw RolloutAuthorityError.effectAdmissionClosed
     }
@@ -52,6 +53,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ permit: RolloutEffectPermit,
     effect: RolloutGitHubReadEffect
   ) throws {
+    try denyHistoricalContext()
     guard admissionOpen || effect.context.isReadback else {
       throw RolloutAuthorityError.effectAdmissionClosed
     }
@@ -65,6 +67,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ effect: RolloutGitRemoteReadEffect,
     now _: Date
   ) throws -> RolloutEffectPermit {
+    try denyHistoricalContext()
     guard admissionOpen, !effect.target.isEmpty else {
       throw RolloutAuthorityError.effectAdmissionClosed
     }
@@ -77,6 +80,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ permit: RolloutEffectPermit,
     effect _: RolloutGitRemoteReadEffect
   ) throws {
+    try denyHistoricalContext()
     guard admissionOpen || RolloutEffectTaskContext.current?.isReadback == true else {
       throw RolloutAuthorityError.effectAdmissionClosed
     }
@@ -90,13 +94,9 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ effect: RolloutProviderEffect,
     now _: Date
   ) throws -> RolloutEffectPermit {
+    try denyHistoricalContext()
     guard admissionOpen, !effect.runNonce.isEmpty else {
       throw RolloutAuthorityError.effectAdmissionClosed
-    }
-    if case .historicalCanary(let jobID) = RolloutEffectTaskContext.current?.mode,
-      jobID == effect.jobID
-    {
-      return .historicalCanary(jobID: jobID)
     }
     return issue(.provider)
   }
@@ -113,7 +113,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
       else {
         throw RolloutAuthorityError.effectIdentityMismatch
       }
-      return
+      throw RolloutAuthorityError.effectAdmissionClosed
     }
     try require(permit, expected: .provider)
   }
@@ -133,7 +133,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
       else {
         throw RolloutAuthorityError.effectIdentityMismatch
       }
-      return
+      throw RolloutAuthorityError.effectAdmissionClosed
     }
     try require(permit, expected: .provider)
   }
@@ -142,9 +142,15 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ effect: RolloutApprovedCommandEffect,
     now _: Date
   ) throws -> RolloutEffectPermit {
-    guard admissionOpen, !effect.commandID.isEmpty else {
-      throw RolloutAuthorityError.effectAdmissionClosed
-    }
+    guard RolloutPreviewBuilder.validIdentifier(effect.commandID, maximum: 128),
+      GitHubInputValidation.validSHA256(effect.definitionSHA256),
+      GitHubInputValidation.validSHA256(effect.planSHA256),
+      GitHubInputValidation.validGitSHA(effect.workspaceHeadSHA),
+      (1...3).contains(effect.round), effect.ordinal >= 0,
+      case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
+      jobID == effect.jobID
+    else { throw RolloutAuthorityError.effectIdentityMismatch }
+    guard admissionOpen else { throw RolloutAuthorityError.effectAdmissionClosed }
     return issue(.command)
   }
 
@@ -152,6 +158,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ permit: RolloutEffectPermit,
     effect _: RolloutApprovedCommandEffect
   ) throws {
+    try denyHistoricalContext()
     guard admissionOpen else { throw RolloutAuthorityError.effectAdmissionClosed }
     try require(permit, expected: .command)
   }
@@ -176,6 +183,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ effect: RolloutMarkerBatchEffect,
     now _: Date
   ) throws -> [RolloutEffectPermit] {
+    try denyHistoricalContext()
     guard admissionOpen,
       !effect.intentIDs.isEmpty,
       Set(effect.intentIDs).count == effect.intentIDs.count
@@ -195,6 +203,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ effect: RolloutGitHubSendEffect,
     now: Date
   ) async throws -> RolloutEffectPermit {
+    try denyHistoricalContext()
     guard admissionOpen else { throw RolloutAuthorityError.effectAdmissionClosed }
     let permit: RolloutEffectPermit
     if let id = markerPermitIDs.removeValue(forKey: effect.intentID) {
@@ -220,6 +229,9 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ effect: RolloutGitSendEffect,
     now: Date
   ) async throws -> RolloutEffectPermit {
+    if case .historicalCanary = RolloutEffectTaskContext.current?.mode {
+      throw RolloutAuthorityError.effectIdentityMismatch
+    }
     guard admissionOpen else { throw RolloutAuthorityError.effectAdmissionClosed }
     let permit = issue(.gitSend)
     if let intents {
@@ -240,6 +252,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     _ permit: RolloutEffectPermit,
     operation _: GitHubOperation
   ) throws {
+    try denyHistoricalContext()
     try require(permit, expected: .githubSend)
   }
 
@@ -255,7 +268,8 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     observation: RolloutMutationObservation,
     evidenceSHA256 _: String,
     now _: Date
-  ) {
+  ) throws {
+    try denyHistoricalContext()
     if case .settled = observation,
       let id = activeSendPermitIDs.removeValue(forKey: intentID)
     {
@@ -276,7 +290,7 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
       else {
         throw RolloutAuthorityError.effectIdentityMismatch
       }
-      return
+      throw RolloutAuthorityError.effectAdmissionClosed
     }
     guard let kind = kind(for: permit),
       kind == .gitRead || kind == .provider || kind == .command
@@ -302,6 +316,12 @@ actor ExplicitTestRolloutEffectAuthority: RolloutEffectAuthorizing {
     let id = UUID().uuidString.lowercased()
     permits[id] = kind
     return .reservation(id: id)
+  }
+
+  private func denyHistoricalContext() throws {
+    if case .historicalCanary = RolloutEffectTaskContext.current?.mode {
+      throw RolloutAuthorityError.effectAdmissionClosed
+    }
   }
 
   private func settle(_ permit: RolloutEffectPermit, expected: PermitKind) throws {

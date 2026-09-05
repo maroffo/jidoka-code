@@ -1,5 +1,6 @@
 import Foundation
 import JidokaCodeCore
+import JidokaCodeTestSupport
 import Testing
 
 @testable import JidokaCodeAppSupport
@@ -7,6 +8,54 @@ import Testing
 @Suite("Fake-first application flow")
 @MainActor
 struct ViewModelFlowTests {
+  @Test("rollout preview requires a paused engine and a canonical bounded valid input")
+  func rolloutPreviewInputGate() async throws {
+    let fake = AppSupportEngineFake(onboardingComplete: true)
+    let model = SettingsViewModel(client: fake) { _ in }
+    let input = try rolloutOperatorFixture().exactInput
+    let canonical = try RolloutCanonicalJSON.encode(input)
+    model.rolloutInputBase64 = canonical.base64EncodedString()
+    #expect(!model.canPreviewRollout)
+    await model.refresh()
+    let state = try #require(model.state)
+    model.apply(pollingState(state, paused: false))
+    #expect(!model.canPreviewRollout)
+    model.apply(pollingState(state, paused: true))
+    #expect(model.canPreviewRollout)
+    for invalid in [
+      "", "_", "AR==", canonical.base64EncodedString() + "\n",
+      (canonical + Data([0x20])).base64EncodedString(),
+      Data("{}".utf8).base64EncodedString(),
+      Data(repeating: 0x61, count: 1_048_577).base64EncodedString(),
+      String(repeating: "A", count: 1_398_108),
+    ] {
+      model.rolloutInputBase64 = invalid
+      #expect(!model.canPreviewRollout)
+    }
+    var invalidObject = try #require(
+      JSONSerialization.jsonObject(with: canonical) as? [String: Any])
+    invalidObject["expiresAtMilliseconds"] = input.createdAtMilliseconds
+    model.rolloutInputBase64 = try JSONSerialization.data(
+      withJSONObject: invalidObject, options: [.sortedKeys, .withoutEscapingSlashes]
+    ).base64EncodedString()
+    #expect(!model.canPreviewRollout)
+    model.rolloutInputBase64 = canonical.base64EncodedString()
+    #expect(model.canPreviewRollout)
+
+    let delayed = SettingsViewModel(client: DelayedSnapshotEngineClient()) { _ in }
+    delayed.apply(pollingState(state, paused: true))
+    delayed.rolloutInputBase64 = canonical.base64EncodedString()
+    #expect(delayed.canPreviewRollout)
+    let refresh = Task { @MainActor in await delayed.refresh() }
+    for _ in 0..<100 {
+      if delayed.isWorking { break }
+      await Task.yield()
+    }
+    #expect(delayed.isWorking)
+    #expect(!delayed.canPreviewRollout)
+    await refresh.value
+  }
+
   @Test("onboarding requires every gate and clears secret input")
   func onboarding() async throws {
     let fake = AppSupportEngineFake(onboardingComplete: false)

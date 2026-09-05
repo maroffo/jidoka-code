@@ -72,18 +72,23 @@ let package = Package(
       name: "JidokaCodeLocationProbeEngine",
       dependencies: ["JidokaCodeCore", "JidokaCodeLocationProbeSupport"]
     ),
+    .target(
+      name: "JidokaCodeTestSupport",
+      dependencies: ["JidokaCodeCore"],
+      path: "Tests/JidokaCodeTestSupport"
+    ),
     .testTarget(
       name: "JidokaCodeCoreTests",
-      dependencies: ["JidokaCodeCore", "JidokaCodeLocationProbeSupport"],
+      dependencies: ["JidokaCodeCore", "JidokaCodeLocationProbeSupport", "JidokaCodeTestSupport"],
       resources: [.copy("Fixtures")]
     ),
     .testTarget(
       name: "JidokaCodeAppSupportTests",
-      dependencies: ["JidokaCodeAppSupport", "JidokaCodeCore"]
+      dependencies: ["JidokaCodeAppSupport", "JidokaCodeCore", "JidokaCodeTestSupport"]
     ),
     .testTarget(
       name: "JidokaCodeAppTests",
-      dependencies: ["JidokaCodeApp", "JidokaCodeCore"]
+      dependencies: ["JidokaCodeApp", "JidokaCodeCore", "JidokaCodeTestSupport"]
     ),
   ],
   swiftLanguageModes: [.v6]

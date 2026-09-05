@@ -246,7 +246,7 @@ struct PullRequestReviewJobWorkflowTests {
     await reopened.database.close()
   }
 
-  @Test("topology recovery bypasses a stale attempt review-selection event exactly once")
+  @Test("topology recovery selection is idempotent but grants no historical effects")
   func topologyRecoveryReviewSelection() async throws {
     let fixture = try await PullRequestReviewJobFixture()
     defer { fixture.remove() }
@@ -329,13 +329,18 @@ struct PullRequestReviewJobWorkflowTests {
     )
     #expect(replayed.state == .runningPi)
 
-    try await fixture.workflow.runRecoveredCanary(
-      jobID: fixture.job.id,
-      recoveryEvidenceSHA256: evidenceSHA256
-    )
+    let artifactsBefore = try await fixture.artifacts.records(jobID: fixture.job.id)
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      try await fixture.workflow.runRecoveredCanary(
+        jobID: fixture.job.id,
+        recoveryEvidenceSHA256: evidenceSHA256
+      )
+    }
 
-    #expect(try await fixture.jobs.job(id: fixture.job.id)?.state == .succeeded)
-    #expect(await fixture.api.createCommentCount == 1)
+    #expect(try await fixture.jobs.job(id: fixture.job.id) == replayed)
+    #expect(await fixture.api.createCommentCount == 0)
+    #expect(try await fixture.intents.intents(jobID: fixture.job.id).isEmpty)
+    #expect(try await fixture.artifacts.records(jobID: fixture.job.id) == artifactsBefore)
     #expect(
       try await fixture.database.scalarInt(
         "SELECT COUNT(*) FROM job_transitions WHERE job_id = ? AND event_key GLOB ?",

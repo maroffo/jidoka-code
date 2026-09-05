@@ -126,7 +126,7 @@ enum RolloutCLI {
     }
   }
 
-  private static func canonicalData(_ value: String) throws -> Data {
+  static func canonicalData(_ value: String) throws -> Data {
     guard value.utf8.count <= 1_398_104,
       let data = Data(base64Encoded: value),
       !data.isEmpty,
@@ -175,7 +175,7 @@ enum RolloutCLI {
       }
       semaphore.signal()
     }
-    let timeout = command.kind == .stopAndDrainRollout ? 700 : 30
+    let timeout = responseTimeoutSeconds(for: command.kind)
     guard semaphore.wait(timeout: .now() + .seconds(timeout)) == .success else {
       connection.invalidate()
       throw EngineClientError(.timedOut)
@@ -183,5 +183,12 @@ enum RolloutCLI {
     connection.invalidate()
     guard let result = box.load() else { throw EngineClientError(.invalidResponse) }
     return try result.get()
+  }
+
+  static func responseTimeoutSeconds(for kind: EngineCommandKind) -> Int {
+    switch kind {
+    case .stopAndDrainRollout, .executeRolloutRecovery: 700
+    default: 30
+    }
   }
 }

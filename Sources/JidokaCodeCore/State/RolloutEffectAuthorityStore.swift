@@ -490,8 +490,10 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
         database: database
       )
       try Self.validateProvider(effect, binding: binding, database: database)
-      guard reservation.state == .reserved,
-        reservation.request.authorizationID == binding.authorizationID,
+      guard reservation.state == .reserved else {
+        throw RolloutAuthorityError.effectAdmissionClosed
+      }
+      guard reservation.request.authorizationID == binding.authorizationID,
         reservation.request.jobID == contextualJobID,
         reservation.request.kind == .providerSession,
         reservation.request.operationSHA256 == Self.providerOperationSHA256(effect),
@@ -506,7 +508,7 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
           bindings: [.text(id)]
         ) == 1
       else {
-        throw RolloutAuthorityError.effectAdmissionClosed
+        throw RolloutAuthorityError.effectIdentityMismatch
       }
       try Self.markProcessBoundary(
         reservation: reservation,
@@ -643,8 +645,10 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
         binding: binding,
         database: database
       )
-      guard reservation.state == .reserved,
-        reservation.request.authorizationID == binding.authorizationID,
+      guard reservation.state == .reserved else {
+        throw RolloutAuthorityError.effectAdmissionClosed
+      }
+      guard reservation.request.authorizationID == binding.authorizationID,
         reservation.request.jobID == contextualJobID,
         reservation.request.kind == .approvedCommand,
         reservation.request.operationSHA256 == Self.approvedCommandOperationSHA256(effect),
@@ -659,7 +663,7 @@ extension RolloutAuthorityStore: RolloutEffectAuthorizing {
           bindings: [.text(id)]
         ) == 1
       else {
-        throw RolloutAuthorityError.effectAdmissionClosed
+        throw RolloutAuthorityError.effectIdentityMismatch
       }
       try Self.markProcessBoundary(
         reservation: reservation,

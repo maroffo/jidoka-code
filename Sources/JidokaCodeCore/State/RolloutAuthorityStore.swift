@@ -1871,6 +1871,20 @@ extension RolloutAuthorityStore {
       else {
         throw RolloutAuthorityError.invalidJobBinding
       }
+      // Existing disposition evidence belongs to its recorded job. An exact
+      // activation may not replace it by creating another job for that identity.
+      guard
+        try database.scalarInt(
+          """
+          SELECT COUNT(*) FROM object_dispositions
+          WHERE repository_id = ? AND kind = ? AND object_node_id = ? AND revision_key = ?
+          """,
+          bindings: [
+            .text(scope.repository.id), .text(binding.jobKind.rawValue),
+            .text(object.nodeID), .text(object.revisionKey),
+          ]
+        ) == 0
+      else { throw RolloutAuthorityError.previewDrift }
       _ = try database.execute(
         """
         INSERT INTO jobs(
@@ -2061,22 +2075,22 @@ extension RolloutAuthorityStore {
           throw RolloutAuthorityError.invalidStateTransition
         }
       }
-      if target != .draining {
-        _ = try database.execute(
-          """
-          UPDATE app_settings
-          SET paused = 1,
-              active_rollout_authorization_id = CASE WHEN ? = 1 THEN NULL
-                ELSE active_rollout_authorization_id END,
-              updated_at = ?
-          WHERE singleton = 1
-          """,
-          bindings: [
-            .integer(target.isOpenLane ? 0 : 1),
-            .real(now.timeIntervalSince1970),
-          ]
-        )
-      }
+      // Closing admission and opening exact readback must be one durable transition.
+      // Draining retains the lane identity, but never its unpaused admission state.
+      _ = try database.execute(
+        """
+        UPDATE app_settings
+        SET paused = 1,
+            active_rollout_authorization_id = CASE WHEN ? = 1 THEN NULL
+              ELSE active_rollout_authorization_id END,
+            updated_at = ?
+        WHERE singleton = 1
+        """,
+        bindings: [
+          .integer(target.isOpenLane ? 0 : 1),
+          .real(now.timeIntervalSince1970),
+        ]
+      )
       let changed = try database.execute(
         """
         UPDATE rollout_authorizations

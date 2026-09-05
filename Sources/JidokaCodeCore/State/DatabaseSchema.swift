@@ -1718,7 +1718,12 @@ public enum DatabaseSchema {
         BEFORE UPDATE OF state ON approved_command_runs
         WHEN NEW.state IS NOT OLD.state AND NOT (
           (OLD.state = 'prepared' AND NEW.state IN ('started', 'superseded'))
-          OR (OLD.state = 'started' AND NEW.state IN ('resultAccepted', 'unknown', 'superseded'))
+          OR (OLD.state = 'started' AND (
+            NEW.state IN ('resultAccepted', 'unknown') OR
+            (NEW.state = 'superseded' AND NOT EXISTS (
+              SELECT 1 FROM approved_command_results WHERE run_id = OLD.id
+            ))
+          ))
         )
         BEGIN
           SELECT RAISE(ABORT, 'invalid approved command transition');
@@ -2692,7 +2697,6 @@ public enum DatabaseSchema {
         BEFORE UPDATE OF state ON rollout_authorizations
         WHEN OLD.state IN ('active', 'draining', 'recoveryRequired')
           AND NEW.state != OLD.state
-          AND NOT (OLD.state = 'active' AND NEW.state = 'draining')
           AND EXISTS (
             SELECT 1 FROM app_settings
             WHERE singleton = 1 AND paused = 0
@@ -2707,6 +2711,123 @@ public enum DatabaseSchema {
         appendOnlyTrigger(table: "rollout_authorization_scopes", operation: "DELETE"),
         appendOnlyTrigger(table: "rollout_authorization_budgets", operation: "UPDATE"),
         appendOnlyTrigger(table: "rollout_authorization_budgets", operation: "DELETE"),
+        """
+        CREATE TRIGGER rollout_authorization_usage_exact_insert
+        BEFORE INSERT ON rollout_authorization_usage
+        WHEN NOT (
+          (
+            NEW.sequence = 0 AND NEW.source_kind = 'activation'
+            AND NEW.source_id = NEW.authorization_id
+            AND NEW.github_read_requests = 0
+            AND NEW.github_read_pages = 0
+            AND NEW.github_read_bytes = 0
+            AND NEW.git_remote_reads = 0
+            AND NEW.provider_sessions = 0
+            AND NEW.approved_commands = 0
+            AND NEW.marker_parts = 0
+            AND NEW.label_writes = 0
+            AND NEW.branch_creates = 0
+            AND NEW.pull_request_creates = 0
+            AND NEW.github_sends = 0
+            AND NEW.git_sends = 0
+            AND EXISTS (
+              SELECT 1 FROM rollout_authorizations
+              WHERE id = NEW.authorization_id AND activated_at_ms = NEW.created_at_ms
+            )
+          )
+          OR EXISTS (
+            SELECT 1 FROM rollout_authorization_usage AS previous
+            JOIN (
+            SELECT authorization_id, 'effect' AS source_kind, id AS source_id,
+              created_at_ms,
+              github_read_requests,
+              github_read_pages,
+              github_read_bytes,
+              git_remote_reads,
+              provider_sessions,
+              approved_commands,
+              marker_parts,
+              label_writes,
+              branch_creates,
+              pull_request_creates,
+              github_sends,
+              git_sends
+            FROM rollout_effect_reservations
+            UNION ALL
+            SELECT authorization_id, 'scopeRead' AS source_kind, id AS source_id,
+              created_at_ms,
+              github_read_requests,
+              github_read_pages,
+              github_read_bytes,
+              0 AS git_remote_reads,
+              0 AS provider_sessions,
+              0 AS approved_commands,
+              0 AS marker_parts,
+              0 AS label_writes,
+              0 AS branch_creates,
+              0 AS pull_request_creates,
+              0 AS github_sends,
+              0 AS git_sends
+            FROM rollout_scope_read_reservations
+            UNION ALL
+            SELECT authorization_id, 'githubReadback' AS source_kind, id AS source_id,
+              created_at_ms,
+              github_read_requests,
+              github_read_pages,
+              github_read_bytes,
+              0 AS git_remote_reads,
+              0 AS provider_sessions,
+              0 AS approved_commands,
+              0 AS marker_parts,
+              0 AS label_writes,
+              0 AS branch_creates,
+              0 AS pull_request_creates,
+              0 AS github_sends,
+              0 AS git_sends
+            FROM rollout_readback_reservations
+            UNION ALL
+            SELECT authorization_id, 'gitReadback' AS source_kind, id AS source_id,
+              created_at_ms,
+              0 AS github_read_requests,
+              0 AS github_read_pages,
+              0 AS github_read_bytes,
+              git_remote_reads,
+              0 AS provider_sessions,
+              0 AS approved_commands,
+              0 AS marker_parts,
+              0 AS label_writes,
+              0 AS branch_creates,
+              0 AS pull_request_creates,
+              0 AS github_sends,
+              0 AS git_sends
+            FROM rollout_git_readback_reservations
+            ) AS source ON source.authorization_id = previous.authorization_id
+            WHERE previous.authorization_id = NEW.authorization_id
+              AND previous.sequence = (
+                SELECT MAX(sequence) FROM rollout_authorization_usage
+                WHERE authorization_id = NEW.authorization_id
+              )
+              AND NEW.sequence = previous.sequence + 1
+              AND NEW.source_kind = source.source_kind AND NEW.source_id = source.source_id
+              AND NEW.created_at_ms = source.created_at_ms
+              AND NEW.github_read_requests = previous.github_read_requests + source.github_read_requests
+              AND NEW.github_read_pages = previous.github_read_pages + source.github_read_pages
+              AND NEW.github_read_bytes = previous.github_read_bytes + source.github_read_bytes
+              AND NEW.git_remote_reads = previous.git_remote_reads + source.git_remote_reads
+              AND NEW.provider_sessions = previous.provider_sessions + source.provider_sessions
+              AND NEW.approved_commands = previous.approved_commands + source.approved_commands
+              AND NEW.marker_parts = previous.marker_parts + source.marker_parts
+              AND NEW.label_writes = previous.label_writes + source.label_writes
+              AND NEW.branch_creates = previous.branch_creates + source.branch_creates
+              AND NEW.pull_request_creates = previous.pull_request_creates + source.pull_request_creates
+              AND NEW.github_sends = previous.github_sends + source.github_sends
+              AND NEW.git_sends = previous.git_sends + source.git_sends
+          )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout usage lacks an exact contiguous source');
+        END
+        """,
         appendOnlyTrigger(table: "rollout_authorization_usage", operation: "UPDATE"),
         appendOnlyTrigger(table: "rollout_authorization_usage", operation: "DELETE"),
         appendOnlyTrigger(table: "rollout_authorization_events", operation: "UPDATE"),

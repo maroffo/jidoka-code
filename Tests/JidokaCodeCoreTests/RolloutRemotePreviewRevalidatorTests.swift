@@ -35,6 +35,7 @@ struct RolloutRemotePreviewRevalidatorTests {
   func exactPullRequestDriftMatrix() async throws {
     for drift in ExactPullRequestDrift.allCases {
       let fixture = try await RolloutRemotePreviewFixture()
+      defer { fixture.remove() }
       let preview = try fixture.exactPreview()
       try await fixture.revalidator.revalidate(preview)
       await fixture.apply(drift)
@@ -42,7 +43,6 @@ struct RolloutRemotePreviewRevalidatorTests {
         try await fixture.revalidator.revalidate(preview)
       }
       await fixture.database.close()
-      fixture.remove()
     }
   }
 
@@ -79,6 +79,7 @@ struct RolloutRemotePreviewRevalidatorTests {
   func exactTriageLabelDrift() async throws {
     for drift in [TriageLabelDrift.issueLabels, .repositoryLabels] {
       let fixture = try await RolloutRemotePreviewFixture()
+      defer { fixture.remove() }
       let preview = try await fixture.exactTriagePreview()
       try await fixture.revalidator.revalidate(preview)
       switch drift {
@@ -91,7 +92,6 @@ struct RolloutRemotePreviewRevalidatorTests {
         try await fixture.revalidator.revalidate(preview)
       }
       await fixture.database.close()
-      fixture.remove()
     }
   }
 
@@ -186,6 +186,7 @@ struct RolloutRemotePreviewRevalidatorTests {
   func repositoryLabelInventoryDrift() async throws {
     for drift in RepositoryLabelInventoryDrift.allCases {
       let fixture = try await RolloutRemotePreviewFixture()
+      defer { fixture.remove() }
       let preview = try await fixture.exactTriagePreview()
       try await fixture.revalidator.revalidate(preview)
       switch drift {
@@ -198,7 +199,6 @@ struct RolloutRemotePreviewRevalidatorTests {
         try await fixture.revalidator.revalidate(preview)
       }
       await fixture.database.close()
-      fixture.remove()
     }
   }
 
@@ -262,11 +262,11 @@ struct RolloutRemotePreviewRevalidatorTests {
     // finite-window mode at all.
     for stage in [RolloutWorkflowStage.implementationExecute, .generatedPRReview] {
       let fixture = try await RolloutRemotePreviewFixture()
+      defer { fixture.remove() }
       await #expect(throws: RolloutAuthorityError.invalidFiniteWindow, "\(stage)") {
         _ = try await fixture.finitePreview(stage: stage)
       }
       await fixture.database.close()
-      fixture.remove()
     }
   }
 
@@ -274,6 +274,7 @@ struct RolloutRemotePreviewRevalidatorTests {
   func issueIdentityDrift() async throws {
     for drift in IssueIdentityDrift.allCases {
       let fixture = try await RolloutRemotePreviewFixture()
+      defer { fixture.remove() }
       let preview = try await fixture.exactTriagePreview()
       try await fixture.revalidator.revalidate(preview)
       switch drift {
@@ -288,7 +289,6 @@ struct RolloutRemotePreviewRevalidatorTests {
         try await fixture.revalidator.revalidate(preview)
       }
       await fixture.database.close()
-      fixture.remove()
     }
   }
 

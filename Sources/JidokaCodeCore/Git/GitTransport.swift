@@ -576,7 +576,9 @@ public actor SystemGitTransport: GitRepositoryTransporting, GitLocalCommanding,
         try await body()
       }
     } catch {
-      try await rolloutReadAuthority.settleGitRemoteRead(
+      // Keep the transport/verification failure primary. Failed settlement leaves
+      // the reservation consumed and unsettled, so it cannot replenish authority.
+      try? await rolloutReadAuthority.settleGitRemoteRead(
         permit,
         evidenceSHA256: GitHubMarkerCodec.sha256(
           Data(String(reflecting: type(of: error)).utf8)

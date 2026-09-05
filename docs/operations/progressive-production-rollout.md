@@ -48,11 +48,10 @@ migrationContentMismatch(version: 10, recorded: <digest or nil>, expected: <dige
 ```
 
 Only version 10 declares it today. The flag is a per-migration opt-in rather than a version
-floor on purpose: the fact that justifies it, "this migration has never shipped, so any other
-recorded body is a pre-release database", belongs to migration 10 and is false for migration 11.
-A floor would silently extend the operator action below to a future migration where deleting the
-database would be exactly the wrong advice. Versions 1 through 9 shipped in binaries that predate
-the column, so their blank rows are expected and are not verified.
+floor: each migration explicitly selects content verification. Versions 1 through 9 shipped
+in binaries that predate the column, so their blank rows are expected and are not verified.
+The version-10 guard remains permanent after release; a mismatch does not identify a database
+as disposable, pre-release, or safe to replace.
 
 Before that guard the connection is configured (`PRAGMA journal_mode = WAL`, `PRAGMA
 foreign_keys = ON`) and the ledger table is created if absent. Both are no-ops on any database
@@ -61,12 +60,12 @@ adds no schema and no rows. What the guard promises is that no migration stateme
 column is written to a database this binary is about to reject; it does not promise the file is
 opened read-only.
 
-**Operator action when this fires.** It means the database was created by a pre-release build of
-this branch, so it is a development or CI database, never a production one: production has never
-been migrated past schema 9. Delete that development database and let the binary recreate it, or
-restore the schema-9 backup taken before the bad migration and re-migrate. Do not edit
-`schema_migrations` with `sqlite3` to silence the error, and never delete a user's database
-automatically — the message names the mismatch so a person can decide.
+**Operator action when this fires.** Stop before migration or rollout. Preserve the database,
+its WAL/SHM files, backups, and the exact binary/release identity that opened it. Compare the
+recorded and expected migration digests against the identified release evidence, then escalate
+to Max for a recovery decision. Do not delete the database, restore over it, or edit
+`schema_migrations` with `sqlite3` to silence the error. A digest mismatch alone does not establish
+which copy or binary is authoritative, and restoring a backup could discard later evidence.
 
 No source-controlled check persists such a database. There is no CI workflow in this repository,
 and every check that creates one (`swift test`, `scripts/tests/test-progressive-production-rollout-preflight.sh`,
@@ -308,7 +307,8 @@ job returns to separately authorized planning.
 
 ## Stop, drain, and recovery
 
-`Stop and drain` first closes in-memory admission, then records draining. New provider,
+`Stop and drain` first closes in-memory admission, then atomically records draining and durable
+pause. New provider,
 command, read, Git, GitHub, discovery, lease, and child-job reservations fail immediately.
 Admitted work may settle, and only already-started uncertain effects retain exact readback.
 
@@ -317,10 +317,13 @@ Admitted work may settle, and only already-started uncertain effects retain exac
   --rollout stop authorization-uuid activation-preview-sha256 600000
 ```
 
-If all permits settle before the deadline, the application pauses and records a terminal
+If all permits settle before the deadline, the application remains paused and records a terminal
 scope. A timeout or uncertain effect records `recoveryRequired`; it never reports a false stop.
 On startup, any interrupted nonterminal lane also becomes recovery-required before scheduler
-recovery.
+startup handling. With schema-10 authority installed, the coordinator deliberately skips ordinary
+`recoverAtStartup`: unbound interrupted jobs (including generation-zero history) remain quarantined,
+not automatically resumed. Only explicit exact recovery may continue a bound job; it cannot grant
+authority to a historical canary or another job.
 
 Recovery preview is read-only and names the same authorization, job, outstanding reservations,
 remaining budgets, and checkpoint. Execution requires confirmation of those exact canonical

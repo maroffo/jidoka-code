@@ -250,7 +250,7 @@ struct RolloutLeaseAuthorityTests {
       repositoryID: fixture.repositoryA,
       job: bound
     )
-    await #expect(throws: (any Error).self) {
+    await #expect(throws: SQLiteStoreError.self) {
       try await fixture.jobs.heartbeat(
         jobID: ordinary.id,
         now: fixture.now.addingTimeInterval(60)
