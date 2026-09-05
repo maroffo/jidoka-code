@@ -5,6 +5,7 @@ Plan decisions E14 and E15 record that authority and the correction scope.
 The starting commit is `786a3b6bf528cf393ab29eed8290a59220357697`, on
 `feat/progressive-production-automation` in the existing worktree
 `/private/tmp/jidoka-code-progressive-production-automation`.
+The correction commit is `dbc7cbfb24bf4d50e540715d631bc8fb44d279d4`.
 
 ## Finding dispositions
 
@@ -71,6 +72,38 @@ Source file SHA-256 values after the final source/test edit:
 a3258d604d7b025086c0e7430148e352b3185c2fa2877184b4978c26ccad3abd  Tests/JidokaCodeCoreTests/RolloutRemotePreviewRevalidatorTests.swift
 f5f12713fb837579d622e341d687f289c4f8b7ba59d5ca8aa5e3befc978854c8  Tests/JidokaCodeCoreTests/SQLiteStoreTests.swift
 ```
+
+## Post-commit local review and mutation measurements
+
+The writer reviewed the committed delta and its surrounding lease, preview, migration,
+and production-writer code after `dbc7cbf` was created. No supported Critical or Major
+finding remains in that inspected delta. This is a local writer review, not the
+independent four-role review required for source completion.
+
+An export was created with `git archive dbc7cbf` at
+`build/round5/review-export.Dr3els`, inside the authorized worktree. No checkout or
+additional Git worktree was used. Each measurement ran the following supplemental
+command, with the same Xcode and qualified-runtime environment as the final gates:
+
+```sh
+xcrun swift test --package-path build/round5/review-export.Dr3els --jobs 2 --filter 'RolloutLeaseAuthorityTests|RolloutRemotePreviewRevalidatorTests'
+```
+
+| Log | Change in the isolated export | Measured result |
+| --- | --- | --- |
+| `review-baseline-dbc7cbf.log` | Exact committed source | 30 tests / 2 suites passed, exit 0 |
+| `review-mutant-drop-job-equality.log` | Remove `AND NEW.job_id = OLD.job_id` from the continuation exemption | Exactly the added transfer test fails, with 4 issues across draining and recoveryRequired; the transfer succeeds and changes the owner in each case. 30 tests / 2 suites ran, exit 1 |
+| `review-mutant-insert-active-two.log` | Change only the INSERT trigger's `WHEN NEW.active = 1` to `= 2` | The strengthened shared-gate test fails on the exact WHEN line, along with 5 existing behavior tests. 30 tests / 2 suites ran, 23 issues, exit 1 |
+| `review-mutant-execution-replan.log` | Add `.replan` to the implementationExecute step whitelist | Exactly the builder test fails because the invalid preview is now accepted. 30 tests / 2 suites ran, 1 issue, exit 1 |
+| `review-restored-dbc7cbf.log` | Restore every mutation | 30 tests / 2 suites passed, exit 0 |
+
+Each log contains an explicit successful build, a nonzero test-run summary and its
+exit status. Only one mutation was present per measured run. No source or test file
+was edited while a measurement was running. After restoration, `diff -qr` confirmed
+that the complete exported `Sources` and `Tests` directories match the committed
+worktree again. The source files in the actual worktree were never mutated during
+this review, so the eight complete final gates remain fresh for those files.
+No `.cleanupFailed` occurred in these supplemental runs.
 
 ## Preservation and remaining gates
 

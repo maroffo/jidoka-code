@@ -1,0 +1,110 @@
+UTC start: 2026-09-05T08:36:16Z
+Command: xcrun swift test --package-path build/round5/review-export.Dr3els --jobs 2 --filter RolloutLeaseAuthorityTests\|RolloutRemotePreviewRevalidatorTests
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/25] Compiling JidokaCodeCore RolloutAuthority.swift
+[4/25] Emitting module JidokaCodeCore
+[4/32] Write Objects.LinkFileList
+[12/35] Linking JidokaCodePushGuard
+[13/35] Linking JidokaCodeLocationProbeEngine
+[14/35] Applying JidokaCodePushGuard
+[15/35] Applying JidokaCodeLocationProbeEngine
+[16/35] Linking JidokaCodeLocationProbeApp
+[17/35] Linking JidokaCodeUIFixture
+[18/35] Applying JidokaCodeLocationProbeApp
+[19/35] Applying JidokaCodeUIFixture
+[20/35] Linking JidokaCodeHerdrHost
+[21/35] Linking JidokaCodeHerdrFixture
+[22/35] Applying JidokaCodeHerdrHost
+[23/35] Applying JidokaCodeHerdrFixture
+[24/35] Linking JidokaCodeEngineProbe
+[25/35] Write Objects.LinkFileList
+[26/35] Applying JidokaCodeEngineProbe
+[27/35] Linking JidokaCodeBoundedCommand
+[28/35] Write Objects.LinkFileList
+[29/35] Applying JidokaCodeBoundedCommand
+[30/35] Linking JidokaCodeAskPass
+[31/35] Applying JidokaCodeAskPass
+[32/35] Linking JidokaCodeApp
+[33/35] Applying JidokaCodeApp
+[34/36] Write Objects.LinkFileList
+[35/36] Linking JidokaCodePackageTests
+Build complete! (5.51s)
+Test Suite 'Selected tests' started at 2026-09-05 10:36:22.386.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 10:36:22.387.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 10:36:22.387.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 10:36:22.387.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Repository lease rollout authority" started.
+◇ Suite "Rollout remote preview revalidation" started.
+◇ Test "a generation-1 job stays gated even where no lane was ever opened" started.
+◇ Test "a missing lease still reports a typed error rather than a raw SQLite abort" started.
+◇ Test "repository-label inventory drift is rejected in every shape" started.
+◇ Test "transferring a live lease to the bound job stays gated during drain or recovery" started.
+◇ Test "a paused or draining lane still refuses fresh admission" started.
+◇ Test "the builder refuses a step the workflow-label switch does not cover" started.
+◇ Test "a finite window binds its observed object-number upper bound" started.
+◇ Test "a generation-1 job stays gated after its own lane has closed" started.
+◇ Test "a preview whose canonical bytes no longer round-trip is rejected" started.
+◇ Test "exact triage preview rejects issue-label and repository-label drift" started.
+◇ Test "the insert and update gates share the active-row condition and an identical tail" started.
+◇ Test "exact PR preview rejects every independently drifted remote binding" started.
+◇ Test "a live lease's identity changes are checked as admission" started.
+◇ Test "a transport failure during revalidation is drift, never a pass" started.
+◇ Test "an empty authorization table leaves ordinary generation-0 leases admissible" started.
+◇ Test "exact triage preview binds issue, labels, and default-branch base" started.
+◇ Test "a review-stage preview cannot be built with missing labels at all" started.
+◇ Test "every closed authorization state releases the gate for ordinary jobs" started.
+◇ Test "the builder refuses a finite window at the exact-only stages" started.
+◇ Test "exact execution preview binds the approved waiting-human checkpoint" started.
+◇ Test "the upsert lease shape is gated exactly like the plain statements" started.
+◇ Test "a lease the open lane does not bind stops being a continuation" started.
+◇ Test "the builder refuses a non-positive object number, so discovery never sees one" started.
+◇ Test "an open lane rejects an unbound generation-0 lease on its own repository" started.
+◇ Test "the builder refuses a missing job binding, so no preview carries one" started.
+◇ Test "reactivating a released lease is admission and stays gated while a lane is open" started.
+◇ Test "an open lane on one repository never gates another repository" started.
+◇ Test "finite preview binds the complete deterministic candidate set" started.
+◇ Test "issue identity and default-branch reference drift are rejected" started.
+◇ Test "pause and drain stop admission but never a held lease's heartbeat" started.
+✔ Test "the insert and update gates share the active-row condition and an identical tail" passed after 0.264 seconds.
+✔ Test "a preview whose canonical bytes no longer round-trip is rejected" passed after 0.265 seconds.
+✔ Test "a transport failure during revalidation is drift, never a pass" passed after 0.265 seconds.
+✔ Test "a finite window binds its observed object-number upper bound" passed after 0.266 seconds.
+✔ Test "an empty authorization table leaves ordinary generation-0 leases admissible" passed after 0.266 seconds.
+✔ Test "a review-stage preview cannot be built with missing labels at all" passed after 0.265 seconds.
+✔ Test "a missing lease still reports a typed error rather than a raw SQLite abort" passed after 0.266 seconds.
+✔ Test "a generation-1 job stays gated even where no lane was ever opened" passed after 0.266 seconds.
+✔ Test "the builder refuses a step the workflow-label switch does not cover" passed after 0.307 seconds.
+✔ Test "the builder refuses a non-positive object number, so discovery never sees one" passed after 0.307 seconds.
+✔ Test "the upsert lease shape is gated exactly like the plain statements" passed after 0.307 seconds.
+✔ Test "a lease the open lane does not bind stops being a continuation" passed after 0.308 seconds.
+✔ Test "the builder refuses a missing job binding, so no preview carries one" passed after 0.337 seconds.
+✔ Test "exact triage preview binds issue, labels, and default-branch base" passed after 0.369 seconds.
+✔ Test "an open lane rejects an unbound generation-0 lease on its own repository" passed after 0.370 seconds.
+✔ Test "exact execution preview binds the approved waiting-human checkpoint" passed after 0.372 seconds.
+✔ Test "finite preview binds the complete deterministic candidate set" passed after 0.385 seconds.
+✔ Test "reactivating a released lease is admission and stays gated while a lane is open" passed after 0.386 seconds.
+✔ Test "transferring a live lease to the bound job stays gated during drain or recovery" passed after 0.390 seconds.
+✔ Test "the builder refuses a finite window at the exact-only stages" passed after 0.393 seconds.
+✔ Test "an open lane on one repository never gates another repository" passed after 0.396 seconds.
+✔ Test "pause and drain stop admission but never a held lease's heartbeat" passed after 0.402 seconds.
+✔ Test "repository-label inventory drift is rejected in every shape" passed after 0.419 seconds.
+✔ Test "exact triage preview rejects issue-label and repository-label drift" passed after 0.435 seconds.
+✔ Test "a paused or draining lane still refuses fresh admission" passed after 0.459 seconds.
+✔ Test "a live lease's identity changes are checked as admission" passed after 0.459 seconds.
+✔ Test "issue identity and default-branch reference drift are rejected" passed after 0.488 seconds.
+✔ Test "a generation-1 job stays gated after its own lane has closed" passed after 0.494 seconds.
+✔ Test "every closed authorization state releases the gate for ordinary jobs" passed after 0.499 seconds.
+✔ Suite "Repository lease rollout authority" passed after 0.499 seconds.
+✔ Test "exact PR preview rejects every independently drifted remote binding" passed after 0.944 seconds.
+✔ Suite "Rollout remote preview revalidation" passed after 0.944 seconds.
+✔ Test run with 30 tests in 2 suites passed after 0.944 seconds.
+
+Exit status: 0
+UTC end: 2026-09-05T08:36:23Z
