@@ -322,15 +322,7 @@ private final class PiRPCProcessFixture: @unchecked Sendable {
   }
 
   func recordedDescendantIdentity() async throws -> SupervisedProcessIdentity {
-    for _ in 0..<300 {
-      if let processID = try? recordedDescendantPID(),
-        let identity = SupervisedProcessTracker.identity(processID)
-      {
-        return identity
-      }
-      try await Task.sleep(for: .milliseconds(5))
-    }
-    throw PiRPCProcessError.cleanupFailed
+    try await ProcessIdentityFixtureRecord.load(from: childPIDURL)
   }
 
   func remove() {

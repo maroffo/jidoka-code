@@ -16,16 +16,19 @@ struct GitAskPassTests {
     let broker = GitHubBroker(
       tokenProvider: AskPassTokenProvider(token: token),
       transport: UnusedAskPassHTTPTransport(),
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
       now: { Date(timeIntervalSince1970: 1_000) }
     )
     let remote = try #require(
       URL(string: "https://x-access-token@github.com/owner/repo.git")
     )
-    let session = try await broker.makeGitCredentialSession(
-      remoteURL: remote,
-      socketDirectory: socketDirectory,
-      timeoutSeconds: 5
-    )
+    let session = try await withGitCredentialCarrier(remoteURL: remote) {
+      try await broker.makeGitCredentialSession(
+        remoteURL: remote,
+        socketDirectory: socketDirectory,
+        timeoutSeconds: 5
+      )
+    }
     let executable = fixture.root.appendingPathComponent("askpass")
     try writeExecutable(executable, "#!/bin/sh\nexit 0\n")
     let environment = try session.environment(
@@ -68,16 +71,19 @@ struct GitAskPassTests {
     let token = Data(repeating: 0x75, count: 32)
     let broker = GitHubBroker(
       tokenProvider: AskPassTokenProvider(token: token),
-      transport: UnusedAskPassHTTPTransport()
+      transport: UnusedAskPassHTTPTransport(),
+      readAuthority: ExplicitTestRolloutEffectAuthority()
     )
     let remote = try #require(
       URL(string: "https://x-access-token@github.com/owner/repo.git")
     )
-    let session = try await broker.makeGitCredentialSession(
-      remoteURL: remote,
-      socketDirectory: socketDirectory,
-      timeoutSeconds: 30
-    )
+    let session = try await withGitCredentialCarrier(remoteURL: remote) {
+      try await broker.makeGitCredentialSession(
+        remoteURL: remote,
+        socketDirectory: socketDirectory,
+        timeoutSeconds: 30
+      )
+    }
     let executable = try builtProduct(named: "JidokaCodeAskPass")
     let environment = try session.environment(
       askPassExecutable: executable,
@@ -106,15 +112,19 @@ struct GitAskPassTests {
     defer { try? FileManager.default.removeItem(at: socketDirectory) }
     let broker = GitHubBroker(
       tokenProvider: AskPassTokenProvider(token: Data(repeating: 0x74, count: 32)),
-      transport: UnusedAskPassHTTPTransport()
+      transport: UnusedAskPassHTTPTransport(),
+      readAuthority: ExplicitTestRolloutEffectAuthority()
     )
-    let session = try await broker.makeGitCredentialSession(
-      remoteURL: try #require(
-        URL(string: "https://x-access-token@github.com/owner/repo.git")
-      ),
-      socketDirectory: socketDirectory,
-      timeoutSeconds: 1
+    let remote = try #require(
+      URL(string: "https://x-access-token@github.com/owner/repo.git")
     )
+    let session = try await withGitCredentialCarrier(remoteURL: remote) {
+      try await broker.makeGitCredentialSession(
+        remoteURL: remote,
+        socketDirectory: socketDirectory,
+        timeoutSeconds: 1
+      )
+    }
     let descriptor = try OneShotGitCredentialServer.connect(to: session.socketURL.path)
     defer { Darwin.close(descriptor) }
     await #expect(throws: GitAskPassError.timedOut) {
@@ -131,16 +141,19 @@ struct GitAskPassTests {
     defer { try? FileManager.default.removeItem(at: socketDirectory) }
     let broker = GitHubBroker(
       tokenProvider: AskPassTokenProvider(token: Data(repeating: 0x74, count: 32)),
-      transport: UnusedAskPassHTTPTransport()
+      transport: UnusedAskPassHTTPTransport(),
+      readAuthority: ExplicitTestRolloutEffectAuthority()
     )
     let remote = try #require(
       URL(string: "https://x-access-token@github.com/owner/repo.git")
     )
-    let session = try await broker.makeGitCredentialSession(
-      remoteURL: remote,
-      socketDirectory: socketDirectory,
-      timeoutSeconds: 5
-    )
+    let session = try await withGitCredentialCarrier(remoteURL: remote) {
+      try await broker.makeGitCredentialSession(
+        remoteURL: remote,
+        socketDirectory: socketDirectory,
+        timeoutSeconds: 5
+      )
+    }
     var environment = [
       "JIDOKA_ASKPASS_NONCE": UUID().uuidString.lowercased(),
       "JIDOKA_ASKPASS_REMOTE": remote.absoluteString,
@@ -190,14 +203,20 @@ struct GitAskPassTests {
     let provider = try GitHubGitCredentialProvider(
       broker: GitHubBroker(
         tokenProvider: AskPassTokenProvider(token: token),
-        transport: UnusedAskPassHTTPTransport()
+        transport: UnusedAskPassHTTPTransport(),
+        readAuthority: ExplicitTestRolloutEffectAuthority()
       ),
       socketDirectory: socketDirectory,
       askPassExecutable: executable
     )
     let remote = try #require(
       URL(string: "https://x-access-token@github.com/owner/repo.git"))
-    let session = try await provider.makeSession(remoteURL: remote)
+    await #expect(throws: GitTransportError.rolloutAuthorityRequired) {
+      _ = try await provider.makeSession(remoteURL: remote)
+    }
+    let session = try await withGitCredentialCarrier(remoteURL: remote) {
+      try await provider.makeSession(remoteURL: remote)
+    }
     #expect(
       session.socketURL.path.utf8.count + 1
         <= MemoryLayout.size(ofValue: sockaddr_un().sun_path)
@@ -271,27 +290,97 @@ struct GitAskPassTests {
     defer { try? FileManager.default.removeItem(at: unsafeDirectory) }
     let broker = GitHubBroker(
       tokenProvider: AskPassTokenProvider(token: Data(repeating: 0x74, count: 32)),
-      transport: UnusedAskPassHTTPTransport()
+      transport: UnusedAskPassHTTPTransport(),
+      readAuthority: ExplicitTestRolloutEffectAuthority()
+    )
+    let validRemote = try #require(
+      URL(string: "https://x-access-token@github.com/owner/repo.git")
     )
     await #expect(throws: GitAskPassError.unsafeDirectory) {
-      _ = try await broker.makeGitCredentialSession(
-        remoteURL: try #require(
-          URL(string: "https://x-access-token@github.com/owner/repo.git")
-        ),
-        socketDirectory: unsafeDirectory
-      )
+      _ = try await withGitCredentialCarrier(remoteURL: validRemote) {
+        try await broker.makeGitCredentialSession(
+          remoteURL: validRemote,
+          socketDirectory: unsafeDirectory
+        )
+      }
     }
     let safeDirectory = try makeShortSocketDirectory(mode: 0o700)
     defer { try? FileManager.default.removeItem(at: safeDirectory) }
+    let invalidRemote = try #require(
+      URL(string: "https://x-access-token@example.com/owner/repo.git")
+    )
     await #expect(throws: GitAskPassError.invalidRemote) {
-      _ = try await broker.makeGitCredentialSession(
-        remoteURL: try #require(
-          URL(string: "https://x-access-token@example.com/owner/repo.git")
-        ),
-        socketDirectory: safeDirectory
+      _ = try await withGitCredentialCarrier(remoteURL: invalidRemote) {
+        try await broker.makeGitCredentialSession(
+          remoteURL: invalidRemote,
+          socketDirectory: safeDirectory
+        )
+      }
+    }
+  }
+
+  @Test("writable askpass executables and parent directories are rejected")
+  func rejectsWritableAskPassChain() throws {
+    let root = try makeShortSocketDirectory(mode: 0o700)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let socketDirectory = root.appendingPathComponent("sockets", isDirectory: true)
+    let helpers = root.appendingPathComponent("helpers", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: socketDirectory,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    try FileManager.default.createDirectory(
+      at: helpers,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    let executable = helpers.appendingPathComponent("JidokaCodeAskPass")
+    try writeExecutable(executable, "#!/bin/sh\nexit 0\n")
+    let broker = GitHubBroker(
+      tokenProvider: AskPassTokenProvider(token: Data(repeating: 0x74, count: 32)),
+      transport: UnusedAskPassHTTPTransport(),
+      readAuthority: ExplicitTestRolloutEffectAuthority()
+    )
+
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o722],
+      ofItemAtPath: executable.path
+    )
+    #expect(throws: GitAskPassError.credentialRejected) {
+      _ = try GitHubGitCredentialProvider(
+        broker: broker,
+        socketDirectory: socketDirectory,
+        askPassExecutable: executable
+      )
+    }
+
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o700],
+      ofItemAtPath: executable.path
+    )
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o722],
+      ofItemAtPath: helpers.path
+    )
+    #expect(throws: GitAskPassError.credentialRejected) {
+      _ = try GitHubGitCredentialProvider(
+        broker: broker,
+        socketDirectory: socketDirectory,
+        askPassExecutable: executable
       )
     }
   }
+}
+
+private func withGitCredentialCarrier<Value: Sendable>(
+  remoteURL: URL,
+  operation: () async throws -> Value
+) async rethrows -> Value {
+  try await RolloutGitCredentialTaskContext.$remoteURL.withValue(
+    remoteURL.absoluteString,
+    operation: operation
+  )
 }
 
 private final class SocketIDSequence: @unchecked Sendable {

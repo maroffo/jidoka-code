@@ -1,4 +1,5 @@
 import Foundation
+import JidokaCodeTestSupport
 import Testing
 
 @testable import JidokaCodeCore
@@ -1002,6 +1003,7 @@ struct EngineProtocolTests {
       plannedLaunchAttemptID: "launch-88888888-8888-4888-8888-888888888888"
     )
     let rollover = try engineGenerationRolloverFixture(retry: replacementRetry)
+    let rollout = try rolloutOperatorFixture()
     let commands: [EngineCommand] = [
       .snapshot,
       .refreshModelCatalog,
@@ -1031,9 +1033,17 @@ struct EngineProtocolTests {
           thinking: .max
         )
       ),
-      .setMaxConcurrency(4),
+      .setMaxConcurrency(1),
       .setPaused(true),
       .pollNow,
+      .previewRollout(rollout.exactInput),
+      .activateRollout(rollout.exactActivation),
+      .rolloutStatus,
+      .stopAndDrainRollout(rollout.stop),
+      .previewRolloutRecovery(rollout.recoveryRequest),
+      .executeRolloutRecovery(rollout.recoveryAuthorization),
+      .previewFiniteWindow(rollout.finiteInput),
+      .activateFiniteWindow(rollout.finiteActivation),
       .recheckAmbiguousMutation(EngineAmbiguousMutationEvidence(mutation)),
       .authorizeRetry(EngineAmbiguousMutationEvidence(mutation)),
       .previewJobMaintenance(maintenanceScope),
@@ -1282,7 +1292,7 @@ private func engineProtocolState(
     settings: EngineSettingsSnapshot(
       repositories: [],
       profiles: [],
-      maxConcurrency: 2,
+      maxConcurrency: 1,
       loginItemSelected: false,
       loginItemStatus: .notRegistered,
       credential: credential,

@@ -1,0 +1,63 @@
+{
+  "$id": "https://jidoka-code.invalid/schemas/progressive-production-rollout-expected-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "qualificationCounters": {
+      "additionalProperties": false,
+      "properties": {
+        "credentialReads": { "const": 0, "type": "integer" },
+        "gitRemoteReads": { "const": 0, "type": "integer" },
+        "githubMutations": { "const": 0, "type": "integer" },
+        "providerCalls": { "const": 0, "type": "integer" }
+      },
+      "required": [
+        "credentialReads",
+        "gitRemoteReads",
+        "githubMutations",
+        "providerCalls"
+      ],
+      "type": "object"
+    },
+    "release": {
+      "additionalProperties": false,
+      "properties": {
+        "bundleBuild": { "const": 3, "type": "integer" },
+        "bundleVersion": { "const": "0.2.0", "type": "string" },
+        "databaseSchemaVersion": { "const": 10, "type": "integer" },
+        "engineProtocolVersion": { "const": 12, "type": "integer" },
+        "maximumConcurrency": { "const": 1, "type": "integer" },
+        "rolloutPolicyVersion": { "const": 1, "type": "integer" }
+      },
+      "required": [
+        "bundleBuild",
+        "bundleVersion",
+        "databaseSchemaVersion",
+        "engineProtocolVersion",
+        "maximumConcurrency",
+        "rolloutPolicyVersion"
+      ],
+      "type": "object"
+    },
+    "requiredSourcePaths": {
+      "items": {
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+        "type": "string"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schemaVersion": { "const": 1, "type": "integer" }
+  },
+  "required": [
+    "qualificationCounters",
+    "release",
+    "requiredSourcePaths",
+    "schemaVersion"
+  ],
+  "title": "Jidoka Code progressive production rollout expected values",
+  "type": "object"
+}

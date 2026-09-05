@@ -1,0 +1,68 @@
+[0/1] Planning build
+Building for debugging...
+[0/24] Write sources
+[2/24] Write swift-version--58304C5D6DBC2206.txt
+[4/26] Compiling JidokaCodeCore PiWorkflowResources.swift
+[5/26] Emitting module JidokaCodeCore
+[5/36] Write Objects.LinkFileList
+[15/38] Linking JidokaCodePushGuard
+[16/38] Linking JidokaCodeBoundedCommand
+[17/39] Linking JidokaCodeAskPass
+[18/38] Linking JidokaCodeLocationProbeEngine
+[19/38] Linking JidokaCodeHerdrFixture
+[20/38] Linking JidokaCodeHerdrHost
+[21/38] Linking JidokaCodeLocationProbeApp
+[22/38] Linking JidokaCodeEngineProbe
+[23/38] Linking JidokaCodeUIFixture
+[24/39] Linking JidokaCodeApp
+[25/38] Applying JidokaCodeEngineProbe
+[26/38] Applying JidokaCodeAskPass
+[27/38] Applying JidokaCodePushGuard
+[28/38] Applying JidokaCodeHerdrHost
+[29/38] Applying JidokaCodeLocationProbeEngine
+[30/38] Applying JidokaCodeLocationProbeApp
+[30/38] Applying JidokaCodeHerdrFixture
+[32/38] Applying JidokaCodeBoundedCommand
+[33/38] Applying JidokaCodeApp
+[34/38] Applying JidokaCodeUIFixture
+[36/39] Emitting module JidokaCodeAppTests
+[37/40] Compiling JidokaCodeCoreTests PiWorkflowResourceTests.swift
+[38/40] Emitting module JidokaCodeCoreTests
+[38/40] Write Objects.LinkFileList
+[39/40] Linking JidokaCodePackageTests
+Build complete! (5.71s)
+Test Suite 'Selected tests' started at 2026-09-03 23:54:08.986.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-03 23:54:08.988.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-03 23:54:08.988.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-03 23:54:08.988.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "App-versioned Pi workflow resources and runtime configuration" started.
+◇ Test "mutated, redirected, linked, or writable resources fail closed" started.
+◇ Test "runtime configuration derives tool policy and writes one private immutable file" started.
+◇ Test "exact manifest attests every production extension, policy, and skill" started.
+◇ Test "read-only roles and unsafe paths cannot gain a write surface" started.
+◇ Test "workflow and role select only the primary skill plus one fixed role skill" started.
+◇ Test "command provenance has no user or project resource" started.
+✘ Test "workflow and role select only the primary skill plus one fixed role skill" recorded an issue at PiWorkflowResourceTests.swift:48:4: Caught error: .unsafeResource("extensions/jidoka-code.ts")
+✘ Test "command provenance has no user or project resource" recorded an issue at PiWorkflowResourceTests.swift:72:4: Caught error: .unsafeResource("extensions/jidoka-code.ts")
+✘ Test "runtime configuration derives tool policy and writes one private immutable file" recorded an issue at PiWorkflowResourceTests.swift:187:4: Caught error: .unsafeResource("extensions/jidoka-code.ts")
+✘ Test "exact manifest attests every production extension, policy, and skill" recorded an issue at PiWorkflowResourceTests.swift:8:4: Caught error: .unsafeResource("extensions/jidoka-code.ts")
+✘ Test "read-only roles and unsafe paths cannot gain a write surface" recorded an issue at PiWorkflowResourceTests.swift:240:4: Caught error: .unsafeResource("extensions/jidoka-code.ts")
+✘ Test "command provenance has no user or project resource" failed after 0.002 seconds with 1 issue.
+✘ Test "exact manifest attests every production extension, policy, and skill" failed after 0.002 seconds with 1 issue.
+✘ Test "workflow and role select only the primary skill plus one fixed role skill" failed after 0.002 seconds with 1 issue.
+✘ Test "runtime configuration derives tool policy and writes one private immutable file" failed after 0.002 seconds with 1 issue.
+✘ Test "read-only roles and unsafe paths cannot gain a write surface" failed after 0.002 seconds with 1 issue.
+✘ Test "mutated, redirected, linked, or writable resources fail closed" recorded an issue at PiWorkflowResourceTests.swift:105:5: Expectation failed: expected error ".resourceDigestMismatch("skills/jidoka-code-plan/SKILL.md")" of type PiWorkflowResourceError, but ".unsafeResource("extensions/jidoka-code.ts")" of type PiWorkflowResourceError was thrown instead
+✘ Test "mutated, redirected, linked, or writable resources fail closed" recorded an issue at PiWorkflowResourceTests.swift:118:5: Expectation failed: expected error ".unsafeResource("skills/jidoka-code-plan/SKILL.md")" of type PiWorkflowResourceError, but ".unsafeResource("extensions/jidoka-code.ts")" of type PiWorkflowResourceError was thrown instead
+✘ Test "mutated, redirected, linked, or writable resources fail closed" recorded an issue at PiWorkflowResourceTests.swift:134:5: Expectation failed: expected error ".unsafeResource("skills/jidoka-code-plan/SKILL.md")" of type PiWorkflowResourceError, but ".unsafeResource("extensions/jidoka-code.ts")" of type PiWorkflowResourceError was thrown instead
+✘ Test "mutated, redirected, linked, or writable resources fail closed" recorded an issue at PiWorkflowResourceTests.swift:150:5: Expectation failed: expected error ".unsafeResource("skills/jidoka-code-plan/SKILL.md")" of type PiWorkflowResourceError, but ".unsafeResource("extensions/jidoka-code.ts")" of type PiWorkflowResourceError was thrown instead
+✘ Test "mutated, redirected, linked, or writable resources fail closed" recorded an issue at PiWorkflowResourceTests.swift:166:5: Expectation failed: expected error ".unsafeResource("runtime/jidoka-extension-contract.mjs")" of type PiWorkflowResourceError, but ".unsafeResource("extensions/jidoka-code.ts")" of type PiWorkflowResourceError was thrown instead
+✘ Test "mutated, redirected, linked, or writable resources fail closed" recorded an issue at PiWorkflowResourceTests.swift:180:5: Expectation failed: expected error ".unsafeResource("runtime/jidoka-tui-contract.mjs")" of type PiWorkflowResourceError, but ".unsafeResource("extensions/jidoka-code.ts")" of type PiWorkflowResourceError was thrown instead
+✘ Test "mutated, redirected, linked, or writable resources fail closed" failed after 0.056 seconds with 6 issues.
+✘ Suite "App-versioned Pi workflow resources and runtime configuration" failed after 0.056 seconds with 11 issues.
+✘ Test run with 6 tests in 1 suite failed after 0.056 seconds with 11 issues.

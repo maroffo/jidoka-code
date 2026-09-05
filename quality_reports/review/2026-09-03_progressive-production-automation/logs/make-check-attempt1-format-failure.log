@@ -1,0 +1,174 @@
+test "$(PATH=/nonexistent /bin/bash ./scripts/qualified-runtime-node.sh)" = "/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node"
+[0/1] Planning build
+Building for production...
+[0/6] Write sources
+[3/6] Write swift-version--58304C5D6DBC2206.txt
+[5/7] Compiling JidokaCodeCore EngineProtocol.swift
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:319:32: warning: 'SecKeychainItemGetTypeID()' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+317 |     case errSecSuccess:
+318 |       guard let result,
+319 |         CFGetTypeID(result) == SecKeychainItemGetTypeID()
+    |                                `- warning: 'SecKeychainItemGetTypeID()' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+320 |       else {
+321 |         throw GitHubTokenStoreError.inconsistentMutation
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:333:11: warning: 'SecKeychainItemCopyAccess' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+331 |   private func access(for item: SecKeychainItem) throws -> SecAccess {
+332 |     var access: SecAccess?
+333 |     guard SecKeychainItemCopyAccess(item, &access) == errSecSuccess,
+    |           `- warning: 'SecKeychainItemCopyAccess' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+334 |       let access
+335 |     else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:625:9: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+623 |       var application: SecTrustedApplication?
+624 |       let status = path.withCString {
+625 |         SecTrustedApplicationCreateFromPath($0, &application)
+    |         `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+626 |       }
+627 |       guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:633:18: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+631 |     }
+632 |     var access: SecAccess?
+633 |     let status = SecAccessCreate(
+    |                  `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+634 |       descriptor as CFString,
+635 |       trustedApplications as CFArray,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:706:7: warning: 'SecAccessCopyOwnerAndACL' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+704 |     var ownerType = SecAccessOwnerType()
+705 |     guard
+706 |       SecAccessCopyOwnerAndACL(
+    |       `- warning: 'SecAccessCopyOwnerAndACL' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+707 |         access,
+708 |         &userID,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:717:11: warning: 'SecAccessCopyACLList' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+715 |     }
+716 |     var list: CFArray?
+717 |     guard SecAccessCopyACLList(access, &list) == errSecSuccess,
+    |           `- warning: 'SecAccessCopyACLList' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+718 |       let entries = list as? [SecACL],
+719 |       (1...32).contains(entries.count)
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:727:30: warning: 'SecACLCopyAuthorizations' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+725 |     for entry in entries {
+726 |       guard
+727 |         let authorizations = SecACLCopyAuthorizations(entry) as? [String],
+    |                              `- warning: 'SecACLCopyAuthorizations' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+728 |         (1...32).contains(authorizations.count)
+729 |       else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:736:9: warning: 'SecACLCopyContents' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+734 |       var prompt = SecKeychainPromptSelector()
+735 |       guard
+736 |         SecACLCopyContents(
+    |         `- warning: 'SecACLCopyContents' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+737 |           entry,
+738 |           &applicationList,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:754:17: warning: 'SecTrustedApplicationCopyData' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+752 |         for application in applications {
+753 |           var value: CFData?
+754 |           guard SecTrustedApplicationCopyData(application, &value) == errSecSuccess,
+    |                 `- warning: 'SecTrustedApplicationCopyData' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+755 |             let value,
+756 |             (value as Data).count <= 16_384
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[6/8] Compiling JidokaCodeAppSupport AppViewModel.swift
+[7/9] Compiling JidokaCodeApp ApplicationComposition.swift
+[7/9] Write Objects.LinkFileList
+[8/9] Linking JidokaCodeApp
+Build of product 'JidokaCodeApp' complete! (78.08s)
+Building for production...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+[2/4] Compiling JidokaCodeBoundedCommand main.swift
+[2/4] Write Objects.LinkFileList
+[3/4] Linking JidokaCodeBoundedCommand
+Build of product 'JidokaCodeBoundedCommand' complete! (1.10s)
+./scripts/verify-toolchain.sh
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+shellcheck scripts/verify-toolchain.sh scripts/qualified-runtime-node.sh scripts/tests/fixtures/pi-rpc-process.sh scripts/package-app.sh scripts/package-installer.sh scripts/production-readiness-preflight.sh scripts/progressive-production-rollout-preflight.sh scripts/build-location-probe-packages.sh scripts/audit-location-probe-packages.sh scripts/tests/test-production-readiness-preflight.sh scripts/tests/test-progressive-production-rollout-preflight.sh scripts/tests/test-progressive-production-automation.sh scripts/tests/test-location-probe-packaging.sh scripts/spikes/test-s1-package.sh scripts/spikes/test-s2-lifecycle.sh scripts/spikes/test-s3-keychain.sh scripts/spikes/test-s4-pi.sh scripts/spikes/test-s5-s7-local.sh scripts/spikes/test-s8-workflows.sh scripts/spikes/test-s9-topology.sh scripts/spikes/test-s10-ui.sh scripts/spikes/test-s11-herdr.sh scripts/spikes/test-s12-pi-tui.sh
+./scripts/tests/test-production-readiness-preflight.sh
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-preflight-test.9cPVQc/fixture/parents/Library/Application Support/JidokaProbe/Applications/Probe.app/Contents/Helpers/ProbeEngine: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-preflight-test.9cPVQc/fixture/parents/Library/Application Support/JidokaProbe/Applications/Probe.app/Contents/MacOS/Probe Main: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-preflight-test.9cPVQc/fixture/parents/Library/Application Support/JidokaProbe/Applications/Probe.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-preflight-test.9cPVQc/fixture/parents/Library/Application Support/JidokaProbe/Applications/Probe.app/Contents/Helpers/ProbeEngine: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-preflight-test.9cPVQc/fixture/parents/Library/Application Support/JidokaProbe/Applications/Probe.app: replacing existing signature
+test-production-readiness-preflight passed
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/generate-progressive-production-release.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/tests/validate-progressive-rollout-expected.mjs
+./scripts/tests/test-progressive-production-rollout-preflight.sh
+progressive-production-rollout-preflight tests: PASS credentialReads=0 providerCalls=0 githubMutations=0 gitRemoteReads=0
+./scripts/tests/test-location-probe-packaging.sh
+test-location-probe-packaging passed
+/usr/bin/perl -c scripts/run-bounded-command.pl
+scripts/run-bounded-command.pl syntax OK
+/usr/bin/plutil -lint Packaging/app-component.plist
+Packaging/app-component.plist: OK
+/usr/bin/plutil -convert xml1 -o /dev/null Resources/Herdr/runtime-builds.json
+test "$(/usr/bin/plutil -extract protocol raw Resources/Herdr/api-schema-0.8.2.json)" = "20"
+test "$(/usr/bin/shasum -a 256 Resources/Herdr/api-schema-0.8.2.json | /usr/bin/awk '{print $1}')" = "c48f1f54ee0150ca27e11fd44455fe94aeadb20fdf4e4a62393ed822a4e5b150"
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/tests/test-herdr-schema-compatibility.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node scripts/tests/test-herdr-schema-compatibility.mjs
+Herdr 0.8.2 used-contract compatibility tests: PASS
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/herdr-s11-fixture.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/herdr-s12-fixture.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/pi-tui-fixture-provider.ts
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/jidoka-local-spikes.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/tests/test-local-spike-runtime-attestation.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node scripts/tests/test-local-spike-runtime-attestation.mjs
+Local spike runtime attestation tests: PASS
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/pi-keychain-denial-probe.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/pi-provider-gate-probe.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/pi-runtime-attestation.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/tests/test-pi-runtime-attestation.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node scripts/tests/test-pi-runtime-attestation.mjs
+Pi runtime attestation tests: PASS
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/tests/test-jidoka-extension-contract.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node scripts/tests/test-jidoka-extension-contract.mjs
+Jidoka extension contract tests: PASS
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/tests/test-jidoka-extension-rpc.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node scripts/tests/test-jidoka-extension-rpc.mjs
+Jidoka extension RPC preflight: PASS, providerCalls=0
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/tests/test-jidoka-tui-contract.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node scripts/tests/test-jidoka-tui-contract.mjs
+✔ strict private configuration pins prompt and runtime identity (2.828875ms)
+✔ terminal result is create-only, canonical, and idempotent (11.771542ms)
+✔ complete prepared result recovers, partial staging is ignored, and partial prepared fails closed (24.217792ms)
+✔ boundaryless resume requires an existing exact same-run session proof (20.317584ms)
+✔ resume requires a causally paired successful terminal tool result (0.750667ms)
+✔ cross-run resume requires an exact settled terminal boundary (0.764333ms)
+✔ planning and orchestration writer rounds resume after the exact prior boundary (0.968875ms)
+✔ runtime failure is create-only and bound to the logical run (10.504833ms)
+✔ acknowledgement binds run identity and result digest (47.981959ms)
+✔ symlinked configuration is rejected (0.590333ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 123.381375
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/pi-rpc-profile-probe.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check scripts/spikes/pi-rpc-workflow-probe.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check Resources/Pi/extensions/jidoka-code.ts
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check Resources/Pi/extensions/jidoka-deny-user-bash.js
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check Resources/Pi/extensions/jidoka-runtime.ts
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check Resources/Pi/extensions/jidoka-tui-runtime.ts
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check Resources/Pi/runtime/jidoka-extension-contract.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check Resources/Pi/runtime/jidoka-model-catalog.mjs
+/private/tmp/jidoka-code-progressive-production-automation/build/runtime-input/qualified-runtime/node/bin/node --check Resources/Pi/runtime/jidoka-tui-contract.mjs
+xcrun swift-format lint --recursive --strict Sources Tests
+Sources/JidokaCodeCore/Application/EngineService.swift:657:29: error: [AddLines] add 1 line break
+Sources/JidokaCodeCore/Application/RolloutReleaseIdentityAttestor.swift:121:10: error: [AddLines] add 1 line break
+Sources/JidokaCodeCore/Application/RolloutReleaseIdentityAttestor.swift:122:1: error: [Indentation] indent by 2 spaces
+Sources/JidokaCodeCore/Application/RolloutReleaseIdentityAttestor.swift:123:1: error: [Indentation] indent by 2 spaces
+Sources/JidokaCodeCore/Application/RolloutReleaseIdentityAttestor.swift:124:1: error: [Indentation] indent by 2 spaces
+Sources/JidokaCodeCore/Application/RolloutReleaseIdentityAttestor.swift:125:1: error: [Indentation] indent by 2 spaces
+Sources/JidokaCodeAppSupport/SettingsViewModel.swift:330:33: error: [AddLines] add 1 line break
+Sources/JidokaCodeAppSupport/SettingsViewModel.swift:347:33: error: [AddLines] add 1 line break
+make: *** [jidoka-code-check] Error 1

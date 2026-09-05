@@ -481,20 +481,23 @@ public struct PiWorkflowRuntimeConfiguration: Equatable, Sendable {
   }
 
   public func encoded() throws -> Data {
+    let manifestPath = try Self.posixCanonicalPath(resources.manifestURL)
+    let resourceRootPath = try Self.posixCanonicalPath(resources.resourceRoot)
+    let workspacePath = try Self.posixCanonicalPath(workspaceRoot)
     let object: [String: Any] = [
       "allowedCommandIDs": allowedCommandIDs,
       "allowedWritePaths": allowedWritePaths,
       "artifactSHA256": artifactSHA256,
       "contractVersion": PiWorkflowResourceCatalog.contractVersion,
       "nonce": nonce,
-      "resourceManifestPath": resources.manifestURL.path,
+      "resourceManifestPath": manifestPath,
       "resourceManifestSHA256": resources.manifestSHA256,
-      "resourceRoot": resources.resourceRoot.path,
+      "resourceRoot": resourceRootPath,
       "role": role.rawValue,
       "schemaVersion": 1,
       "toolPolicy": toolPolicy.rawValue,
       "workflow": workflow.rawValue,
-      "workspaceRoot": workspaceRoot.path,
+      "workspaceRoot": workspacePath,
     ]
     return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) + Data([0x0A])
   }
@@ -545,7 +548,8 @@ public struct PiWorkflowRuntimeConfiguration: Equatable, Sendable {
       workspaceRoot: URL(fileURLWithPath: workspacePath, isDirectory: true),
       resources: resources
     )
-    guard manifestPath == resources.manifestURL.path,
+    let expectedManifestPath = try Self.posixCanonicalPath(resources.manifestURL)
+    guard manifestPath == expectedManifestPath,
       manifestSHA256 == resources.manifestSHA256,
       toolPolicyValue == configuration.toolPolicy.rawValue,
       try configuration.encoded() == data
@@ -574,6 +578,14 @@ public struct PiWorkflowRuntimeConfiguration: Equatable, Sendable {
 
   private static func validIdentifier(_ value: String) -> Bool {
     value.wholeMatch(of: /^[a-z0-9][a-z0-9-]{0,63}$/) != nil
+  }
+
+  private static func posixCanonicalPath(_ url: URL) throws -> String {
+    do {
+      return try PiTUIFileProtocol.canonicalExistingURL(url).path
+    } catch {
+      throw PiWorkflowResourceError.invalidRuntimeConfiguration
+    }
   }
 
   private static func validRelativeWorkspacePath(_ value: String) -> Bool {

@@ -103,10 +103,12 @@ public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestratin
   private let verificationRunner: VerificationCommandRunner
   private let commandRuns: ApprovedCommandRunStore
   private let commandGate: ApprovedCommandExecutionGate
+  private let rolloutAuthority: any RolloutEffectAuthorizing
   private let importer: WorkspaceImporter
   private let git: any GitLocalCommanding
   private let offline: Bool
   private let timeoutSeconds: TimeInterval
+  private let now: @Sendable () -> Date
 
   public init(
     executorFactory: any PiWorkflowExecutorBuilding,
@@ -115,10 +117,12 @@ public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestratin
     verificationRunner: VerificationCommandRunner,
     commandRuns: ApprovedCommandRunStore,
     commandGate: ApprovedCommandExecutionGate,
+    rolloutAuthority: any RolloutEffectAuthorizing,
     importer: WorkspaceImporter,
     git: any GitLocalCommanding,
     offline: Bool = false,
-    timeoutSeconds: TimeInterval = 600
+    timeoutSeconds: TimeInterval = 600,
+    now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.executorFactory = executorFactory
     self.sessionRoot = sessionRoot
@@ -126,13 +130,35 @@ public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestratin
     self.verificationRunner = verificationRunner
     self.commandRuns = commandRuns
     self.commandGate = commandGate
+    self.rolloutAuthority = rolloutAuthority
     self.importer = importer
     self.git = git
     self.offline = offline
     self.timeoutSeconds = timeoutSeconds
+    self.now = now
   }
 
   public func orchestrate(
+    job: JobRecord,
+    prepared: PreparedIssueImplementationJob,
+    workspaceURL: URL,
+    envelope: IssueImplementationPlanEnvelope,
+    artifactSHA256: String
+  ) async throws -> IssueImplementationExecutionResult {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .workflow(jobID: job.id))
+    ) {
+      try await self.orchestrateAuthorized(
+        job: job,
+        prepared: prepared,
+        workspaceURL: workspaceURL,
+        envelope: envelope,
+        artifactSHA256: artifactSHA256
+      )
+    }
+  }
+
+  private func orchestrateAuthorized(
     job: JobRecord,
     prepared: PreparedIssueImplementationJob,
     workspaceURL: URL,
@@ -158,7 +184,9 @@ public struct PiIssueImplementationOrchestrator: IssueImplementationOrchestratin
       store: commandRuns,
       gate: commandGate,
       runner: verificationRunner,
-      workspace: workspaceURL
+      authority: rolloutAuthority,
+      workspace: workspaceURL,
+      now: now
     )
     var bootstrapEvidence: [String: VerificationCommandEvidence] = [:]
     for commandID in layout.bootstrapCommandIDs {

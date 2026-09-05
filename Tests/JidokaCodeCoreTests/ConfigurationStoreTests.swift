@@ -77,7 +77,10 @@ struct ConfigurationStoreTests {
     for profile in profiles {
       try await store.setProfile(profile, now: now)
     }
-    try await store.setMaxConcurrency(4, now: now)
+    await #expect(throws: ConfigurationStoreError.invalidMaxConcurrency) {
+      try await store.setMaxConcurrency(4, now: now)
+    }
+    try await store.setMaxConcurrency(1, now: now)
     try await store.setPaused(true, now: now)
     await database.close()
 
@@ -89,7 +92,7 @@ struct ConfigurationStoreTests {
     #expect(snapshot.repositories.first?.triageEnabled == false)
     #expect(snapshot.repositories.first?.implementationEnabled == true)
     #expect(snapshot.profiles == profiles)
-    #expect(snapshot.app == AppConfiguration(maxConcurrency: 4, paused: true))
+    #expect(snapshot.app == AppConfiguration(maxConcurrency: 1, paused: true))
     await reopenedDatabase.close()
   }
 
@@ -116,43 +119,29 @@ struct ConfigurationStoreTests {
       enabled: true
     )
     try await legacyConfiguration.upsertRepository(legacyRepository, now: now)
-    try await legacyConfiguration.setMaxConcurrency(4, now: now)
-    try await legacyConfiguration.setPaused(true, now: now)
-    let legacyJob = try await DurableJobStore(database: legacy).createJob(
-      id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
-      identity: LogicalJobIdentity(
-        repositoryID: legacyRepository.id,
-        kind: .prReview,
-        objectNodeID: "PR_legacy",
-        revisionKey: String(repeating: "c", count: 40)
-      ),
-      objectNumber: 9,
-      contractVersionUsed: "w6-migration-fixture",
-      priority: .prReview,
-      firstStep: .review,
-      now: now
+    try await legacy.execute(
+      "UPDATE app_settings SET max_concurrency = 4, updated_at = ? WHERE singleton = 1",
+      bindings: [.real(now.timeIntervalSince1970)]
     )
-    guard case .created(let legacyJobRecord) = legacyJob else {
-      Issue.record("legacy migration job was suppressed")
-      return
-    }
+    try await legacyConfiguration.setPaused(true, now: now)
     #expect(try await legacy.schemaVersion() == 1)
     await legacy.close()
 
     let upgraded = try SQLiteStore(databaseURL: fixture.databaseURL)
-    #expect(upgraded.migrationBackups.count == 8)
+    #expect(upgraded.migrationBackups.count == 9)
     let settingsBackupURL = try #require(upgraded.migrationBackups.first)
     let herdrBackupURL = try #require(upgraded.migrationBackups.dropFirst().first)
     let commandBackupURL = upgraded.migrationBackups[2]
     let primeBackupURL = upgraded.migrationBackups[5]
     let resetBackupURL = upgraded.migrationBackups[6]
-    let replacementBackupURL = try #require(upgraded.migrationBackups.last)
+    let replacementBackupURL = upgraded.migrationBackups[7]
+    let rolloutBackupURL = try #require(upgraded.migrationBackups.last)
     let settingsBackup = try SQLiteStore(
       databaseURL: settingsBackupURL,
       migrations: [firstMigration]
     )
     #expect(try await settingsBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
-    #expect(try await settingsBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    #expect(try await settingsBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
     #expect(try await settingsBackup.scalarInt("SELECT max_concurrency FROM app_settings") == 4)
     #expect(try await settingsBackup.scalarInt("SELECT paused FROM app_settings") == 1)
     await settingsBackup.close()
@@ -162,7 +151,7 @@ struct ConfigurationStoreTests {
     )
     #expect(try await herdrBackup.schemaVersion() == 2)
     #expect(try await herdrBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
-    #expect(try await herdrBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    #expect(try await herdrBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
     await herdrBackup.close()
     let commandBackup = try SQLiteStore(
       databaseURL: commandBackupURL,
@@ -182,7 +171,7 @@ struct ConfigurationStoreTests {
     )
     #expect(try await primeBackup.schemaVersion() == 6)
     #expect(try await primeBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
-    #expect(try await primeBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    #expect(try await primeBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
     await primeBackup.close()
     let resetBackup = try SQLiteStore(
       databaseURL: resetBackupURL,
@@ -190,7 +179,7 @@ struct ConfigurationStoreTests {
     )
     #expect(try await resetBackup.schemaVersion() == 7)
     #expect(try await resetBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
-    #expect(try await resetBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    #expect(try await resetBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
     await resetBackup.close()
     let replacementBackup = try SQLiteStore(
       databaseURL: replacementBackupURL,
@@ -198,8 +187,16 @@ struct ConfigurationStoreTests {
     )
     #expect(try await replacementBackup.schemaVersion() == 8)
     #expect(try await replacementBackup.scalarInt("SELECT COUNT(*) FROM repositories") == 1)
-    #expect(try await replacementBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 1)
+    #expect(try await replacementBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
     await replacementBackup.close()
+    let rolloutBackup = try SQLiteStore(
+      databaseURL: rolloutBackupURL,
+      migrations: Array(DatabaseSchema.migrations.prefix(9))
+    )
+    #expect(try await rolloutBackup.schemaVersion() == 9)
+    #expect(try await rolloutBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
+    #expect(try await rolloutBackup.scalarInt("SELECT max_concurrency FROM app_settings") == 4)
+    await rolloutBackup.close()
 
     let store = ConfigurationStore(database: upgraded)
     var snapshot = try await store.snapshot()
@@ -209,9 +206,8 @@ struct ConfigurationStoreTests {
         $0.provider == "openai-codex" && $0.model == "gpt-5.6-sol" && $0.thinking == .max
       })
     #expect(snapshot.repositories == [legacyRepository])
-    #expect(snapshot.app.maxConcurrency == 4)
+    #expect(snapshot.app.maxConcurrency == 1)
     #expect(snapshot.app.paused)
-    #expect(try await DurableJobStore(database: upgraded).job(id: legacyJobRecord.id) != nil)
     #expect(!snapshot.app.onboardingComplete)
     #expect(!snapshot.app.externalAutomationAcknowledged)
     #expect(!snapshot.app.providerDisclosureAcknowledged)
@@ -261,7 +257,7 @@ struct ConfigurationStoreTests {
     let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
     let reopened = try await ConfigurationStore(database: reopenedDatabase).snapshot()
     #expect(reopened.app.onboardingComplete)
-    #expect(!reopened.app.paused)
+    #expect(reopened.app.paused)
     #expect(reopened.app.externalAutomationAcknowledged)
     #expect(reopened.app.providerDisclosureAcknowledged)
     #expect(reopened.app.githubAccount == "hubot")
@@ -382,6 +378,9 @@ struct ConfigurationStoreTests {
     await #expect(throws: ConfigurationStoreError.invalidMaxConcurrency) {
       try await configuration.setMaxConcurrency(9, now: Date())
     }
+    await #expect(throws: ConfigurationStoreError.invalidMaxConcurrency) {
+      try await configuration.setMaxConcurrency(2, now: Date())
+    }
     await #expect(throws: SQLiteStoreError.self) {
       try await database.execute(
         "UPDATE app_settings SET max_concurrency = 9 WHERE singleton = 1"
@@ -408,7 +407,7 @@ struct ConfigurationStoreTests {
         now: now
       )
     }
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let first = try await createConfigurationJob(
       jobs: jobs,
       repositoryID: firstRepository,

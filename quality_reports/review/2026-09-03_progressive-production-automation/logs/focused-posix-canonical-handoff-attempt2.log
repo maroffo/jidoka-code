@@ -1,0 +1,73 @@
+Building for debugging...
+[0/25] Write sources
+[3/25] Write swift-version--58304C5D6DBC2206.txt
+[5/27] Compiling JidokaCodeCore PiWorkflowResources.swift
+[6/27] Emitting module JidokaCodeCore
+[7/31] Compiling JidokaCodeCore PiRPCWorkflowExecutor.swift
+[8/31] Compiling JidokaCodeCore PiTUIRuntime.swift
+[9/31] Compiling JidokaCodeCore HerdrHostRuntime.swift
+[10/31] Compiling JidokaCodeCore HerdrPiWorkflowExecutor.swift
+[10/39] Write Objects.LinkFileList
+[17/47] Emitting module JidokaCodeEngineProbe
+[17/47] Write Objects.LinkFileList
+[19/47] Emitting module JidokaCodeHerdrFixture
+[20/47] Compiling JidokaCodeHerdrFixture main.swift
+[20/47] Write Objects.LinkFileList
+[22/47] Emitting module JidokaCodeAppSupport
+[23/51] Emitting module JidokaCodeUIFixture
+[23/51] Write Objects.LinkFileList
+[25/51] Emitting module JidokaCodeAppSupportTests
+[26/51] Emitting module JidokaCodeApp
+[26/52] Write Objects.LinkFileList
+[27/52] Linking JidokaCodePushGuard
+[28/52] Linking JidokaCodeAskPass
+[28/53] Linking JidokaCodeBoundedCommand
+[28/53] Linking JidokaCodeHerdrHost
+[28/53] Linking JidokaCodeLocationProbeEngine
+[28/53] Linking JidokaCodeHerdrFixture
+[28/53] Linking JidokaCodeEngineProbe
+[28/53] Linking JidokaCodeLocationProbeApp
+[35/52] Applying JidokaCodeHerdrFixture
+[36/52] Applying JidokaCodeLocationProbeEngine
+[37/52] Applying JidokaCodeEngineProbe
+[37/52] Applying JidokaCodeBoundedCommand
+[39/52] Applying JidokaCodePushGuard
+[40/52] Applying JidokaCodeLocationProbeApp
+[41/52] Applying JidokaCodeAskPass
+[42/52] Applying JidokaCodeHerdrHost
+[43/52] Linking JidokaCodeUIFixture
+[44/52] Applying JidokaCodeUIFixture
+[45/52] Linking JidokaCodeApp
+[46/52] Applying JidokaCodeApp
+[48/53] Emitting module JidokaCodeAppTests
+[49/54] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+[50/54] Compiling JidokaCodeCoreTests PiWorkflowResourceTests.swift
+[51/54] Compiling JidokaCodeCoreTests HerdrHostRuntimeTests.swift
+[52/54] Emitting module JidokaCodeCoreTests
+[52/54] Write Objects.LinkFileList
+[53/54] Linking JidokaCodePackageTests
+Build complete! (13.87s)
+Test Suite 'Selected tests' started at 2026-09-04 00:17:17.596.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 00:17:17.597.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 00:17:17.597.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 00:17:17.597.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "App-versioned Pi workflow resources and runtime configuration" started.
+◇ Test "command provenance has no user or project resource" started.
+◇ Test "read-only roles and unsafe paths cannot gain a write surface" started.
+◇ Test "workflow and role select only the primary skill plus one fixed role skill" started.
+◇ Test "runtime configuration derives tool policy and writes one private immutable file" started.
+◇ Test "exact manifest attests every production extension, policy, and skill" started.
+◇ Test "mutated, redirected, linked, or writable resources fail closed" started.
+✔ Test "command provenance has no user or project resource" passed after 0.009 seconds.
+✔ Test "workflow and role select only the primary skill plus one fixed role skill" passed after 0.009 seconds.
+✔ Test "read-only roles and unsafe paths cannot gain a write surface" passed after 0.010 seconds.
+✔ Test "runtime configuration derives tool policy and writes one private immutable file" passed after 0.014 seconds.
+✔ Test "exact manifest attests every production extension, policy, and skill" passed after 0.015 seconds.
+✔ Test "mutated, redirected, linked, or writable resources fail closed" passed after 0.091 seconds.
+✔ Suite "App-versioned Pi workflow resources and runtime configuration" passed after 0.091 seconds.
+✔ Test run with 6 tests in 1 suite passed after 0.091 seconds.

@@ -17,6 +17,7 @@ public enum GitHubBrokerError: Error, Equatable, Sendable {
   case responseTooLarge
   case unexpectedResponseURL
   case writeOperationRequired
+  case rolloutAuthorityRequired
 }
 
 public protocol GitHubReadAPI: Sendable {
@@ -56,7 +57,7 @@ public protocol GitHubMutationReadAPI: Sendable {
 public protocol GitHubMutationSending: Sendable {
   func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse
 }
 
@@ -70,12 +71,21 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
 
   private let tokenProvider: any GitHubTokenProviding
   private let transport: any GitHubHTTPTransport
+  private let readAuthority: any RolloutGitHubReadAuthorizing
+  private let effectAuthority: (any RolloutEffectAuthorizing)?
+  private let defaultReadContext: RolloutEffectExecutionContext?
   private let now: @Sendable () -> Date
   private let decoder: JSONDecoder
 
-  public init(tokenStore: GitHubTokenStore) {
+  public init(
+    tokenStore: GitHubTokenStore,
+    authority: any RolloutEffectAuthorizing
+  ) {
     tokenProvider = tokenStore
     transport = GitHubURLSessionTransport()
+    readAuthority = authority
+    effectAuthority = authority
+    defaultReadContext = nil
     now = Date.init
     decoder = JSONDecoder()
   }
@@ -83,19 +93,28 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
   public init(
     tokenProvider: any GitHubTokenProviding,
     transport: any GitHubHTTPTransport,
+    readAuthority: any RolloutGitHubReadAuthorizing,
+    effectAuthority: (any RolloutEffectAuthorizing)? = nil,
+    defaultReadContext: RolloutEffectExecutionContext? = nil,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.tokenProvider = tokenProvider
     self.transport = transport
+    self.readAuthority = readAuthority
+    self.effectAuthority = effectAuthority
+    self.defaultReadContext = defaultReadContext
     self.now = now
     decoder = JSONDecoder()
   }
 
-  public func makeGitCredentialSession(
+  func makeGitCredentialSession(
     remoteURL: URL,
     socketDirectory: URL,
     timeoutSeconds: TimeInterval = 30
   ) async throws -> OneShotGitCredentialSession {
+    guard RolloutGitCredentialTaskContext.remoteURL == remoteURL.absoluteString else {
+      throw GitHubBrokerError.rolloutAuthorityRequired
+    }
     var token = try await tokenProvider.token()
     let tokenCount = token.count
     defer { token.resetBytes(in: 0..<tokenCount) }
@@ -114,12 +133,15 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
   }
 
   func perform(_ operation: GitHubOperation) async throws -> GitHubBrokerResponse {
-    try await send(operation: operation, overrideURL: nil, beforeSend: nil)
+    guard !operation.kind.isWrite else {
+      throw GitHubBrokerError.writeOperationRequired
+    }
+    return try await send(operation: operation, overrideURL: nil, beforeSend: nil)
   }
 
   public func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse {
     guard operation.kind.isWrite else {
       throw GitHubBrokerError.writeOperationRequired
@@ -358,8 +380,11 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
   private func send(
     operation: GitHubOperation,
     overrideURL: URL?,
-    beforeSend: (@Sendable () async throws -> Void)?
+    beforeSend: (@Sendable () async throws -> RolloutEffectPermit)?
   ) async throws -> GitHubBrokerResponse {
+    guard operation.kind.isWrite == (beforeSend != nil) else {
+      throw GitHubBrokerError.writeOperationRequired
+    }
     let descriptor = try GitHubRequestFactory.make(operation)
     var request = descriptor.request
     if let overrideURL {
@@ -375,17 +400,83 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
       request.url = overrideURL
     }
 
-    let tokenData = try await tokenProvider.token()
+    let readEffect: RolloutGitHubReadEffect?
+    let readPermit: RolloutEffectPermit?
+    if operation.kind.isWrite {
+      readEffect = nil
+      readPermit = nil
+    } else {
+      guard let context = RolloutEffectTaskContext.current ?? defaultReadContext else {
+        throw GitHubBrokerError.rolloutAuthorityRequired
+      }
+      let effect = RolloutGitHubReadEffect(
+        operation: operation,
+        maximumResponseBytes: Int64(Self.maximumResponseBytes),
+        context: context
+      )
+      readEffect = effect
+      readPermit = try await readAuthority.reserveGitHubRead(
+        effect,
+        now: now()
+      )
+    }
+
+    let tokenData: Data
+    do {
+      tokenData = try await tokenProvider.token()
+    } catch {
+      if let readPermit {
+        try? await settleRead(
+          readPermit,
+          operation: operation,
+          evidence: Self.failureEvidence(operation: operation, error: error)
+        )
+      }
+      throw error
+    }
     guard (20...2_048).contains(tokenData.count),
       let token = String(data: tokenData, encoding: .utf8),
       token.utf8.count == tokenData.count,
       token.utf8.allSatisfy({ (0x21...0x7E).contains($0) })
     else {
+      if let readPermit {
+        try await settleRead(
+          readPermit,
+          operation: operation,
+          evidence: Self.failureEvidence(
+            operation: operation,
+            error: GitHubBrokerError.invalidCredential
+          )
+        )
+      }
       throw GitHubBrokerError.invalidCredential
     }
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-    if let beforeSend { try await beforeSend() }
+    if let readPermit, let readEffect {
+      do {
+        try await readAuthority.verifyGitHubReadPermit(readPermit, effect: readEffect)
+      } catch {
+        try? await settleRead(
+          readPermit,
+          operation: operation,
+          evidence: Self.failureEvidence(operation: operation, error: error)
+        )
+        throw error
+      }
+    }
+    let sendPermit: RolloutEffectPermit?
+    if let beforeSend {
+      guard let effectAuthority else {
+        throw GitHubBrokerError.rolloutAuthorityRequired
+      }
+      let permit = try await beforeSend()
+      try await effectAuthority.verifyGitHubSendPermit(permit, operation: operation)
+      sendPermit = permit
+    } else {
+      sendPermit = nil
+    }
 
+    let brokerResponse: GitHubBrokerResponse
     do {
       let response = try await transport.send(request)
       guard response.body.count <= Self.maximumResponseBytes else {
@@ -398,7 +489,7 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
       else {
         throw GitHubBrokerError.unexpectedResponseURL
       }
-      return GitHubBrokerResponse(
+      brokerResponse = GitHubBrokerResponse(
         operation: operation,
         disposition: GitHubStatusClassifier.classify(
           operation: operation,
@@ -410,13 +501,34 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
         body: response.body
       )
     } catch let error as GitHubBrokerError {
+      if let readPermit {
+        try? await settleRead(
+          readPermit,
+          operation: operation,
+          evidence: Self.failureEvidence(operation: operation, error: error)
+        )
+      }
       throw error
     } catch is CancellationError {
+      if let readPermit {
+        try? await settleRead(
+          readPermit,
+          operation: operation,
+          evidence: Self.failureEvidence(operation: operation, error: CancellationError())
+        )
+      }
       throw CancellationError()
     } catch let error as URLError where error.code == .cancelled && Task.isCancelled {
+      if let readPermit {
+        try? await settleRead(
+          readPermit,
+          operation: operation,
+          evidence: Self.failureEvidence(operation: operation, error: error)
+        )
+      }
       throw CancellationError()
     } catch {
-      return GitHubBrokerResponse(
+      brokerResponse = GitHubBrokerResponse(
         operation: operation,
         disposition: GitHubStatusClassifier.classify(
           operation: operation,
@@ -427,6 +539,40 @@ public actor GitHubBroker: GitHubReadAPI, GitHubPullRequestCommitAPI,
         body: Data()
       )
     }
+    if let readPermit {
+      try await settleRead(
+        readPermit,
+        operation: operation,
+        evidence: Self.responseEvidence(brokerResponse)
+      )
+    }
+    _ = sendPermit
+    return brokerResponse
+  }
+
+  private func settleRead(
+    _ permit: RolloutEffectPermit,
+    operation: GitHubOperation,
+    evidence: String
+  ) async throws {
+    try await readAuthority.settleGitHubRead(permit, evidenceSHA256: evidence, now: now())
+  }
+
+  private static func responseEvidence(_ response: GitHubBrokerResponse) -> String {
+    var bytes = Data(response.operation.operationID.utf8)
+    bytes.append(0x0A)
+    bytes.append(Data(String(response.statusCode ?? 0).utf8))
+    bytes.append(0x0A)
+    bytes.append(Data(GitHubMarkerCodec.sha256(response.body).utf8))
+    return GitHubMarkerCodec.sha256(bytes)
+  }
+
+  private static func failureEvidence(
+    operation: GitHubOperation,
+    error: any Error
+  ) -> String {
+    let value = "\(operation.operationID)\n\(String(reflecting: type(of: error)))"
+    return GitHubMarkerCodec.sha256(Data(value.utf8))
   }
 
   private func decoded<T: Decodable & Sendable>(

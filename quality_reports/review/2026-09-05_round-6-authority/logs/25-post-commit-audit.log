@@ -1,0 +1,34 @@
+UTC start: 2026-09-05T17:40:07Z
+Command: bash -c $'set -e\ngit show --format=fuller --stat --oneline HEAD\ngit show --format= --check HEAD\ngit diff --exit-code HEAD -- Sources Tests Package.swift scripts docs/operations quality_reports/plans/active/2026-09-03_progressive-production-automation.md\ngit diff --exit-code 4206456 HEAD -- quality_reports/review/2026-09-03_progressive-production-automation/logs quality_reports/review/2026-09-03_progressive-production-automation/tracked-changes.diff quality_reports/review/2026-09-05_round-5-accuracy\ngit diff --check'
+d123a41 fix(automation): align rollout authority and operator boundaries
+ .gitattributes                                     |    1 +
+ Package.swift                                      |   11 +-
+ Sources/JidokaCodeApp/RolloutCLI.swift             |   11 +-
+ .../Application/ProductionEngineJobRuntime.swift   |   57 +-
+ Sources/JidokaCodeCore/Git/GitTransport.swift      |    4 +-
+ .../Pi/HerdrPiWorkflowExecutor.swift               |   70 +-
+ Sources/JidokaCodeCore/State/DatabaseSchema.swift  |  125 +-
+ Sources/JidokaCodeCore/State/DurableJobStore.swift |    6 +-
+ .../State/RolloutAuthorityStore.swift              |   46 +-
+ .../State/RolloutEffectAuthorityStore.swift        |   16 +-
+ .../ViewModelFlowTests.swift                       |   49 +
+ Tests/JidokaCodeAppTests/RolloutCLITests.swift     |  152 +
+ .../ApprovedCommandRunStoreTests.swift             |   40 +
+ .../JidokaCodeCoreTests/EngineProtocolTests.swift  |  198 +-
+ .../HerdrPiWorkflowRuntimeTests.swift              | 4637 ++++++--------------
+ .../HistoricalCanaryEffectDenialTests.swift        |   89 +-
+ .../PullRequestReviewJobWorkflowTests.swift        |   19 +-
+ .../RolloutAuthorityStoreTests.swift               |  498 ++-
+ .../RolloutEffectAuthorityTestSupport.swift        |   44 +-
+ .../RolloutLeaseAuthorityTests.swift               |    2 +-
+ .../RolloutRemotePreviewRevalidatorTests.swift     |   10 +-
+ Tests/JidokaCodeCoreTests/SQLiteStoreTests.swift   |    6 +-
+ .../RolloutOperatorFixture.swift                   |  197 +
+ docs/operations/progressive-production-rollout.md  |   31 +-
+ ...2026-09-03_progressive-production-automation.md |   12 +
+ .../fixtures/process-identity-session-escape.py    |   10 +-
+ .../test-progressive-production-automation.sh      |    3 +
+ 27 files changed, 2659 insertions(+), 3685 deletions(-)
+
+Exit status: 0
+UTC end: 2026-09-05T17:40:07Z

@@ -1,0 +1,493 @@
+[0/1] Planning build
+Test Suite 'Selected tests' started at 2026-09-05 22:17:15.617.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 22:17:15.619.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 22:17:15.619.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 22:17:15.619.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Production rollout operator commands" started.
+◇ Suite "Explicit command authority double" started.
+◇ Suite "Production Herdr Pi workflow runtime" started.
+◇ Suite "SQLite durable store" started.
+◇ Suite "Progressive rollout authority" started.
+◇ Suite "Rollout Git preview reads" started.
+◇ Suite "Historical canary effect denial" started.
+◇ Test "command reservation requires the workflow identity and every effect field" started.
+◇ Test "symbolic-link database and parent paths fail closed" started.
+◇ Test "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "failed migration rolls back schema and migration version" started.
+◇ Test "irreversible upgrade creates a readable pre-migration backup" started.
+◇ Test "applied migrations record their body digest and reopen idempotently" started.
+◇ Test "typed transaction commits once and rolls back on error" started.
+◇ Test "explicit backup is consistent and closed stores fail closed" started.
+◇ Test "a database this binary refuses as too new is never written to" started.
+◇ Test "explicit WAL checkpoint is durable and closed stores reject it" started.
+◇ Test "empty database migrates with required pragmas and permissions" started.
+◇ Test case passing 1 argument completedStatementCount → 1 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "production schema upgrades to rollout authority without manufacturing authority" started.
+◇ Test case passing 1 argument completedStatementCount → 4 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "generated review activation cannot invent an unlinked child job" started.
+◇ Test "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 2 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 5 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "foreign keys and append-only triggers reject invalid writes" started.
+◇ Test case passing 1 argument completedStatementCount → 7 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "the same durable provider run reuses one permit without consuming another slot" started.
+◇ Test "production schema upgrades through architecture role-host replacement authority" started.
+◇ Test case passing 1 argument completedStatementCount → 3 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 6 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 8 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "GitHub reads require the matching task-local scope and settle exactly once" started.
+◇ Test "activation rejects a confirmed digest that differs from canonical preview bytes" started.
+◇ Test "a schema-10 database stamped by an unshipped migration body fails closed" started.
+◇ Test case passing 1 argument completedStatementCount → 9 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "concurrent reservations cannot overrun the provider cap" started.
+◇ Test "execution activation cannot invent a job beyond the planning checkpoint" started.
+◇ Test "usage INSERT cannot reset a consumed cap, skip sequence or invent a source" started.
+◇ Test case passing 1 argument completedStatementCount → 10 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "preview rejects duplicate labels and lists larger than their budgets" started.
+◇ Test case passing 1 argument completedStatementCount → 11 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 12 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "activation rejects a canonical preview at its exact expiry boundary" started.
+◇ Test "confirmed recovery resumes only the same exact job after every effect settles" started.
+◇ Test "a settled local provider result reconciles only its bound reservation" started.
+◇ Test case passing 1 argument completedStatementCount → 13 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "revocation denies fresh effects but preserves exact uncertain-effect readback" started.
+◇ Test "database lease triggers reject an unbound quarantined generated review" started.
+◇ Test case passing 1 argument completedStatementCount → 14 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 15 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "an exact intentional terminal result settles and pauses its stage" started.
+◇ Test case passing 1 argument completedStatementCount → 16 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 17 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "startup recovery transforms only the bound rollout job before explicit continuation" started.
+◇ Test case passing 1 argument completedStatementCount → 18 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 19 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "planning authority cannot cross the durable simple-plan boundary" started.
+◇ Test "stale approval checkpoints into a separately authorized planning step" started.
+◇ Test "provider admission binds artifact, narrative, resources, and model profile" started.
+◇ Test "an exact interrupted provider boundary requires explicit recovery" started.
+◇ Test "a started branch publication can read back during drain without fresh send authority" started.
+◇ Test "an unpaused open lane cannot change state even below the store" started.
+◇ Test case passing 1 argument completedStatementCount → 20 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "finite activation requires a same-stage exact receipt" started.
+◇ Test "exact execution evaluates only its bound waiting-human job" started.
+◇ Test case passing 1 argument completedStatementCount → 21 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "terminal historical evidence does not block a later drain" started.
+◇ Test "expiry closes and terminalizes the lane before any fresh effect" started.
+◇ Test "restart reattaches only pre-boundary orphan reservations after exact recovery" started.
+◇ Test case passing 1 argument completedStatementCount → 22 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "canonical preview rejects unknown fields and changed bytes" started.
+◇ Test "an exact transient failure closes the lane instead of retrying" started.
+◇ Test "first finite window admits only its closed future predicate and uses operational expiry" started.
+◇ Test case passing 1 argument completedStatementCount → 23 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 24 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "send permits are task-bound, single-use transport capabilities" started.
+◇ Test "stop pauses durably with draining and terminalizes only after drain" started.
+◇ Test case passing 1 argument completedStatementCount → 25 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "a send-started mutation's readback is reservable while the lane is draining" started.
+◇ Test "a rollout job cannot settle an unreserved mutation effect" started.
+◇ Test case passing 1 argument completedStatementCount → 26 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "usage ledger refuses every single-fault forgery of a seed or append row" started.
+◇ Test "marker cap failure rolls back the complete reservation batch" started.
+◇ Test "activation rejects every stale preview digest" started.
+◇ Test case passing 1 argument completedStatementCount → 27 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "the GitHub and Git readback gates share one lane-and-pause clause" started.
+◇ Test "a workflow-issued provider permit is inert under a historical canary context" started.
+◇ Test "exact activation refuses another job's disposition without rewriting history" started.
+◇ Test "preview is read-only and exact activation is atomic" started.
+◇ Test case passing 1 argument completedStatementCount → 28 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "configuration drift fails and pauses the active lane before another effect" started.
+◇ Test "a historical canary context cannot reserve any fresh effect" started.
+◇ Test "issue marker revision and label sends are bound to the live planning step" started.
+◇ Test "effect reservations consume a finite cap and remain immutable" started.
+◇ Test "a historical canary permit cannot be verified or settled" started.
+◇ Test case passing 1 argument completedStatementCount → 29 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "the double keeps workflow-issued permits inert under a historical context" started.
+◇ Test "the explicit test double denies a historical canary provider reservation like the store" started.
+◇ Test case passing 1 argument completedStatementCount → 30 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "a historical canary send is denied and marks no intent as started" started.
+◇ Test "closing read admission after reservation prevents Git transport" started.
+◇ Test "runtime mutation drift and fault matrices have exact unique shape" started.
+◇ Test "preview and activation enforce paused, exclusive and checkpoint boundaries" started.
+◇ Test case passing 1 argument completedStatementCount → 31 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "preview fetches only the exact base and pull-request head under a finite permit" started.
+◇ Test "stop closes actual dispatch and command gates and pauses the scheduler" started.
+◇ Test case passing 1 argument completedStatementCount → 32 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "recovery rejects unpaused, expired and drifted evidence" started.
+◇ Test "a failed Git read keeps the transport error primary when settlement also fails" started.
+◇ Test case passing 1 argument completedStatementCount → 33 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "a busy command times out into recovery without reopening admission" started.
+◇ Test "release mismatch and local identity drift leave operator admission closed" started.
+◇ Test case passing 1 argument completedStatementCount → 34 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 35 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "execution start is not misreported as a completed stage" started.
+◇ Test case passing 1 argument completedStatementCount → 36 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 37 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 38 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 39 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 40 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 41 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 42 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 43 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 44 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 45 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 46 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 47 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 48 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 49 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 50 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 51 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 52 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 53 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 54 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 1 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 55 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 2 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 3 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 56 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 4 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 5 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 57 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 6 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 7 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 58 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 8 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 59 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 9 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 60 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 10 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 61 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 11 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 12 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 62 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 13 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 63 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 14 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 64 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 15 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 65 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 16 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 17 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 66 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 18 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 67 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 19 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 68 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 20 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 69 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 21 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 70 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 22 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 23 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 24 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 25 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 26 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 71 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 27 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 72 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 28 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 73 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 29 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 74 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 30 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 31 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 75 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 32 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 33 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 34 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 35 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 36 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 76 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 37 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 77 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 38 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 78 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 39 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 79 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 40 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 80 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 41 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 81 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 42 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 43 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 82 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 44 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 83 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 84 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 45 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 85 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 46 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 86 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 47 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 87 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 48 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 49 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 88 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 89 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 50 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 90 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 51 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 52 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 53 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 91 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 54 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 55 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 56 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 57 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 58 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 59 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 60 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 61 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 62 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 63 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 64 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 65 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 66 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 67 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 68 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 69 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 70 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 71 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 72 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 73 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 74 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 75 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 76 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+✔ Test "symbolic-link database and parent paths fail closed" passed after 3.686 seconds.
+✔ Test "failed migration rolls back schema and migration version" passed after 3.787 seconds.
+✔ Test "irreversible upgrade creates a readable pre-migration backup" passed after 3.817 seconds.
+✔ Test "typed transaction commits once and rolls back on error" passed after 3.818 seconds.
+✔ Test "command reservation requires the workflow identity and every effect field" passed after 3.820 seconds.
+✔ Test "production schema 9 to 10 rolls back after every exact migration statement" with 91 test cases passed after 3.820 seconds.
+✔ Test "applied migrations record their body digest and reopen idempotently" passed after 3.966 seconds.
+◇ Test case passing 1 argument useDouble → false to "a historical canary context cannot reserve any fresh effect" started.
+◇ Test case passing 1 argument useDouble → true to "a historical canary context cannot reserve any fresh effect" started.
+◇ Test case passing 1 argument useDouble → false to "a historical canary permit cannot be verified or settled" started.
+◇ Test case passing 1 argument useDouble → true to "a historical canary permit cannot be verified or settled" started.
+✘ Test "usage ledger refuses every single-fault forgery of a seed or append row" recorded an issue at RolloutAuthorityStoreTests.swift:1060:4: Caught error: .decode("rollout usage ledger")
+◇ Test case passing 1 argument useDouble → false to "a historical canary send is denied and marks no intent as started" started.
+◇ Test case passing 1 argument useDouble → true to "a historical canary send is denied and marks no intent as started" started.
+✔ Test "explicit WAL checkpoint is durable and closed stores reject it" passed after 4.081 seconds.
+✔ Test "empty database migrates with required pragmas and permissions" passed after 4.082 seconds.
+✔ Test "explicit backup is consistent and closed stores fail closed" passed after 4.093 seconds.
+✔ Test "a database this binary refuses as too new is never written to" passed after 4.107 seconds.
+✔ Test "generated review activation cannot invent an unlinked child job" passed after 4.115 seconds.
+✔ Test "production schema upgrades to rollout authority without manufacturing authority" passed after 4.116 seconds.
+✔ Test "foreign keys and append-only triggers reject invalid writes" passed after 4.116 seconds.
+✔ Test "the same durable provider run reuses one permit without consuming another slot" passed after 4.115 seconds.
+✔ Test "production schema 8 to 9 rolls back after every exact migration statement" with 76 test cases passed after 4.116 seconds.
+✔ Test "production schema upgrades through architecture role-host replacement authority" passed after 4.116 seconds.
+✔ Test "GitHub reads require the matching task-local scope and settle exactly once" passed after 4.116 seconds.
+✔ Test "activation rejects a confirmed digest that differs from canonical preview bytes" passed after 4.116 seconds.
+✔ Test "execution activation cannot invent a job beyond the planning checkpoint" passed after 4.119 seconds.
+✔ Test "a schema-10 database stamped by an unshipped migration body fails closed" passed after 4.119 seconds.
+✔ Test "usage INSERT cannot reset a consumed cap, skip sequence or invent a source" passed after 4.119 seconds.
+✔ Test "preview rejects duplicate labels and lists larger than their budgets" passed after 4.119 seconds.
+✔ Test "activation rejects a canonical preview at its exact expiry boundary" passed after 4.113 seconds.
+✔ Test "confirmed recovery resumes only the same exact job after every effect settles" passed after 4.113 seconds.
+✔ Test "a settled local provider result reconciles only its bound reservation" passed after 4.113 seconds.
+✔ Test "finite activation requires a same-stage exact receipt" passed after 3.619 seconds.
+✔ Test "database lease triggers reject an unbound quarantined generated review" passed after 4.085 seconds.
+✔ Test "an unpaused open lane cannot change state even below the store" passed after 3.620 seconds.
+✔ Test "planning authority cannot cross the durable simple-plan boundary" passed after 3.621 seconds.
+✔ Test "a started branch publication can read back during drain without fresh send authority" passed after 3.620 seconds.
+✔ Test "revocation denies fresh effects but preserves exact uncertain-effect readback" passed after 4.085 seconds.
+✔ Test "provider admission binds artifact, narrative, resources, and model profile" passed after 3.620 seconds.
+✔ Test "an exact intentional terminal result settles and pauses its stage" passed after 3.847 seconds.
+✔ Test "exact execution evaluates only its bound waiting-human job" passed after 3.619 seconds.
+✔ Test "the GitHub and Git readback gates share one lane-and-pause clause" passed after 3.589 seconds.
+✔ Test "stale approval checkpoints into a separately authorized planning step" passed after 3.621 seconds.
+✔ Test "startup recovery transforms only the bound rollout job before explicit continuation" passed after 3.677 seconds.
+✔ Test "an exact interrupted provider boundary requires explicit recovery" passed after 3.621 seconds.
+✔ Test "terminal historical evidence does not block a later drain" passed after 3.619 seconds.
+✔ Test "canonical preview rejects unknown fields and changed bytes" passed after 3.613 seconds.
+✔ Test "stop pauses durably with draining and terminalizes only after drain" passed after 3.612 seconds.
+✔ Test "expiry closes and terminalizes the lane before any fresh effect" passed after 3.619 seconds.
+✔ Test "send permits are task-bound, single-use transport capabilities" passed after 3.613 seconds.
+✔ Test "an exact transient failure closes the lane instead of retrying" passed after 3.613 seconds.
+✔ Test "restart reattaches only pre-boundary orphan reservations after exact recovery" passed after 3.619 seconds.
+✘ Test "usage ledger refuses every single-fault forgery of a seed or append row" failed after 3.608 seconds with 1 issue.
+✔ Test "activation rejects every stale preview digest" passed after 3.608 seconds.
+✔ Test "first finite window admits only its closed future predicate and uses operational expiry" passed after 3.613 seconds.
+✔ Test "a send-started mutation's readback is reservable while the lane is draining" passed after 3.612 seconds.
+✔ Test "exact activation refuses another job's disposition without rewriting history" passed after 3.589 seconds.
+✔ Test "runtime mutation drift and fault matrices have exact unique shape" passed after 3.443 seconds.
+✔ Test "closing read admission after reservation prevents Git transport" passed after 3.443 seconds.
+✔ Test "a rollout job cannot settle an unreserved mutation effect" passed after 3.612 seconds.
+✔ Test "a failed Git read keeps the transport error primary when settlement also fails" passed after 3.355 seconds.
+✔ Test "preview is read-only and exact activation is atomic" passed after 3.589 seconds.
+✔ Test "marker cap failure rolls back the complete reservation batch" passed after 3.608 seconds.
+✔ Test "configuration drift fails and pauses the active lane before another effect" passed after 3.547 seconds.
+✔ Test "a workflow-issued provider permit is inert under a historical canary context" passed after 3.589 seconds.
+✔ Suite "SQLite durable store" passed after 4.121 seconds.
+✔ Suite "Explicit command authority double" passed after 4.121 seconds.
+◇ Test "job kinds eagerly create exact one four and five role-host topologies" started.
+✔ Test "issue marker revision and label sends are bound to the live planning step" passed after 3.572 seconds.
+✔ Test "concurrent reservations cannot overrun the provider cap" passed after 4.151 seconds.
+✔ Test "a historical canary context cannot reserve any fresh effect" with 2 test cases passed after 3.595 seconds.
+✔ Test "effect reservations consume a finite cap and remain immutable" passed after 3.600 seconds.
+✔ Test "preview and activation enforce paused, exclusive and checkpoint boundaries" passed after 3.537 seconds.
+✔ Test "execution start is not misreported as a completed stage" passed after 3.291 seconds.
+✘ Suite "Progressive rollout authority" failed after 4.220 seconds with 1 issue.
+✔ Test "recovery rejects unpaused, expired and drifted evidence" passed after 3.461 seconds.
+✔ Test "stop closes actual dispatch and command gates and pauses the scheduler" passed after 3.532 seconds.
+✔ Test "release mismatch and local identity drift leave operator admission closed" passed after 3.461 seconds.
+✔ Test "the double keeps workflow-issued permits inert under a historical context" passed after 3.605 seconds.
+✔ Test "a historical canary permit cannot be verified or settled" with 2 test cases passed after 3.676 seconds.
+✔ Test "the explicit test double denies a historical canary provider reservation like the store" passed after 3.608 seconds.
+✔ Test "a historical canary send is denied and marks no intent as started" with 2 test cases passed after 3.577 seconds.
+✔ Suite "Historical canary effect denial" passed after 4.254 seconds.
+✔ Test "preview fetches only the exact base and pull-request head under a finite permit" passed after 4.054 seconds.
+✔ Suite "Rollout Git preview reads" passed after 4.751 seconds.
+✔ Test "job kinds eagerly create exact one four and five role-host topologies" passed after 0.744 seconds.
+◇ Test "Pi-owned terminal theme remains valid while importing a launched child" started.
+✔ Test "Pi-owned terminal theme remains valid while importing a launched child" passed after 0.248 seconds.
+◇ Test "workflow launch event gates time out in seconds and remain reusable" started.
+✔ Test "workflow launch event gates time out in seconds and remain reusable" passed after 0.055 seconds.
+◇ Test "terminal failure strictly removes projected provider credentials" started.
+◇ Test case passing 1 argument channelFailure → true to "terminal failure strictly removes projected provider credentials" started.
+✔ Test "a busy command times out into recovery without reopening admission" passed after 4.471 seconds.
+✔ Suite "Production rollout operator commands" passed after 5.240 seconds.
+◇ Test case passing 1 argument channelFailure → false to "terminal failure strictly removes projected provider credentials" started.
+✔ Test "terminal failure strictly removes projected provider credentials" with 2 test cases passed after 8.449 seconds.
+◇ Test "Herdr-redacted layout environment is closed by exact role-host process evidence" started.
+✔ Test "Herdr-redacted layout environment is closed by exact role-host process evidence" passed after 0.191 seconds.
+◇ Test "canary launch scope rejects another job before topology or run creation" started.
+✔ Test "canary launch scope rejects another job before topology or run creation" passed after 0.045 seconds.
+◇ Test "paused exact canary cannot create topology or a provider launch" started.
+✔ Test "paused exact canary cannot create topology or a provider launch" passed after 0.050 seconds.
+◇ Test "explicit recovery preserves unknown intent and resumes only the same no-Pi canary" started.
+✔ Test "explicit recovery preserves unknown intent and resumes only the same no-Pi canary" passed after 0.138 seconds.
+◇ Test "explicit focus revalidates exact ownership before changing shared-session focus" started.
+✔ Test "explicit focus revalidates exact ownership before changing shared-session focus" passed after 0.072 seconds.
+◇ Test "durable result import remains local when the Herdr socket is unavailable" started.
+✔ Test "durable result import remains local when the Herdr socket is unavailable" passed after 0.047 seconds.
+◇ Test "every production workflow fails closed when Herdr is unavailable" started.
+✔ Test "every production workflow fails closed when Herdr is unavailable" passed after 0.217 seconds.
+◇ Test "startup recovery rolls back every partial exact 1 4 and 5 role generation" started.
+✔ Test "startup recovery rolls back every partial exact 1 4 and 5 role generation" passed after 0.893 seconds.
+◇ Test "partial exact 1 4 and 5 role activation rolls every sibling back" started.
+✔ Test "partial exact 1 4 and 5 role activation rolls every sibling back" passed after 0.767 seconds.
+◇ Test "quit timeout marks every sibling host lost instead of stranding stopping state" started.
+✔ Test "quit timeout marks every sibling host lost instead of stranding stopping state" passed after 0.294 seconds.
+◇ Test "quit ignores inactive prepared history after release runtime replacement" started.
+✔ Test "quit ignores inactive prepared history after release runtime replacement" passed after 0.180 seconds.
+◇ Test "pause admission closes before a live result settles and replays without relaunch" started.
+✔ Test "pause admission closes before a live result settles and replays without relaunch" passed after 0.287 seconds.
+◇ Test "durable enqueued state republishes one missing command after a crash window" started.
+✔ Test "durable enqueued state republishes one missing command after a crash window" passed after 0.499 seconds.
+◇ Test "a moved persistent role host executes its next round in the rebound pane" started.
+✔ Test "a moved persistent role host executes its next round in the rebound pane" passed after 0.382 seconds.
+◇ Test "settled evidence survives topology rebind job recovery and durable pause" started.
+✔ Test "settled evidence survives topology rebind job recovery and durable pause" passed after 0.311 seconds.
+◇ Test "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 0 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 1 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 2 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 3 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 4 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 5 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 6 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+✔ Test "replacement runtime rejects each one-field q4 descriptor binding drift" with 7 test cases passed after 0.002 seconds.
+◇ Test "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 0 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 1 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 2 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 3 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 4 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 5 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+✔ Test "replacement runtime rejects each adjacent q4 digest-role transposition" with 6 test cases passed after 0.001 seconds.
+◇ Test "replacement runtime rejects a coherent q4 rebind after preview" started.
+✔ Test "replacement runtime rejects a coherent q4 rebind after preview" passed after 0.001 seconds.
+◇ Test "historical rollover preserves prepared or enqueued q4 without provider authority" started.
+◇ Test case passing 1 argument restartState → .prepared to "historical rollover preserves prepared or enqueued q4 without provider authority" started.
+◇ Test case passing 1 argument restartState → .enqueuedMissingCommand to "historical rollover preserves prepared or enqueued q4 without provider authority" started.
+✔ Test "historical rollover preserves prepared or enqueued q4 without provider authority" with 2 test cases passed after 2.583 seconds.
+◇ Test "schema eight migration reaches current-runtime lost topology recovery" started.
+✔ Test "schema eight migration reaches current-runtime lost topology recovery" passed after 0.313 seconds.
+◇ Test "generation rollover resumes after a binding and one-host restart cut" started.
+✔ Test "generation rollover resumes after a binding and one-host restart cut" passed after 0.459 seconds.
+◇ Test "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .q4Configuration to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .q4Prompt to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .q4WorkflowConfiguration to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .priorLaunchConfiguration to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .sourcePrompt to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .sourceWorkflowConfiguration to "historical replacement denies one-field q4 backing drift before remote effects" started.
+✔ Test "historical replacement denies one-field q4 backing drift before remote effects" with 6 test cases passed after 2.423 seconds.
+◇ Test "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 0 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 1 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 2 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 3 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 4 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 5 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 6 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+✔ Test "historical replacement rejects every authorized q4 digest drift before credentials" with 7 test cases passed after 3.391 seconds.
+◇ Test "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "socket-vnode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.socketVnode, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.topologyUnavailable)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-processID", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.processID), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-startSeconds", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.startSeconds), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-startMicroseconds", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.startMicroseconds), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-executablePath", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.executablePath), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-executableDevice", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.executableDevice), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-executableInode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.executableInode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-executableContent", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.executableContent), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "resource-rootIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.resource(JidokaCodeCoreTests.ReplacementResourceDrift.rootIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "resource-inventory", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.resource(JidokaCodeCoreTests.ReplacementResourceDrift.inventory), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "resource-fileVnode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.resource(JidokaCodeCoreTests.ReplacementResourceDrift.fileVnode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "resource-fileContent", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.resource(JidokaCodeCoreTests.ReplacementResourceDrift.fileContent), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-path", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.path), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-device", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.device), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-inode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.inode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-content", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.content), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-path", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.path), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-device", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.device), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-inode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.inode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-content", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.content), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-path", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.path), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-device", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.device), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-inode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.inode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-content", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.content), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-path", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.path), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-device", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.device), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-inode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.inode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-content", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.content), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "stale-pane-revision", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.stalePaneRevision, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "stale-pane-token-presence", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.stalePaneTokenPresence, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "stale-pane-token-digest", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.stalePaneTokenDigest, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-descriptor", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Descriptor, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.resultDivergent)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-q4Configuration", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.q4Configuration), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.tui(JidokaCodeCore.PiTUIRuntimeError.unsafePath)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-q4Prompt", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.q4Prompt), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.tui(JidokaCodeCore.PiTUIRuntimeError.unsafePath)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-q4WorkflowConfiguration", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.q4WorkflowConfiguration), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.tui(JidokaCodeCore.PiTUIRuntimeError.unsafePath)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-priorLaunchConfiguration", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.priorLaunchConfiguration), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.resultDivergent)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-sourcePrompt", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.sourcePrompt), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.resultDivergent)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-sourceWorkflowConfiguration", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.sourceWorkflowConfiguration), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.resultDivergent)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "credential-sourceContent", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.credential(JidokaCodeCoreTests.ReplacementCredentialDrift.sourceContent), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "credential-sourceAccount", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.credential(JidokaCodeCoreTests.ReplacementCredentialDrift.sourceAccount), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "credential-installedProjection", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.credential(JidokaCodeCoreTests.ReplacementCredentialDrift.installedProjection), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.tui(JidokaCodeCore.PiTUIRuntimeError.identityMismatch)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "paused-state", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.pausedState, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.runStore(JidokaCodeCore.PiRunStoreError.invalidTransition)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "active-canary", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.activeCanary, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.runStore(JidokaCodeCore.PiRunStoreError.invalidTransition)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "active-lease", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.activeLease, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.runStore(JidokaCodeCore.PiRunStoreError.invalidTransition)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "replacement-evidence", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.replacementEvidence, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "replacement-q4-authorization", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.replacementQ4Authorization, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+✔ Test "historical post-preview scenarios never authorize replacement effects" with 51 test cases passed after 22.263 seconds.
+◇ Test "historical replacement preview never grants a launch, including after reopen" started.
+✔ Test "historical replacement preview never grants a launch, including after reopen" passed after 0.545 seconds.
+◇ Test "production reload quarantines historical replacement and unrelated jobs" started.
+✔ Test "production reload quarantines historical replacement and unrelated jobs" passed after 0.335 seconds.
+◇ Test "exact paused canary startup leaves every unrelated durable row unchanged" started.
+✔ Test "exact paused canary startup leaves every unrelated durable row unchanged" passed after 0.086 seconds.
+◇ Test "production reload skips startup execution while paused" started.
+✔ Test "production reload skips startup execution while paused" passed after 0.044 seconds.
+✔ Suite "Production Herdr Pi workflow runtime" passed after 50.457 seconds.
+✘ Test run with 106 tests in 7 suites failed after 50.457 seconds with 1 issue.
+TEST_EXIT=1

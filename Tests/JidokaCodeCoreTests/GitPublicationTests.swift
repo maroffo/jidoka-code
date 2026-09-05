@@ -34,7 +34,10 @@ struct GitPublicationTests {
       defaultBranch: "main",
       localFixtureURL: remoteURL
     )
-    let publisher = GitPublisher(transport: fixture.git)
+    let publisher = ExplicitlyAuthorizedTestGitPublisher(
+      transport: fixture.git,
+      authority: fixture.authority
+    )
     let created = try await publisher.publishCreateOnly(
       branch: "agent/issue-1-created",
       exactSHA: exact,
@@ -110,7 +113,10 @@ struct GitPublicationTests {
       remoteRepository: remoteURL,
       competingSHA: base
     )
-    let result = try await GitPublisher(transport: transport).publishCreateOnly(
+    let result = try await ExplicitlyAuthorizedTestGitPublisher(
+      transport: transport,
+      authority: fixture.authority
+    ).publishCreateOnly(
       branch: "agent/issue-3-pre-advertisement",
       exactSHA: exact,
       remote: remote,
@@ -134,7 +140,7 @@ struct GitPublicationTests {
     let base = String(repeating: "a", count: 40)
     let exact = String(repeating: "b", count: 40)
     let transport = RacingPublicationTransport(raceSHA: base)
-    let publisher = GitPublisher(transport: transport)
+    let publisher = ExplicitlyAuthorizedTestGitPublisher(transport: transport)
     let result = try await publisher.publishCreateOnly(
       branch: "agent/issue-3-race",
       exactSHA: exact,
@@ -152,7 +158,7 @@ struct GitPublicationTests {
   func concurrentPublish() async throws {
     let exact = String(repeating: "c", count: 40)
     let transport = RacingPublicationTransport(raceSHA: nil, suspendRead: true)
-    let publisher = GitPublisher(transport: transport)
+    let publisher = ExplicitlyAuthorizedTestGitPublisher(transport: transport)
     let remote = try fixtureRemote()
     async let first = publisher.publishCreateOnly(
       branch: "agent/issue-4-concurrent",
@@ -177,7 +183,7 @@ struct GitPublicationTests {
   @Test("branch traversal, malformed SHA, and missing commit fail before a send")
   func invalidInputs() async throws {
     let transport = RacingPublicationTransport(raceSHA: nil)
-    let publisher = GitPublisher(transport: transport)
+    let publisher = ExplicitlyAuthorizedTestGitPublisher(transport: transport)
     await #expect(throws: GitPublicationError.invalidBranch) {
       _ = try await publisher.publishCreateOnly(
         branch: "agent/issue-1-topic/../../escape",
@@ -199,7 +205,9 @@ struct GitPublicationTests {
       behavior: .failureAbsent
     )
     await #expect(throws: GitPublicationError.localObjectMissing) {
-      _ = try await GitPublisher(transport: missing).publishCreateOnly(
+      _ = try await ExplicitlyAuthorizedTestGitPublisher(
+        transport: missing
+      ).publishCreateOnly(
         branch: "agent/issue-1-missing",
         exactSHA: String(repeating: "a", count: 40),
         remote: try fixtureRemote(),
@@ -232,27 +240,33 @@ struct GitPublicationTests {
       ),
       now: Date(timeIntervalSince1970: 4_000)
     )
-    let creation = try await DurableJobStore(database: database).createJob(
-      identity: LogicalJobIdentity(
-        repositoryID: repositoryID,
-        kind: .issueImplementation,
-        objectNodeID: "I_intent",
-        revisionKey: "claim-1"
-      ),
-      objectNumber: 6,
-      contractVersionUsed: "v1",
-      priority: .issueImplementation,
-      firstStep: .publish,
-      now: Date(timeIntervalSince1970: 4_000)
-    )
+    let creation = try await DurableJobStore(database: database, enforceRolloutAuthority: false)
+      .createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repositoryID,
+          kind: .issueImplementation,
+          objectNodeID: "I_intent",
+          revisionKey: "claim-1"
+        ),
+        objectNumber: 6,
+        contractVersionUsed: "v1",
+        priority: .issueImplementation,
+        firstStep: .publish,
+        now: Date(timeIntervalSince1970: 4_000)
+      )
     let job = try #require(createdPublicationJob(creation))
     let intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     let remote = try fixtureRemote(repositoryID: repositoryID)
     let exact = String(repeating: "f", count: 40)
     let expectedState = String(repeating: "1", count: 64)
 
     let freshTransport = FaultPublicationTransport(behavior: .successExact)
-    let freshPublisher = DurableGitPublisher(intents: intents, transport: freshTransport)
+    let freshPublisher = DurableGitPublisher(
+      intents: intents,
+      transport: freshTransport,
+      authority: authority
+    )
     let freshRequest = GitBranchPublicationRequest(
       jobID: job.id,
       idempotencyKey: String(repeating: "2", count: 64),
@@ -305,7 +319,8 @@ struct GitPublicationTests {
     )
     let recoveryPublisher = DurableGitPublisher(
       intents: intents,
-      transport: recoveryTransport
+      transport: recoveryTransport,
+      authority: authority
     )
     let recovered = try await recoveryPublisher.publishCreateOnly(
       request: recoveryRequest,
@@ -340,7 +355,8 @@ struct GitPublicationTests {
     let absentTransport = FaultPublicationTransport(behavior: .failureAbsent)
     let absent = try await DurableGitPublisher(
       intents: intents,
-      transport: absentTransport
+      transport: absentTransport,
+      authority: authority
     ).publishCreateOnly(
       request: absentRequest,
       remote: remote,
@@ -365,7 +381,8 @@ struct GitPublicationTests {
     await #expect(throws: GitPublicationError.readBackUnavailable) {
       _ = try await DurableGitPublisher(
         intents: intents,
-        transport: unreadableTransport
+        transport: unreadableTransport,
+        authority: authority
       ).publishCreateOnly(
         request: unreadableRequest,
         remote: remote,
@@ -380,12 +397,83 @@ struct GitPublicationTests {
     #expect(await unreadableTransport.createCount() == 1)
   }
 
+  @Test("durable publisher denial leaves a prepared intent and performs no Git send")
+  func durablePublisherDenial() async throws {
+    let fixture = try GitTestRoot(prefix: "jidoka-publication-denied")
+    defer { fixture.remove() }
+    let database = try SQLiteStore(
+      databaseURL: fixture.root.appendingPathComponent("state.sqlite3")
+    )
+    let repositoryID = UUID()
+    try await ConfigurationStore(database: database).upsertRepository(
+      RepositoryConfiguration(
+        id: repositoryID,
+        nodeID: "R_denied",
+        owner: "owner",
+        name: "repo",
+        defaultBranch: "main",
+        reviewEnabled: true,
+        triageEnabled: true,
+        implementationEnabled: true,
+        enabled: true
+      ),
+      now: Date(timeIntervalSince1970: 4_100)
+    )
+    let creation = try await DurableJobStore(
+      database: database,
+      enforceRolloutAuthority: false
+    ).createJob(
+      identity: LogicalJobIdentity(
+        repositoryID: repositoryID,
+        kind: .issueImplementation,
+        objectNodeID: "I_denied",
+        revisionKey: "claim-denied"
+      ),
+      objectNumber: 7,
+      contractVersionUsed: "v1",
+      priority: .issueImplementation,
+      firstStep: .publish,
+      now: Date(timeIntervalSince1970: 4_100)
+    )
+    let job = try #require(createdPublicationJob(creation))
+    let intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
+    await authority.closeAdmission()
+    let transport = FaultPublicationTransport(behavior: .successExact)
+    let request = GitBranchPublicationRequest(
+      jobID: job.id,
+      idempotencyKey: String(repeating: "6", count: 64),
+      branch: "agent/issue-7-denied",
+      exactSHA: String(repeating: "f", count: 40),
+      expectedStateDigest: String(repeating: "7", count: 64)
+    )
+
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await DurableGitPublisher(
+        intents: intents,
+        transport: transport,
+        authority: authority
+      ).publishCreateOnly(
+        request: request,
+        remote: try fixtureRemote(repositoryID: repositoryID),
+        repository: fixture.root,
+        now: Date(timeIntervalSince1970: 4_101)
+      )
+    }
+
+    #expect(await transport.createCount() == 0)
+    #expect(try await intents.intent(idempotencyKey: request.idempotencyKey)?.state == .prepared)
+    await database.close()
+  }
+
   @Test("every post-send outcome reconciles without a blind second create")
   func faultClassifications() async throws {
     let exact = String(repeating: "d", count: 40)
 
     let failed = FaultPublicationTransport(behavior: .failureAbsent)
-    let safe = try await GitPublisher(transport: failed).publishCreateOnly(
+    let safe = try await ExplicitlyAuthorizedTestGitPublisher(
+      transport: failed
+    ).publishCreateOnly(
       branch: "agent/issue-5-safe",
       exactSHA: exact,
       remote: try fixtureRemote(),
@@ -396,7 +484,9 @@ struct GitPublicationTests {
     #expect(safe.observationComplete)
 
     let thrownEffect = FaultPublicationTransport(behavior: .throwAfterExactEffect)
-    let attributed = try await GitPublisher(transport: thrownEffect).publishCreateOnly(
+    let attributed = try await ExplicitlyAuthorizedTestGitPublisher(
+      transport: thrownEffect
+    ).publishCreateOnly(
       branch: "agent/issue-5-attributed",
       exactSHA: exact,
       remote: try fixtureRemote(),
@@ -407,7 +497,9 @@ struct GitPublicationTests {
     #expect(attributed.observedSHA == exact)
 
     let divergent = FaultPublicationTransport(behavior: .successDivergent)
-    let escalated = try await GitPublisher(transport: divergent).publishCreateOnly(
+    let escalated = try await ExplicitlyAuthorizedTestGitPublisher(
+      transport: divergent
+    ).publishCreateOnly(
       branch: "agent/issue-5-divergent",
       exactSHA: exact,
       remote: try fixtureRemote(),
@@ -420,7 +512,9 @@ struct GitPublicationTests {
       behavior: .successExact,
       failPostSendRead: true
     )
-    let unknown = try await GitPublisher(transport: unreadable).publishCreateOnly(
+    let unknown = try await ExplicitlyAuthorizedTestGitPublisher(
+      transport: unreadable
+    ).publishCreateOnly(
       branch: "agent/issue-5-unreadable",
       exactSHA: exact,
       remote: try fixtureRemote(),
@@ -474,7 +568,9 @@ private actor PreAdvertisementRacingTransport: GitPublicationTransporting {
     exactSHA: String,
     remote: GitRemoteRepository,
     repository: URL,
-    credentials: (any GitCredentialSessionProviding)?
+    credentials: (any GitCredentialSessionProviding)?,
+    permit: RolloutEffectPermit,
+    effect: RolloutGitSendEffect
   ) async throws -> GitProcessResult {
     creates += 1
     let injected = try await delegate.runLocalGit(
@@ -498,7 +594,9 @@ private actor PreAdvertisementRacingTransport: GitPublicationTransporting {
       exactSHA: exactSHA,
       remote: remote,
       repository: repository,
-      credentials: credentials
+      credentials: credentials,
+      permit: permit,
+      effect: effect
     )
   }
 
@@ -542,7 +640,9 @@ private actor RacingPublicationTransport: GitPublicationTransporting {
     exactSHA: String,
     remote: GitRemoteRepository,
     repository: URL,
-    credentials: (any GitCredentialSessionProviding)?
+    credentials: (any GitCredentialSessionProviding)?,
+    permit _: RolloutEffectPermit,
+    effect _: RolloutGitSendEffect
   ) async throws -> GitProcessResult {
     creates += 1
     if let raceSHA {
@@ -611,7 +711,9 @@ private actor FaultPublicationTransport: GitPublicationTransporting {
     exactSHA: String,
     remote: GitRemoteRepository,
     repository: URL,
-    credentials: (any GitCredentialSessionProviding)?
+    credentials: (any GitCredentialSessionProviding)?,
+    permit _: RolloutEffectPermit,
+    effect _: RolloutGitSendEffect
   ) async throws -> GitProcessResult {
     creates += 1
     switch behavior {

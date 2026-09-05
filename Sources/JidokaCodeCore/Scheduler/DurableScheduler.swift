@@ -340,11 +340,20 @@ public struct SystemSchedulerClock: SchedulerClock {
 
 public protocol SchedulerPassRunner: Sendable {
   func run(pass: SchedulerPass) async
+  func runReadbackOnly(pass: SchedulerPass) async
 }
+
+public protocol RolloutSchedulerAuthorizing: Sendable {
+  func schedulerAdmission(now: Date) async throws -> RolloutSchedulerAdmission
+  func activeStatus(now: Date) async throws -> RolloutStatusReport?
+}
+
+extension RolloutAuthorityStore: RolloutSchedulerAuthorizing {}
 
 public actor DurableScheduler {
   private let clock: any SchedulerClock
   private let runner: any SchedulerPassRunner
+  private let rolloutAuthority: any RolloutSchedulerAuthorizing
   private var timing: SchedulerTimingState
   private var runGeneration: UInt64 = 0
   private var sleepGeneration: UInt64 = 0
@@ -353,29 +362,72 @@ public actor DurableScheduler {
   public init(
     clock: any SchedulerClock,
     runner: any SchedulerPassRunner,
-    initialNow: Date
+    initialNow: Date,
+    rolloutAuthority: any RolloutSchedulerAuthorizing
   ) {
     self.clock = clock
     self.runner = runner
+    self.rolloutAuthority = rolloutAuthority
     timing = SchedulerTimingState(now: initialNow)
   }
 
   public func request(_ reason: SchedulerTriggerReason) async {
-    timing.request(reason, now: await clock.now())
+    let instant = await clock.now()
+    let admission = (try? await rolloutAuthority.schedulerAdmission(now: instant)) ?? .denied
+    switch admission {
+    case .active(let mode):
+      if reason == .manual, mode != .finiteWindow { return }
+    case .readbackOnly:
+      guard reason != .manual && reason != .resume else { return }
+      await runner.runReadbackOnly(
+        pass: SchedulerPass(reasons: [reason], startedAt: instant)
+      )
+      timing.setPaused(true, now: await clock.now())
+      interruptSleep()
+      return
+    case .denied:
+      timing.setPaused(true, now: instant)
+      interruptSleep()
+      return
+    }
+    timing.request(reason, now: instant)
     interruptSleep()
   }
 
   public func setPaused(_ paused: Bool) async {
-    timing.setPaused(paused, now: await clock.now())
+    let instant = await clock.now()
+    if !paused, (try? await rolloutAuthority.activeStatus(now: instant)) == nil {
+      return
+    }
+    timing.setPaused(paused, now: instant)
     interruptSleep()
   }
 
   @discardableResult
   public func runDuePass() async -> Bool {
     let now = await clock.now()
+    // No absent-authority arm: the authority is non-optional, so there is no value of
+    // it that skips the gate. Any failure to read admission is a denial.
+    let admission = (try? await rolloutAuthority.schedulerAdmission(now: now)) ?? .denied
+    if admission == .denied {
+      timing.setPaused(true, now: now)
+      interruptSleep()
+      return false
+    }
     guard let pass = timing.takeDuePass(now: now) else { return false }
-    await runner.run(pass: pass)
-    timing.finishPass(now: await clock.now())
+    switch admission {
+    case .active:
+      await runner.run(pass: pass)
+    case .readbackOnly:
+      await runner.runReadbackOnly(pass: pass)
+    case .denied:
+      return false
+    }
+    let finishedAt = await clock.now()
+    timing.finishPass(now: finishedAt)
+    if admission == .readbackOnly {
+      timing.setPaused(true, now: finishedAt)
+    }
     return true
   }
 

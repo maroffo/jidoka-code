@@ -12,7 +12,7 @@ struct ProductionHerdrCompositionTests {
     defer { try? FileManager.default.removeItem(at: root) }
     let database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
     let configuration = ConfigurationStore(database: database)
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let intents = MutationIntentStore(database: database)
     let logger = ProductionRuntimeLogFake()
     let runtime = ProductionEngineJobRuntime(
@@ -53,7 +53,7 @@ struct ProductionHerdrCompositionTests {
     defer { try? FileManager.default.removeItem(at: root) }
     let database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
     let configuration = ConfigurationStore(database: database)
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let repository = RepositoryConfiguration(
       id: UUID(),
       nodeID: "R_maintenance",
@@ -140,7 +140,7 @@ struct ProductionHerdrCompositionTests {
     defer { try? FileManager.default.removeItem(at: root) }
     let database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
     let configuration = ConfigurationStore(database: database)
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let authorization = productionReplacementAuthorization()
     let canary = productionReplacementCanaryReport(authorization: authorization)
     let terminal = try productionReplacementReport(
@@ -240,7 +240,7 @@ struct ProductionHerdrCompositionTests {
       ),
       database: database,
       configuration: configuration,
-      jobs: DurableJobStore(database: database),
+      jobs: DurableJobStore(database: database, enforceRolloutAuthority: false),
       intents: MutationIntentStore(database: database),
       herdrReadiness: ProductionRuntimeReadinessFake(),
       ownershipRuntime: nil,

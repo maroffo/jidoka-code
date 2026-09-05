@@ -49,7 +49,7 @@ struct IssueImplementationJobWorkflowTests {
     )
     defer { fixture.remove() }
 
-    try await fixture.workflow.run(jobID: fixture.job.id)
+    try await fixture.runAuthorizedStages()
 
     #expect(try await fixture.jobs.job(id: fixture.job.id)?.state == .awaitingResolution)
     #expect(await fixture.api.workflowLabels() == ["agent:wip"])
@@ -66,7 +66,7 @@ struct IssueImplementationJobWorkflowTests {
     )
     defer { fixture.remove() }
 
-    try await fixture.workflow.run(jobID: fixture.job.id)
+    try await fixture.runAuthorizedStages()
 
     #expect(try await fixture.jobs.job(id: fixture.job.id)?.state == .awaitingResolution)
     #expect(await fixture.api.workflowLabels() == ["agent:wip"])
@@ -102,7 +102,7 @@ struct IssueImplementationJobWorkflowTests {
       context: JobTransitionContext(now: fixture.now, reason: "claim retry inputs")
     )
 
-    try await fixture.workflow.run(jobID: queued.id)
+    try await fixture.runAuthorizedStages(jobID: queued.id)
 
     #expect(try await fixture.jobs.job(id: queued.id)?.state == .succeeded)
     #expect(await fixture.api.commentSendAttempts() == 2)
@@ -114,7 +114,7 @@ struct IssueImplementationJobWorkflowTests {
     defer { fixture.remove() }
     await fixture.api.useMixedCaseReadyLabel()
 
-    try await fixture.workflow.run(jobID: fixture.job.id)
+    try await fixture.runAuthorizedStages()
 
     #expect(try await fixture.jobs.job(id: fixture.job.id)?.state == .succeeded)
     #expect(await fixture.api.workflowLabels() == ["agent:qa"])
@@ -150,7 +150,7 @@ struct IssueImplementationJobWorkflowTests {
       context: JobTransitionContext(now: fixture.now, reason: "implementation reopen recovery")
     )
 
-    try await reopened.workflow.run(jobID: queued.id)
+    try await reopened.runAuthorizedStages(jobID: queued.id, now: fixture.now)
 
     #expect(try await reopened.jobs.job(id: queued.id)?.state == .succeeded)
     await reopened.database.close()
@@ -160,8 +160,9 @@ struct IssueImplementationJobWorkflowTests {
   func orchestrationEvidenceCrashBoundary() async throws {
     let fixture = try await IssueImplementationJobFixture(crashAfterOrchestrationEvidence: true)
     defer { fixture.remove() }
+    try await fixture.workflow.run(jobID: fixture.job.id)
     await #expect(throws: URLError.self) {
-      try await fixture.workflow.run(jobID: fixture.job.id)
+      try await fixture.resumeExecutionIfCheckpointed()
     }
     #expect(
       try await fixture.jobs.steps(jobID: fixture.job.id).allSatisfy { $0.kind != .orchestrate }
@@ -178,7 +179,7 @@ struct IssueImplementationJobWorkflowTests {
       context: JobTransitionContext(now: fixture.now, reason: "orchestration evidence recovery")
     )
 
-    try await reopened.workflow.run(jobID: queued.id)
+    try await reopened.runAuthorizedStages(jobID: queued.id, now: fixture.now)
 
     #expect(try await reopened.jobs.job(id: queued.id)?.state == .succeeded)
     #expect(
@@ -199,8 +200,16 @@ struct IssueImplementationJobWorkflowTests {
     let fixture = try await IssueImplementationJobFixture(crashAfterStep: kind)
     defer { fixture.remove() }
 
-    await #expect(throws: URLError.self) {
+    if [.orchestrate, .push, .openPullRequest, .linkPullRequest, .qa].contains(kind) {
       try await fixture.workflow.run(jobID: fixture.job.id)
+      #expect(try await fixture.jobs.job(id: fixture.job.id)?.state == .queued)
+      await #expect(throws: URLError.self) {
+        try await fixture.resumeExecutionIfCheckpointed()
+      }
+    } else {
+      await #expect(throws: URLError.self) {
+        try await fixture.workflow.run(jobID: fixture.job.id)
+      }
     }
     let interrupted = try #require(try await fixture.jobs.job(id: fixture.job.id))
     #expect([JobState.runningPi, .executing, .reconciling].contains(interrupted.state))
@@ -216,7 +225,7 @@ struct IssueImplementationJobWorkflowTests {
       context: JobTransitionContext(now: fixture.now, reason: "completed plan recovery")
     )
 
-    try await fixture.workflow.run(jobID: queued.id)
+    try await fixture.runAuthorizedStages(jobID: queued.id)
 
     #expect(try await fixture.jobs.job(id: queued.id)?.state == .succeeded)
     #expect(
@@ -299,8 +308,9 @@ struct IssueImplementationJobWorkflowTests {
     )
     defer { fixture.remove() }
 
+    try await fixture.workflow.run(jobID: fixture.job.id)
     await #expect(throws: URLError.self) {
-      try await fixture.workflow.run(jobID: fixture.job.id)
+      try await fixture.resumeExecutionIfCheckpointed()
     }
     _ = try await fixture.jobs.recoverAtStartup(now: fixture.now)
     let queued = try #require(try await fixture.jobs.job(id: fixture.job.id))
@@ -327,6 +337,14 @@ struct IssueImplementationJobWorkflowTests {
 
     try await fixture.workflow.run(jobID: fixture.job.id)
 
+    let checkpointed = try #require(try await fixture.jobs.job(id: fixture.job.id))
+    #expect(checkpointed.state == .queued)
+    #expect(checkpointed.currentStepKind == .orchestrate)
+    #expect(try await fixture.jobs.activeLeases().isEmpty)
+    #expect(await fixture.branchTransport.publishedSHA == nil)
+    #expect(await fixture.api.pullRequestHeadSHA() == nil)
+    try await fixture.resumeExecutionIfCheckpointed()
+
     let completed = try #require(try await fixture.jobs.job(id: fixture.job.id))
     #expect(completed.state == .succeeded)
     #expect(
@@ -350,6 +368,23 @@ struct IssueImplementationJobWorkflowTests {
     }
     #expect(reviews.count == 1)
     #expect(reviews.first?.identity.revisionKey == pullRequestHeadSHA)
+    let generatedReview = try #require(reviews.first)
+    let productionJobs = DurableJobStore(
+      database: fixture.database,
+      enforceApplicationDispatchGate: true,
+      enforceRolloutAuthority: true
+    )
+    await #expect(throws: DurableJobStoreError.self) {
+      _ = try await productionJobs.transition(
+        jobID: generatedReview.id,
+        eventKey: "w0:generated-review:lease",
+        event: .acquireLease,
+        context: JobTransitionContext(
+          now: fixture.now,
+          reason: "generated review requires separate rollout authority"
+        )
+      )
+    }
     #expect(await fixture.api.pullRequestBody()?.contains("Closes #12") == true)
   }
 
@@ -377,6 +412,13 @@ struct IssueImplementationJobWorkflowTests {
     )
 
     try await fixture.workflow.run(jobID: queued.id)
+
+    let checkpointed = try #require(try await fixture.jobs.job(id: queued.id))
+    #expect(checkpointed.state == .queued)
+    #expect(checkpointed.currentStepKind == .replan)
+    #expect(try await fixture.jobs.activeLeases().isEmpty)
+    #expect(await fixture.api.workflowLabels() == ["agent:plan-review"])
+    try await fixture.resumePlanningIfCheckpointed()
 
     let waiting = try #require(try await fixture.jobs.job(id: queued.id))
     #expect(waiting.state == .waitingHuman)
@@ -425,6 +467,13 @@ struct IssueImplementationJobWorkflowTests {
     )
 
     try await fixture.workflow.run(jobID: queued.id)
+
+    let checkpointed = try #require(try await fixture.jobs.job(id: queued.id))
+    #expect(checkpointed.state == .queued)
+    #expect(checkpointed.currentStepKind == .replan)
+    #expect(try await fixture.jobs.activeLeases().isEmpty)
+    #expect(await fixture.api.workflowLabels() == ["agent:plan-review"])
+    try await fixture.resumePlanningIfCheckpointed()
 
     let final = try #require(try await fixture.jobs.job(id: queued.id))
     #expect(final.state == .waitingHuman)
@@ -488,6 +537,11 @@ struct IssueImplementationJobWorkflowTests {
         .claimReady, .plan, .publishPlan, .claimApprovedPlan, .orchestrate, .push,
         .openPullRequest, .linkPullRequest, .qa,
       ])
+    let snapshots = await fixture.rolloutSnapshots.values()
+    #expect(snapshots.count == 2)
+    #expect(snapshots[0].planSHA256 == nil)
+    #expect(snapshots[1].planSHA256 != nil)
+    #expect(snapshots[0].labelStateSHA256 != snapshots[1].labelStateSHA256)
   }
 }
 
@@ -502,6 +556,7 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
   let repositories: RepositoryStore
   let api: IssueImplementationGitHubFixture
   let branchTransport: IssueImplementationBranchTransport
+  let rolloutSnapshots: RecordingRolloutJobInputSnapshots
   let job: JobRecord
   let workflow: IssueImplementationJobWorkflow
   let now = Date(timeIntervalSince1970: 120_000)
@@ -556,7 +611,7 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
         linkedInputs: []
       )
     )
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repository.id,
@@ -600,6 +655,7 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
       localFixtureURL: remoteURL
     )
     let intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     let inputs = SystemIssueImplementationJobPreparer(
       configuration: configuration,
       api: api,
@@ -608,9 +664,14 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
       appAuthorID: 7,
       remoteResolver: LocalImplementationRemoteResolver(remote: remote)
     )
-    let executor = GitHubMutationExecutor(intents: intents, broker: api)
+    let executor = GitHubMutationExecutor(
+      intents: intents,
+      broker: api,
+      authority: authority
+    )
     let sleeper = IssueImplementationImmediateSleeper()
     branchTransport = IssueImplementationBranchTransport()
+    rolloutSnapshots = RecordingRolloutJobInputSnapshots()
     let crashGate = ImplementationStepCrashGate(kind: crashAfterStep)
     let evidenceCrashGate = ImplementationEvidenceCrashGate(
       enabled: crashAfterOrchestrationEvidence
@@ -636,6 +697,7 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 120_001) }
       ),
@@ -643,6 +705,7 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 120_001) }
       ),
@@ -650,17 +713,24 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 120_001) }
       ),
-      branchPublisher: DurableGitPublisher(intents: intents, transport: branchTransport),
+      branchPublisher: DurableGitPublisher(
+        intents: intents,
+        transport: branchTransport,
+        authority: authority
+      ),
       pullRequestPublisher: GitHubPullRequestPublisher(
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 120_001) }
       ),
+      rolloutSnapshots: rolloutSnapshots,
       authorID: 7,
       contractVersion: "w6-test",
       now: { Date(timeIntervalSince1970: 120_001) },
@@ -672,13 +742,42 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
     await api.setBranchTransport(branchTransport)
   }
 
+  func runAuthorizedStages(jobID: UUID? = nil) async throws {
+    let selectedJobID = jobID ?? job.id
+    try await workflow.run(jobID: selectedJobID)
+    try await resumeExecutionIfCheckpointed(jobID: selectedJobID)
+  }
+
+  func resumeExecutionIfCheckpointed(jobID: UUID? = nil) async throws {
+    let selectedJobID = jobID ?? job.id
+    guard let checkpointed = try await jobs.job(id: selectedJobID),
+      checkpointed.state == .queued,
+      checkpointed.currentStepKind == .orchestrate
+    else {
+      return
+    }
+    _ = try await jobs.transition(
+      jobID: selectedJobID,
+      eventKey: "fixture:execution-lease:\(checkpointed.attempt)",
+      event: .acquireLease,
+      context: JobTransitionContext(now: now, reason: "separate execution-stage lease")
+    )
+    _ = try await jobs.transition(
+      jobID: selectedJobID,
+      eventKey: "fixture:execution-inputs:\(checkpointed.attempt)",
+      event: .inputsValidated,
+      context: JobTransitionContext(now: now, reason: "separate execution-stage inputs")
+    )
+    try await workflow.run(jobID: selectedJobID)
+  }
+
   func reopenSimple() async throws -> ReopenedImplementationRuntime {
     await database.close()
     let reopenedDatabase = try SQLiteStore(
       databaseURL: gitFixture.root.appendingPathComponent("state.sqlite3")
     )
     let reopenedConfiguration = ConfigurationStore(database: reopenedDatabase)
-    let reopenedJobs = DurableJobStore(database: reopenedDatabase)
+    let reopenedJobs = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let reopenedRepositories = try RepositoryStore(
       rootURL: gitFixture.root.appendingPathComponent("ApplicationSupport", isDirectory: true),
       database: reopenedDatabase,
@@ -693,6 +792,7 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
       localFixtureURL: remoteURL
     )
     let intents = MutationIntentStore(database: reopenedDatabase)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     let inputs = SystemIssueImplementationJobPreparer(
       configuration: reopenedConfiguration,
       api: api,
@@ -701,7 +801,11 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
       appAuthorID: 7,
       remoteResolver: LocalImplementationRemoteResolver(remote: remote)
     )
-    let executor = GitHubMutationExecutor(intents: intents, broker: api)
+    let executor = GitHubMutationExecutor(
+      intents: intents,
+      broker: api,
+      authority: authority
+    )
     let sleeper = IssueImplementationImmediateSleeper()
     let reopenedWorkflow = IssueImplementationJobWorkflow(
       jobs: reopenedJobs,
@@ -724,6 +828,7 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 120_002) }
       ),
@@ -731,6 +836,7 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 120_002) }
       ),
@@ -738,14 +844,20 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 120_002) }
       ),
-      branchPublisher: DurableGitPublisher(intents: intents, transport: branchTransport),
+      branchPublisher: DurableGitPublisher(
+        intents: intents,
+        transport: branchTransport,
+        authority: authority
+      ),
       pullRequestPublisher: GitHubPullRequestPublisher(
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 120_002) }
       ),
@@ -774,13 +886,71 @@ private final class IssueImplementationJobFixture: @unchecked Sendable {
     await api.setBaseSHA(advanced)
   }
 
+  func resumePlanningIfCheckpointed() async throws {
+    guard let checkpointed = try await jobs.job(id: job.id),
+      checkpointed.state == .queued,
+      checkpointed.currentStepKind == .replan
+    else { return }
+    _ = try await jobs.transition(
+      jobID: checkpointed.id,
+      eventKey: "fixture:replan-lease:\(checkpointed.attempt):\(checkpointed.currentStep)",
+      event: .acquireLease,
+      context: JobTransitionContext(now: now, reason: "separate planning authorization lease")
+    )
+    _ = try await jobs.transition(
+      jobID: checkpointed.id,
+      eventKey: "fixture:replan-inputs:\(checkpointed.attempt):\(checkpointed.currentStep)",
+      event: .inputsValidated,
+      context: JobTransitionContext(now: now, reason: "separate planning authorization inputs")
+    )
+    try await workflow.run(jobID: checkpointed.id)
+  }
+
   func remove() { gitFixture.remove() }
+}
+
+private actor RecordingRolloutJobInputSnapshots: RolloutJobInputSnapshotRecording {
+  private var snapshots: [RolloutJobInputSnapshot] = []
+
+  func freezeJobInputSnapshot(
+    _ snapshot: RolloutJobInputSnapshot,
+    now _: Date
+  ) {
+    snapshots.append(snapshot)
+  }
+
+  func values() -> [RolloutJobInputSnapshot] {
+    snapshots
+  }
 }
 
 private struct ReopenedImplementationRuntime {
   let database: SQLiteStore
   let jobs: DurableJobStore
   let workflow: IssueImplementationJobWorkflow
+
+  func runAuthorizedStages(jobID: UUID, now: Date) async throws {
+    try await workflow.run(jobID: jobID)
+    guard let checkpointed = try await jobs.job(id: jobID),
+      checkpointed.state == .queued,
+      checkpointed.currentStepKind == .orchestrate
+    else {
+      return
+    }
+    _ = try await jobs.transition(
+      jobID: jobID,
+      eventKey: "fixture:reopened-execution-lease:\(checkpointed.attempt)",
+      event: .acquireLease,
+      context: JobTransitionContext(now: now, reason: "reopened execution-stage lease")
+    )
+    _ = try await jobs.transition(
+      jobID: jobID,
+      eventKey: "fixture:reopened-execution-inputs:\(checkpointed.attempt)",
+      event: .inputsValidated,
+      context: JobTransitionContext(now: now, reason: "reopened execution-stage inputs")
+    )
+    try await workflow.run(jobID: jobID)
+  }
 }
 
 private struct LocalImplementationRemoteResolver: GitRemoteRepositoryResolving {
@@ -988,7 +1158,9 @@ private actor IssueImplementationBranchTransport: GitPublicationTransporting {
     exactSHA: String,
     remote: GitRemoteRepository,
     repository: URL,
-    credentials: (any GitCredentialSessionProviding)?
+    credentials: (any GitCredentialSessionProviding)?,
+    permit _: RolloutEffectPermit,
+    effect _: RolloutGitSendEffect
   ) async throws -> GitProcessResult {
     publishedSHA = exactSHA
     return GitProcessResult(
@@ -1088,9 +1260,9 @@ private actor IssueImplementationGitHubFixture: GitHubMutationReadAPI, GitHubMut
 
   func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse {
-    try await beforeSend()
+    _ = try await beforeSend()
     switch operation {
     case .createComment(_, _, _, let body):
       let markerKind = (try? GitHubMarkerCodec.parse(body).identity.kind.rawValue) ?? "unknown"
@@ -1116,7 +1288,7 @@ private actor IssueImplementationGitHubFixture: GitHubMutationReadAPI, GitHubMut
     case .createRepositoryLabel(_, _, let request):
       repositoryLabels[request.name] = GitHubLabel(
         id: Int64(repositoryLabels.count + 100),
-        nodeID: "repository-label-\(request.name)",
+        nodeID: "repository-label-\(GitHubMarkerCodec.sha256(Data(request.name.utf8)))",
         name: request.name,
         color: request.color,
         description: request.description
@@ -1243,7 +1415,7 @@ private actor IssueImplementationGitHubFixture: GitHubMutationReadAPI, GitHubMut
   private static func label(_ name: String) -> GitHubLabel {
     GitHubLabel(
       id: Int64(name.utf8.count),
-      nodeID: "label-\(name)",
+      nodeID: "label-\(GitHubMarkerCodec.sha256(Data(name.utf8)))",
       name: name,
       color: "abcdef",
       description: nil

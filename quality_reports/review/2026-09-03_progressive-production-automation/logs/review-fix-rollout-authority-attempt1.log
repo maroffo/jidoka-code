@@ -1,0 +1,100 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Emitting module JidokaCodeCoreTests
+[4/5] Compiling JidokaCodeCoreTests SQLiteStoreTests.swift
+[5/12] Compiling JidokaCodeCoreTests PiRunStoreTests.swift
+[6/12] Compiling JidokaCodeCoreTests PiJobWorkflowPreparerTests.swift
+[7/12] Compiling JidokaCodeCoreTests EngineRedactedLogTests.swift
+[8/12] Compiling JidokaCodeCoreTests VerificationCommandRunnerTests.swift
+[9/12] Compiling JidokaCodeCoreTests PackagedExecutableSnapshotTests.swift
+[10/12] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+[11/12] Compiling JidokaCodeCoreTests GitTestSupport.swift
+[11/13] Write Objects.LinkFileList
+[12/13] Linking JidokaCodePackageTests
+Build complete! (11.73s)
+Test Suite 'Selected tests' started at 2026-09-04 11:32:28.758.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 11:32:28.758.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 11:32:28.758.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 11:32:28.759.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Progressive rollout authority" started.
+◇ Test "execution start is not misreported as a completed stage" started.
+◇ Test "execution activation cannot invent a job beyond the planning checkpoint" started.
+◇ Test "finite activation requires a same-stage exact receipt" started.
+◇ Test "issue marker revision and label sends are bound to the live planning step" started.
+◇ Test "activation rejects a confirmed digest that differs from canonical preview bytes" started.
+◇ Test "planning authority cannot cross the durable simple-plan boundary" started.
+◇ Test "an exact transient failure closes the lane instead of retrying" started.
+◇ Test "preview rejects duplicate labels and lists larger than their budgets" started.
+◇ Test "concurrent reservations cannot overrun the provider cap" started.
+◇ Test "provider admission binds artifact, narrative, resources, and model profile" started.
+◇ Test "a rollout job cannot settle an unreserved mutation effect" started.
+◇ Test "an exact intentional terminal result settles and pauses its stage" started.
+◇ Test "activation rejects a canonical preview at its exact expiry boundary" started.
+◇ Test "GitHub reads require the matching task-local scope and settle exactly once" started.
+◇ Test "the same durable provider run reuses one permit without consuming another slot" started.
+◇ Test "expiry closes and terminalizes the lane before any fresh effect" started.
+◇ Test "generated review activation cannot invent an unlinked child job" started.
+◇ Test "marker cap failure rolls back the complete reservation batch" started.
+◇ Test "terminal historical evidence does not block a later drain" started.
+◇ Test "configuration drift fails and pauses the active lane before another effect" started.
+◇ Test "revocation denies fresh effects but preserves exact uncertain-effect readback" started.
+◇ Test "confirmed recovery resumes only the same exact job after every effect settles" started.
+◇ Test "canonical preview rejects unknown fields and changed bytes" started.
+◇ Test "effect reservations consume a finite cap and remain immutable" started.
+◇ Test "startup recovery transforms only the bound rollout job before explicit continuation" started.
+◇ Test "send permits are task-bound, single-use transport capabilities" started.
+◇ Test "an exact interrupted provider boundary requires explicit recovery" started.
+◇ Test "stop enters draining before durable pause and terminalizes only after drain" started.
+◇ Test "preview is read-only and exact activation is atomic" started.
+◇ Test "restart reattaches only pre-boundary orphan reservations after exact recovery" started.
+◇ Test "a settled local provider result reconciles only its bound reservation" started.
+◇ Test "first finite window admits only its closed future predicate and uses operational expiry" started.
+◇ Test "stale approval checkpoints into a separately authorized planning step" started.
+◇ Test "activation rejects every stale preview digest" started.
+◇ Test "database lease triggers reject an unbound quarantined generated review" started.
+◇ Test "exact execution evaluates only its bound waiting-human job" started.
+✔ Test "activation rejects a confirmed digest that differs from canonical preview bytes" passed after 0.178 seconds.
+✔ Test "finite activation requires a same-stage exact receipt" passed after 0.178 seconds.
+✔ Test "generated review activation cannot invent an unlinked child job" passed after 0.177 seconds.
+✔ Test "preview rejects duplicate labels and lists larger than their budgets" passed after 0.178 seconds.
+✔ Test "activation rejects a canonical preview at its exact expiry boundary" passed after 0.177 seconds.
+✔ Test "execution activation cannot invent a job beyond the planning checkpoint" passed after 0.178 seconds.
+✔ Test "expiry closes and terminalizes the lane before any fresh effect" passed after 0.177 seconds.
+✔ Test "execution start is not misreported as a completed stage" passed after 0.183 seconds.
+✔ Test "a rollout job cannot settle an unreserved mutation effect" passed after 0.183 seconds.
+✔ Test "marker cap failure rolls back the complete reservation batch" passed after 0.183 seconds.
+✔ Test "planning authority cannot cross the durable simple-plan boundary" passed after 0.183 seconds.
+✔ Test "an exact intentional terminal result settles and pauses its stage" passed after 0.183 seconds.
+✔ Test "GitHub reads require the matching task-local scope and settle exactly once" passed after 0.183 seconds.
+✔ Test "issue marker revision and label sends are bound to the live planning step" passed after 0.183 seconds.
+✔ Test "provider admission binds artifact, narrative, resources, and model profile" passed after 0.183 seconds.
+✔ Test "an exact transient failure closes the lane instead of retrying" passed after 0.183 seconds.
+✔ Test "the same durable provider run reuses one permit without consuming another slot" passed after 0.183 seconds.
+✔ Test "configuration drift fails and pauses the active lane before another effect" passed after 0.183 seconds.
+✔ Test "canonical preview rejects unknown fields and changed bytes" passed after 0.186 seconds.
+✔ Test "concurrent reservations cannot overrun the provider cap" passed after 0.188 seconds.
+✔ Test "terminal historical evidence does not block a later drain" passed after 0.188 seconds.
+✔ Test "confirmed recovery resumes only the same exact job after every effect settles" passed after 0.188 seconds.
+✔ Test "activation rejects every stale preview digest" passed after 0.189 seconds.
+✔ Test "effect reservations consume a finite cap and remain immutable" passed after 0.194 seconds.
+✔ Test "stop enters draining before durable pause and terminalizes only after drain" passed after 0.194 seconds.
+✔ Test "database lease triggers reject an unbound quarantined generated review" passed after 0.196 seconds.
+✔ Test "revocation denies fresh effects but preserves exact uncertain-effect readback" passed after 0.196 seconds.
+✔ Test "an exact interrupted provider boundary requires explicit recovery" passed after 0.198 seconds.
+✔ Test "preview is read-only and exact activation is atomic" passed after 0.201 seconds.
+✔ Test "startup recovery transforms only the bound rollout job before explicit continuation" passed after 0.202 seconds.
+✔ Test "exact execution evaluates only its bound waiting-human job" passed after 0.204 seconds.
+✔ Test "stale approval checkpoints into a separately authorized planning step" passed after 0.205 seconds.
+✔ Test "send permits are task-bound, single-use transport capabilities" passed after 0.206 seconds.
+✔ Test "a settled local provider result reconciles only its bound reservation" passed after 0.211 seconds.
+✔ Test "first finite window admits only its closed future predicate and uses operational expiry" passed after 0.215 seconds.
+✔ Test "restart reattaches only pre-boundary orphan reservations after exact recovery" passed after 0.218 seconds.
+✔ Suite "Progressive rollout authority" passed after 0.219 seconds.
+✔ Test run with 36 tests in 1 suite passed after 0.219 seconds.

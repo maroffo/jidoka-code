@@ -66,11 +66,16 @@ public enum GitTransportError: Error, Equatable, Sendable {
   case unsafePushGuard
   case forceClassArgument
   case createOnlyPacketMissing
+  case rolloutAuthorityRequired
 }
 
 public protocol GitCredentialSessionProviding: Sendable {
   func makeSession(remoteURL: URL) async throws -> OneShotGitCredentialSession
   var askPassExecutable: URL { get }
+}
+
+enum RolloutGitCredentialTaskContext {
+  @TaskLocal static var remoteURL: String?
 }
 
 public actor GitHubGitCredentialProvider: GitCredentialSessionProviding {
@@ -91,9 +96,25 @@ public actor GitHubGitCredentialProvider: GitCredentialSessionProviding {
     let executableValues = try askPassExecutable.resourceValues(forKeys: [
       .isExecutableKey, .isRegularFileKey, .isSymbolicLinkKey,
     ])
+    let executableDirectory = askPassExecutable.deletingLastPathComponent()
+    let executableDirectoryValues = try executableDirectory.resourceValues(forKeys: [
+      .isDirectoryKey, .isSymbolicLinkKey,
+    ])
+    var executableStatus = stat()
+    var executableDirectoryStatus = stat()
     guard executableValues.isExecutable == true,
       executableValues.isRegularFile == true,
-      executableValues.isSymbolicLink != true
+      executableValues.isSymbolicLink != true,
+      executableDirectoryValues.isDirectory == true,
+      executableDirectoryValues.isSymbolicLink != true,
+      lstat(askPassExecutable.path, &executableStatus) == 0,
+      lstat(executableDirectory.path, &executableDirectoryStatus) == 0,
+      (executableStatus.st_mode & S_IFMT) == S_IFREG,
+      (executableDirectoryStatus.st_mode & S_IFMT) == S_IFDIR,
+      (executableStatus.st_mode & 0o022) == 0,
+      (executableDirectoryStatus.st_mode & 0o022) == 0,
+      [uid_t(0), geteuid()].contains(executableStatus.st_uid),
+      [uid_t(0), geteuid()].contains(executableDirectoryStatus.st_uid)
     else {
       throw GitAskPassError.credentialRejected
     }
@@ -134,7 +155,10 @@ public actor GitHubGitCredentialProvider: GitCredentialSessionProviding {
   }
 
   public func makeSession(remoteURL: URL) async throws -> OneShotGitCredentialSession {
-    try await broker.makeGitCredentialSession(
+    guard RolloutGitCredentialTaskContext.remoteURL == remoteURL.absoluteString else {
+      throw GitTransportError.rolloutAuthorityRequired
+    }
+    return try await broker.makeGitCredentialSession(
       remoteURL: remoteURL,
       socketDirectory: socketDirectory
     )
@@ -185,7 +209,9 @@ public protocol GitPublicationTransporting: Sendable {
     exactSHA: String,
     remote: GitRemoteRepository,
     repository: URL,
-    credentials: (any GitCredentialSessionProviding)?
+    credentials: (any GitCredentialSessionProviding)?,
+    permit: RolloutEffectPermit,
+    effect: RolloutGitSendEffect
   ) async throws -> GitProcessResult
 }
 
@@ -206,19 +232,28 @@ public actor SystemGitTransport: GitRepositoryTransporting, GitLocalCommanding,
   private let homeDirectory: String
   private let temporaryDirectory: String
   private let pushGuardExecutable: URL
+  private let rolloutAuthority: (any RolloutEffectAuthorizing)?
+  private let rolloutReadAuthority: (any RolloutGitRemoteReadAuthorizing)?
+  private let now: @Sendable () -> Date
 
   public init(
     runner: any GitProcessExecuting = BoundedProcessRunner(),
     developerDirectory: String = CredentiallessEnvironment.lockedDeveloperDirectory,
     homeDirectory: String = "/var/empty",
     temporaryDirectory: String = NSTemporaryDirectory(),
-    pushGuardExecutable: URL = SystemGitTransport.packagedPushGuardExecutable
+    pushGuardExecutable: URL = SystemGitTransport.packagedPushGuardExecutable,
+    rolloutAuthority: (any RolloutEffectAuthorizing)? = nil,
+    rolloutReadAuthority: (any RolloutGitRemoteReadAuthorizing)? = nil,
+    now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.runner = runner
     self.developerDirectory = developerDirectory
     self.homeDirectory = homeDirectory
     self.temporaryDirectory = temporaryDirectory
     self.pushGuardExecutable = pushGuardExecutable
+    self.rolloutAuthority = rolloutAuthority
+    self.rolloutReadAuthority = rolloutReadAuthority ?? rolloutAuthority
+    self.now = now
   }
 
   public func cloneMirror(
@@ -226,13 +261,19 @@ public actor SystemGitTransport: GitRepositoryTransporting, GitLocalCommanding,
     destination: URL,
     credentials: (any GitCredentialSessionProviding)?
   ) async throws {
-    let result = try await runGit(
-      arguments: ["clone", "--mirror", "--", remote.url.absoluteString, destination.path],
-      workingDirectory: destination.deletingLastPathComponent(),
-      remote: remote,
-      credentials: credentials,
-      timeoutSeconds: 300
-    )
+    let result = try await runRemoteRead(
+      operation: .cloneMirror,
+      target: remote.url.absoluteString,
+      remote: remote
+    ) {
+      try await self.runGit(
+        arguments: ["clone", "--mirror", "--", remote.url.absoluteString, destination.path],
+        workingDirectory: destination.deletingLastPathComponent(),
+        remote: remote,
+        credentials: credentials,
+        timeoutSeconds: 300
+      )
+    }
     try requireSuccess(result)
   }
 
@@ -241,17 +282,23 @@ public actor SystemGitTransport: GitRepositoryTransporting, GitLocalCommanding,
     mirror: URL,
     credentials: (any GitCredentialSessionProviding)?
   ) async throws {
-    let result = try await runGit(
-      arguments: [
-        "--git-dir", mirror.path,
-        "fetch", "--prune", "--no-tags", "origin",
-        "+refs/heads/*:refs/heads/*",
-      ],
-      workingDirectory: mirror.deletingLastPathComponent(),
-      remote: remote,
-      credentials: credentials,
-      timeoutSeconds: 300
-    )
+    let result = try await runRemoteRead(
+      operation: .fetchMirror,
+      target: "refs/heads/*",
+      remote: remote
+    ) {
+      try await self.runGit(
+        arguments: [
+          "--git-dir", mirror.path,
+          "fetch", "--prune", "--no-tags", "origin",
+          "+refs/heads/*:refs/heads/*",
+        ],
+        workingDirectory: mirror.deletingLastPathComponent(),
+        remote: remote,
+        credentials: credentials,
+        timeoutSeconds: 300
+      )
+    }
     try requireSuccess(result)
   }
 
@@ -267,21 +314,112 @@ public actor SystemGitTransport: GitRepositoryTransporting, GitLocalCommanding,
       throw GitTransportError.unsafeReference
     }
     let localReference = "refs/jidoka/reviews/\(jobID.uuidString.lowercased())"
-    let result = try await runGit(
-      arguments: [
-        "--git-dir", mirror.path,
-        "fetch", "--no-tags", "origin",
-        "refs/pull/\(number)/head:\(localReference)",
-      ],
-      workingDirectory: mirror.deletingLastPathComponent(),
+    let result = try await runRemoteRead(
+      operation: .fetchPullRequest,
+      target: "refs/pull/\(number)/head:\(expectedSHA)",
       remote: remote,
-      credentials: credentials,
-      timeoutSeconds: 300
-    )
+      requiredJobID: jobID
+    ) {
+      try await self.runGit(
+        arguments: [
+          "--git-dir", mirror.path,
+          "fetch", "--no-tags", "origin",
+          "refs/pull/\(number)/head:\(localReference)",
+        ],
+        workingDirectory: mirror.deletingLastPathComponent(),
+        remote: remote,
+        credentials: credentials,
+        timeoutSeconds: 300
+      )
+    }
     try requireSuccess(result)
     let observed = try await localRevision(reference: localReference, repository: mirror)
     guard observed == expectedSHA else { throw GitTransportError.exactSHAMismatch }
     return observed
+  }
+
+  public func preparePullRequestPreviewRepository(
+    number: Int,
+    baseBranch: String,
+    expectedBaseSHA: String,
+    expectedHeadSHA: String,
+    jobID: UUID,
+    remote: GitRemoteRepository,
+    destination: URL,
+    credentials: (any GitCredentialSessionProviding)?
+  ) async throws {
+    guard number > 0,
+      GitHubInputValidation.validBranch(baseBranch),
+      GitHubInputValidation.validGitSHA(expectedBaseSHA),
+      GitHubInputValidation.validGitSHA(expectedHeadSHA),
+      expectedBaseSHA != expectedHeadSHA,
+      destination.isFileURL,
+      destination.path.hasPrefix("/")
+    else {
+      throw GitTransportError.unsafeReference
+    }
+    let initialized = try await runLocalGit(
+      arguments: ["init", "--bare", "--", destination.path],
+      workingDirectory: destination.deletingLastPathComponent(),
+      timeoutSeconds: 30,
+      maximumOutputBytes: 1_048_576,
+      environmentOverrides: [:]
+    )
+    try requireSuccess(initialized)
+
+    let baseReference = "refs/jidoka/preview/base"
+    let baseFetch = try await runRemoteRead(
+      operation: .fetchPreviewBase,
+      target: "refs/heads/\(baseBranch):\(expectedBaseSHA)",
+      remote: remote,
+      requiredJobID: jobID
+    ) {
+      try await self.runGit(
+        arguments: [
+          "--git-dir", destination.path,
+          "fetch", "--depth=257", "--no-tags", remote.url.absoluteString,
+          "refs/heads/\(baseBranch):\(baseReference)",
+        ],
+        workingDirectory: destination.deletingLastPathComponent(),
+        remote: remote,
+        credentials: credentials,
+        timeoutSeconds: 300
+      )
+    }
+    try requireSuccess(baseFetch)
+    guard
+      try await localRevision(reference: baseReference, repository: destination)
+        == expectedBaseSHA
+    else {
+      throw GitTransportError.exactSHAMismatch
+    }
+
+    let headReference = "refs/jidoka/preview/head"
+    let headFetch = try await runRemoteRead(
+      operation: .fetchPullRequest,
+      target: "refs/pull/\(number)/head:\(expectedHeadSHA)",
+      remote: remote,
+      requiredJobID: jobID
+    ) {
+      try await self.runGit(
+        arguments: [
+          "--git-dir", destination.path,
+          "fetch", "--depth=257", "--no-tags", remote.url.absoluteString,
+          "refs/pull/\(number)/head:\(headReference)",
+        ],
+        workingDirectory: destination.deletingLastPathComponent(),
+        remote: remote,
+        credentials: credentials,
+        timeoutSeconds: 300
+      )
+    }
+    try requireSuccess(headFetch)
+    guard
+      try await localRevision(reference: headReference, repository: destination)
+        == expectedHeadSHA
+    else {
+      throw GitTransportError.exactSHAMismatch
+    }
   }
 
   public func containsLocalCommit(
@@ -319,15 +457,21 @@ public actor SystemGitTransport: GitRepositoryTransporting, GitLocalCommanding,
     guard Self.validRemoteReference(reference) else {
       throw GitTransportError.unsafeReference
     }
-    let result = try await runGit(
-      arguments: [
-        "-C", repository.path, "ls-remote", "--refs", remote.url.absoluteString, reference,
-      ],
-      workingDirectory: repository,
-      remote: remote,
-      credentials: credentials,
-      timeoutSeconds: 120
-    )
+    let result = try await runRemoteRead(
+      operation: .readReference,
+      target: reference,
+      remote: remote
+    ) {
+      try await self.runGit(
+        arguments: [
+          "-C", repository.path, "ls-remote", "--refs", remote.url.absoluteString, reference,
+        ],
+        workingDirectory: repository,
+        remote: remote,
+        credentials: credentials,
+        timeoutSeconds: 120
+      )
+    }
     try requireSuccess(result)
     guard let output = String(data: result.stdout, encoding: .utf8) else {
       throw GitTransportError.malformedOutput
@@ -351,13 +495,16 @@ public actor SystemGitTransport: GitRepositoryTransporting, GitLocalCommanding,
     exactSHA: String,
     remote: GitRemoteRepository,
     repository: URL,
-    credentials: (any GitCredentialSessionProviding)?
+    credentials: (any GitCredentialSessionProviding)?,
+    permit: RolloutEffectPermit,
+    effect: RolloutGitSendEffect
   ) async throws -> GitProcessResult {
     guard Self.validRemoteReference(reference),
       GitHubInputValidation.validGitSHA(exactSHA)
     else {
       throw GitTransportError.unsafeReference
     }
+    guard let rolloutAuthority else { throw GitTransportError.rolloutAuthorityRequired }
     let hooksDirectory = try validatedPushGuardDirectory()
     let arguments = [
       "-C", repository.path,
@@ -369,25 +516,92 @@ public actor SystemGitTransport: GitRepositoryTransporting, GitLocalCommanding,
     guard !Self.containsForceClassArgument(arguments) else {
       throw GitTransportError.forceClassArgument
     }
-    let result = try await runGit(
-      arguments: arguments,
-      workingDirectory: repository,
-      remote: remote,
-      credentials: credentials,
-      timeoutSeconds: 300,
-      environmentOverrides: [
-        "GIT_TRACE_PACKET": "1",
-        "JIDOKA_PUSH_GUARD_REFERENCE": reference,
-        "JIDOKA_PUSH_GUARD_REMOTE": remote.url.absoluteString,
-        "JIDOKA_PUSH_GUARD_SHA": exactSHA,
-      ]
-    )
+    try await rolloutAuthority.verifyGitSendPermit(permit, effect: effect)
+    let result = try await RolloutGitCredentialTaskContext.$remoteURL.withValue(
+      remote.url.absoluteString
+    ) {
+      try await self.runGit(
+        arguments: arguments,
+        workingDirectory: repository,
+        remote: remote,
+        credentials: credentials,
+        timeoutSeconds: 300,
+        environmentOverrides: [
+          "GIT_TRACE_PACKET": "1",
+          "JIDOKA_PUSH_GUARD_REFERENCE": reference,
+          "JIDOKA_PUSH_GUARD_REMOTE": remote.url.absoluteString,
+          "JIDOKA_PUSH_GUARD_SHA": exactSHA,
+        ]
+      )
+    }
     let zero = String(repeating: "0", count: exactSHA.count)
     let trace = String(data: result.stderr, encoding: .utf8) ?? ""
     guard trace.contains("\(zero) \(exactSHA) \(reference)") else {
       throw GitTransportError.createOnlyPacketMissing
     }
     return result
+  }
+
+  private func runRemoteRead(
+    operation: RolloutGitRemoteOperation,
+    target: String,
+    remote: GitRemoteRepository,
+    requiredJobID: UUID? = nil,
+    body: () async throws -> GitProcessResult
+  ) async throws -> GitProcessResult {
+    guard let rolloutReadAuthority,
+      let context = RolloutEffectTaskContext.current,
+      let jobID = context.jobID,
+      requiredJobID.map({ $0 == jobID }) ?? true
+    else {
+      throw GitTransportError.rolloutAuthorityRequired
+    }
+    let effect = RolloutGitRemoteReadEffect(
+      jobID: jobID,
+      repositoryID: remote.repositoryID,
+      repositoryNodeID: remote.nodeID,
+      operation: operation,
+      target: target
+    )
+    let permit = try await rolloutReadAuthority.reserveGitRemoteRead(
+      effect,
+      now: now()
+    )
+    let result: GitProcessResult
+    do {
+      try await rolloutReadAuthority.verifyGitRemoteReadPermit(permit, effect: effect)
+      result = try await RolloutGitCredentialTaskContext.$remoteURL.withValue(
+        remote.url.absoluteString
+      ) {
+        try await body()
+      }
+    } catch {
+      // Keep the transport/verification failure primary. Failed settlement leaves
+      // the reservation consumed and unsettled, so it cannot replenish authority.
+      try? await rolloutReadAuthority.settleGitRemoteRead(
+        permit,
+        evidenceSHA256: GitHubMarkerCodec.sha256(
+          Data(String(reflecting: type(of: error)).utf8)
+        ),
+        now: now()
+      )
+      throw error
+    }
+    try await rolloutReadAuthority.settleGitRemoteRead(
+      permit,
+      evidenceSHA256: Self.resultEvidence(result),
+      now: now()
+    )
+    return result
+  }
+
+  private static func resultEvidence(_ result: GitProcessResult) -> String {
+    let value = [
+      String(result.exitCode ?? -1), String(result.terminationSignal ?? -1),
+      result.stdoutSHA256, result.stderrSHA256, String(result.timedOut),
+      String(result.outputLimitExceeded),
+    ].joined(separator: ":")
+    return GitHubMarkerCodec.sha256(Data(value.utf8))
   }
 
   public func localRevision(reference: String, repository: URL) async throws -> String {

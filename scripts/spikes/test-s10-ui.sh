@@ -194,6 +194,8 @@ for (const identifier of [
   'jidoka.settings.window',
   'jidoka.settings.repository-reference',
   'jidoka.settings.repository-add',
+  'jidoka.rollout.input',
+  'jidoka.rollout.preview',
   'jidoka.settings.model-catalog-refresh',
   'jidoka.settings.model-catalog-notice',
   'jidoka.settings.model-selector.review',
@@ -202,11 +204,16 @@ for (const identifier of [
   'jidoka.settings.credential-deletion',
   'jidoka.menu.status',
   'jidoka.menu.poll-now',
-  'jidoka.menu.pause-resume',
+  'jidoka.menu.rollout-stop',
+  'jidoka.menu.rollout-recovery',
   'jidoka.menu.quit',
   'jidoka.ambiguous.recheck',
   'jidoka.ambiguous.authorize',
 ]) assert(identifiers.has(identifier), `missing accessibility contract ${identifier}`);
+assert(
+  !identifiers.has('jidoka.menu.pause-resume'),
+  'legacy unscoped Resume accessibility contract remains exposed'
+);
 const serialized = JSON.stringify(report);
 assert(!serialized.includes('/Users/'), 'report contains a user path');
 assert(!serialized.includes('Authorization:'), 'report contains an authorization header');

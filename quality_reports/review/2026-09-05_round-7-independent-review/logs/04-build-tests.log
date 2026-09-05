@@ -1,0 +1,24 @@
+[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Emitting module JidokaCodeCoreTests
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1100:17: warning: no calls to throwing functions occur within 'try' expression
+1098 |     func integers(_ sql: String, bindings: [SQLiteValue]) async throws -> [String: Int64] {
+1099 |       let rows = try await fixture.database.query(sql, bindings: bindings)
+1100 |       let row = try #require(rows.first)
+     |                 `- warning: no calls to throwing functions occur within 'try' expression
+1101 |       var values: [String: Int64] = [:]
+1102 |       for column in row.columns {
+[4/5] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1375:5: warning: no calls to throwing functions occur within 'try' expression
+1373 |       )
+1374 |     }
+1375 |     try await RolloutEffectTaskContext.$current.withValue(
+     |     `- warning: no calls to throwing functions occur within 'try' expression
+1376 |       RolloutEffectExecutionContext(mode: .historicalCanary(jobID: fixture.jobID))
+1377 |     ) {
+[4/6] Write Objects.LinkFileList
+[5/6] Linking JidokaCodePackageTests
+Build complete! (6.81s)
+BUILD_EXIT=0

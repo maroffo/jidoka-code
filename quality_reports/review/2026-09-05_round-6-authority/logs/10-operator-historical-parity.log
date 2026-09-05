@@ -1,0 +1,259 @@
+UTC start: 2026-09-05T15:28:59Z
+Command: xcrun swift test --filter HerdrPiWorkflowRuntimeTests\|HistoricalCanaryEffectDenialTests\|ProductionRolloutOperatorTests
+Building for debugging...
+[0/24] Write sources
+[2/24] Write swift-version--58304C5D6DBC2206.txt
+[4/26] Compiling JidokaCodeCore ProductionEngineJobRuntime.swift
+[5/26] Emitting module JidokaCodeCore
+[5/36] Write Objects.LinkFileList
+[15/40] Linking JidokaCodeLocationProbeEngine
+[15/40] Linking JidokaCodeHerdrHost
+[15/40] Linking JidokaCodeHerdrFixture
+[18/40] Linking JidokaCodeAskPass
+[18/40] Linking JidokaCodeBoundedCommand
+[20/40] Linking JidokaCodePushGuard
+[21/40] Linking JidokaCodeLocationProbeApp
+[22/40] Linking JidokaCodeEngineProbe
+[23/40] Linking JidokaCodeUIFixture
+[24/40] Linking JidokaCodeApp
+[25/40] Applying JidokaCodeHerdrFixture
+[26/40] Applying JidokaCodeHerdrHost
+[27/40] Applying JidokaCodeAskPass
+[28/40] Applying JidokaCodeLocationProbeEngine
+[29/40] Applying JidokaCodeBoundedCommand
+[30/40] Applying JidokaCodePushGuard
+[31/40] Applying JidokaCodeUIFixture
+[32/40] Applying JidokaCodeLocationProbeApp
+[33/40] Applying JidokaCodeEngineProbe
+[34/40] Applying JidokaCodeApp
+[36/41] Emitting module JidokaCodeAppTests
+[37/42] Emitting module JidokaCodeCoreTests
+[38/42] Compiling JidokaCodeCoreTests HistoricalCanaryEffectDenialTests.swift
+[39/42] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:5212:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+5210 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+5211 |       ) ?? 0
+5212 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+5213 |       _ = try await database.execute(
+5214 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[40/42] Compiling JidokaCodeCoreTests RolloutEffectAuthorityTestSupport.swift
+[41/67] Compiling JidokaCodeCoreTests PullRequestReviewJobWorkflowTests.swift
+[42/67] Compiling JidokaCodeCoreTests PullRequestCommitDeriverTests.swift
+[43/67] Compiling JidokaCodeCoreTests VerificationCommandRunnerTests.swift
+[44/67] Compiling JidokaCodeCoreTests WorkspaceImporterTests.swift
+[45/67] Compiling JidokaCodeCoreTests MutationReconcilerTests.swift
+[46/67] Compiling JidokaCodeCoreTests RepositoryStoreTests.swift
+[47/67] Compiling JidokaCodeCoreTests GitHubWorkflowLabelBootstrapperTests.swift
+[48/67] Compiling JidokaCodeCoreTests GitHubWorkflowLabelMutatorTests.swift
+[49/67] Compiling JidokaCodeCoreTests WorkspaceApprovedCommandExecutorTests.swift
+[50/67] Compiling JidokaCodeCoreTests GitHubHTTPTests.swift
+[51/67] Compiling JidokaCodeCoreTests GitHubMarkerPublisherTests.swift
+[52/67] Compiling JidokaCodeCoreTests SubmoduleManagerTests.swift
+[53/67] Compiling JidokaCodeCoreTests DurableApprovedCommandExecutorTests.swift
+[54/67] Compiling JidokaCodeCoreTests GitAskPassTests.swift
+[55/67] Compiling JidokaCodeCoreTests RepositoryStoreFaultTests.swift
+[56/67] Compiling JidokaCodeCoreTests IssueTriageJobWorkflowTests.swift
+[57/67] Compiling JidokaCodeCoreTests GitProcessTests.swift
+[58/67] Compiling JidokaCodeCoreTests GitPublicationTests.swift
+[59/67] Compiling JidokaCodeCoreTests GitHubMutationExecutorTests.swift
+[60/67] Compiling JidokaCodeCoreTests GitHubPullRequestPublisherTests.swift
+[61/67] Compiling JidokaCodeCoreTests PiIssueImplementationOrchestratorTests.swift
+[62/67] Compiling JidokaCodeCoreTests GitTestSupport.swift
+[63/67] Compiling JidokaCodeCoreTests IssueImplementationJobWorkflowTests.swift
+[64/67] Compiling JidokaCodeCoreTests GitPushGuardTests.swift
+[65/67] Compiling JidokaCodeCoreTests GitRolloutPreviewTests.swift
+[65/67] Write Objects.LinkFileList
+[66/67] Linking JidokaCodePackageTests
+Build complete! (12.77s)
+Test Suite 'Selected tests' started at 2026-09-05 17:29:14.290.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 17:29:14.291.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 17:29:14.291.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 17:29:14.291.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Production rollout operator commands" started.
+◇ Suite "Historical canary effect denial" started.
+◇ Suite "Production Herdr Pi workflow runtime" started.
+◇ Test "release mismatch and local identity drift leave operator admission closed" started.
+◇ Test "a busy command times out into recovery without reopening admission" started.
+◇ Test "a historical canary send is denied and marks no intent as started" started.
+◇ Test "a historical canary permit cannot be verified or settled" started.
+◇ Test "stop closes actual dispatch and command gates and pauses the scheduler" started.
+◇ Test "a historical canary context cannot reserve any fresh effect" started.
+◇ Test "recovery rejects unpaused, expired and drifted evidence" started.
+◇ Test case passing 1 argument useDouble → false to "a historical canary send is denied and marks no intent as started" started.
+◇ Test "preview and activation enforce paused, exclusive and checkpoint boundaries" started.
+◇ Test "the explicit test double denies a historical canary provider reservation like the store" started.
+◇ Test case passing 1 argument useDouble → true to "a historical canary context cannot reserve any fresh effect" started.
+◇ Test case passing 1 argument useDouble → true to "a historical canary send is denied and marks no intent as started" started.
+◇ Test case passing 1 argument useDouble → false to "a historical canary context cannot reserve any fresh effect" started.
+◇ Test case passing 1 argument useDouble → false to "a historical canary permit cannot be verified or settled" started.
+◇ Test case passing 1 argument useDouble → true to "a historical canary permit cannot be verified or settled" started.
+◇ Test "runtime mutation drift and fault matrices have exact unique shape" started.
+✔ Test "runtime mutation drift and fault matrices have exact unique shape" passed after 0.001 seconds.
+◇ Test "job kinds eagerly create exact one four and five role-host topologies" started.
+✔ Test "preview and activation enforce paused, exclusive and checkpoint boundaries" passed after 0.087 seconds.
+✔ Test "a historical canary permit cannot be verified or settled" with 2 test cases passed after 0.092 seconds.
+✔ Test "the explicit test double denies a historical canary provider reservation like the store" passed after 0.094 seconds.
+✔ Test "a historical canary context cannot reserve any fresh effect" with 2 test cases passed after 0.094 seconds.
+✔ Test "stop closes actual dispatch and command gates and pauses the scheduler" passed after 0.095 seconds.
+✔ Test "release mismatch and local identity drift leave operator admission closed" passed after 0.095 seconds.
+✔ Test "recovery rejects unpaused, expired and drifted evidence" passed after 0.095 seconds.
+✔ Test "a historical canary send is denied and marks no intent as started" with 2 test cases passed after 0.095 seconds.
+✔ Suite "Historical canary effect denial" passed after 0.095 seconds.
+✔ Test "job kinds eagerly create exact one four and five role-host topologies" passed after 0.628 seconds.
+◇ Test "Pi-owned terminal theme remains valid while importing a launched child" started.
+✔ Test "Pi-owned terminal theme remains valid while importing a launched child" passed after 0.238 seconds.
+◇ Test "workflow launch event gates time out in seconds and remain reusable" started.
+✔ Test "workflow launch event gates time out in seconds and remain reusable" passed after 0.058 seconds.
+◇ Test "terminal failure strictly removes projected provider credentials" started.
+◇ Test case passing 1 argument channelFailure → true to "terminal failure strictly removes projected provider credentials" started.
+✔ Test "a busy command times out into recovery without reopening admission" passed after 1.111 seconds.
+✔ Suite "Production rollout operator commands" passed after 1.111 seconds.
+◇ Test case passing 1 argument channelFailure → false to "terminal failure strictly removes projected provider credentials" started.
+✔ Test "terminal failure strictly removes projected provider credentials" with 2 test cases passed after 8.446 seconds.
+◇ Test "Herdr-redacted layout environment is closed by exact role-host process evidence" started.
+✔ Test "Herdr-redacted layout environment is closed by exact role-host process evidence" passed after 0.201 seconds.
+◇ Test "canary launch scope rejects another job before topology or run creation" started.
+✔ Test "canary launch scope rejects another job before topology or run creation" passed after 0.037 seconds.
+◇ Test "paused exact canary cannot create topology or a provider launch" started.
+✔ Test "paused exact canary cannot create topology or a provider launch" passed after 0.042 seconds.
+◇ Test "explicit recovery preserves unknown intent and resumes only the same no-Pi canary" started.
+✔ Test "explicit recovery preserves unknown intent and resumes only the same no-Pi canary" passed after 0.123 seconds.
+◇ Test "explicit focus revalidates exact ownership before changing shared-session focus" started.
+✔ Test "explicit focus revalidates exact ownership before changing shared-session focus" passed after 0.047 seconds.
+◇ Test "durable result import remains local when the Herdr socket is unavailable" started.
+✔ Test "durable result import remains local when the Herdr socket is unavailable" passed after 0.039 seconds.
+◇ Test "every production workflow fails closed when Herdr is unavailable" started.
+✔ Test "every production workflow fails closed when Herdr is unavailable" passed after 0.174 seconds.
+◇ Test "startup recovery rolls back every partial exact 1 4 and 5 role generation" started.
+✔ Test "startup recovery rolls back every partial exact 1 4 and 5 role generation" passed after 0.622 seconds.
+◇ Test "partial exact 1 4 and 5 role activation rolls every sibling back" started.
+✔ Test "partial exact 1 4 and 5 role activation rolls every sibling back" passed after 0.636 seconds.
+◇ Test "quit timeout marks every sibling host lost instead of stranding stopping state" started.
+✔ Test "quit timeout marks every sibling host lost instead of stranding stopping state" passed after 0.234 seconds.
+◇ Test "quit ignores inactive prepared history after release runtime replacement" started.
+✔ Test "quit ignores inactive prepared history after release runtime replacement" passed after 0.148 seconds.
+◇ Test "pause admission closes before a live result settles and replays without relaunch" started.
+✔ Test "pause admission closes before a live result settles and replays without relaunch" passed after 0.243 seconds.
+◇ Test "durable enqueued state republishes one missing command after a crash window" started.
+✔ Test "durable enqueued state republishes one missing command after a crash window" passed after 0.431 seconds.
+◇ Test "a moved persistent role host executes its next round in the rebound pane" started.
+✔ Test "a moved persistent role host executes its next round in the rebound pane" passed after 0.306 seconds.
+◇ Test "settled evidence survives topology rebind job recovery and durable pause" started.
+✔ Test "settled evidence survives topology rebind job recovery and durable pause" passed after 0.259 seconds.
+◇ Test "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 0 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 1 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 2 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 3 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 4 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 5 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+◇ Test case passing 1 argument field → 6 to "replacement runtime rejects each one-field q4 descriptor binding drift" started.
+✔ Test "replacement runtime rejects each one-field q4 descriptor binding drift" with 7 test cases passed after 0.002 seconds.
+◇ Test "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 0 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 1 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 2 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 3 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 4 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+◇ Test case passing 1 argument leftField → 5 to "replacement runtime rejects each adjacent q4 digest-role transposition" started.
+✔ Test "replacement runtime rejects each adjacent q4 digest-role transposition" with 6 test cases passed after 0.001 seconds.
+◇ Test "replacement runtime rejects a coherent q4 rebind after preview" started.
+✔ Test "replacement runtime rejects a coherent q4 rebind after preview" passed after 0.001 seconds.
+◇ Test "historical rollover preserves prepared or enqueued q4 without provider authority" started.
+◇ Test case passing 1 argument restartState → .prepared to "historical rollover preserves prepared or enqueued q4 without provider authority" started.
+◇ Test case passing 1 argument restartState → .enqueuedMissingCommand to "historical rollover preserves prepared or enqueued q4 without provider authority" started.
+✔ Test "historical rollover preserves prepared or enqueued q4 without provider authority" with 2 test cases passed after 2.248 seconds.
+◇ Test "schema eight migration reaches current-runtime lost topology recovery" started.
+✔ Test "schema eight migration reaches current-runtime lost topology recovery" passed after 0.255 seconds.
+◇ Test "generation rollover resumes after a binding and one-host restart cut" started.
+✔ Test "generation rollover resumes after a binding and one-host restart cut" passed after 0.393 seconds.
+◇ Test "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .q4Configuration to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .q4Prompt to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .q4WorkflowConfiguration to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .priorLaunchConfiguration to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .sourcePrompt to "historical replacement denies one-field q4 backing drift before remote effects" started.
+◇ Test case passing 1 argument drift → .sourceWorkflowConfiguration to "historical replacement denies one-field q4 backing drift before remote effects" started.
+✔ Test "historical replacement denies one-field q4 backing drift before remote effects" with 6 test cases passed after 2.110 seconds.
+◇ Test "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 0 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 1 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 2 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 3 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 4 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 5 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+◇ Test case passing 1 argument field → 6 to "historical replacement rejects every authorized q4 digest drift before credentials" started.
+✔ Test "historical replacement rejects every authorized q4 digest drift before credentials" with 7 test cases passed after 2.938 seconds.
+◇ Test "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "socket-vnode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.socketVnode, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.topologyUnavailable)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-processID", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.processID), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-startSeconds", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.startSeconds), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-startMicroseconds", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.startMicroseconds), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-executablePath", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.executablePath), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-executableDevice", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.executableDevice), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-executableInode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.executableInode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-executableContent", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.executableContent), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "peer-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.peer(JidokaCodeCoreTests.ReplacementConnectedPeerDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "resource-rootIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.resource(JidokaCodeCoreTests.ReplacementResourceDrift.rootIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "resource-inventory", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.resource(JidokaCodeCoreTests.ReplacementResourceDrift.inventory), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "resource-fileVnode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.resource(JidokaCodeCoreTests.ReplacementResourceDrift.fileVnode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "resource-fileContent", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.resource(JidokaCodeCoreTests.ReplacementResourceDrift.fileContent), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-path", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.path), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-device", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.device), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-inode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.inode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-content", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.content), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-architecture-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.architecture, JidokaCodeCoreTests.ReplacementExecutableDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-path", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.path), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-device", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.device), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-inode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.inode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-content", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.content), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-security-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.security, JidokaCodeCoreTests.ReplacementExecutableDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-path", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.path), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-device", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.device), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-inode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.inode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-content", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.content), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-test-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.test, JidokaCodeCoreTests.ReplacementExecutableDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-path", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.path), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-device", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.device), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-inode", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.inode), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-content", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.content), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "mapped-executable-synthesis-codeIdentity", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.executable(JidokaCodeCore.PiWorkflowRole.synthesis, JidokaCodeCoreTests.ReplacementExecutableDriftField.codeIdentity), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "stale-pane-revision", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.stalePaneRevision, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "stale-pane-token-presence", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.stalePaneTokenPresence, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "stale-pane-token-digest", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.stalePaneTokenDigest, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-descriptor", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Descriptor, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.resultDivergent)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-q4Configuration", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.q4Configuration), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.tui(JidokaCodeCore.PiTUIRuntimeError.unsafePath)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-q4Prompt", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.q4Prompt), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.tui(JidokaCodeCore.PiTUIRuntimeError.unsafePath)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-q4WorkflowConfiguration", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.q4WorkflowConfiguration), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.tui(JidokaCodeCore.PiTUIRuntimeError.unsafePath)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-priorLaunchConfiguration", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.priorLaunchConfiguration), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.resultDivergent)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-sourcePrompt", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.sourcePrompt), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.resultDivergent)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "q4-backing-sourceWorkflowConfiguration", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.q4Backing(JidokaCodeCoreTests.ReplacementQ4BackingDrift.sourceWorkflowConfiguration), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.resultDivergent)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "credential-sourceContent", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.credential(JidokaCodeCoreTests.ReplacementCredentialDrift.sourceContent), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "credential-sourceAccount", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.credential(JidokaCodeCoreTests.ReplacementCredentialDrift.sourceAccount), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "credential-installedProjection", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.credential(JidokaCodeCoreTests.ReplacementCredentialDrift.installedProjection), expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.tui(JidokaCodeCore.PiTUIRuntimeError.identityMismatch)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "paused-state", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.pausedState, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.runStore(JidokaCodeCore.PiRunStoreError.invalidTransition)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "active-canary", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.activeCanary, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.runStore(JidokaCodeCore.PiRunStoreError.invalidTransition)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "active-lease", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.activeLease, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.runStore(JidokaCodeCore.PiRunStoreError.invalidTransition)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "replacement-evidence", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.replacementEvidence, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+◇ Test case passing 1 argument drift → ReplacementPostPreviewDriftCase(name: "replacement-q4-authorization", kind: JidokaCodeCoreTests.ReplacementPostPreviewDriftKind.replacementQ4Authorization, expectedError: JidokaCodeCoreTests.ReplacementMatrixExpectedError.herdr(JidokaCodeCore.HerdrPiWorkflowError.recoveryBoundaryReached)) to "historical post-preview scenarios never authorize replacement effects" started.
+✔ Test "historical post-preview scenarios never authorize replacement effects" with 51 test cases passed after 20.094 seconds.
+◇ Test "historical replacement preview never grants a launch, including after reopen" started.
+✔ Test "historical replacement preview never grants a launch, including after reopen" passed after 0.500 seconds.
+◇ Test "production reload keeps paused replacement recovery dispatch closed" started.
+✘ Test "production reload keeps paused replacement recovery dispatch closed" recorded an issue at HerdrPiWorkflowRuntimeTests.swift:2276:4: Caught error: .canaryRecoveryRequired
+✘ Test "production reload keeps paused replacement recovery dispatch closed" failed after 0.410 seconds with 1 issue.
+◇ Test "exact paused canary startup leaves every unrelated durable row unchanged" started.
+✔ Test "exact paused canary startup leaves every unrelated durable row unchanged" passed after 0.071 seconds.
+◇ Test "production reload skips startup execution while paused" started.
+✔ Test "production reload skips startup execution while paused" passed after 0.037 seconds.
+✘ Suite "Production Herdr Pi workflow runtime" failed after 41.989 seconds with 1 issue.
+✘ Test run with 42 tests in 3 suites failed after 41.989 seconds with 1 issue.
+
+Exit status: 1
+UTC end: 2026-09-05T15:29:56Z

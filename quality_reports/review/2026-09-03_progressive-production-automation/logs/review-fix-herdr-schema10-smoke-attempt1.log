@@ -1,0 +1,23 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+[4/5] Emitting module JidokaCodeCoreTests
+[4/6] Write Objects.LinkFileList
+[5/6] Linking JidokaCodePackageTests
+Build complete! (22.37s)
+Test Suite 'Selected tests' started at 2026-09-04 11:19:48.154.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 11:19:48.155.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 11:19:48.155.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 11:19:48.155.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Production Herdr Pi workflow runtime" started.
+◇ Test "job kinds eagerly create exact one four and five role-host topologies" started.
+✔ Test "job kinds eagerly create exact one four and five role-host topologies" passed after 0.598 seconds.
+✔ Suite "Production Herdr Pi workflow runtime" passed after 0.598 seconds.
+✔ Test run with 1 test in 1 suite passed after 0.598 seconds.

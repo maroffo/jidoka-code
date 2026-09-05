@@ -1,0 +1,82 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Emitting module JidokaCodeCoreTests
+[4/5] Compiling JidokaCodeCoreTests JobCoordinatorTests.swift
+[5/10] Compiling JidokaCodeCoreTests GitHubJobMutationObservationReaderTests.swift
+[6/10] Compiling JidokaCodeCoreTests RolloutEffectAuthorityTestSupport.swift
+[7/10] Compiling JidokaCodeCoreTests PullRequestReviewJobWorkflowTests.swift
+[8/10] Compiling JidokaCodeCoreTests GitHubDiscoveryTests.swift
+[9/10] Compiling JidokaCodeCoreTests GitHubTokenStoreTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:446:7: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+444 |     var application: SecTrustedApplication?
+445 |     let status = path.withCString {
+446 |       SecTrustedApplicationCreateFromPath($0, &application)
+    |       `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+447 |     }
+448 |     guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:454:16: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+452 |   }
+453 |   var access: SecAccess?
+454 |   let status = SecAccessCreate(
+    |                `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+455 |     descriptor as CFString,
+456 |     trustedApplications as CFArray,
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[9/11] Write Objects.LinkFileList
+[10/11] Linking JidokaCodePackageTests
+Build complete! (4.52s)
+Test Suite 'Selected tests' started at 2026-09-04 11:44:25.384.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 11:44:25.385.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 11:44:25.385.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 11:44:25.385.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "End-to-end scheduler job coordinator" started.
+◇ Test "transient workflow failure enters durable backoff instead of terminal block" started.
+◇ Test "W0: repository flag drift leaves an already queued job inert" started.
+◇ Test "paused legacy passes promote exactly-due and overdue retries but not future deadlines" started.
+◇ Test "startup sweep finishes cleanup stranded by a terminal crash boundary" started.
+◇ Test "Pi transport interruption is classified as unknown writer state, never blind retry" started.
+◇ Test "W0: an unscoped pass cannot dispatch two serial queued jobs" started.
+◇ Test "direct canary runs exactly one leased job and never walks the queue" started.
+◇ Test "recovery that needs a guarded rerun preserves the current step in backoff" started.
+◇ Test "the first real scheduler pass recovers an interrupted leased job before discovery" started.
+◇ Test "reconciliation dispatch runs before any new discovery read" started.
+◇ Test "durable pause atomically rejects discovery creation and new leases" started.
+◇ Test "discovery failure persists repository backoff without terminal skip" started.
+◇ Test "one pass discovers and dispatches PR, implementation, and triage in locked priority" started.
+◇ Test "W0: pause suppresses unbound recovery as well as discovery" started.
+✔ Test "Pi transport interruption is classified as unknown writer state, never blind retry" passed after 0.001 seconds.
+✘ Test "the first real scheduler pass recovers an interrupted leased job before discovery" recorded an issue at JobCoordinatorTests.swift:381:4: Caught error: .statementFailed(code: 1, message: "table jobs has no column named rollout_generation")
+✘ Test "the first real scheduler pass recovers an interrupted leased job before discovery" failed after 0.047 seconds with 1 issue.
+✘ Test "recovery that needs a guarded rerun preserves the current step in backoff" recorded an issue at JobCoordinatorTests.swift:446:4: Caught error: .statementFailed(code: 1, message: "table jobs has no column named rollout_generation")
+✘ Test "recovery that needs a guarded rerun preserves the current step in backoff" failed after 0.064 seconds with 1 issue.
+✔ Test "discovery failure persists repository backoff without terminal skip" passed after 0.063 seconds.
+✘ Test "startup sweep finishes cleanup stranded by a terminal crash boundary" recorded an issue at JobCoordinatorTests.swift:302:4: Caught error: .statementFailed(code: 1, message: "table jobs has no column named rollout_generation")
+✘ Test "startup sweep finishes cleanup stranded by a terminal crash boundary" failed after 0.064 seconds with 1 issue.
+✘ Test "one pass discovers and dispatches PR, implementation, and triage in locked priority" recorded an issue at JobCoordinatorTests.swift:69:5: Expectation failed: (jobs.count → 0) == 3
+✘ Test "one pass discovers and dispatches PR, implementation, and triage in locked priority" recorded an issue at JobCoordinatorTests.swift:71:5: Expectation failed: await fixture.workflows.order() == [.prReview, .issueImplementation, .issueTriage]
+✘ Test "one pass discovers and dispatches PR, implementation, and triage in locked priority" recorded an issue at JobCoordinatorTests.swift:72:5: Expectation failed: (jobs.first(where: { $0.identity.kind == .issueImplementation })?.identity.revisionKey → nil) == "claim-1"
+✘ Test "one pass discovers and dispatches PR, implementation, and triage in locked priority" recorded an issue at JobCoordinatorTests.swift:77:5: Expectation failed: (await coordinator.snapshot()).failures.isEmpty
+✘ Test "transient workflow failure enters durable backoff instead of terminal block" recorded an issue at JobCoordinatorTests.swift:557:4: Caught error: .statementFailed(code: 1, message: "table jobs has no column named rollout_generation")
+✘ Test "transient workflow failure enters durable backoff instead of terminal block" failed after 0.064 seconds with 1 issue.
+✘ Test "direct canary runs exactly one leased job and never walks the queue" recorded an issue at JobCoordinatorTests.swift:80:4: Caught error: .statementFailed(code: 1, message: "table jobs has no column named rollout_generation")
+✘ Test "direct canary runs exactly one leased job and never walks the queue" failed after 0.064 seconds with 1 issue.
+✘ Test "paused legacy passes promote exactly-due and overdue retries but not future deadlines" recorded an issue at JobCoordinatorTests.swift:505:4: Caught error: .statementFailed(code: 1, message: "table jobs has no column named rollout_generation")
+✘ Test "reconciliation dispatch runs before any new discovery read" recorded an issue at JobCoordinatorTests.swift:165:4: Caught error: .statementFailed(code: 1, message: "table jobs has no column named rollout_generation")
+✘ Test "reconciliation dispatch runs before any new discovery read" failed after 0.065 seconds with 1 issue.
+✘ Test "paused legacy passes promote exactly-due and overdue retries but not future deadlines" failed after 0.065 seconds with 1 issue.
+✘ Test "one pass discovers and dispatches PR, implementation, and triage in locked priority" failed after 0.065 seconds with 4 issues.
+✔ Test "W0: an unscoped pass cannot dispatch two serial queued jobs" passed after 0.071 seconds.
+✔ Test "W0: pause suppresses unbound recovery as well as discovery" passed after 0.074 seconds.
+✔ Test "W0: repository flag drift leaves an already queued job inert" passed after 0.075 seconds.
+✔ Test "durable pause atomically rejects discovery creation and new leases" passed after 0.075 seconds.
+✘ Suite "End-to-end scheduler job coordinator" failed after 0.075 seconds with 11 issues.
+✘ Test run with 14 tests in 1 suite failed after 0.075 seconds with 11 issues.

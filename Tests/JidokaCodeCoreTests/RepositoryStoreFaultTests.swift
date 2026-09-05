@@ -49,8 +49,11 @@ struct RepositoryStoreFaultTests {
       database: database,
       transport: transport
     )
-    _ = try await store.ensureMirror(remote: remote)
-    let jobs = DurableJobStore(database: database)
+    let mirrorReadJobID = UUID()
+    _ = try await withTestRolloutWorkflow(jobID: mirrorReadJobID) {
+      try await store.ensureMirror(remote: remote)
+    }
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
 
     for (index, failureCall) in [7, 8, 12, 15].enumerated() {
       let creation = try await jobs.createJob(
@@ -69,12 +72,14 @@ struct RepositoryStoreFaultTests {
       let job = try #require(createdJob(creation))
       await transport.failLocalCall(failureCall)
       await #expect(throws: RepositoryStoreError.gitFailure) {
-        _ = try await store.materializeWorkspace(
-          jobID: job.id,
-          remote: remote,
-          baseSHA: baseSHA,
-          branch: "agent/issue-\(100 + index)-fault"
-        )
+        _ = try await withTestRolloutWorkflow(jobID: job.id) {
+          try await store.materializeWorkspace(
+            jobID: job.id,
+            remote: remote,
+            baseSHA: baseSHA,
+            branch: "agent/issue-\(100 + index)-fault"
+          )
+        }
       }
       #expect(try await store.workspaceRecord(jobID: job.id) == nil)
       let exactDirectory = store.workspacesURL.appendingPathComponent(
@@ -89,12 +94,14 @@ struct RepositoryStoreFaultTests {
     await transport.failLocalCall(nil)
     let missingJobID = UUID()
     await #expect(throws: RepositoryStoreError.invalidJob) {
-      _ = try await store.materializeWorkspace(
-        jobID: missingJobID,
-        remote: remote,
-        baseSHA: baseSHA,
-        branch: "agent/issue-999-db-failure"
-      )
+      _ = try await withTestRolloutWorkflow(jobID: missingJobID) {
+        try await store.materializeWorkspace(
+          jobID: missingJobID,
+          remote: remote,
+          baseSHA: baseSHA,
+          branch: "agent/issue-999-db-failure"
+        )
+      }
     }
     #expect(
       !FileManager.default.fileExists(
@@ -133,12 +140,17 @@ struct RepositoryStoreFaultTests {
       database: database,
       transport: fixture.git
     )
-    let mirror = try await store.ensureMirror(remote: remote)
+    let mirrorReadJobID = UUID()
+    let mirror = try await withTestRolloutWorkflow(jobID: mirrorReadJobID) {
+      try await store.ensureMirror(remote: remote)
+    }
     let moved = mirror.deletingLastPathComponent().appendingPathComponent("moved.git")
     try FileManager.default.moveItem(at: mirror, to: moved)
     try FileManager.default.createSymbolicLink(at: mirror, withDestinationURL: moved)
     await #expect(throws: RepositoryStoreError.unsafePath) {
-      _ = try await store.ensureMirror(remote: remote)
+      _ = try await withTestRolloutWorkflow(jobID: mirrorReadJobID) {
+        try await store.ensureMirror(remote: remote)
+      }
     }
   }
 }

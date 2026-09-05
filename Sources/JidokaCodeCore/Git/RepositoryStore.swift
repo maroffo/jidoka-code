@@ -353,7 +353,7 @@ public actor RepositoryStore {
   public init(
     rootURL: URL,
     database: SQLiteStore,
-    transport: any GitRepositoryTransporting & GitLocalCommanding = SystemGitTransport()
+    transport: any GitRepositoryTransporting & GitLocalCommanding
   ) throws {
     guard rootURL.isFileURL, rootURL.path.hasPrefix("/") else {
       throw RepositoryStoreError.unsafeRoot

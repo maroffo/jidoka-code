@@ -6,6 +6,32 @@ import Testing
 
 @Suite("Production engine external services")
 struct ProductionEngineExternalServicesTests {
+  @Test("rollout preview budgets account for the identity request and page")
+  func rolloutPreviewBudgetIncludesIdentityPage() throws {
+    let responseBytes = Int64(GitHubBroker.maximumResponseBytes)
+    let insufficient = rolloutBudgets(
+      githubReadRequests: 2,
+      githubReadPages: 1,
+      githubReadBytes: responseBytes * 2
+    )
+    #expect(throws: RolloutAuthorityError.invalidBudget) {
+      _ = try ProductionEngineExternalServices.rolloutGitHubBudget(insufficient)
+    }
+
+    let exact = rolloutBudgets(
+      githubReadRequests: 2,
+      githubReadPages: 2,
+      githubReadBytes: responseBytes * 2
+    )
+    #expect(
+      try ProductionEngineExternalServices.rolloutGitHubBudget(exact)
+        == ProductionRolloutGitHubBudget(
+          repositoryRequests: 1,
+          repositoryBytes: responseBytes
+        )
+    )
+  }
+
   @Test("a Keychain success followed by an error is completed from the durable journal")
   func replacementFailureAfterWriteRecoversForward() async throws {
     let fixture = try ExternalServicesFixture()
@@ -388,4 +414,26 @@ private struct UnusedPiRuntimeResolver: PiRuntimeResolving {
 
 private func tokenDigest(_ token: Data) -> String {
   SHA256.hash(data: token).map { String(format: "%02x", $0) }.joined()
+}
+
+private func rolloutBudgets(
+  githubReadRequests: Int,
+  githubReadPages: Int,
+  githubReadBytes: Int64
+) -> RolloutBudgets {
+  RolloutBudgets(
+    jobs: 1,
+    githubReadRequests: githubReadRequests,
+    githubReadPages: githubReadPages,
+    githubReadBytes: githubReadBytes,
+    gitRemoteReads: 0,
+    providerSessions: 0,
+    approvedCommands: 0,
+    markerParts: 0,
+    labelWrites: 0,
+    branchCreates: 0,
+    pullRequestCreates: 0,
+    githubSends: 0,
+    gitSends: 0
+  )
 }

@@ -1705,6 +1705,1942 @@ public enum DatabaseSchema {
         piRunLaunchInsertAuthorityV9,
       ]
     ),
+    SQLiteMigration(
+      version: 10,
+      name: "progressive-production-rollout-authority",
+      requiresBackup: true,
+      statements: [
+        "DROP TRIGGER app_settings_generation_rollover_resume_denied",
+        "DROP TRIGGER app_settings_generation_rollover_insert_resume_denied",
+        "DROP TRIGGER approved_command_run_state_transition",
+        """
+        CREATE TRIGGER approved_command_run_state_transition
+        BEFORE UPDATE OF state ON approved_command_runs
+        WHEN NEW.state IS NOT OLD.state AND NOT (
+          (OLD.state = 'prepared' AND NEW.state IN ('started', 'superseded'))
+          OR (OLD.state = 'started' AND (
+            NEW.state IN ('resultAccepted', 'unknown') OR
+            (NEW.state = 'superseded' AND NOT EXISTS (
+              SELECT 1 FROM approved_command_results WHERE run_id = OLD.id
+            ))
+          ))
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid approved command transition');
+        END
+        """,
+        "ALTER TABLE jobs ADD COLUMN rollout_generation INTEGER NOT NULL DEFAULT 0 CHECK (rollout_generation IN (0, 1))",
+        """
+        CREATE TABLE rollout_authorizations (
+          id TEXT PRIMARY KEY CHECK (
+            length(id) = 36 AND id = lower(id) AND
+            substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND
+            substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND
+            replace(id, '-', '') NOT GLOB '*[^0-9a-f]*'
+          ),
+          preview_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(preview_sha256) = 64 AND preview_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          policy_version INTEGER NOT NULL CHECK (policy_version = 1),
+          state TEXT NOT NULL CHECK (state IN (
+            'active', 'draining', 'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
+          )),
+          scope_mode TEXT NOT NULL CHECK (scope_mode IN ('exactObject', 'finiteWindow')),
+          workflow_stage TEXT NOT NULL CHECK (workflow_stage IN (
+            'prReview', 'issueTriage', 'implementationPlan',
+            'implementationExecute', 'generatedPRReview'
+          )),
+          repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+          activated_at_ms INTEGER NOT NULL CHECK (activated_at_ms >= 0),
+          expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > activated_at_ms),
+          updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= activated_at_ms),
+          terminal_reason TEXT CHECK (
+            terminal_reason IS NULL OR
+            (length(terminal_reason) BETWEEN 1 AND 128 AND
+             terminal_reason NOT GLOB '*[^A-Za-z0-9._:-]*')
+          ),
+          CHECK (
+            (state IN ('active', 'draining', 'recoveryRequired') AND terminal_reason IS NULL) OR
+            (state IN ('settled', 'revoked', 'expired', 'failed') AND terminal_reason IS NOT NULL)
+          )
+        ) STRICT
+        """,
+        """
+        CREATE UNIQUE INDEX rollout_authorizations_one_open_lane_idx
+        ON rollout_authorizations((1))
+        WHERE state IN ('active', 'draining', 'recoveryRequired')
+        """,
+        """
+        CREATE TABLE rollout_authorization_scopes (
+          authorization_id TEXT PRIMARY KEY
+            REFERENCES rollout_authorizations(id) ON DELETE RESTRICT,
+          repository_node_id TEXT NOT NULL CHECK (length(repository_node_id) BETWEEN 1 AND 256),
+          repository_owner TEXT NOT NULL COLLATE NOCASE
+            CHECK (length(repository_owner) BETWEEN 1 AND 39),
+          repository_name TEXT NOT NULL COLLATE NOCASE
+            CHECK (length(repository_name) BETWEEN 1 AND 100),
+          default_branch TEXT NOT NULL CHECK (length(default_branch) BETWEEN 1 AND 255),
+          repository_enabled INTEGER NOT NULL CHECK (repository_enabled IN (0, 1)),
+          review_enabled INTEGER NOT NULL CHECK (review_enabled IN (0, 1)),
+          triage_enabled INTEGER NOT NULL CHECK (triage_enabled IN (0, 1)),
+          implementation_enabled INTEGER NOT NULL CHECK (implementation_enabled IN (0, 1)),
+          object_node_id TEXT CHECK (object_node_id IS NULL OR length(object_node_id) BETWEEN 1 AND 256),
+          object_number INTEGER CHECK (object_number IS NULL OR object_number > 0),
+          revision_key TEXT CHECK (revision_key IS NULL OR length(revision_key) BETWEEN 1 AND 256),
+          canonical_input_sha256 TEXT CHECK (
+            canonical_input_sha256 IS NULL OR
+            (length(canonical_input_sha256) = 64 AND
+             canonical_input_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          head_sha TEXT CHECK (
+            head_sha IS NULL OR
+            (length(head_sha) IN (40, 64) AND head_sha NOT GLOB '*[^0-9a-f]*')
+          ),
+          base_sha TEXT CHECK (
+            base_sha IS NULL OR
+            (length(base_sha) IN (40, 64) AND base_sha NOT GLOB '*[^0-9a-f]*')
+          ),
+          plan_sha256 TEXT CHECK (
+            plan_sha256 IS NULL OR
+            (length(plan_sha256) = 64 AND plan_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          narrative_sha256 TEXT CHECK (
+            narrative_sha256 IS NULL OR
+            (length(narrative_sha256) = 64 AND narrative_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          label_state_sha256 TEXT CHECK (
+            label_state_sha256 IS NULL OR
+            (length(label_state_sha256) = 64 AND label_state_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          current_step TEXT NOT NULL CHECK (
+            length(current_step) BETWEEN 1 AND 64 AND current_step NOT GLOB '*[^A-Za-z0-9._-]*'
+          ),
+          finite_predicate_version INTEGER,
+          finite_candidates_sha256 TEXT CHECK (
+            finite_candidates_sha256 IS NULL OR
+            (length(finite_candidates_sha256) = 64 AND
+             finite_candidates_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          finite_candidate_count INTEGER,
+          source_commit TEXT NOT NULL CHECK (
+            length(source_commit) IN (40, 64) AND source_commit NOT GLOB '*[^0-9a-f]*'
+          ),
+          source_tree TEXT NOT NULL CHECK (
+            length(source_tree) IN (40, 64) AND source_tree NOT GLOB '*[^0-9a-f]*'
+          ),
+          bundle_version TEXT NOT NULL CHECK (length(bundle_version) BETWEEN 1 AND 32),
+          bundle_build INTEGER NOT NULL CHECK (bundle_build > 0),
+          application_sha256 TEXT NOT NULL CHECK (
+            length(application_sha256) = 64 AND application_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          helper_sha256 TEXT NOT NULL CHECK (
+            length(helper_sha256) = 64 AND helper_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          ask_pass_sha256 TEXT NOT NULL CHECK (
+            length(ask_pass_sha256) = 64 AND ask_pass_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          push_guard_sha256 TEXT NOT NULL CHECK (
+            length(push_guard_sha256) = 64 AND push_guard_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          herdr_host_sha256 TEXT NOT NULL CHECK (
+            length(herdr_host_sha256) = 64 AND herdr_host_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          schema_version INTEGER NOT NULL CHECK (schema_version = 10),
+          engine_protocol_version INTEGER NOT NULL CHECK (engine_protocol_version = 12),
+          runtime_manifest_sha256 TEXT NOT NULL CHECK (
+            length(runtime_manifest_sha256) = 64 AND
+            runtime_manifest_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          runtime_tree_sha256 TEXT NOT NULL CHECK (
+            length(runtime_tree_sha256) = 64 AND runtime_tree_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          model_profiles_sha256 TEXT NOT NULL CHECK (
+            length(model_profiles_sha256) = 64 AND model_profiles_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          workflow_resources_sha256 TEXT NOT NULL CHECK (
+            length(workflow_resources_sha256) = 64 AND
+            workflow_resources_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          github_account TEXT NOT NULL CHECK (length(github_account) BETWEEN 1 AND 39),
+          github_author_id INTEGER NOT NULL CHECK (github_author_id > 0),
+          repository_configuration_sha256 TEXT NOT NULL CHECK (
+            length(repository_configuration_sha256) = 64 AND
+            repository_configuration_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          queue_inventory_sha256 TEXT NOT NULL CHECK (
+            length(queue_inventory_sha256) = 64 AND queue_inventory_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          recovery_inventory_sha256 TEXT NOT NULL CHECK (
+            length(recovery_inventory_sha256) = 64 AND
+            recovery_inventory_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          mutation_inventory_sha256 TEXT NOT NULL CHECK (
+            length(mutation_inventory_sha256) = 64 AND
+            mutation_inventory_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          queue_item_count INTEGER NOT NULL CHECK (queue_item_count >= 0),
+          recovery_item_count INTEGER NOT NULL CHECK (recovery_item_count >= 0),
+          mutation_item_count INTEGER NOT NULL CHECK (mutation_item_count >= 0),
+          outside_scope_queue_sha256 TEXT NOT NULL CHECK (
+            length(outside_scope_queue_sha256) = 64 AND
+            outside_scope_queue_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          outside_scope_recovery_sha256 TEXT NOT NULL CHECK (
+            length(outside_scope_recovery_sha256) = 64 AND
+            outside_scope_recovery_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          outside_scope_mutation_sha256 TEXT NOT NULL CHECK (
+            length(outside_scope_mutation_sha256) = 64 AND
+            outside_scope_mutation_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          outside_scope_queue_item_count INTEGER NOT NULL CHECK (
+            outside_scope_queue_item_count BETWEEN 0 AND queue_item_count
+          ),
+          outside_scope_recovery_item_count INTEGER NOT NULL CHECK (
+            outside_scope_recovery_item_count BETWEEN 0 AND recovery_item_count
+          ),
+          outside_scope_mutation_item_count INTEGER NOT NULL CHECK (
+            outside_scope_mutation_item_count BETWEEN 0 AND mutation_item_count
+          ),
+          missing_labels_sha256 TEXT NOT NULL CHECK (
+            length(missing_labels_sha256) = 64 AND missing_labels_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          missing_label_count INTEGER NOT NULL CHECK (missing_label_count BETWEEN 0 AND 32),
+          command_plan_sha256 TEXT NOT NULL CHECK (
+            length(command_plan_sha256) = 64 AND command_plan_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          command_count INTEGER NOT NULL CHECK (command_count BETWEEN 0 AND 128),
+          effect_envelope_sha256 TEXT NOT NULL CHECK (
+            length(effect_envelope_sha256) = 64 AND effect_envelope_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          preview_json TEXT NOT NULL CHECK (
+            length(preview_json) BETWEEN 2 AND 1048576 AND
+            json_valid(preview_json) AND json(preview_json) = preview_json
+          ),
+          CHECK (
+            (object_node_id IS NULL AND object_number IS NULL AND revision_key IS NULL AND
+             canonical_input_sha256 IS NULL AND finite_predicate_version = 1 AND
+             finite_candidates_sha256 IS NOT NULL AND finite_candidate_count >= 0)
+            OR
+            (object_node_id IS NOT NULL AND object_number IS NOT NULL AND
+             revision_key IS NOT NULL AND canonical_input_sha256 IS NOT NULL AND
+             finite_predicate_version IS NULL AND finite_candidates_sha256 IS NULL AND
+             finite_candidate_count IS NULL)
+          )
+        ) STRICT
+        """,
+        """
+        CREATE TABLE rollout_authorization_budgets (
+          authorization_id TEXT PRIMARY KEY
+            REFERENCES rollout_authorizations(id) ON DELETE RESTRICT,
+          jobs INTEGER NOT NULL CHECK (jobs BETWEEN 1 AND 10),
+          github_read_requests INTEGER NOT NULL CHECK (github_read_requests BETWEEN 0 AND 10000),
+          github_read_pages INTEGER NOT NULL CHECK (github_read_pages BETWEEN 0 AND 1000),
+          github_read_bytes INTEGER NOT NULL CHECK (github_read_bytes BETWEEN 0 AND 1073741824),
+          git_remote_reads INTEGER NOT NULL CHECK (git_remote_reads BETWEEN 0 AND 1000),
+          provider_sessions INTEGER NOT NULL CHECK (provider_sessions BETWEEN 0 AND 150),
+          approved_commands INTEGER NOT NULL CHECK (approved_commands BETWEEN 0 AND 128),
+          marker_parts INTEGER NOT NULL CHECK (marker_parts BETWEEN 0 AND 64),
+          label_writes INTEGER NOT NULL CHECK (label_writes BETWEEN 0 AND 64),
+          branch_creates INTEGER NOT NULL CHECK (branch_creates BETWEEN 0 AND 10),
+          pull_request_creates INTEGER NOT NULL CHECK (pull_request_creates BETWEEN 0 AND 10),
+          github_sends INTEGER NOT NULL CHECK (github_sends BETWEEN 0 AND 256),
+          git_sends INTEGER NOT NULL CHECK (git_sends BETWEEN 0 AND 32)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE rollout_authorization_usage (
+          authorization_id TEXT NOT NULL
+            REFERENCES rollout_authorizations(id) ON DELETE RESTRICT,
+          sequence INTEGER NOT NULL CHECK (sequence >= 0),
+          source_kind TEXT NOT NULL CHECK (source_kind IN (
+            'activation', 'effect', 'scopeRead', 'githubReadback', 'gitReadback'
+          )),
+          source_id TEXT NOT NULL CHECK (length(source_id) BETWEEN 1 AND 256),
+          github_read_requests INTEGER NOT NULL CHECK (github_read_requests >= 0),
+          github_read_pages INTEGER NOT NULL CHECK (github_read_pages >= 0),
+          github_read_bytes INTEGER NOT NULL CHECK (github_read_bytes >= 0),
+          git_remote_reads INTEGER NOT NULL CHECK (git_remote_reads >= 0),
+          provider_sessions INTEGER NOT NULL CHECK (provider_sessions >= 0),
+          approved_commands INTEGER NOT NULL CHECK (approved_commands >= 0),
+          marker_parts INTEGER NOT NULL CHECK (marker_parts >= 0),
+          label_writes INTEGER NOT NULL CHECK (label_writes >= 0),
+          branch_creates INTEGER NOT NULL CHECK (branch_creates >= 0),
+          pull_request_creates INTEGER NOT NULL CHECK (pull_request_creates >= 0),
+          github_sends INTEGER NOT NULL CHECK (github_sends >= 0),
+          git_sends INTEGER NOT NULL CHECK (git_sends >= 0),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          PRIMARY KEY(authorization_id, sequence),
+          UNIQUE(authorization_id, source_kind, source_id)
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE TRIGGER rollout_authorization_usage_seed
+        AFTER INSERT ON rollout_authorizations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          ) VALUES (
+            NEW.id, 0, 'activation', NEW.id,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NEW.activated_at_ms
+          );
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_authorization_scopes_exact_insert
+        BEFORE INSERT ON rollout_authorization_scopes
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM rollout_authorizations AS authorization
+          JOIN repositories AS repository ON repository.id = authorization.repository_id
+          WHERE authorization.id = NEW.authorization_id
+            AND authorization.state = 'active'
+            AND authorization.scope_mode = CASE
+              WHEN NEW.object_node_id IS NULL THEN 'finiteWindow' ELSE 'exactObject' END
+            AND repository.node_id = NEW.repository_node_id
+            AND repository.owner = NEW.repository_owner
+            AND repository.name = NEW.repository_name
+            AND repository.default_branch = NEW.default_branch
+            AND repository.enabled = NEW.repository_enabled
+            AND repository.review_enabled = NEW.review_enabled
+            AND repository.triage_enabled = NEW.triage_enabled
+            AND repository.implementation_enabled = NEW.implementation_enabled
+            AND NEW.repository_enabled = 1
+            AND (
+              (authorization.workflow_stage IN ('prReview', 'generatedPRReview') AND
+                NEW.review_enabled = 1) OR
+              (authorization.workflow_stage = 'issueTriage' AND NEW.triage_enabled = 1) OR
+              (authorization.workflow_stage IN ('implementationPlan', 'implementationExecute')
+                AND NEW.implementation_enabled = 1)
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout scope does not match active repository authority');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_authorization_budgets_stage_insert
+        BEFORE INSERT ON rollout_authorization_budgets
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM rollout_authorizations AS authorization
+          JOIN rollout_authorization_scopes AS scope
+            ON scope.authorization_id = authorization.id
+          WHERE authorization.id = NEW.authorization_id
+            AND authorization.state = 'active'
+            AND (
+              (authorization.scope_mode = 'exactObject' AND NEW.jobs = 1) OR
+              authorization.scope_mode = 'finiteWindow'
+            )
+            AND NEW.provider_sessions <= NEW.jobs * CASE authorization.workflow_stage
+              WHEN 'prReview' THEN 4
+              WHEN 'generatedPRReview' THEN 4
+              WHEN 'issueTriage' THEN 1
+              ELSE 15 END
+            AND (
+              authorization.workflow_stage = 'implementationExecute' OR
+              (NEW.approved_commands = 0 AND NEW.branch_creates = 0 AND
+                NEW.pull_request_creates = 0 AND NEW.git_sends = 0)
+            )
+            AND (
+              authorization.workflow_stage IN ('prReview', 'generatedPRReview',
+                'implementationPlan', 'implementationExecute') OR
+              NEW.git_remote_reads = 0
+            )
+            AND (
+              authorization.workflow_stage IN ('issueTriage', 'implementationPlan',
+                'implementationExecute') OR NEW.label_writes = 0
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout budget exceeds stage-derived authority');
+        END
+        """,
+        """
+        CREATE TABLE rollout_authorization_events (
+          id INTEGER PRIMARY KEY,
+          authorization_id TEXT NOT NULL
+            REFERENCES rollout_authorizations(id) ON DELETE RESTRICT,
+          event_key TEXT NOT NULL UNIQUE CHECK (length(event_key) BETWEEN 1 AND 256),
+          kind TEXT NOT NULL CHECK (kind IN (
+            'activated', 'recoveryActivated', 'jobBound', 'effectReserved',
+            'sendStarted', 'effectObserved', 'drainStarted', 'recoveryRequired',
+            'settled', 'revoked', 'expired', 'failed'
+          )),
+          from_state TEXT CHECK (from_state IS NULL OR from_state IN (
+            'active', 'draining', 'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
+          )),
+          to_state TEXT NOT NULL CHECK (to_state IN (
+            'active', 'draining', 'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
+          )),
+          reason_code TEXT NOT NULL CHECK (
+            length(reason_code) BETWEEN 1 AND 128 AND reason_code NOT GLOB '*[^A-Za-z0-9._:-]*'
+          ),
+          checkpoint_sha256 TEXT CHECK (
+            checkpoint_sha256 IS NULL OR
+            (length(checkpoint_sha256) = 64 AND checkpoint_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+        ) STRICT
+        """,
+        """
+        CREATE INDEX rollout_authorization_events_authorization_idx
+        ON rollout_authorization_events(authorization_id, id)
+        """,
+        """
+        CREATE TRIGGER rollout_authorization_events_state_evidence
+        BEFORE INSERT ON rollout_authorization_events
+        WHEN NOT EXISTS (
+          SELECT 1 FROM rollout_authorizations AS authorization
+          WHERE authorization.id = NEW.authorization_id
+            AND authorization.state = NEW.to_state
+            AND (
+              (NEW.kind = 'activated' AND NEW.from_state IS NULL AND
+                NEW.to_state = 'active') OR
+              (NEW.kind = 'recoveryActivated' AND
+                NEW.from_state = 'recoveryRequired' AND NEW.to_state = 'active') OR
+              (NEW.kind IN ('jobBound', 'effectReserved', 'sendStarted', 'effectObserved')
+                AND NEW.from_state = NEW.to_state) OR
+              (NEW.kind = 'drainStarted' AND NEW.from_state = 'active' AND
+                NEW.to_state = 'draining') OR
+              (NEW.kind = 'recoveryRequired' AND
+                NEW.from_state IN ('active', 'draining') AND
+                NEW.to_state = 'recoveryRequired') OR
+              (NEW.kind = 'settled' AND
+                NEW.from_state IN ('active', 'draining', 'recoveryRequired') AND
+                NEW.to_state = 'settled') OR
+              (NEW.kind = 'revoked' AND
+                NEW.from_state IN ('active', 'draining', 'recoveryRequired') AND
+                NEW.to_state = 'revoked') OR
+              (NEW.kind = 'expired' AND
+                NEW.from_state IN ('active', 'draining', 'recoveryRequired') AND
+                NEW.to_state = 'expired') OR
+              (NEW.kind = 'failed' AND
+                NEW.from_state IN ('active', 'draining', 'recoveryRequired') AND
+                NEW.to_state = 'failed')
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout event does not evidence current state');
+        END
+        """,
+        """
+        CREATE TABLE rollout_window_candidates (
+          authorization_id TEXT NOT NULL
+            REFERENCES rollout_authorizations(id) ON DELETE RESTRICT,
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          object_node_id TEXT NOT NULL CHECK (length(object_node_id) BETWEEN 1 AND 256),
+          object_number INTEGER NOT NULL CHECK (object_number > 0),
+          revision_key TEXT NOT NULL CHECK (length(revision_key) BETWEEN 1 AND 256),
+          canonical_input_sha256 TEXT NOT NULL CHECK (
+            length(canonical_input_sha256) = 64 AND
+            canonical_input_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          PRIMARY KEY(authorization_id, ordinal),
+          UNIQUE(authorization_id, object_node_id, revision_key)
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE TRIGGER rollout_window_candidates_exact_insert
+        BEFORE INSERT ON rollout_window_candidates
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM rollout_authorizations AS authorization
+          JOIN rollout_authorization_scopes AS scope
+            ON scope.authorization_id = authorization.id
+          WHERE authorization.id = NEW.authorization_id
+            AND authorization.state = 'active'
+            AND authorization.scope_mode = 'finiteWindow'
+            AND (
+              NEW.ordinal < scope.finite_candidate_count OR (
+                json_extract(
+                  scope.preview_json,
+                  '$.scope.finiteWindow.allowsFutureObjects'
+                ) = 1
+                AND NEW.object_number > json_extract(
+                  scope.preview_json,
+                  '$.scope.finiteWindow.observedObjectNumberUpperBound'
+                )
+                AND NEW.object_number <= json_extract(
+                  scope.preview_json,
+                  '$.scope.finiteWindow.maximumFutureObjectNumber'
+                )
+              )
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout candidate exceeds finite selector');
+        END
+        """,
+        """
+        CREATE TRIGGER jobs_rollout_generation_insert_authority
+        BEFORE INSERT ON jobs
+        WHEN NEW.rollout_generation = 1 AND NOT EXISTS (
+          SELECT 1
+          FROM rollout_authorizations AS authorization
+          JOIN rollout_authorization_scopes AS scope
+            ON scope.authorization_id = authorization.id
+          WHERE authorization.state = 'active'
+            AND authorization.repository_id = NEW.repository_id
+            AND (
+              (authorization.workflow_stage IN ('prReview', 'generatedPRReview') AND
+                NEW.kind = 'prReview') OR
+              (authorization.workflow_stage = 'issueTriage' AND NEW.kind = 'issueTriage') OR
+              (authorization.workflow_stage IN ('implementationPlan', 'implementationExecute')
+                AND NEW.kind IN ('issueImplementation', 'complexPlan'))
+            )
+            AND (
+              (authorization.scope_mode = 'exactObject' AND
+                scope.object_node_id = NEW.object_node_id AND
+                scope.revision_key = NEW.revision_key) OR
+              (authorization.scope_mode = 'finiteWindow' AND EXISTS (
+                SELECT 1 FROM rollout_window_candidates AS candidate
+                WHERE candidate.authorization_id = authorization.id
+                  AND candidate.object_node_id = NEW.object_node_id
+                  AND candidate.revision_key = NEW.revision_key
+              ))
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout-generation job insert lacks active authority');
+        END
+        """,
+        """
+        CREATE TRIGGER jobs_rollout_generation_update_authority
+        BEFORE UPDATE OF rollout_generation ON jobs
+        WHEN NEW.rollout_generation != OLD.rollout_generation AND (
+          OLD.rollout_generation != 0 OR NEW.rollout_generation != 1 OR
+          NEW.id != OLD.id OR NEW.repository_id != OLD.repository_id OR
+          NEW.kind != OLD.kind OR NEW.object_node_id != OLD.object_node_id OR
+          NEW.object_number IS NOT OLD.object_number OR NEW.revision_key != OLD.revision_key OR
+          NOT EXISTS (
+            SELECT 1
+            FROM rollout_authorizations AS authorization
+            JOIN rollout_authorization_scopes AS scope
+              ON scope.authorization_id = authorization.id
+            WHERE authorization.state = 'active'
+              AND authorization.repository_id = NEW.repository_id
+              AND (
+                (authorization.workflow_stage IN ('prReview', 'generatedPRReview') AND
+                  NEW.kind = 'prReview') OR
+                (authorization.workflow_stage = 'issueTriage' AND NEW.kind = 'issueTriage') OR
+                (authorization.workflow_stage IN ('implementationPlan', 'implementationExecute')
+                  AND NEW.kind IN ('issueImplementation', 'complexPlan'))
+              )
+              AND (
+                (authorization.scope_mode = 'exactObject' AND
+                  scope.object_node_id = NEW.object_node_id AND
+                  scope.revision_key = NEW.revision_key) OR
+                (authorization.scope_mode = 'finiteWindow' AND EXISTS (
+                  SELECT 1 FROM rollout_window_candidates AS candidate
+                  WHERE candidate.authorization_id = authorization.id
+                    AND candidate.object_node_id = NEW.object_node_id
+                    AND candidate.revision_key = NEW.revision_key
+                ))
+              )
+          )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout generation is monotonic and authority-bound');
+        END
+        """,
+        """
+        CREATE TABLE rollout_job_bindings (
+          authorization_id TEXT NOT NULL
+            REFERENCES rollout_authorizations(id) ON DELETE RESTRICT,
+          job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+          repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+          workflow_stage TEXT NOT NULL CHECK (workflow_stage IN (
+            'prReview', 'issueTriage', 'implementationPlan',
+            'implementationExecute', 'generatedPRReview'
+          )),
+          object_node_id TEXT NOT NULL CHECK (length(object_node_id) BETWEEN 1 AND 256),
+          revision_key TEXT NOT NULL CHECK (length(revision_key) BETWEEN 1 AND 256),
+          canonical_input_sha256 TEXT NOT NULL CHECK (
+            length(canonical_input_sha256) = 64 AND
+            canonical_input_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          current_step TEXT NOT NULL CHECK (
+            length(current_step) BETWEEN 1 AND 64 AND current_step NOT GLOB '*[^A-Za-z0-9._-]*'
+          ),
+          job_slot INTEGER NOT NULL CHECK (job_slot > 0),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          PRIMARY KEY(authorization_id, job_id),
+          UNIQUE(authorization_id, job_slot)
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE INDEX rollout_job_bindings_job_idx
+        ON rollout_job_bindings(job_id, authorization_id)
+        """,
+        """
+        CREATE TABLE rollout_job_input_snapshots (
+          authorization_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          canonical_input_sha256 TEXT NOT NULL CHECK (
+            length(canonical_input_sha256) = 64 AND
+            canonical_input_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          narrative_sha256 TEXT CHECK (
+            narrative_sha256 IS NULL OR
+            (length(narrative_sha256) = 64 AND narrative_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          base_sha TEXT NOT NULL CHECK (
+            length(base_sha) IN (40, 64) AND base_sha NOT GLOB '*[^0-9a-f]*'
+          ),
+          label_state_sha256 TEXT CHECK (
+            label_state_sha256 IS NULL OR
+            (length(label_state_sha256) = 64 AND label_state_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          plan_sha256 TEXT CHECK (
+            plan_sha256 IS NULL OR
+            (length(plan_sha256) = 64 AND plan_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          PRIMARY KEY(authorization_id, job_id, ordinal),
+          FOREIGN KEY(authorization_id, job_id)
+            REFERENCES rollout_job_bindings(authorization_id, job_id) ON DELETE RESTRICT
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE INDEX rollout_job_input_snapshots_latest_idx
+        ON rollout_job_input_snapshots(authorization_id, job_id, ordinal DESC)
+        """,
+        """
+        CREATE TABLE rollout_generated_job_links (
+          child_job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
+          parent_authorization_id TEXT NOT NULL,
+          parent_job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+          repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+          head_sha TEXT NOT NULL CHECK (
+            length(head_sha) IN (40, 64) AND head_sha NOT GLOB '*[^0-9a-f]*'
+          ),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          FOREIGN KEY(parent_authorization_id, parent_job_id)
+            REFERENCES rollout_job_bindings(authorization_id, job_id) ON DELETE RESTRICT,
+          UNIQUE(parent_authorization_id, parent_job_id, child_job_id)
+        ) STRICT, WITHOUT ROWID
+        """,
+        """
+        CREATE TRIGGER rollout_generated_job_links_exact_insert
+        BEFORE INSERT ON rollout_generated_job_links
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM rollout_authorizations AS authorization
+          JOIN rollout_job_bindings AS binding
+            ON binding.authorization_id = authorization.id
+           AND binding.job_id = NEW.parent_job_id
+          JOIN jobs AS parent ON parent.id = NEW.parent_job_id
+          JOIN jobs AS child ON child.id = NEW.child_job_id
+          JOIN app_settings AS settings ON settings.singleton = 1
+          WHERE authorization.id = NEW.parent_authorization_id
+            AND authorization.state = 'active'
+            AND authorization.workflow_stage = 'implementationExecute'
+            AND authorization.repository_id = NEW.repository_id
+            AND parent.repository_id = NEW.repository_id
+            AND parent.kind IN ('issueImplementation', 'complexPlan')
+            AND parent.state = 'reconciling'
+            AND parent.current_step_kind = 'qa'
+            AND child.repository_id = NEW.repository_id
+            AND child.kind = 'prReview'
+            AND child.revision_key = NEW.head_sha
+            AND child.rollout_generation = 0
+            AND NOT EXISTS (
+              SELECT 1 FROM rollout_job_bindings AS child_binding
+              WHERE child_binding.job_id = child.id
+            )
+            AND settings.paused = 0
+            AND settings.active_rollout_authorization_id = authorization.id
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'generated review child lacks quarantined parent authority');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_generated_job_links_immutable
+        BEFORE UPDATE ON rollout_generated_job_links
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout generated job links are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_generated_job_links_no_delete
+        BEFORE DELETE ON rollout_generated_job_links
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout generated job links are append-only');
+        END
+        """,
+        """
+        CREATE TABLE rollout_effect_reservations (
+          id TEXT PRIMARY KEY CHECK (
+            length(id) = 36 AND id = lower(id) AND
+            substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND
+            substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND
+            replace(id, '-', '') NOT GLOB '*[^0-9a-f]*'
+          ),
+          authorization_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN (
+            'githubRead', 'gitRemoteRead', 'providerSession', 'approvedCommand',
+            'markerBatch', 'labelWrite', 'branchCreate', 'pullRequestCreate',
+            'githubMutation'
+          )),
+          operation_sha256 TEXT NOT NULL CHECK (
+            length(operation_sha256) = 64 AND operation_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          target_sha256 TEXT NOT NULL CHECK (
+            length(target_sha256) = 64 AND target_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          attempt INTEGER NOT NULL CHECK (attempt > 0),
+          github_read_requests INTEGER NOT NULL DEFAULT 0 CHECK (github_read_requests >= 0),
+          github_read_pages INTEGER NOT NULL DEFAULT 0 CHECK (github_read_pages >= 0),
+          github_read_bytes INTEGER NOT NULL DEFAULT 0 CHECK (github_read_bytes >= 0),
+          git_remote_reads INTEGER NOT NULL DEFAULT 0 CHECK (git_remote_reads >= 0),
+          provider_sessions INTEGER NOT NULL DEFAULT 0 CHECK (provider_sessions >= 0),
+          approved_commands INTEGER NOT NULL DEFAULT 0 CHECK (approved_commands >= 0),
+          marker_parts INTEGER NOT NULL DEFAULT 0 CHECK (marker_parts >= 0),
+          label_writes INTEGER NOT NULL DEFAULT 0 CHECK (label_writes >= 0),
+          branch_creates INTEGER NOT NULL DEFAULT 0 CHECK (branch_creates >= 0),
+          pull_request_creates INTEGER NOT NULL DEFAULT 0 CHECK (pull_request_creates >= 0),
+          github_sends INTEGER NOT NULL DEFAULT 0 CHECK (github_sends >= 0),
+          git_sends INTEGER NOT NULL DEFAULT 0 CHECK (git_sends >= 0),
+          state TEXT NOT NULL CHECK (state IN (
+            'reserved', 'sendStarted', 'observationRequired', 'attributed', 'settled'
+          )),
+          mutation_intent_id TEXT REFERENCES mutation_intents(id) ON DELETE RESTRICT,
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+          FOREIGN KEY(authorization_id, job_id)
+            REFERENCES rollout_job_bindings(authorization_id, job_id) ON DELETE RESTRICT,
+          UNIQUE(authorization_id, kind, operation_sha256, ordinal, attempt),
+          CHECK (
+            github_read_requests + github_read_pages + github_read_bytes +
+            git_remote_reads + provider_sessions + approved_commands + marker_parts +
+            label_writes + branch_creates + pull_request_creates + github_sends + git_sends > 0
+          ),
+          CHECK (
+            (kind = 'githubRead' AND github_read_requests = 1 AND
+              github_read_pages = 1 AND github_read_bytes > 0 AND
+              git_remote_reads + provider_sessions + approved_commands + marker_parts +
+              label_writes + branch_creates + pull_request_creates + github_sends + git_sends = 0)
+            OR
+            (kind = 'gitRemoteRead' AND git_remote_reads = 1 AND
+              github_read_requests + github_read_pages + github_read_bytes +
+              provider_sessions + approved_commands + marker_parts + label_writes +
+              branch_creates + pull_request_creates + github_sends + git_sends = 0)
+            OR
+            (kind = 'providerSession' AND provider_sessions = 1 AND
+              github_read_requests + github_read_pages + github_read_bytes + git_remote_reads +
+              approved_commands + marker_parts + label_writes + branch_creates +
+              pull_request_creates + github_sends + git_sends = 0)
+            OR
+            (kind = 'approvedCommand' AND approved_commands = 1 AND
+              github_read_requests + github_read_pages + github_read_bytes + git_remote_reads +
+              provider_sessions + marker_parts + label_writes + branch_creates +
+              pull_request_creates + github_sends + git_sends = 0)
+            OR
+            (kind = 'markerBatch' AND marker_parts = 1 AND github_sends = 1 AND
+              github_read_requests + github_read_pages + github_read_bytes + git_remote_reads +
+              provider_sessions + approved_commands + label_writes + branch_creates +
+              pull_request_creates + git_sends = 0)
+            OR
+            (kind = 'labelWrite' AND label_writes = 1 AND github_sends = 1 AND
+              github_read_requests + github_read_pages + github_read_bytes + git_remote_reads +
+              provider_sessions + approved_commands + marker_parts + branch_creates +
+              pull_request_creates + git_sends = 0)
+            OR
+            (kind = 'branchCreate' AND branch_creates = 1 AND git_sends = 1 AND
+              github_read_requests + github_read_pages + github_read_bytes + git_remote_reads +
+              provider_sessions + approved_commands + marker_parts + label_writes +
+              pull_request_creates + github_sends = 0)
+            OR
+            (kind = 'pullRequestCreate' AND pull_request_creates = 1 AND
+              github_sends = 1 AND
+              github_read_requests + github_read_pages + github_read_bytes + git_remote_reads +
+              provider_sessions + approved_commands + marker_parts + label_writes +
+              branch_creates + git_sends = 0)
+            OR
+            (kind = 'githubMutation' AND github_sends = 1 AND
+              github_read_requests + github_read_pages + github_read_bytes + git_remote_reads +
+              provider_sessions + approved_commands + marker_parts + label_writes +
+              branch_creates + pull_request_creates + git_sends = 0)
+          )
+        ) STRICT
+        """,
+        """
+        CREATE TABLE rollout_local_effect_bindings (
+          reservation_id TEXT PRIMARY KEY
+            REFERENCES rollout_effect_reservations(id) ON DELETE RESTRICT,
+          kind TEXT NOT NULL CHECK (kind IN ('providerSession', 'approvedCommand')),
+          pi_run_id TEXT UNIQUE REFERENCES pi_runs(id) ON DELETE RESTRICT,
+          approved_command_run_id TEXT UNIQUE
+            REFERENCES approved_command_runs(id) ON DELETE RESTRICT,
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          CHECK (
+            (kind = 'providerSession' AND pi_run_id IS NOT NULL
+              AND approved_command_run_id IS NULL)
+            OR
+            (kind = 'approvedCommand' AND pi_run_id IS NULL
+              AND approved_command_run_id IS NOT NULL)
+          )
+        ) STRICT
+        """,
+        """
+        CREATE TRIGGER rollout_local_effect_bindings_insert_authority
+        BEFORE INSERT ON rollout_local_effect_bindings
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM rollout_effect_reservations AS reservation
+          WHERE reservation.id = NEW.reservation_id
+            AND reservation.kind = NEW.kind
+            AND reservation.state = 'reserved'
+            AND (
+              (NEW.kind = 'providerSession' AND EXISTS (
+                SELECT 1 FROM pi_runs AS run
+                WHERE run.id = NEW.pi_run_id
+                  AND run.job_id = reservation.job_id
+                  AND run.runtime_kind = 'herdr'
+              ))
+              OR
+              (NEW.kind = 'approvedCommand' AND EXISTS (
+                SELECT 1 FROM approved_command_runs AS run
+                WHERE run.id = NEW.approved_command_run_id
+                  AND run.job_id = reservation.job_id
+              ))
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout local effect binding lacks reserved authority');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_local_effect_bindings_immutable
+        BEFORE UPDATE ON rollout_local_effect_bindings
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout local effect bindings are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_local_effect_bindings_no_delete
+        BEFORE DELETE ON rollout_local_effect_bindings
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout local effect bindings are append-only');
+        END
+        """,
+        """
+        CREATE TABLE rollout_scope_read_reservations (
+          id TEXT PRIMARY KEY CHECK (
+            length(id) = 36 AND id = lower(id) AND
+            substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND
+            substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND
+            replace(id, '-', '') NOT GLOB '*[^0-9a-f]*'
+          ),
+          authorization_id TEXT NOT NULL
+            REFERENCES rollout_authorizations(id) ON DELETE RESTRICT,
+          operation_sha256 TEXT NOT NULL CHECK (
+            length(operation_sha256) = 64 AND operation_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          target_sha256 TEXT NOT NULL CHECK (
+            length(target_sha256) = 64 AND target_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          github_read_requests INTEGER NOT NULL CHECK (github_read_requests = 1),
+          github_read_pages INTEGER NOT NULL CHECK (github_read_pages = 1),
+          github_read_bytes INTEGER NOT NULL CHECK (github_read_bytes > 0),
+          state TEXT NOT NULL CHECK (state IN ('reserved', 'settled')),
+          evidence_sha256 TEXT CHECK (
+            evidence_sha256 IS NULL OR
+            (length(evidence_sha256) = 64 AND evidence_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+          UNIQUE(authorization_id, ordinal),
+          UNIQUE(authorization_id, operation_sha256, ordinal)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE rollout_readback_reservations (
+          id TEXT PRIMARY KEY CHECK (
+            length(id) = 36 AND id = lower(id) AND
+            substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND
+            substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND
+            replace(id, '-', '') NOT GLOB '*[^0-9a-f]*'
+          ),
+          authorization_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          source_reservation_id TEXT NOT NULL
+            REFERENCES rollout_effect_reservations(id) ON DELETE RESTRICT,
+          operation_sha256 TEXT NOT NULL CHECK (
+            length(operation_sha256) = 64 AND operation_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          target_sha256 TEXT NOT NULL CHECK (
+            length(target_sha256) = 64 AND target_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          github_read_requests INTEGER NOT NULL CHECK (github_read_requests = 1),
+          github_read_pages INTEGER NOT NULL CHECK (github_read_pages = 1),
+          github_read_bytes INTEGER NOT NULL CHECK (github_read_bytes > 0),
+          state TEXT NOT NULL CHECK (state IN ('reserved', 'settled')),
+          evidence_sha256 TEXT CHECK (
+            evidence_sha256 IS NULL OR
+            (length(evidence_sha256) = 64 AND evidence_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+          FOREIGN KEY(authorization_id, job_id)
+            REFERENCES rollout_job_bindings(authorization_id, job_id) ON DELETE RESTRICT,
+          UNIQUE(authorization_id, source_reservation_id, ordinal)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE rollout_git_readback_reservations (
+          id TEXT PRIMARY KEY CHECK (
+            length(id) = 36 AND id = lower(id) AND
+            substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-' AND
+            substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-' AND
+            replace(id, '-', '') NOT GLOB '*[^0-9a-f]*'
+          ),
+          authorization_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          source_reservation_id TEXT NOT NULL
+            REFERENCES rollout_effect_reservations(id) ON DELETE RESTRICT,
+          operation_sha256 TEXT NOT NULL CHECK (
+            length(operation_sha256) = 64 AND operation_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          target_sha256 TEXT NOT NULL CHECK (
+            length(target_sha256) = 64 AND target_sha256 NOT GLOB '*[^0-9a-f]*'
+          ),
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          git_remote_reads INTEGER NOT NULL CHECK (git_remote_reads = 1),
+          state TEXT NOT NULL CHECK (state IN ('reserved', 'settled')),
+          evidence_sha256 TEXT CHECK (
+            evidence_sha256 IS NULL OR
+            (length(evidence_sha256) = 64 AND evidence_sha256 NOT GLOB '*[^0-9a-f]*')
+          ),
+          created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+          updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+          FOREIGN KEY(authorization_id, job_id)
+            REFERENCES rollout_job_bindings(authorization_id, job_id) ON DELETE RESTRICT,
+          UNIQUE(authorization_id, source_reservation_id, ordinal)
+        ) STRICT
+        """,
+        "ALTER TABLE app_settings ADD COLUMN active_rollout_authorization_id TEXT REFERENCES rollout_authorizations(id) ON DELETE RESTRICT",
+        "UPDATE app_settings SET paused = 1, max_concurrency = 1, active_rollout_authorization_id = NULL, updated_at = unixepoch('subsec') WHERE singleton = 1",
+        """
+        CREATE TRIGGER rollout_authorizations_active_insert_only
+        BEFORE INSERT ON rollout_authorizations
+        WHEN NEW.state != 'active' OR NEW.terminal_reason IS NOT NULL OR NOT EXISTS (
+          SELECT 1 FROM app_settings
+          WHERE singleton = 1 AND paused = 1
+            AND active_rollout_authorization_id IS NULL AND max_concurrency = 1
+        )
+        -- Deliberately not conditioned on repository_leases being empty. A rollout
+        -- binds a job that is already in flight -- an implementationExecute lane is
+        -- only previewable once that job has produced its plan artifacts -- so the
+        -- bound job legitimately holds the lease at activation time.
+        --
+        -- What this means for a lease the new lane does not bind: it keeps the row.
+        -- Production writes repository_leases only to acquire (an initial INSERT or
+        -- a generation-changing reacquisition, both gated) or release (active = 0), and
+        -- nothing expires a lease by heartbeat age, so such a job runs to completion
+        -- and releases normally. It gains no rollout authority while it does: every
+        -- effect is bound through rollout_job_bindings, where it has no row.
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout authorization activation requires paused empty scope');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_authorizations_identity_immutable
+        BEFORE UPDATE ON rollout_authorizations
+        WHEN NEW.id != OLD.id OR NEW.preview_sha256 != OLD.preview_sha256 OR
+          NEW.policy_version != OLD.policy_version OR NEW.scope_mode != OLD.scope_mode OR
+          NEW.workflow_stage != OLD.workflow_stage OR NEW.repository_id != OLD.repository_id OR
+          NEW.activated_at_ms != OLD.activated_at_ms OR NEW.expires_at_ms != OLD.expires_at_ms
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout authorization identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_authorizations_state_transition
+        BEFORE UPDATE OF state ON rollout_authorizations
+        WHEN NEW.state = OLD.state OR NEW.updated_at_ms < OLD.updated_at_ms OR NOT (
+          (OLD.state = 'active' AND NEW.state IN (
+            'draining', 'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
+          )) OR
+          (OLD.state = 'draining' AND NEW.state IN (
+            'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
+          )) OR
+          (OLD.state = 'recoveryRequired' AND NEW.state IN (
+            'active', 'settled', 'revoked', 'expired', 'failed'
+          ))
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid rollout authorization state transition');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_authorizations_metadata_transition_only
+        BEFORE UPDATE OF updated_at_ms, terminal_reason ON rollout_authorizations
+        WHEN NEW.state = OLD.state
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout authorization metadata changes only with state');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_authorizations_open_lane_close_requires_pause
+        BEFORE UPDATE OF state ON rollout_authorizations
+        WHEN OLD.state IN ('active', 'draining', 'recoveryRequired')
+          AND NEW.state != OLD.state
+          AND EXISTS (
+            SELECT 1 FROM app_settings
+            WHERE singleton = 1 AND paused = 0
+              AND active_rollout_authorization_id = OLD.id
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout lane must pause before terminal transition');
+        END
+        """,
+        appendOnlyTrigger(table: "rollout_authorizations", operation: "DELETE"),
+        appendOnlyTrigger(table: "rollout_authorization_scopes", operation: "UPDATE"),
+        appendOnlyTrigger(table: "rollout_authorization_scopes", operation: "DELETE"),
+        appendOnlyTrigger(table: "rollout_authorization_budgets", operation: "UPDATE"),
+        appendOnlyTrigger(table: "rollout_authorization_budgets", operation: "DELETE"),
+        """
+        CREATE TRIGGER rollout_authorization_usage_exact_insert
+        BEFORE INSERT ON rollout_authorization_usage
+        WHEN NOT (
+          (
+            NEW.sequence = 0 AND NEW.source_kind = 'activation'
+            AND NEW.source_id = NEW.authorization_id
+            AND NEW.github_read_requests = 0
+            AND NEW.github_read_pages = 0
+            AND NEW.github_read_bytes = 0
+            AND NEW.git_remote_reads = 0
+            AND NEW.provider_sessions = 0
+            AND NEW.approved_commands = 0
+            AND NEW.marker_parts = 0
+            AND NEW.label_writes = 0
+            AND NEW.branch_creates = 0
+            AND NEW.pull_request_creates = 0
+            AND NEW.github_sends = 0
+            AND NEW.git_sends = 0
+            AND EXISTS (
+              SELECT 1 FROM rollout_authorizations
+              WHERE id = NEW.authorization_id AND activated_at_ms = NEW.created_at_ms
+            )
+          )
+          OR EXISTS (
+            SELECT 1 FROM rollout_authorization_usage AS previous
+            JOIN (
+            SELECT authorization_id, 'effect' AS source_kind, id AS source_id,
+              created_at_ms,
+              github_read_requests,
+              github_read_pages,
+              github_read_bytes,
+              git_remote_reads,
+              provider_sessions,
+              approved_commands,
+              marker_parts,
+              label_writes,
+              branch_creates,
+              pull_request_creates,
+              github_sends,
+              git_sends
+            FROM rollout_effect_reservations
+            UNION ALL
+            SELECT authorization_id, 'scopeRead' AS source_kind, id AS source_id,
+              created_at_ms,
+              github_read_requests,
+              github_read_pages,
+              github_read_bytes,
+              0 AS git_remote_reads,
+              0 AS provider_sessions,
+              0 AS approved_commands,
+              0 AS marker_parts,
+              0 AS label_writes,
+              0 AS branch_creates,
+              0 AS pull_request_creates,
+              0 AS github_sends,
+              0 AS git_sends
+            FROM rollout_scope_read_reservations
+            UNION ALL
+            SELECT authorization_id, 'githubReadback' AS source_kind, id AS source_id,
+              created_at_ms,
+              github_read_requests,
+              github_read_pages,
+              github_read_bytes,
+              0 AS git_remote_reads,
+              0 AS provider_sessions,
+              0 AS approved_commands,
+              0 AS marker_parts,
+              0 AS label_writes,
+              0 AS branch_creates,
+              0 AS pull_request_creates,
+              0 AS github_sends,
+              0 AS git_sends
+            FROM rollout_readback_reservations
+            UNION ALL
+            SELECT authorization_id, 'gitReadback' AS source_kind, id AS source_id,
+              created_at_ms,
+              0 AS github_read_requests,
+              0 AS github_read_pages,
+              0 AS github_read_bytes,
+              git_remote_reads,
+              0 AS provider_sessions,
+              0 AS approved_commands,
+              0 AS marker_parts,
+              0 AS label_writes,
+              0 AS branch_creates,
+              0 AS pull_request_creates,
+              0 AS github_sends,
+              0 AS git_sends
+            FROM rollout_git_readback_reservations
+            ) AS source ON source.authorization_id = previous.authorization_id
+            WHERE previous.authorization_id = NEW.authorization_id
+              AND previous.sequence = (
+                SELECT MAX(sequence) FROM rollout_authorization_usage
+                WHERE authorization_id = NEW.authorization_id
+              )
+              AND NEW.sequence = previous.sequence + 1
+              AND NEW.source_kind = source.source_kind AND NEW.source_id = source.source_id
+              AND NEW.created_at_ms = source.created_at_ms
+              AND NEW.github_read_requests = previous.github_read_requests + source.github_read_requests
+              AND NEW.github_read_pages = previous.github_read_pages + source.github_read_pages
+              AND NEW.github_read_bytes = previous.github_read_bytes + source.github_read_bytes
+              AND NEW.git_remote_reads = previous.git_remote_reads + source.git_remote_reads
+              AND NEW.provider_sessions = previous.provider_sessions + source.provider_sessions
+              AND NEW.approved_commands = previous.approved_commands + source.approved_commands
+              AND NEW.marker_parts = previous.marker_parts + source.marker_parts
+              AND NEW.label_writes = previous.label_writes + source.label_writes
+              AND NEW.branch_creates = previous.branch_creates + source.branch_creates
+              AND NEW.pull_request_creates = previous.pull_request_creates + source.pull_request_creates
+              AND NEW.github_sends = previous.github_sends + source.github_sends
+              AND NEW.git_sends = previous.git_sends + source.git_sends
+          )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout usage lacks an exact contiguous source');
+        END
+        """,
+        appendOnlyTrigger(table: "rollout_authorization_usage", operation: "UPDATE"),
+        appendOnlyTrigger(table: "rollout_authorization_usage", operation: "DELETE"),
+        appendOnlyTrigger(table: "rollout_authorization_events", operation: "UPDATE"),
+        appendOnlyTrigger(table: "rollout_authorization_events", operation: "DELETE"),
+        appendOnlyTrigger(table: "rollout_window_candidates", operation: "UPDATE"),
+        appendOnlyTrigger(table: "rollout_window_candidates", operation: "DELETE"),
+        appendOnlyTrigger(table: "rollout_job_bindings", operation: "UPDATE"),
+        appendOnlyTrigger(table: "rollout_job_bindings", operation: "DELETE"),
+        appendOnlyTrigger(table: "rollout_job_input_snapshots", operation: "UPDATE"),
+        appendOnlyTrigger(table: "rollout_job_input_snapshots", operation: "DELETE"),
+        """
+        CREATE TRIGGER rollout_effect_reservations_usage_append
+        AFTER INSERT ON rollout_effect_reservations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          )
+          SELECT NEW.authorization_id, usage.sequence + 1, 'effect', NEW.id,
+            usage.github_read_requests + NEW.github_read_requests,
+            usage.github_read_pages + NEW.github_read_pages,
+            usage.github_read_bytes + NEW.github_read_bytes,
+            usage.git_remote_reads + NEW.git_remote_reads,
+            usage.provider_sessions + NEW.provider_sessions,
+            usage.approved_commands + NEW.approved_commands,
+            usage.marker_parts + NEW.marker_parts,
+            usage.label_writes + NEW.label_writes,
+            usage.branch_creates + NEW.branch_creates,
+            usage.pull_request_creates + NEW.pull_request_creates,
+            usage.github_sends + NEW.github_sends,
+            usage.git_sends + NEW.git_sends,
+            NEW.created_at_ms
+          FROM rollout_authorization_usage AS usage
+          WHERE usage.authorization_id = NEW.authorization_id
+          ORDER BY usage.sequence DESC LIMIT 1;
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_scope_read_reservations_usage_append
+        AFTER INSERT ON rollout_scope_read_reservations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          )
+          SELECT NEW.authorization_id, usage.sequence + 1, 'scopeRead', NEW.id,
+            usage.github_read_requests + NEW.github_read_requests,
+            usage.github_read_pages + NEW.github_read_pages,
+            usage.github_read_bytes + NEW.github_read_bytes,
+            usage.git_remote_reads, usage.provider_sessions, usage.approved_commands,
+            usage.marker_parts, usage.label_writes, usage.branch_creates,
+            usage.pull_request_creates, usage.github_sends, usage.git_sends,
+            NEW.created_at_ms
+          FROM rollout_authorization_usage AS usage
+          WHERE usage.authorization_id = NEW.authorization_id
+          ORDER BY usage.sequence DESC LIMIT 1;
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_readback_reservations_usage_append
+        AFTER INSERT ON rollout_readback_reservations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          )
+          SELECT NEW.authorization_id, usage.sequence + 1, 'githubReadback', NEW.id,
+            usage.github_read_requests + NEW.github_read_requests,
+            usage.github_read_pages + NEW.github_read_pages,
+            usage.github_read_bytes + NEW.github_read_bytes,
+            usage.git_remote_reads, usage.provider_sessions, usage.approved_commands,
+            usage.marker_parts, usage.label_writes, usage.branch_creates,
+            usage.pull_request_creates, usage.github_sends, usage.git_sends,
+            NEW.created_at_ms
+          FROM rollout_authorization_usage AS usage
+          WHERE usage.authorization_id = NEW.authorization_id
+          ORDER BY usage.sequence DESC LIMIT 1;
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_git_readback_reservations_usage_append
+        AFTER INSERT ON rollout_git_readback_reservations
+        BEGIN
+          INSERT INTO rollout_authorization_usage(
+            authorization_id, sequence, source_kind, source_id,
+            github_read_requests, github_read_pages, github_read_bytes,
+            git_remote_reads, provider_sessions, approved_commands, marker_parts,
+            label_writes, branch_creates, pull_request_creates, github_sends, git_sends,
+            created_at_ms
+          )
+          SELECT NEW.authorization_id, usage.sequence + 1, 'gitReadback', NEW.id,
+            usage.github_read_requests, usage.github_read_pages, usage.github_read_bytes,
+            usage.git_remote_reads + NEW.git_remote_reads,
+            usage.provider_sessions, usage.approved_commands, usage.marker_parts,
+            usage.label_writes, usage.branch_creates, usage.pull_request_creates,
+            usage.github_sends, usage.git_sends, NEW.created_at_ms
+          FROM rollout_authorization_usage AS usage
+          WHERE usage.authorization_id = NEW.authorization_id
+          ORDER BY usage.sequence DESC LIMIT 1;
+        END
+        """,
+        """
+        CREATE TRIGGER repository_leases_rollout_authority_insert
+        BEFORE INSERT ON repository_leases
+        WHEN NEW.active = 1
+          -- The gate arms on either half, and needs both to stay honest.
+          --
+          -- A generation-1 job is one an authorization promoted, so a lease on it
+          -- always needs a matching active authorization, including after its lane
+          -- closed. Arming on lane state alone would leave that job ungated for
+          -- ever once the lane settled.
+          --
+          -- An open lane on THIS repository additionally gates unbound generation-0
+          -- jobs, so a rollout in flight cannot be joined by ordinary work. Arming
+          -- on generation alone would let that through.
+          --
+          -- Neither half may become a global EXISTS over rollout_authorizations:
+          -- the table is append-only, so that would make the first authorization
+          -- ever created a permanent bar on every repository.
+          AND (
+            EXISTS (
+              SELECT 1 FROM jobs AS leased_job
+              WHERE leased_job.id = NEW.job_id AND leased_job.rollout_generation = 1
+            )
+            OR EXISTS (
+              SELECT 1 FROM rollout_authorizations AS open_authorization
+              WHERE open_authorization.repository_id = NEW.repository_id
+                AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jobs AS job
+            JOIN rollout_job_bindings AS binding ON binding.job_id = job.id
+            JOIN rollout_authorizations AS authorization
+              ON authorization.id = binding.authorization_id
+            JOIN repositories AS repository ON repository.id = job.repository_id
+            JOIN app_settings AS settings ON settings.singleton = 1
+            WHERE job.id = NEW.job_id
+              AND job.repository_id = NEW.repository_id
+              AND binding.repository_id = NEW.repository_id
+              AND authorization.repository_id = NEW.repository_id
+              AND authorization.workflow_stage = binding.workflow_stage
+              AND authorization.state = 'active'
+              AND authorization.expires_at_ms > CAST(NEW.heartbeat * 1000 AS INTEGER)
+              AND job.rollout_generation = 1
+              AND job.state NOT IN ('succeeded', 'blocked')
+              AND NOT (
+                binding.workflow_stage = 'implementationPlan'
+                AND job.current_step_kind = 'orchestrate'
+              )
+              AND NOT (
+                binding.workflow_stage = 'implementationExecute'
+                AND job.current_step_kind = 'replan'
+              )
+              AND repository.enabled = 1
+              AND (
+                (binding.workflow_stage IN ('prReview', 'generatedPRReview')
+                  AND job.kind = 'prReview' AND repository.review_enabled = 1) OR
+                (binding.workflow_stage = 'issueTriage'
+                  AND job.kind = 'issueTriage' AND repository.triage_enabled = 1) OR
+                (binding.workflow_stage IN ('implementationPlan', 'implementationExecute')
+                  AND job.kind IN ('issueImplementation', 'complexPlan')
+                  AND repository.implementation_enabled = 1)
+              )
+              AND settings.paused = 0
+              AND settings.max_concurrency = 1
+              AND settings.active_rollout_authorization_id = authorization.id
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'active repository lease lacks rollout authority');
+        END
+        """,
+        """
+        CREATE TRIGGER repository_leases_rollout_authority_update
+        BEFORE UPDATE OF repository_id, job_id, generation, heartbeat, active
+        ON repository_leases
+        WHEN NEW.active = 1
+          -- A heartbeat continues a lease this repository already holds: same row,
+          -- same job, same fencing generation, already active. It grants no
+          -- admission, so pause and drain must not abort it -- pausing is the
+          -- mandatory first step of closing a lane, and a drain that could not
+          -- heartbeat would abort itself.
+          --
+          -- Scope, stated honestly: no production code emits this shape today.
+          -- DurableJobStore.heartbeat is public API with no caller in Sources, and
+          -- every production write to repository_leases is either acquisition (an
+          -- initial INSERT or a generation-changing reacquisition, both gated) or
+          -- release (active = 0, excluded by WHEN NEW.active = 1). This exemption
+          -- keeps the store's public contract coherent and bounds a future
+          -- heartbeat writer; it is not an
+          -- operative bound on a live lease, and nothing here expires one.
+          --
+          -- Given that it exists, it is bounded by an open lane that binds THIS job,
+          -- so it cannot become a way for ordinary generation-0 work to inherit a
+          -- rollout it was never part of. It checks open-lane state, not expiry;
+          -- a held lease may continue past expiry until the lane closes.
+          --
+          -- Reactivation (OLD.active = 0), a generation bump, and any identity
+          -- change are admission, not continuation, and stay gated.
+          AND NOT (
+            OLD.active = 1
+            AND NEW.repository_id = OLD.repository_id
+            AND NEW.job_id = OLD.job_id
+            AND NEW.generation = OLD.generation
+            AND EXISTS (
+              SELECT 1
+              FROM rollout_authorizations AS open_authorization
+              JOIN rollout_job_bindings AS open_binding
+                ON open_binding.authorization_id = open_authorization.id
+              WHERE open_authorization.repository_id = NEW.repository_id
+                AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+                AND open_binding.job_id = NEW.job_id
+            )
+          )
+          -- The gate arms on either half, and needs both to stay honest.
+          --
+          -- A generation-1 job is one an authorization promoted, so a lease on it
+          -- always needs a matching active authorization, including after its lane
+          -- closed. Arming on lane state alone would leave that job ungated for
+          -- ever once the lane settled.
+          --
+          -- An open lane on THIS repository additionally gates unbound generation-0
+          -- jobs, so a rollout in flight cannot be joined by ordinary work. Arming
+          -- on generation alone would let that through.
+          --
+          -- Neither half may become a global EXISTS over rollout_authorizations:
+          -- the table is append-only, so that would make the first authorization
+          -- ever created a permanent bar on every repository.
+          AND (
+            EXISTS (
+              SELECT 1 FROM jobs AS leased_job
+              WHERE leased_job.id = NEW.job_id AND leased_job.rollout_generation = 1
+            )
+            OR EXISTS (
+              SELECT 1 FROM rollout_authorizations AS open_authorization
+              WHERE open_authorization.repository_id = NEW.repository_id
+                AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jobs AS job
+            JOIN rollout_job_bindings AS binding ON binding.job_id = job.id
+            JOIN rollout_authorizations AS authorization
+              ON authorization.id = binding.authorization_id
+            JOIN repositories AS repository ON repository.id = job.repository_id
+            JOIN app_settings AS settings ON settings.singleton = 1
+            WHERE job.id = NEW.job_id
+              AND job.repository_id = NEW.repository_id
+              AND binding.repository_id = NEW.repository_id
+              AND authorization.repository_id = NEW.repository_id
+              AND authorization.workflow_stage = binding.workflow_stage
+              AND authorization.state = 'active'
+              AND authorization.expires_at_ms > CAST(NEW.heartbeat * 1000 AS INTEGER)
+              AND job.rollout_generation = 1
+              AND job.state NOT IN ('succeeded', 'blocked')
+              AND NOT (
+                binding.workflow_stage = 'implementationPlan'
+                AND job.current_step_kind = 'orchestrate'
+              )
+              AND NOT (
+                binding.workflow_stage = 'implementationExecute'
+                AND job.current_step_kind = 'replan'
+              )
+              AND repository.enabled = 1
+              AND (
+                (binding.workflow_stage IN ('prReview', 'generatedPRReview')
+                  AND job.kind = 'prReview' AND repository.review_enabled = 1) OR
+                (binding.workflow_stage = 'issueTriage'
+                  AND job.kind = 'issueTriage' AND repository.triage_enabled = 1) OR
+                (binding.workflow_stage IN ('implementationPlan', 'implementationExecute')
+                  AND job.kind IN ('issueImplementation', 'complexPlan')
+                  AND repository.implementation_enabled = 1)
+              )
+              AND settings.paused = 0
+              AND settings.max_concurrency = 1
+              AND settings.active_rollout_authorization_id = authorization.id
+          )
+        BEGIN
+          SELECT RAISE(ABORT, 'active repository lease lacks rollout authority');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_job_bindings_exact_authority
+        BEFORE INSERT ON rollout_job_bindings
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM rollout_authorizations AS authorization
+          JOIN rollout_authorization_scopes AS scope
+            ON scope.authorization_id = authorization.id
+          JOIN rollout_authorization_budgets AS budget
+            ON budget.authorization_id = authorization.id
+          JOIN jobs AS job ON job.id = NEW.job_id
+          WHERE authorization.id = NEW.authorization_id
+            AND authorization.state = 'active'
+            AND authorization.repository_id = NEW.repository_id
+            AND authorization.workflow_stage = NEW.workflow_stage
+            AND job.rollout_generation = 1
+            AND job.repository_id = NEW.repository_id
+            AND job.object_node_id = NEW.object_node_id
+            AND job.revision_key = NEW.revision_key
+            AND job.current_step_kind = NEW.current_step
+            AND (
+              (NEW.workflow_stage IN ('prReview', 'generatedPRReview') AND job.kind = 'prReview') OR
+              (NEW.workflow_stage = 'issueTriage' AND job.kind = 'issueTriage') OR
+              (NEW.workflow_stage IN ('implementationPlan', 'implementationExecute') AND
+                job.kind IN ('issueImplementation', 'complexPlan'))
+            )
+            AND NEW.job_slot <= budget.jobs
+            AND (
+              (authorization.scope_mode = 'exactObject' AND
+                scope.object_node_id = NEW.object_node_id AND
+                scope.revision_key = NEW.revision_key AND
+                scope.canonical_input_sha256 = NEW.canonical_input_sha256) OR
+              (authorization.scope_mode = 'finiteWindow' AND EXISTS (
+                SELECT 1 FROM rollout_window_candidates AS candidate
+                WHERE candidate.authorization_id = authorization.id
+                  AND candidate.object_node_id = NEW.object_node_id
+                  AND candidate.revision_key = NEW.revision_key
+                  AND candidate.canonical_input_sha256 = NEW.canonical_input_sha256
+              ))
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout job binding lacks exact active authority');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_job_input_snapshots_exact_insert
+        BEFORE INSERT ON rollout_job_input_snapshots
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM rollout_job_bindings AS binding
+          JOIN rollout_authorizations AS authorization
+            ON authorization.id = binding.authorization_id
+          JOIN rollout_authorization_scopes AS scope
+            ON scope.authorization_id = authorization.id
+          JOIN app_settings AS settings ON settings.singleton = 1
+          WHERE binding.authorization_id = NEW.authorization_id
+            AND binding.job_id = NEW.job_id
+            AND authorization.state = 'active'
+            AND authorization.expires_at_ms > NEW.created_at_ms
+            AND settings.paused = 0
+            AND settings.active_rollout_authorization_id = authorization.id
+            AND NEW.ordinal = (
+              SELECT COALESCE(MAX(existing.ordinal), -1) + 1
+              FROM rollout_job_input_snapshots AS existing
+              WHERE existing.authorization_id = NEW.authorization_id
+                AND existing.job_id = NEW.job_id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM rollout_effect_reservations AS effect
+              WHERE effect.authorization_id = NEW.authorization_id
+                AND effect.job_id = NEW.job_id
+                AND effect.kind NOT IN ('githubRead', 'gitRemoteRead')
+            )
+            AND (
+              (authorization.scope_mode = 'exactObject'
+                AND NEW.canonical_input_sha256 = scope.canonical_input_sha256
+                AND NEW.narrative_sha256 IS scope.narrative_sha256
+                AND NEW.base_sha = scope.base_sha
+                AND NEW.label_state_sha256 IS scope.label_state_sha256
+                AND NEW.plan_sha256 IS scope.plan_sha256)
+              OR
+              (authorization.scope_mode = 'finiteWindow' AND (
+                (authorization.workflow_stage IN ('prReview', 'generatedPRReview')
+                  AND NEW.narrative_sha256 IS NOT NULL
+                  AND NEW.label_state_sha256 IS NULL AND NEW.plan_sha256 IS NULL)
+                OR
+                (authorization.workflow_stage IN ('issueTriage', 'implementationPlan')
+                  AND NEW.narrative_sha256 IS NULL
+                  AND NEW.label_state_sha256 IS NOT NULL AND NEW.plan_sha256 IS NULL)
+              ))
+            )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout job snapshot lacks exact active authority');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_effect_reservations_identity_immutable
+        BEFORE UPDATE ON rollout_effect_reservations
+        WHEN NEW.id != OLD.id OR NEW.authorization_id != OLD.authorization_id OR
+          NEW.job_id != OLD.job_id OR NEW.kind != OLD.kind OR
+          NEW.operation_sha256 != OLD.operation_sha256 OR NEW.target_sha256 != OLD.target_sha256 OR
+          NEW.ordinal != OLD.ordinal OR NEW.attempt != OLD.attempt OR
+          NEW.github_read_requests != OLD.github_read_requests OR
+          NEW.github_read_pages != OLD.github_read_pages OR
+          NEW.github_read_bytes != OLD.github_read_bytes OR
+          NEW.git_remote_reads != OLD.git_remote_reads OR
+          NEW.provider_sessions != OLD.provider_sessions OR
+          NEW.approved_commands != OLD.approved_commands OR
+          NEW.marker_parts != OLD.marker_parts OR NEW.label_writes != OLD.label_writes OR
+          NEW.branch_creates != OLD.branch_creates OR
+          NEW.pull_request_creates != OLD.pull_request_creates OR
+          NEW.github_sends != OLD.github_sends OR NEW.git_sends != OLD.git_sends OR
+          NEW.mutation_intent_id IS NOT OLD.mutation_intent_id OR
+          NEW.created_at_ms != OLD.created_at_ms
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout effect reservation identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_effect_reservations_insert_authority
+        BEFORE INSERT ON rollout_effect_reservations
+        WHEN NEW.state != 'reserved' OR (
+          NEW.github_sends + NEW.git_sends = 0 AND NEW.mutation_intent_id IS NOT NULL
+        ) OR (
+          NEW.github_sends + NEW.git_sends > 0 AND (
+            NEW.mutation_intent_id IS NULL OR NOT EXISTS (
+              SELECT 1 FROM mutation_intents AS intent
+              WHERE intent.id = NEW.mutation_intent_id AND intent.job_id = NEW.job_id
+                AND (
+                  intent.state = 'prepared' OR (
+                    intent.state = 'retryAllowed'
+                    AND NEW.attempt = intent.send_epoch + 1
+                    AND EXISTS (
+                      SELECT 1 FROM rollout_effect_reservations AS prior
+                      WHERE prior.authorization_id = NEW.authorization_id
+                        AND prior.job_id = NEW.job_id
+                        AND prior.mutation_intent_id = NEW.mutation_intent_id
+                        AND prior.attempt = intent.send_epoch
+                        AND prior.state = 'settled'
+                    )
+                  )
+                )
+            )
+          )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout reservation lacks exact prepared effect authority');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_effect_reservations_state_transition
+        BEFORE UPDATE OF state ON rollout_effect_reservations
+        WHEN NEW.state = OLD.state OR NOT (
+          (OLD.state = 'reserved' AND NEW.state IN ('sendStarted', 'settled')) OR
+          (OLD.state = 'sendStarted' AND NEW.state IN (
+            'observationRequired', 'attributed', 'settled'
+          )) OR
+          (OLD.state = 'observationRequired' AND NEW.state IN ('attributed', 'settled')) OR
+          (OLD.state = 'attributed' AND NEW.state = 'settled')
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid rollout effect reservation state transition');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_effect_reservations_updated_at_monotonic
+        BEFORE UPDATE ON rollout_effect_reservations
+        WHEN NEW.updated_at_ms < OLD.updated_at_ms OR (
+          NEW.updated_at_ms != OLD.updated_at_ms AND NEW.state = OLD.state
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout effect timestamp changes only with monotonic state');
+        END
+        """,
+        appendOnlyTrigger(table: "rollout_effect_reservations", operation: "DELETE"),
+        """
+        CREATE TRIGGER rollout_scope_read_reservations_identity_immutable
+        BEFORE UPDATE ON rollout_scope_read_reservations
+        WHEN NEW.id != OLD.id OR NEW.authorization_id != OLD.authorization_id OR
+          NEW.operation_sha256 != OLD.operation_sha256 OR
+          NEW.target_sha256 != OLD.target_sha256 OR NEW.ordinal != OLD.ordinal OR
+          NEW.github_read_requests != OLD.github_read_requests OR
+          NEW.github_read_pages != OLD.github_read_pages OR
+          NEW.github_read_bytes != OLD.github_read_bytes OR
+          NEW.created_at_ms != OLD.created_at_ms
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout scope read identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_scope_read_reservations_state_transition
+        BEFORE UPDATE OF state, evidence_sha256 ON rollout_scope_read_reservations
+        WHEN OLD.state != 'reserved' OR NEW.state != 'settled' OR
+          NEW.evidence_sha256 IS NULL
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid rollout scope read settlement');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_scope_read_reservations_updated_at_monotonic
+        BEFORE UPDATE ON rollout_scope_read_reservations
+        WHEN NEW.updated_at_ms < OLD.updated_at_ms OR (
+          NEW.updated_at_ms != OLD.updated_at_ms AND NEW.state = OLD.state
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout scope read timestamp changes only with monotonic state');
+        END
+        """,
+        appendOnlyTrigger(table: "rollout_scope_read_reservations", operation: "DELETE"),
+        """
+        CREATE TRIGGER rollout_scope_read_reservations_active_finite_scope
+        BEFORE INSERT ON rollout_scope_read_reservations
+        WHEN NEW.state != 'reserved' OR NEW.evidence_sha256 IS NOT NULL OR NOT EXISTS (
+          SELECT 1
+          FROM rollout_authorizations AS authorization
+          JOIN rollout_authorization_budgets AS budget
+            ON budget.authorization_id = authorization.id
+          JOIN rollout_authorization_usage AS usage
+            ON usage.authorization_id = authorization.id
+            AND usage.sequence = (
+              SELECT latest.sequence
+              FROM rollout_authorization_usage AS latest
+              WHERE latest.authorization_id = authorization.id
+              ORDER BY latest.sequence DESC LIMIT 1
+            )
+          JOIN app_settings AS settings ON settings.singleton = 1
+          WHERE authorization.id = NEW.authorization_id
+            AND authorization.state = 'active'
+            AND authorization.scope_mode = 'finiteWindow'
+            AND authorization.expires_at_ms > NEW.created_at_ms
+            AND settings.paused = 0
+            AND settings.active_rollout_authorization_id = authorization.id
+            AND usage.github_read_requests + NEW.github_read_requests
+              <= budget.github_read_requests
+            AND usage.github_read_pages + NEW.github_read_pages
+              <= budget.github_read_pages
+            AND usage.github_read_bytes + NEW.github_read_bytes
+              <= budget.github_read_bytes
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout scope read exceeds active finite budget');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_readback_reservations_identity_immutable
+        BEFORE UPDATE ON rollout_readback_reservations
+        WHEN NEW.id != OLD.id OR NEW.authorization_id != OLD.authorization_id OR
+          NEW.job_id != OLD.job_id OR
+          NEW.source_reservation_id != OLD.source_reservation_id OR
+          NEW.operation_sha256 != OLD.operation_sha256 OR
+          NEW.target_sha256 != OLD.target_sha256 OR NEW.ordinal != OLD.ordinal OR
+          NEW.github_read_requests != OLD.github_read_requests OR
+          NEW.github_read_pages != OLD.github_read_pages OR
+          NEW.github_read_bytes != OLD.github_read_bytes OR
+          NEW.created_at_ms != OLD.created_at_ms
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout readback identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_readback_reservations_state_transition
+        BEFORE UPDATE OF state, evidence_sha256 ON rollout_readback_reservations
+        WHEN OLD.state != 'reserved' OR NEW.state != 'settled' OR
+          NEW.evidence_sha256 IS NULL
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid rollout readback settlement');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_readback_reservations_updated_at_monotonic
+        BEFORE UPDATE ON rollout_readback_reservations
+        WHEN NEW.updated_at_ms < OLD.updated_at_ms OR (
+          NEW.updated_at_ms != OLD.updated_at_ms AND NEW.state = OLD.state
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout readback timestamp changes only with monotonic state');
+        END
+        """,
+        appendOnlyTrigger(table: "rollout_readback_reservations", operation: "DELETE"),
+        """
+        CREATE TRIGGER rollout_readback_reservations_exact_started_effect
+        BEFORE INSERT ON rollout_readback_reservations
+        WHEN NEW.state != 'reserved' OR NEW.evidence_sha256 IS NOT NULL OR NOT EXISTS (
+          SELECT 1
+          FROM rollout_effect_reservations AS source
+          JOIN rollout_authorizations AS authorization
+            ON authorization.id = source.authorization_id
+          JOIN rollout_authorization_budgets AS budget
+            ON budget.authorization_id = authorization.id
+          JOIN rollout_authorization_usage AS usage
+            ON usage.authorization_id = authorization.id
+            AND usage.sequence = (
+              SELECT latest.sequence
+              FROM rollout_authorization_usage AS latest
+              WHERE latest.authorization_id = authorization.id
+              ORDER BY latest.sequence DESC LIMIT 1
+            )
+          JOIN app_settings AS settings ON settings.singleton = 1
+          WHERE source.id = NEW.source_reservation_id
+            AND source.authorization_id = NEW.authorization_id
+            AND source.job_id = NEW.job_id
+            AND source.mutation_intent_id IS NOT NULL
+            AND source.state IN ('sendStarted', 'observationRequired')
+            AND (
+              (authorization.state = 'active' AND settings.paused = 0 AND
+                settings.active_rollout_authorization_id = authorization.id) OR
+              (authorization.state IN (
+                'draining', 'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
+              ) AND settings.paused = 1)
+            )
+            AND usage.github_read_requests + NEW.github_read_requests
+              <= budget.github_read_requests
+            AND usage.github_read_pages + NEW.github_read_pages
+              <= budget.github_read_pages
+            AND usage.github_read_bytes + NEW.github_read_bytes
+              <= budget.github_read_bytes
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout readback lacks an exact started effect or budget');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_git_readback_reservations_identity_immutable
+        BEFORE UPDATE ON rollout_git_readback_reservations
+        WHEN NEW.id != OLD.id OR NEW.authorization_id != OLD.authorization_id OR
+          NEW.job_id != OLD.job_id OR
+          NEW.source_reservation_id != OLD.source_reservation_id OR
+          NEW.operation_sha256 != OLD.operation_sha256 OR
+          NEW.target_sha256 != OLD.target_sha256 OR NEW.ordinal != OLD.ordinal OR
+          NEW.git_remote_reads != OLD.git_remote_reads OR
+          NEW.created_at_ms != OLD.created_at_ms
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout Git readback identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_git_readback_reservations_state_transition
+        BEFORE UPDATE OF state, evidence_sha256 ON rollout_git_readback_reservations
+        WHEN OLD.state != 'reserved' OR NEW.state != 'settled' OR
+          NEW.evidence_sha256 IS NULL
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid rollout Git readback settlement');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_git_readback_reservations_updated_at_monotonic
+        BEFORE UPDATE ON rollout_git_readback_reservations
+        WHEN NEW.updated_at_ms < OLD.updated_at_ms OR (
+          NEW.updated_at_ms != OLD.updated_at_ms AND NEW.state = OLD.state
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout Git readback timestamp changes only with monotonic state');
+        END
+        """,
+        appendOnlyTrigger(table: "rollout_git_readback_reservations", operation: "DELETE"),
+        """
+        CREATE TRIGGER rollout_git_readback_reservations_exact_started_effect
+        BEFORE INSERT ON rollout_git_readback_reservations
+        WHEN NEW.state != 'reserved' OR NEW.evidence_sha256 IS NOT NULL OR NOT EXISTS (
+          SELECT 1
+          FROM rollout_effect_reservations AS source
+          JOIN rollout_authorizations AS authorization
+            ON authorization.id = source.authorization_id
+          JOIN rollout_authorization_budgets AS budget
+            ON budget.authorization_id = authorization.id
+          JOIN rollout_authorization_usage AS usage
+            ON usage.authorization_id = authorization.id
+            AND usage.sequence = (
+              SELECT latest.sequence
+              FROM rollout_authorization_usage AS latest
+              WHERE latest.authorization_id = authorization.id
+              ORDER BY latest.sequence DESC LIMIT 1
+            )
+          JOIN app_settings AS settings ON settings.singleton = 1
+          WHERE source.id = NEW.source_reservation_id
+            AND source.authorization_id = NEW.authorization_id
+            AND source.job_id = NEW.job_id
+            AND source.kind = 'branchCreate'
+            AND source.mutation_intent_id IS NOT NULL
+            AND source.state IN ('sendStarted', 'observationRequired')
+            AND (
+              (authorization.state = 'active' AND settings.paused = 0 AND
+                settings.active_rollout_authorization_id = authorization.id) OR
+              (authorization.state IN (
+                'draining', 'recoveryRequired', 'settled', 'revoked', 'expired', 'failed'
+              ) AND settings.paused = 1)
+            )
+            AND usage.git_remote_reads + NEW.git_remote_reads
+              <= budget.git_remote_reads
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout Git readback lacks an exact started effect or budget');
+        END
+        """,
+        """
+        CREATE TRIGGER rollout_effect_reservations_cap_and_stage
+        BEFORE INSERT ON rollout_effect_reservations
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM rollout_authorizations AS authorization
+          JOIN rollout_authorization_budgets AS budget
+            ON budget.authorization_id = authorization.id
+          JOIN rollout_authorization_usage AS usage
+            ON usage.authorization_id = authorization.id
+            AND usage.sequence = (
+              SELECT latest.sequence
+              FROM rollout_authorization_usage AS latest
+              WHERE latest.authorization_id = authorization.id
+              ORDER BY latest.sequence DESC LIMIT 1
+            )
+          JOIN app_settings AS settings ON settings.singleton = 1
+          WHERE authorization.id = NEW.authorization_id
+            AND authorization.state = 'active'
+            AND authorization.expires_at_ms > NEW.created_at_ms
+            AND settings.paused = 0
+            AND settings.active_rollout_authorization_id = authorization.id
+            AND (
+              (authorization.workflow_stage IN ('prReview', 'generatedPRReview') AND
+                NEW.kind IN ('githubRead', 'gitRemoteRead', 'providerSession', 'markerBatch')) OR
+              (authorization.workflow_stage = 'issueTriage' AND
+                NEW.kind IN ('githubRead', 'providerSession', 'markerBatch', 'labelWrite')) OR
+              (authorization.workflow_stage = 'implementationPlan' AND
+                NEW.kind IN (
+                  'githubRead', 'gitRemoteRead', 'providerSession', 'markerBatch', 'labelWrite'
+                )) OR
+              (authorization.workflow_stage = 'implementationExecute' AND
+                NEW.kind IN (
+                  'githubRead', 'gitRemoteRead', 'providerSession', 'approvedCommand',
+                  'markerBatch', 'labelWrite', 'branchCreate', 'pullRequestCreate',
+                  'githubMutation'
+                ))
+            )
+            AND usage.github_read_requests + NEW.github_read_requests
+              <= budget.github_read_requests
+            AND usage.github_read_pages + NEW.github_read_pages
+              <= budget.github_read_pages
+            AND usage.github_read_bytes + NEW.github_read_bytes
+              <= budget.github_read_bytes
+            AND usage.git_remote_reads + NEW.git_remote_reads
+              <= budget.git_remote_reads
+            AND usage.provider_sessions + NEW.provider_sessions
+              <= budget.provider_sessions
+            AND usage.approved_commands + NEW.approved_commands
+              <= budget.approved_commands
+            AND usage.marker_parts + NEW.marker_parts <= budget.marker_parts
+            AND usage.label_writes + NEW.label_writes <= budget.label_writes
+            AND usage.branch_creates + NEW.branch_creates <= budget.branch_creates
+            AND usage.pull_request_creates + NEW.pull_request_creates
+              <= budget.pull_request_creates
+            AND usage.github_sends + NEW.github_sends <= budget.github_sends
+            AND usage.git_sends + NEW.git_sends <= budget.git_sends
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'rollout effect exceeds active stage or budget');
+        END
+        """,
+        """
+        CREATE TRIGGER app_settings_rollout_scope_required
+        BEFORE UPDATE OF paused, active_rollout_authorization_id ON app_settings
+        WHEN NEW.paused = 0 AND (
+          NEW.active_rollout_authorization_id IS NULL OR NOT EXISTS (
+            SELECT 1
+            FROM rollout_authorizations AS authorization
+            JOIN rollout_authorization_scopes AS scope
+              ON scope.authorization_id = authorization.id
+            JOIN rollout_authorization_budgets AS budget
+              ON budget.authorization_id = authorization.id
+            JOIN repositories AS repository ON repository.id = authorization.repository_id
+            WHERE authorization.id = NEW.active_rollout_authorization_id
+              AND authorization.state = 'active'
+              AND authorization.expires_at_ms > CAST(NEW.updated_at * 1000 AS INTEGER)
+              AND NEW.max_concurrency = 1
+              AND repository.node_id = scope.repository_node_id
+              AND repository.owner = scope.repository_owner
+              AND repository.name = scope.repository_name
+              AND repository.default_branch = scope.default_branch
+              AND repository.enabled = scope.repository_enabled
+              AND repository.review_enabled = scope.review_enabled
+              AND repository.triage_enabled = scope.triage_enabled
+              AND repository.implementation_enabled = scope.implementation_enabled
+              AND (
+                (authorization.scope_mode = 'exactObject' AND budget.jobs = 1 AND
+                  (SELECT COUNT(*) FROM rollout_job_bindings AS binding
+                   WHERE binding.authorization_id = authorization.id) = 1) OR
+                (authorization.scope_mode = 'finiteWindow' AND
+                  (SELECT COUNT(*) FROM rollout_window_candidates AS candidate
+                   WHERE candidate.authorization_id = authorization.id
+                     AND candidate.ordinal < scope.finite_candidate_count)
+                    = scope.finite_candidate_count)
+              )
+          )
+        )
+        BEGIN
+          SELECT RAISE(ABORT, 'Resume requires exact active rollout authority');
+        END
+        """,
+        """
+        CREATE TRIGGER app_settings_rollout_insert_scope_required
+        BEFORE INSERT ON app_settings
+        WHEN NEW.paused = 0
+        BEGIN
+          SELECT RAISE(ABORT, 'Resume requires exact active rollout authority');
+        END
+        """,
+        """
+        CREATE TRIGGER app_settings_rollout_concurrency_one
+        BEFORE UPDATE OF max_concurrency ON app_settings
+        WHEN NEW.max_concurrency != 1
+        BEGIN
+          SELECT RAISE(ABORT, 'production rollout concurrency must remain one');
+        END
+        """,
+      ],
+      // Schema 10 has never shipped, and its body was edited more than once while
+      // this branch was in review. Any database recording a different body, or no
+      // body at all, was written by a pre-release build and must fail closed rather
+      // than silently skip the difference.
+      verifiesContent: true
+    ),
   ]
 
   private static let herdrTopologyIntentsTableV7 = """

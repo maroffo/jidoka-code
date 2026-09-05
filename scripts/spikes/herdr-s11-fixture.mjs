@@ -17,6 +17,14 @@ function absolute(value, name) {
   return value;
 }
 
+function foundationStandardPath(value) {
+  if (value === "/private/tmp") return "/tmp";
+  if (value.startsWith("/private/tmp/")) return `/tmp/${value.slice(13)}`;
+  if (value === "/private/var") return "/var";
+  if (value.startsWith("/private/var/")) return `/var/${value.slice(13)}`;
+  return value;
+}
+
 async function request(socketPath, method, params) {
   absolute(socketPath, "socket path");
   const id = `s11-${crypto.randomUUID()}`;
@@ -124,7 +132,7 @@ function prepareDescriptor([
     runRootStatus.isSymbolicLink() ||
     !cwdStatus.isDirectory() ||
     cwdStatus.isSymbolicLink() ||
-    fs.realpathSync(child) !== child
+    foundationStandardPath(fs.realpathSync(child)) !== child
   ) {
     fail("non-canonical path");
   }

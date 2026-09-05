@@ -64,10 +64,12 @@ struct GitPushGuardTests {
     let symbolic = fixture.root.appendingPathComponent("pre-push")
     try writeExecutable(target, "#!/bin/sh\nexit 0\n")
     try FileManager.default.createSymbolicLink(at: symbolic, withDestinationURL: target)
+    let authority = ExplicitTestRolloutEffectAuthority()
     let transport = SystemGitTransport(
       homeDirectory: fixture.root.path,
       temporaryDirectory: fixture.root.path,
-      pushGuardExecutable: symbolic
+      pushGuardExecutable: symbolic,
+      rolloutAuthority: authority
     )
     let remote = try GitRemoteRepository(
       repositoryID: UUID(),
@@ -77,13 +79,28 @@ struct GitPushGuardTests {
       defaultBranch: "main",
       localFixtureURL: fixture.root.appendingPathComponent("remote.git")
     )
+    let intentID = UUID()
+    let effect = RolloutGitSendEffect(
+      jobID: UUID(),
+      intentID: intentID,
+      repositoryID: remote.repositoryID,
+      repositoryNodeID: remote.nodeID,
+      branch: "agent/issue-8-unsafe",
+      exactSHA: String(repeating: "a", count: 40),
+      target: "repository:R_unsafe_guard:refs/heads/agent/issue-8-unsafe",
+      expectedStateSHA256: String(repeating: "b", count: 64),
+      requestSHA256: String(repeating: "c", count: 64)
+    )
+    let permit = try await authority.reserveGitSendAndMarkStarted(effect, now: Date())
     await #expect(throws: GitTransportError.unsafePushGuard) {
       _ = try await transport.createRemoteRef(
         "refs/heads/agent/issue-8-unsafe",
         exactSHA: String(repeating: "a", count: 40),
         remote: remote,
         repository: fixture.root,
-        credentials: nil
+        credentials: nil,
+        permit: permit,
+        effect: effect
       )
     }
   }

@@ -14,20 +14,93 @@ struct JobCoordinatorTests {
     #expect(classification == .piInterruptedUnknown)
   }
 
-  @Test("one pass discovers and dispatches PR, implementation, and triage in locked priority")
-  func discoveryAndPriority() async throws {
+  @Test("W0: an unscoped pass cannot dispatch two serial queued jobs")
+  func unscopedPassDoesNotWalkQueue() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
-    _ = try await fixture.addRepository()
+    let repository = try await fixture.addRepository(activateDispatch: false)
     try await fixture.configuration.setMaxConcurrency(1, now: fixture.now)
-    await fixture.api.configure(
-      pullRequests: [pullRequest(number: 4)],
-      issues: [
-        issue(number: 10, labels: []),
-        issue(number: 11, labels: [label("agent:ready")]),
-      ]
+    for number in 1...2 {
+      _ = try await fixture.jobs.createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repository.id,
+          kind: .prReview,
+          objectNodeID: "unscoped-pr-\(number)",
+          revisionKey: String(repeating: String(number), count: 40)
+        ),
+        objectNumber: number,
+        contractVersionUsed: "w0-rollout-baseline",
+        priority: .prReview,
+        firstStep: .review,
+        now: fixture.now.addingTimeInterval(TimeInterval(number))
+      )
+    }
+
+    await fixture.coordinator().run(
+      pass: SchedulerPass(reasons: [.resume], startedAt: fixture.now)
     )
-    let coordinator = fixture.coordinator()
+
+    #expect(await fixture.workflows.order().isEmpty)
+    #expect(try await fixture.jobs.jobs().allSatisfy { $0.state == .queued })
+  }
+
+  @Test("one pass dispatches only the exact bound workflow and leaves other jobs queued")
+  func exactScopeIsolation() async throws {
+    let fixture = try await JobCoordinatorFixture()
+    defer { fixture.remove() }
+    let repository = try await fixture.addRepository(activateDispatch: false)
+    try await fixture.configuration.setMaxConcurrency(1, now: fixture.now)
+    guard
+      case .created(let reviewJob) = try await fixture.jobs.createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repository.id,
+          kind: .prReview,
+          objectNodeID: "exact-review",
+          revisionKey: String(repeating: "a", count: 40)
+        ),
+        objectNumber: 4,
+        contractVersionUsed: "w6-test",
+        priority: .prReview,
+        firstStep: .review,
+        now: fixture.now
+      ),
+      case .created(let implementationJob) = try await fixture.jobs.createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repository.id,
+          kind: .issueImplementation,
+          objectNodeID: "outside-implementation",
+          revisionKey: "claim-1"
+        ),
+        objectNumber: 11,
+        contractVersionUsed: "w6-test",
+        priority: .issueImplementation,
+        firstStep: .claimReady,
+        now: fixture.now.addingTimeInterval(1)
+      ),
+      case .created(let triageJob) = try await fixture.jobs.createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repository.id,
+          kind: .issueTriage,
+          objectNodeID: "outside-triage",
+          revisionKey: "initial-triage"
+        ),
+        objectNumber: 10,
+        contractVersionUsed: "w6-test",
+        priority: .triage,
+        firstStep: .triage,
+        now: fixture.now.addingTimeInterval(2)
+      )
+    else {
+      Issue.record("coordinator isolation fixture was suppressed")
+      return
+    }
+    await fixture.api.configure(pullRequests: [], issues: [])
+    let coordinator = fixture.coordinator(rolloutAuthority: fixture.rolloutAuthority)
+    try await coordinator.recoverAtStartup()
+    try await fixture.activateExactReviewScope(
+      repository: repository,
+      job: reviewJob
+    )
 
     await coordinator.run(
       pass: SchedulerPass(reasons: [.manual], startedAt: fixture.now)
@@ -35,13 +108,10 @@ struct JobCoordinatorTests {
 
     let jobs = try await fixture.jobs.jobs()
     #expect(jobs.count == 3)
-    #expect(jobs.allSatisfy { $0.state == .blocked })
-    #expect(await fixture.workflows.order() == [.prReview, .issueImplementation, .issueTriage])
-    #expect(
-      jobs.first(where: { $0.identity.kind == .issueImplementation })?.identity.revisionKey
-        == "claim-1"
-    )
-    #expect((try await fixture.jobs.claims(issueNodeID: "issue-node-11")).isEmpty)
+    #expect(try await fixture.jobs.job(id: reviewJob.id)?.state == .blocked)
+    #expect(try await fixture.jobs.job(id: implementationJob.id)?.state == .queued)
+    #expect(try await fixture.jobs.job(id: triageJob.id)?.state == .queued)
+    #expect(await fixture.workflows.order() == [.prReview])
     #expect((await coordinator.snapshot()).failures.isEmpty)
   }
 
@@ -49,7 +119,7 @@ struct JobCoordinatorTests {
   func directCanaryDoesNotWalkQueue() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
-    let repository = try await fixture.addRepository()
+    let repository = try await fixture.addRepository(activateDispatch: false)
     var jobs: [JobRecord] = []
     for number in 1...2 {
       let creation = try await fixture.jobs.createJob(
@@ -71,6 +141,7 @@ struct JobCoordinatorTests {
       }
       jobs.append(job)
     }
+    try await fixture.activateExactReviewScope(repository: repository, job: jobs[0])
     _ = try await fixture.jobs.transition(
       jobID: jobs[0].id,
       eventKey: "direct-canary:lease",
@@ -85,8 +156,8 @@ struct JobCoordinatorTests {
     #expect(try await fixture.jobs.job(id: jobs[1].id)?.state == .queued)
   }
 
-  @Test("repository disable is not a selector for an already queued job")
-  func disabledRepositoryDoesNotFilterQueue() async throws {
+  @Test("W0: repository flag drift leaves an already queued job inert")
+  func disabledRepositoryFiltersQueuedJob() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
     let repository = try await fixture.addRepository()
@@ -126,15 +197,15 @@ struct JobCoordinatorTests {
       pass: SchedulerPass(reasons: [.manual], startedAt: fixture.now)
     )
 
-    #expect((await fixture.workflows.order()) == [.prReview])
-    #expect(try await fixture.jobs.job(id: job.id)?.state == .blocked)
+    #expect((await fixture.workflows.order()).isEmpty)
+    #expect(try await fixture.jobs.job(id: job.id)?.state == .queued)
   }
 
   @Test("reconciliation dispatch runs before any new discovery read")
   func recoveryFirst() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
-    let repository = try await fixture.addRepository()
+    let repository = try await fixture.addRepository(activateDispatch: false)
     let created = try await fixture.jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repository.id,
@@ -152,6 +223,7 @@ struct JobCoordinatorTests {
       Issue.record("recovery job was suppressed")
       return
     }
+    try await fixture.activateExactReviewScope(repository: repository, job: job)
     try await fixture.database.execute(
       "UPDATE jobs SET state = 'reconciliationQueued' WHERE id = ?",
       bindings: [.text(job.id.uuidString.lowercased())]
@@ -171,8 +243,8 @@ struct JobCoordinatorTests {
     #expect(try await fixture.jobs.job(id: job.id)?.state == .blocked)
   }
 
-  @Test("dispatch gate preserves recovery but suppresses discovery and new jobs")
-  func dispatchGate() async throws {
+  @Test("W0: pause suppresses unbound recovery as well as discovery")
+  func pausedDispatchGateSuppressesRecovery() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
     let repository = try await fixture.addRepository()
@@ -211,8 +283,8 @@ struct JobCoordinatorTests {
     let jobs = try await fixture.jobs.jobs()
     #expect(jobs.count == 1)
     #expect(jobs.first?.id == recoveryJob.id)
-    #expect(jobs.first?.state == .blocked)
-    #expect((await fixture.events.values()).contains("workflow:prReview:reconciling"))
+    #expect(jobs.first?.state == .reconciliationQueued)
+    #expect(!(await fixture.events.values()).contains("workflow:prReview:reconciling"))
     #expect(!(await fixture.events.values()).contains("api:pulls"))
     #expect(!(await fixture.events.values()).contains("api:issues"))
     #expect((await coordinator.snapshot()).failures.isEmpty)
@@ -271,7 +343,7 @@ struct JobCoordinatorTests {
   func startupCleanupSweep() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
-    let repository = try await fixture.addRepository()
+    let repository = try await fixture.addRepository(activateDispatch: false)
     await fixture.api.configure(pullRequests: [], issues: [])
     let creation = try await fixture.jobs.createJob(
       identity: LogicalJobIdentity(
@@ -290,6 +362,7 @@ struct JobCoordinatorTests {
       Issue.record("cleanup recovery job was suppressed")
       return
     }
+    try await fixture.activateExactReviewScope(repository: repository, job: job)
     _ = try await fixture.jobs.transition(
       jobID: job.id,
       eventKey: "cleanup-fixture:lease",
@@ -350,7 +423,7 @@ struct JobCoordinatorTests {
   func firstPassRunsStartupRecovery() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
-    let repository = try await fixture.addRepository()
+    let repository = try await fixture.addRepository(activateDispatch: false)
     await fixture.api.configure(pullRequests: [], issues: [])
     let creation = try await fixture.jobs.createJob(
       identity: LogicalJobIdentity(
@@ -369,6 +442,7 @@ struct JobCoordinatorTests {
       Issue.record("startup recovery job was suppressed")
       return
     }
+    try await fixture.activateExactReviewScope(repository: repository, job: job)
     _ = try await fixture.jobs.transition(
       jobID: job.id,
       eventKey: "startup-fixture:lease",
@@ -399,6 +473,7 @@ struct JobCoordinatorTests {
         complexPlan: workflow
       ),
       contractVersion: "w6-test",
+      rolloutAuthority: nil,
       now: { fixture.now }
     )
 
@@ -414,7 +489,7 @@ struct JobCoordinatorTests {
   func recoveryRetry() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
-    let repository = try await fixture.addRepository()
+    let repository = try await fixture.addRepository(activateDispatch: false)
     await fixture.api.configure(pullRequests: [], issues: [])
     let creation = try await fixture.jobs.createJob(
       identity: LogicalJobIdentity(
@@ -426,13 +501,14 @@ struct JobCoordinatorTests {
       objectNumber: 6,
       contractVersionUsed: "w6-test",
       priority: .prReview,
-      firstStep: .publish,
+      firstStep: .review,
       now: fixture.now
     )
     guard case .created(let job) = creation else {
       Issue.record("recoverable job was suppressed")
       return
     }
+    try await fixture.activateExactReviewScope(repository: repository, job: job)
     try await fixture.database.execute(
       "UPDATE jobs SET state = 'reconciliationQueued', current_step = 4 WHERE id = ?",
       bindings: [.text(job.id.uuidString.lowercased())]
@@ -456,6 +532,7 @@ struct JobCoordinatorTests {
       schedulerPersistence: fixture.persistence,
       workflows: registry,
       contractVersion: "w6-test",
+      rolloutAuthority: nil,
       now: { fixture.now }
     )
 
@@ -464,11 +541,11 @@ struct JobCoordinatorTests {
     let retrying = try #require(try await fixture.jobs.job(id: job.id))
     #expect(retrying.state == .retryBackoff)
     #expect(retrying.currentStep == 4)
-    #expect(retrying.currentStepKind == .publish)
+    #expect(retrying.currentStepKind == .review)
     #expect(retrying.notBefore == fixture.now.addingTimeInterval(1))
   }
 
-  @Test("paused passes promote exactly-due and overdue retries but not future deadlines")
+  @Test("paused legacy passes promote exactly-due and overdue retries but not future deadlines")
   func retryDeadlineBoundaries() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
@@ -524,7 +601,7 @@ struct JobCoordinatorTests {
   func workflowBackoff() async throws {
     let fixture = try await JobCoordinatorFixture()
     defer { fixture.remove() }
-    let repository = try await fixture.addRepository()
+    let repository = try await fixture.addRepository(activateDispatch: false)
     await fixture.api.configure(pullRequests: [], issues: [])
     let creation = try await fixture.jobs.createJob(
       identity: LogicalJobIdentity(
@@ -543,6 +620,7 @@ struct JobCoordinatorTests {
       Issue.record("transient job was suppressed")
       return
     }
+    try await fixture.activateExactReviewScope(repository: repository, job: job)
     let workflow = CoordinatorTransientWorkflow()
     let registry = JobWorkflowRegistry(
       pullRequestReview: workflow,
@@ -562,6 +640,7 @@ struct JobCoordinatorTests {
       schedulerPersistence: fixture.persistence,
       workflows: registry,
       contractVersion: "w6-test",
+      rolloutAuthority: nil,
       now: { fixture.now }
     )
 
@@ -613,6 +692,7 @@ struct JobCoordinatorTests {
 private final class JobCoordinatorFixture: @unchecked Sendable {
   let root: URL
   let database: SQLiteStore
+  let rolloutAuthority: RolloutAuthorityStore
   let configuration: ConfigurationStore
   let jobs: DurableJobStore
   let repositories: RepositoryStore
@@ -630,14 +710,20 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
     )
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
+    rolloutAuthority = RolloutAuthorityStore(
+      database: database,
+      enforceFinitePromotion: false
+    )
     configuration = ConfigurationStore(database: database)
     jobs = DurableJobStore(
       database: database,
-      enforceApplicationDispatchGate: true
+      enforceApplicationDispatchGate: true,
+      enforceRolloutAuthority: false
     )
     repositories = try RepositoryStore(
       rootURL: root.appendingPathComponent("ApplicationSupport", isDirectory: true),
-      database: database
+      database: database,
+      transport: SystemGitTransport()
     )
     reviewed = ReviewedRevisionStore(database: database)
     persistence = SchedulerPersistence(database: database)
@@ -648,9 +734,17 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
     try await configuration.setProviderDisclosureAcknowledged(true, now: now)
     try await configuration.setLoginItem(selected: true, status: .enabled, now: now)
     try await configuration.setOnboardingComplete(true, now: now)
+    try await database.execute(
+      """
+      UPDATE app_settings
+      SET github_account = 'owner', github_author_id = 1, updated_at = ?
+      WHERE singleton = 1
+      """,
+      bindings: [.real(now.timeIntervalSince1970)]
+    )
   }
 
-  func addRepository() async throws -> RepositoryConfiguration {
+  func addRepository(activateDispatch: Bool = true) async throws -> RepositoryConfiguration {
     let repository = RepositoryConfiguration(
       id: UUID(),
       nodeID: "repository-node",
@@ -663,10 +757,189 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
       enabled: true
     )
     try await configuration.upsertRepository(repository, now: now)
+    if activateDispatch {
+      try await activateCompatibilityScope(repository: repository)
+    }
     return repository
   }
 
+  func activateExactReviewScope(
+    repository: RepositoryConfiguration,
+    job: JobRecord
+  ) async throws {
+    guard job.identity.repositoryID == repository.id,
+      job.identity.kind == .prReview,
+      let objectNumber = job.objectNumber,
+      job.currentStepKind == .review
+    else {
+      throw RolloutAuthorityError.invalidJobBinding
+    }
+    let canonicalInputSHA256 = String(repeating: "b", count: 64)
+    let object = RolloutObjectSelector(
+      nodeID: job.identity.objectNodeID,
+      number: objectNumber,
+      revisionKey: job.identity.revisionKey,
+      canonicalInputSHA256: canonicalInputSHA256,
+      headSHA: job.identity.revisionKey,
+      baseSHA: String(repeating: "c", count: 40),
+      narrativeSHA256: String(repeating: "d", count: 64),
+      currentStep: JobStepKind.review.rawValue
+    )
+    let scope = RolloutScope(
+      mode: .exactObject,
+      stage: .prReview,
+      repository: rolloutRepository(repository),
+      object: object,
+      finiteWindow: nil
+    )
+    let binding = RolloutJobBinding(
+      jobID: job.id,
+      jobKind: job.identity.kind,
+      objectNumber: objectNumber,
+      contractVersion: job.contractVersionUsed,
+      priority: job.priority,
+      firstStep: .review,
+      currentStep: JobStepKind.review.rawValue
+    )
+    let evidence = try await rolloutAuthority.localEvidence(scope: scope, jobBinding: binding)
+    let input = RolloutPreviewInput(
+      releaseIdentity: releaseIdentity(evidence: evidence),
+      scope: scope,
+      budgets: RolloutBudgets(
+        jobs: 1,
+        githubReadRequests: 10,
+        githubReadPages: 10,
+        githubReadBytes: 1_000_000,
+        gitRemoteReads: 0,
+        providerSessions: 4,
+        approvedCommands: 0,
+        markerParts: 1,
+        labelWrites: 0,
+        branchCreates: 0,
+        pullRequestCreates: 0,
+        githubSends: 1,
+        gitSends: 0
+      ),
+      inventory: evidence.inventory,
+      missingLabels: [],
+      commands: [],
+      jobBinding: binding,
+      createdAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+      expiresAtMilliseconds: Int64(now.addingTimeInterval(600).timeIntervalSince1970 * 1_000)
+    )
+    let preview = try await rolloutAuthority.preview(input: input)
+    _ = try await rolloutAuthority.activate(
+      approvedCanonicalJSON: preview.canonicalJSON,
+      confirmedSHA256: preview.sha256,
+      recomputedInput: input,
+      now: now
+    )
+  }
+
+  private func activateCompatibilityScope(repository: RepositoryConfiguration) async throws {
+    let previewExpiresAt = now.addingTimeInterval(600)
+    let windowExpiresAt = now.addingTimeInterval(3_600)
+    let scope = RolloutScope(
+      mode: .finiteWindow,
+      stage: .prReview,
+      repository: rolloutRepository(repository),
+      object: nil,
+      finiteWindow: RolloutFiniteWindowSelector(
+        maximumJobs: 1,
+        expiresAtMilliseconds: Int64(windowExpiresAt.timeIntervalSince1970 * 1_000),
+        observedObjectNumberUpperBound: 1,
+        maximumFutureObjectNumber: 1,
+        candidates: [
+          RolloutWindowCandidate(
+            ordinal: 0,
+            nodeID: "compatibility-candidate",
+            number: 1,
+            revisionKey: String(repeating: "1", count: 40),
+            canonicalInputSHA256: String(repeating: "b", count: 64)
+          )
+        ]
+      )
+    )
+    let evidence = try await rolloutAuthority.localEvidence(scope: scope, jobBinding: nil)
+    let input = RolloutPreviewInput(
+      releaseIdentity: releaseIdentity(evidence: evidence),
+      scope: scope,
+      budgets: RolloutBudgets(
+        jobs: 1,
+        githubReadRequests: 10,
+        githubReadPages: 10,
+        githubReadBytes: 1_000_000,
+        gitRemoteReads: 0,
+        providerSessions: 4,
+        approvedCommands: 0,
+        markerParts: 1,
+        labelWrites: 0,
+        branchCreates: 0,
+        pullRequestCreates: 0,
+        githubSends: 1,
+        gitSends: 0
+      ),
+      inventory: evidence.inventory,
+      missingLabels: [],
+      commands: [],
+      jobBinding: nil,
+      createdAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+      expiresAtMilliseconds: Int64(previewExpiresAt.timeIntervalSince1970 * 1_000)
+    )
+    let preview = try await rolloutAuthority.preview(input: input)
+    _ = try await rolloutAuthority.activate(
+      approvedCanonicalJSON: preview.canonicalJSON,
+      confirmedSHA256: preview.sha256,
+      recomputedInput: input,
+      now: now
+    )
+  }
+
+  private func rolloutRepository(
+    _ repository: RepositoryConfiguration
+  ) -> RolloutRepositoryIdentity {
+    RolloutRepositoryIdentity(
+      id: repository.id,
+      nodeID: repository.nodeID,
+      owner: repository.owner,
+      name: repository.name,
+      defaultBranch: repository.defaultBranch,
+      enabled: repository.enabled,
+      reviewEnabled: repository.reviewEnabled,
+      triageEnabled: repository.triageEnabled,
+      implementationEnabled: repository.implementationEnabled
+    )
+  }
+
+  private func releaseIdentity(
+    evidence: RolloutLocalStateEvidence
+  ) -> RolloutReleaseIdentity {
+    let digest = String(repeating: "a", count: 64)
+    return RolloutReleaseIdentity(
+      sourceCommit: String(repeating: "1", count: 40),
+      sourceTree: String(repeating: "2", count: 40),
+      bundleVersion: "0.2.0",
+      bundleBuild: 3,
+      applicationSHA256: digest,
+      helperSHA256: digest,
+      askPassSHA256: digest,
+      pushGuardSHA256: digest,
+      herdrHostSHA256: digest,
+      schemaVersion: 10,
+      engineProtocolVersion: 12,
+      runtimeManifestSHA256: digest,
+      runtimeTreeSHA256: digest,
+      modelProfilesSHA256: evidence.modelProfilesSHA256,
+      workflowResourcesSHA256: digest,
+      githubAccount: "owner",
+      githubAuthorID: 1,
+      repositoryConfigurationSHA256: evidence.repositoryConfigurationSHA256,
+      maxConcurrency: 1
+    )
+  }
+
   func coordinator(
+    rolloutAuthority: RolloutAuthorityStore? = nil,
     newDispatchAllowed: @escaping @Sendable () async -> Bool = { true }
   ) -> JobCoordinator {
     let discovery = GitHubDiscovery(api: api, jobs: jobs, reviewedRevisions: reviewed)
@@ -684,6 +957,7 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
       schedulerPersistence: persistence,
       workflows: registry,
       contractVersion: "w6-test",
+      rolloutAuthority: rolloutAuthority,
       newDispatchAllowed: newDispatchAllowed,
       now: { self.now }
     )

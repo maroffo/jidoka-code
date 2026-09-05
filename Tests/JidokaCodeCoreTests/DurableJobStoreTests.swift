@@ -39,7 +39,7 @@ struct DurableJobStoreTests {
 
     await fixture.database.close()
     let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let reopened = DurableJobStore(database: reopenedDatabase)
+    let reopened = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let afterRestart = try await reopened.createJob(
       identity: identity,
       contractVersionUsed: "app-and-skill-v99",
@@ -355,21 +355,15 @@ struct DurableJobStoreTests {
         context: fixture.context("collision")
       )
     }
-    _ = try await fixture.jobs.transition(
-      jobID: b1.id,
-      eventKey: "b1-lease",
-      event: .acquireLease,
-      context: fixture.context("lease")
-    )
     await #expect(throws: DurableJobStoreError.globalConcurrencyReached) {
       _ = try await fixture.jobs.transition(
-        jobID: c1.id,
-        eventKey: "c1-cap",
+        jobID: b1.id,
+        eventKey: "b1-cap",
         event: .acquireLease,
         context: fixture.context("cap")
       )
     }
-    #expect(try await fixture.jobs.activeLeases().count == 2)
+    #expect(try await fixture.jobs.activeLeases().count == 1)
 
     _ = try await fixture.jobs.transition(
       jobID: a1.id,
@@ -384,6 +378,32 @@ struct DurableJobStoreTests {
       context: fixture.context("blocked")
     )
     _ = try await fixture.jobs.transition(
+      jobID: b1.id,
+      eventKey: "b1-lease",
+      event: .acquireLease,
+      context: fixture.context("lease")
+    )
+    await #expect(throws: DurableJobStoreError.globalConcurrencyReached) {
+      _ = try await fixture.jobs.transition(
+        jobID: c1.id,
+        eventKey: "c1-cap",
+        event: .acquireLease,
+        context: fixture.context("cap")
+      )
+    }
+    _ = try await fixture.jobs.transition(
+      jobID: b1.id,
+      eventKey: "b1-inputs",
+      event: .inputsValidated,
+      context: fixture.context("inputs")
+    )
+    _ = try await fixture.jobs.transition(
+      jobID: b1.id,
+      eventKey: "b1-block",
+      event: .permanentSetupFailure,
+      context: fixture.context("blocked")
+    )
+    _ = try await fixture.jobs.transition(
       jobID: a2.id,
       eventKey: "a2-lease",
       event: .acquireLease,
@@ -393,7 +413,7 @@ struct DurableJobStoreTests {
     let a2Lease = try #require(leases.first { $0.jobID == a2.id })
     #expect(a2Lease.generation == 2)
     #expect(Set(leases.map(\.repositoryID)).count == leases.count)
-    #expect(leases.count == 2)
+    #expect(leases.count == 1)
   }
 
   @Test("deterministic operation property preserves repository and global lease bounds")
@@ -437,7 +457,7 @@ struct DurableJobStoreTests {
           context: fixture.context("release")
         )
         active.removeValue(forKey: repositoryID)
-      } else if active.count < 2,
+      } else if active.isEmpty,
         let index = nextIndex[repositoryID],
         let available = jobsByRepository[repositoryID],
         index < available.count
@@ -454,7 +474,7 @@ struct DurableJobStoreTests {
       }
 
       let leases = try await fixture.jobs.activeLeases()
-      #expect(leases.count <= 2)
+      #expect(leases.count <= 1)
       #expect(Set(leases.map(\.repositoryID)).count == leases.count)
       #expect(Set(leases.map(\.repositoryID)) == Set(active.keys))
     }
@@ -498,7 +518,7 @@ struct DurableJobStoreTests {
 
     await fixture.database.close()
     let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let reopened = DurableJobStore(database: reopenedDatabase)
+    let reopened = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let recoveryRecords = try await reopened.recoverAtStartup(now: now)
     #expect(try await reopened.activeLeases().isEmpty)
     let awaitingRecord = try #require(
@@ -582,15 +602,28 @@ struct DurableJobStoreTests {
       event: .mutationNeedsAttribution,
       context: fixture.context("approval removal sent")
     )
-    let attributed = try await fixture.jobs.transition(
+    await #expect(throws: DurableJobStoreError.staleApprovalRequiresCheckpoint) {
+      _ = try await fixture.jobs.transition(
+        jobID: job.id,
+        eventKey: "stale-attribution-bypass",
+        event: .effectAttributedMore,
+        context: fixture.context("must cross the planning checkpoint")
+      )
+    }
+    let checkpointed = try await fixture.jobs.transition(
       jobID: job.id,
-      eventKey: "stale-attributed",
-      event: .effectAttributedMore,
-      context: fixture.context("approval removal attributed")
+      eventKey: "stale-attributed-checkpoint",
+      event: .phaseCheckpoint,
+      context: JobTransitionContext(
+        now: fixture.now,
+        reason: "approval removal attributed at the planning boundary",
+        nextStep: .replan
+      )
     )
-    #expect(try appliedJob(attributed).state == .preparing)
-    #expect(try appliedJob(attributed).currentStep == 2)
-    #expect(try appliedJob(attributed).currentStepKind == .replan)
+    #expect(try appliedJob(checkpointed).state == .queued)
+    #expect(try appliedJob(checkpointed).currentStep == 2)
+    #expect(try appliedJob(checkpointed).currentStepKind == .replan)
+    #expect(try await fixture.jobs.activeLeases().isEmpty)
   }
 
   @Test("claim generations persist ready, stale, and approved sequences")
@@ -735,7 +768,9 @@ struct DurableJobStoreTests {
 
     await fixture.database.close()
     let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let reopened = try await DurableJobStore(database: reopenedDatabase).applyMaintenance(
+    let reopened = try await DurableJobStore(
+      database: reopenedDatabase, enforceRolloutAuthority: false
+    ).applyMaintenance(
       authorization,
       now: Date(timeIntervalSince1970: TimeInterval(boundary + 3_000))
     )
@@ -1036,6 +1071,30 @@ struct DurableJobStoreTests {
     #expect(try await fixture.jobs.job(id: candidate.id)?.state == .leased)
     #expect(try await fixture.jobs.job(id: untouched.id)?.state == .queued)
     #expect(try await fixture.jobs.activeLeases().map(\.jobID) == [candidate.id])
+    let rolloutAuthority = RolloutAuthorityStore(database: fixture.database)
+    let historicalContext = RolloutEffectExecutionContext(
+      mode: .historicalCanary(jobID: candidate.id)
+    )
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await RolloutEffectTaskContext.$current.withValue(historicalContext) {
+        try await rolloutAuthority.reserveGitHubRead(
+          RolloutGitHubReadEffect(
+            operation: .pullRequest(
+              owner: "owner",
+              repository: "repo-\(repositoryID.uuidString.lowercased())",
+              number: 42
+            ),
+            maximumResponseBytes: 4_096,
+            context: historicalContext
+          ),
+          now: fixture.now
+        )
+      }
+    }
+    #expect(
+      try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_effect_reservations")
+        == 0
+    )
     await #expect(throws: DurableJobStoreError.canaryUnsafe(candidate.id)) {
       _ = try await fixture.jobs.previewCanary(
         scope: scope,
@@ -1148,7 +1207,7 @@ struct DurableJobStoreTests {
     #expect(replay.report.status == .settled)
     #expect(replay.report.replayed)
     #expect(try await fixture.jobs.job(id: untouched.id)?.state == .queued)
-    #expect(DatabaseSchema.migrations.count == 9)
+    #expect(DatabaseSchema.migrations.count == 10)
   }
 
   @Test("a closed no-effect canary retry requires a new preview and admission")
@@ -1349,12 +1408,7 @@ struct DurableJobStoreTests {
       expectedCount: preview.candidateCount,
       evidenceSHA256: preview.evidenceSHA256
     )
-    await #expect(throws: DurableJobStoreError.dispatchSuppressed) {
-      _ = try await fixture.jobs.applyMaintenance(authorization, now: fixture.now)
-    }
-    try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
     let wrongCount = JobMaintenanceAuthorization(
       scope: scope,
       expectedCount: preview.candidateCount + 1,
@@ -1609,7 +1663,7 @@ private final class JobStoreFixture: @unchecked Sendable {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     databaseURL = root.appendingPathComponent("jidoka-code.sqlite3")
     database = try SQLiteStore(databaseURL: databaseURL)
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
   }
 
   func remove() {

@@ -5,6 +5,46 @@ import Testing
 
 @Suite("Durable approved command authority")
 struct ApprovedCommandRunStoreTests {
+  @Test("launch denial supersedes only a started command without accepted results")
+  func launchDenialPreservesAcceptedResult() async throws {
+    let fixture = try await ApprovedCommandStoreFixture(prefix: "command-denial-result")
+    defer { fixture.remove() }
+    let command = makeApprovedCommand(
+      id: "check", kind: .makeTargets, executable: "make", arguments: ["check"]
+    )
+    let plan = try makeFrozenPlan([command])
+    let first = try await fixture.prepare(command: command, plan: plan)
+    _ = try await fixture.store.start(runID: first.id)
+    #expect(try await fixture.store.recordLaunchDenied(runID: first.id).state == .superseded)
+    let replacement = try await fixture.prepare(command: command, plan: plan)
+    #expect(replacement.id != first.id)
+    _ = try await fixture.store.start(runID: replacement.id)
+    let evidence = Self.evidence(command: command, succeeded: true)
+    _ = try await fixture.store.accept(runID: replacement.id, evidence: evidence)
+    await #expect(throws: ApprovedCommandRunStoreError.invalidTransition) {
+      _ = try await fixture.store.recordLaunchDenied(runID: replacement.id)
+    }
+    #expect(try await fixture.store.acceptedEvidence(runID: replacement.id) == evidence)
+    #expect(try await fixture.store.run(id: replacement.id)?.state == .resultAccepted)
+
+    // This definition check pins the lower-level started+result-row guard. The API
+    // test above does not manufacture that intermediate transaction state.
+    let migration = try #require(DatabaseSchema.migrations.first { $0.version == 10 })
+    let transition = try #require(
+      migration.statements.first {
+        $0.contains("CREATE TRIGGER approved_command_run_state_transition")
+      })
+    let normalized = transition.split(separator: "\n")
+      .map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
+    #expect(
+      normalized.contains(
+        """
+        (NEW.state = 'superseded' AND NOT EXISTS (
+        SELECT 1 FROM approved_command_results WHERE run_id = OLD.id
+        ))
+        """))
+  }
+
   @Test("prepare start result and replay are immutable and idempotent")
   func lifecycle() async throws {
     let fixture = try await ApprovedCommandStoreFixture(prefix: "command-lifecycle")
@@ -120,6 +160,17 @@ struct ApprovedCommandRunStoreTests {
       )
     }
 
+    _ = try await fixture.database.execute(
+      "UPDATE jobs SET state = 'blocked' WHERE id = ?",
+      bindings: [.text(fixture.job.id.uuidString.lowercased())]
+    )
+    await #expect(throws: ApprovedCommandRunStoreError.identityCollision) {
+      _ = try await fixture.store.start(runID: prepared.id)
+    }
+    _ = try await fixture.database.execute(
+      "UPDATE jobs SET state = 'runningPi' WHERE id = ?",
+      bindings: [.text(fixture.job.id.uuidString.lowercased())]
+    )
     try await fixture.configuration.setPaused(
       true,
       now: Date(timeIntervalSince1970: 200_001)
@@ -128,17 +179,6 @@ struct ApprovedCommandRunStoreTests {
       _ = try await fixture.store.start(runID: prepared.id)
     }
     #expect(try await fixture.store.run(id: prepared.id)?.state == .prepared)
-    try await fixture.configuration.setPaused(
-      false,
-      now: Date(timeIntervalSince1970: 200_002)
-    )
-    _ = try await fixture.database.execute(
-      "UPDATE jobs SET state = 'blocked' WHERE id = ?",
-      bindings: [.text(fixture.job.id.uuidString.lowercased())]
-    )
-    await #expect(throws: ApprovedCommandRunStoreError.identityCollision) {
-      _ = try await fixture.store.start(runID: prepared.id)
-    }
     await #expect(throws: SQLiteStoreError.self) {
       _ = try await fixture.database.execute(
         "UPDATE approved_command_runs SET state = 'started' WHERE id = ?",
@@ -273,8 +313,10 @@ private final class ApprovedCommandStoreFixture: @unchecked Sendable {
   let jobs: DurableJobStore
   let store: ApprovedCommandRunStore
   let repositoryID: UUID
+  let repository: RepositoryConfiguration
   let job: JobRecord
   let workspaceIdentity: ApprovedCommandWorkspaceIdentity
+  private var rolloutAuthority: RolloutAuthorityStore?
 
   init(prefix: String) async throws {
     root = try makeApprovedCommandTemporaryDirectory(prefix: prefix)
@@ -287,21 +329,22 @@ private final class ApprovedCommandStoreFixture: @unchecked Sendable {
     database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
     configuration = ConfigurationStore(database: database)
     repositoryID = UUID()
+    repository = RepositoryConfiguration(
+      id: repositoryID,
+      nodeID: "repository-\(repositoryID.uuidString.lowercased())",
+      owner: "owner",
+      name: "repo",
+      defaultBranch: "main",
+      reviewEnabled: true,
+      triageEnabled: true,
+      implementationEnabled: true,
+      enabled: true
+    )
     try await configuration.upsertRepository(
-      RepositoryConfiguration(
-        id: repositoryID,
-        nodeID: "repository-\(repositoryID.uuidString.lowercased())",
-        owner: "owner",
-        name: "repo",
-        defaultBranch: "main",
-        reviewEnabled: true,
-        triageEnabled: true,
-        implementationEnabled: true,
-        enabled: true
-      ),
+      repository,
       now: Date(timeIntervalSince1970: 200_000)
     )
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let creation = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repositoryID,
@@ -354,7 +397,18 @@ private final class ApprovedCommandStoreFixture: @unchecked Sendable {
     plan: FrozenCommandPlan,
     ordinal: Int = 0
   ) async throws -> ApprovedCommandRunRecord {
-    try await store.prepare(
+    if rolloutAuthority == nil {
+      rolloutAuthority = try await activateTestImplementationRollout(
+        database: database,
+        repository: repository,
+        job: job,
+        plan: plan,
+        workspaceHeadSHA: String(repeating: "a", count: 40),
+        now: Date(timeIntervalSince1970: 200_000),
+        currentTime: { Date(timeIntervalSince1970: 200_002) }
+      )
+    }
+    return try await store.prepare(
       job: job,
       phase: .bootstrap,
       round: 1,

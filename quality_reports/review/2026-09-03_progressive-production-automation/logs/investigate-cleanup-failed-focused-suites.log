@@ -1,0 +1,54 @@
+[0/1] Planning build
+Building for debugging...
+[0/22] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.20s)
+Test Suite 'Selected tests' started at 2026-09-04 00:35:04.072.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 00:35:04.072.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 00:35:04.072.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 00:35:04.073.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Bounded credentialless process execution" started.
+◇ Suite "Bounded full-duplex Pi RPC process runner" started.
+◇ Test "a settled child must still exit successfully when it exits on its own" started.
+◇ Test "credentialless environment has exact locked boundaries" started.
+◇ Test "a child that closes stdin cannot terminate the engine with SIGPIPE" started.
+◇ Test "invocation builder excludes generic discovery and secret-shaped environment keys" started.
+◇ Test "timeout removes an observed session escape by PID and microsecond start time" started.
+◇ Test "observed session-escaping descendants are identity-cleaned with exact leader status" started.
+◇ Test "correlated fake provider transcript settles and every descendant is removed" started.
+◇ Test "symlink executables and working directories fail closed" started.
+◇ Test "timeout and output bounds terminate the whole process group" started.
+◇ Test "same-second PID reuse cannot bind an original process group" started.
+◇ Test "argv stays discrete and output is captured without a shell" started.
+◇ Test "stderr and non-JSONL output fail with exact protocol outcomes" started.
+◇ Test "timeout sends one abort, requires acknowledgement, and still cleans descendants" started.
+◇ Test "timeout directly removes an observed session-escaping identity" started.
+◇ Test "a child that never reads stdin cannot escape the monotonic timeout" started.
+◇ Test case passing 1 argument exitCode → 0 to "observed session-escaping descendants are identity-cleaned with exact leader status" started.
+◇ Test case passing 1 argument exitCode → 37 to "observed session-escaping descendants are identity-cleaned with exact leader status" started.
+◇ Test "an observed session escape stays identity-owned across exact leader outcome" started.
+◇ Test case passing 1 argument mode → "session-escape-success" to "an observed session escape stays identity-owned across exact leader outcome" started.
+◇ Test case passing 1 argument mode → "session-escape-error" to "an observed session escape stays identity-owned across exact leader outcome" started.
+✔ Test "same-second PID reuse cannot bind an original process group" passed after 0.001 seconds.
+✔ Test "credentialless environment has exact locked boundaries" passed after 0.002 seconds.
+✔ Test "symlink executables and working directories fail closed" passed after 0.003 seconds.
+✔ Test "invocation builder excludes generic discovery and secret-shaped environment keys" passed after 0.006 seconds.
+✔ Test "a settled child must still exit successfully when it exits on its own" passed after 0.405 seconds.
+✔ Test "argv stays discrete and output is captured without a shell" passed after 0.408 seconds.
+✔ Test "correlated fake provider transcript settles and every descendant is removed" passed after 0.432 seconds.
+✔ Test "an observed session escape stays identity-owned across exact leader outcome" with 2 test cases passed after 0.647 seconds.
+✔ Test "timeout removes an observed session escape by PID and microsecond start time" passed after 0.762 seconds.
+✔ Test "observed session-escaping descendants are identity-cleaned with exact leader status" with 2 test cases passed after 1.018 seconds.
+✔ Test "timeout directly removes an observed session-escaping identity" passed after 1.073 seconds.
+✔ Test "a child that closes stdin cannot terminate the engine with SIGPIPE" passed after 1.150 seconds.
+✔ Test "stderr and non-JSONL output fail with exact protocol outcomes" passed after 1.305 seconds.
+✔ Test "timeout sends one abort, requires acknowledgement, and still cleans descendants" passed after 3.321 seconds.
+✔ Test "timeout and output bounds terminate the whole process group" passed after 4.239 seconds.
+✔ Suite "Bounded credentialless process execution" passed after 4.239 seconds.
+✔ Test "a child that never reads stdin cannot escape the monotonic timeout" passed after 5.059 seconds.
+✔ Suite "Bounded full-duplex Pi RPC process runner" passed after 5.059 seconds.
+✔ Test run with 16 tests in 2 suites passed after 5.059 seconds.

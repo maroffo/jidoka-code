@@ -85,13 +85,15 @@ private struct XPCApplicationEngineClient: EngineClient {
       .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
       3_500
     case .setProfile, .recheckAmbiguousMutation, .authorizeRetry, .runHerdrPreflight,
-      .prepareForHandoff, .prepareForQuit:
+      .stopAndDrainRollout, .executeRolloutRecovery, .prepareForHandoff, .prepareForQuit:
       700
     case .snapshot, .acknowledgeExternalAutomation, .acknowledgeProviderDisclosure,
       .deleteCredential, .updateRepository, .removeRepository, .setMaxConcurrency,
       .setPaused, .pollNow, .previewJobMaintenance, .applyJobMaintenance,
       .previewJobCanary, .previewJobCanaryRecovery, .previewJobCanaryPiRetry,
       .previewJobCanaryRoleHostReplacement, .previewJobCanaryGenerationRollover,
+      .previewRollout, .activateRollout, .rolloutStatus, .previewRolloutRecovery,
+      .previewFiniteWindow, .activateFiniteWindow,
       .setLoginEnabled, .synchronizeLoginStatus,
       .completeOnboarding, .rollbackOnboarding:
       30
@@ -507,7 +509,8 @@ actor ProductionEngineClient: EngineClient {
     let configuration = ConfigurationStore(database: database)
     let jobs = DurableJobStore(
       database: database,
-      enforceApplicationDispatchGate: true
+      enforceApplicationDispatchGate: true,
+      enforceRolloutAuthority: true
     )
     let intents = MutationIntentStore(database: database)
     let runtimeResolver = ReleaseOwnedPiRuntimeResolver(

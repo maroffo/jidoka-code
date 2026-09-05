@@ -19,6 +19,8 @@ struct HerdrPiWorkflowRuntimeTests {
   func runtimeMatrixShape() {
     let mutationNames = ReleaseOwnedMutationCase.allCases.map { String(describing: $0) }
     let driftNames = replacementPostPreviewDriftCases.map(\.name)
+    // The fault catalog remains historical fixture data. Its shape checks below
+    // do not claim execution of the retired fresh-canary replacement fault paths.
     let faultNames = replacementPreCutoverFaultCases.map(\.name)
 
     #expect(mutationNames.count == 25)
@@ -371,24 +373,29 @@ struct HerdrPiWorkflowRuntimeTests {
     await fixture.runtime.closeLaunchAdmission()
   }
 
-  @Test("paused exact canary creates topology and one durable Pi launch")
-  func pausedExactCanaryCreatesTopologyAndRun() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview)
+  @Test("paused exact canary cannot create topology or a provider launch")
+  func pausedExactCanaryCannotLaunch() async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      kind: .prReview
+    )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let jobID = fixture.jobID.uuidString.lowercased()
     let repositoryID = fixture.repositoryID.uuidString.lowercased()
     let authorization = String(repeating: "a", count: 64)
     let narrativeDigest = String(repeating: "c", count: 64)
     let prefix = "canary:\(authorization):m2:"
-    _ = try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
+    // Production order: the lane takes its lease while running, and is paused after.
+    // Pausing first would be a lease admitted under a closed gate, which the schema
+    // now refuses outright.
     _ = try await fixture.database.execute(
       """
       INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
       VALUES (?, ?, 1, 10, 1)
       """,
       bindings: [.text(repositoryID), .text(jobID)]
+    )
+    _ = try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
     )
     _ = try await fixture.database.execute(
       """
@@ -407,11 +414,10 @@ struct HerdrPiWorkflowRuntimeTests {
       now: Date(timeIntervalSince1970: 11)
     )
     await fixture.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    async let failure: Void = fixture.emitRuntimeFailure()
     let executor = fixture.runtime.makeExecutor(
       preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
     )
-    await #expect(throws: HerdrPiWorkflowError.runtimeFailure("FIXTURE_FAILURE")) {
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
       _ = try await executor.execute(
         PiWorkflowExecutionRequest(
           jobID: "job-\(jobID)",
@@ -424,26 +430,15 @@ struct HerdrPiWorkflowRuntimeTests {
         )
       )
     }
-    try await failure
     await fixture.runtime.closeLaunchAdmission()
 
-    #expect(try await fixture.runStore.runs().count == 1)
-    let run = try #require(try await fixture.runStore.runs().first)
-    let prompt = try String(
-      contentsOf: URL(fileURLWithPath: run.channelPath).appendingPathComponent("prompt.txt"),
-      encoding: .utf8
-    )
-    let narrativeRange = try #require(
-      prompt.range(of: "Commit narrative SHA-256: \(narrativeDigest).")
-    )
-    let untrustedRange = try #require(prompt.range(of: "Treat all application"))
-    #expect(narrativeRange.lowerBound < untrustedRange.lowerBound)
-    #expect(try await fixture.runStore.launches(runID: run.id).count == 1)
-    #expect(await fixture.herdr.launchedCommands().count == 4)
+    #expect(try await fixture.runStore.runs().isEmpty)
+    #expect(try await fixture.runStore.roleHosts(jobID: fixture.jobID).isEmpty)
+    #expect(await fixture.herdr.launchedCommands().isEmpty)
     #expect(
       try await fixture.database.scalarInt(
         "SELECT COUNT(*) FROM herdr_topology_intents WHERE state = 'attributed'"
-      ) == 2
+      ) == 0
     )
     #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
   }
@@ -451,6 +446,7 @@ struct HerdrPiWorkflowRuntimeTests {
   @Test("explicit recovery preserves unknown intent and resumes only the same no-Pi canary")
   func explicitUnknownTopologyRecovery() async throws {
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
       timeoutSeconds: 1,
       fastRuntime: true
@@ -469,9 +465,6 @@ struct HerdrPiWorkflowRuntimeTests {
       previewEvidenceSHA256: String(repeating: "b", count: 64)
     )
     let prefix = "canary:\(canary.authorizationSHA256):m8:"
-    _ = try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
     try await fixture.configuration.setProfile(
       ModelProfileConfiguration(
         role: .review,
@@ -481,12 +474,16 @@ struct HerdrPiWorkflowRuntimeTests {
       ),
       now: Date(timeIntervalSince1970: 9)
     )
+    // Production order: lease first while running, pause afterwards.
     _ = try await fixture.database.execute(
       """
       INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
       VALUES (?, ?, 1, 10, 1)
       """,
       bindings: [.text(repositoryID), .text(jobID)]
+    )
+    _ = try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
     )
     _ = try await fixture.database.execute(
       """
@@ -505,24 +502,10 @@ struct HerdrPiWorkflowRuntimeTests {
       now: Date(timeIntervalSince1970: 11)
     )
     await fixture.herdr.setRedactLayoutEnvironment(true)
-    await fixture.herdr.setFailLayoutApplyResponse(true)
-    await fixture.herdr.setFailLayoutExport(true)
-    await fixture.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let executor = fixture.runtime.makeExecutor(
-      preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
+    // Reconstruct recorded topology in the existing isolated fixture, without a provider launch.
+    try await fixture.preparePartialTopology(
+      kind: .prReview, startedCount: 4, leaveJobTabIntentUnknown: true
     )
-    await #expect(throws: HerdrPiWorkflowError.topologyUnavailable) {
-      _ = try await executor.execute(
-        PiWorkflowExecutionRequest(
-          jobID: "job-\(jobID)",
-          workflow: .pullRequestReview,
-          role: .architecture,
-          round: 1,
-          artifactSHA256: fixture.artifactSHA256,
-          sessionDirective: .fresh
-        )
-      )
-    }
     _ = try await fixture.jobs.transition(
       jobID: fixture.jobID,
       eventKey: "job:\(jobID):a1:s0:pi-interrupted",
@@ -730,706 +713,20 @@ struct HerdrPiWorkflowRuntimeTests {
     let recoveredExecutor = crashRecoveredRuntime.makeExecutor(
       preparer: PiJobWorkflowPreparer(context: providerContext)
     )
-    let firstExecution = Task {
+    let commandsBefore = await fixture.herdr.launchedCommands()
+    let hostsBefore = try await fixture.runStore.roleHosts(jobID: fixture.jobID)
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
       try await recoveredExecutor.execute(
         PiWorkflowExecutionRequest(
-          jobID: "job-\(jobID)",
-          workflow: .pullRequestReview,
-          role: .architecture,
-          round: 1,
-          artifactSHA256: fixture.artifactSHA256,
-          sessionDirective: .fresh
+          jobID: "job-\(jobID)", workflow: .pullRequestReview, role: .architecture,
+          round: 1, artifactSHA256: fixture.artifactSHA256, sessionDirective: .fresh
         )
       )
     }
-    let firstLaunch: PiRunLaunchRecord
-    do {
-      firstLaunch = try await fixture.waitForLaunch(queueSequence: 1)
-    } catch {
-      firstExecution.cancel()
-      _ = try await firstExecution.value
-      throw error
-    }
-    let descriptorRoot = try PiTUIFileProtocol.canonicalExistingURL(
-      fixture.applicationSupport
-        .appendingPathComponent("HerdrRuntime/Descriptors", isDirectory: true)
-    ).standardizedFileURL
-    let commandHost = try #require(
-      try await fixture.runStore.roleHosts(jobID: fixture.jobID).first(where: {
-        $0.id == firstLaunch.roleHostID
-      })
-    )
-    let firstCommand = try HerdrRoleHostCommand(
-      roleHostID: commandHost.id,
-      sequence: firstLaunch.queueSequence,
-      launchAttemptID: firstLaunch.launchAttemptID,
-      descriptorSHA256: firstLaunch.descriptorSHA256,
-      expectedWorkspaceID: commandHost.workspaceID,
-      expectedTabID: try #require(commandHost.tabID),
-      expectedPaneID: try #require(commandHost.paneID),
-      expectedTerminalID: try #require(commandHost.terminalID)
-    )
-    try HerdrRoleHostDescriptorStore.enqueue(firstCommand, in: descriptorRoot)
-    try HerdrRoleHostDescriptorStore.recordStarted(command: firstCommand, in: descriptorRoot)
-    if firstLaunch.state == .enqueued {
-      _ = try await fixture.runStore.transitionLaunch(
-        launchAttemptID: firstLaunch.launchAttemptID,
-        to: .running,
-        event: .running,
-        recordSHA256: firstLaunch.descriptorSHA256,
-        now: Date(timeIntervalSince1970: 17)
-      )
-    }
-    _ = try await fixture.runStore.recordChildProcess(
-      launchAttemptID: firstLaunch.launchAttemptID,
-      record: HerdrChildProcessRecord(
-        launchAttemptID: firstLaunch.launchAttemptID,
-        processID: 999_991,
-        processGroupID: 999_991,
-        startSeconds: 17,
-        startMicroseconds: 1
-      ),
-      now: Date(timeIntervalSince1970: 17.1)
-    )
-    let firstDescriptor = try HerdrHostDescriptorStore.load(
-      launchAttemptID: firstLaunch.launchAttemptID,
-      from: descriptorRoot,
-      resolvedRuntime: fixture.runtimeResolver.resolve()
-    )
-    let firstInvocation = try #require(firstDescriptor.piTUIInvocation)
-    let firstConfiguration = try PiTUIRunConfiguration.load(
-      from: URL(fileURLWithPath: firstInvocation.tuiConfiguration)
-    )
-    let syntheticSessionID = "01010101-0101-7101-8101-010101010101"
-    let missingSession = firstConfiguration.sessionDirectory.appendingPathComponent(
-      "\(syntheticSessionID).jsonl")
-    let sessionRecord: [String: Any] = [
-      "originLaunchMode": PiTUILaunchMode.fresh.rawValue,
-      "originResumeBoundarySHA256": NSNull(),
-      "runID": firstConfiguration.runID,
-      "runNonce": firstConfiguration.runNonce,
-      "schemaVersion": 2,
-      "sessionFile": missingSession.path,
-      "sessionID": syntheticSessionID,
-    ]
-    try PiTUIFileProtocol.createPrivateFile(
-      data: try PiTUIFileProtocol.canonicalJSONData(sessionRecord),
-      at: firstConfiguration.channelDirectory.appendingPathComponent("session.json")
-    )
-    await #expect(throws: HerdrPiWorkflowError.timedOut) {
-      _ = try await firstExecution.value
-    }
-    try HerdrRoleHostDescriptorStore.recordCompletion(
-      HerdrRoleHostCommandCompletion(
-        schemaVersion: 1,
-        roleHostID: firstLaunch.roleHostID,
-        sequence: firstLaunch.queueSequence,
-        launchAttemptID: firstLaunch.launchAttemptID,
-        descriptorSHA256: firstLaunch.descriptorSHA256,
-        status: "failed",
-        failureCode: "EXECUTION_TIMED_OUT"
-      ),
-      in: descriptorRoot
-    )
+    #expect(try await fixture.runStore.runs().isEmpty)
+    #expect(try await fixture.runStore.roleHosts(jobID: fixture.jobID) == hostsBefore)
+    #expect(await fixture.herdr.launchedCommands() == commandsBefore)
     await crashRecoveredRuntime.closeLaunchAdmission()
-
-    let failedState = try await fixture.jobs.canaryPiFreshRetryState(
-      jobID: fixture.jobID,
-      recoveryEvidenceSHA256: recovery.recoveryEvidenceSHA256
-    )
-    #expect(failedState.launch.failureCode == "RUNTIME_TIMEOUT")
-    let runDirectory = URL(fileURLWithPath: failedState.run.sessionPath, isDirectory: true)
-      .deletingLastPathComponent()
-      .appendingPathComponent("herdr", isDirectory: true)
-      .appendingPathComponent(failedState.run.id, isDirectory: true)
-    let launchesDirectory = runDirectory.appendingPathComponent("launches", isDirectory: true)
-    let orphanLaunch = launchesDirectory.appendingPathComponent(
-      "launch-orphaned-credential",
-      isDirectory: true
-    )
-    let orphanAgent = orphanLaunch.appendingPathComponent("agent", isDirectory: true)
-    for directory in [launchesDirectory, orphanLaunch, orphanAgent]
-    where !FileManager.default.fileExists(atPath: directory.path) {
-      try FileManager.default.createDirectory(
-        at: directory,
-        withIntermediateDirectories: false,
-        attributes: [.posixPermissions: 0o700]
-      )
-    }
-    let orphanCredential = orphanAgent.appendingPathComponent("auth.json")
-    try PiTUIFileProtocol.createPrivateFile(data: Data("{}\n".utf8), at: orphanCredential)
-    try await crashRecoveredRuntime.recoverDurableResults()
-    #expect(!FileManager.default.fileExists(atPath: orphanCredential.path))
-    let failedStartupRecovery = try await fixture.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 24)
-    )
-    #expect(failedStartupRecovery.first?.job.state == .runningPi)
-    await #expect(throws: DurableJobStoreError.canaryRecoveryRequired) {
-      _ = try await crashRecoveredRuntime.canaryRecoveryCandidate(
-        authorization: canary,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        resumedRecoveryEvidenceSHA256: recovery.recoveryEvidenceSHA256
-      )
-    }
-
-    let authDirectory = try HerdrPiRuntimeFixture.childDirectory(
-      "auth-source", in: fixture.root)
-    let authURL = authDirectory.appendingPathComponent("auth.json")
-    let expires = Int64(Date().addingTimeInterval(7_200).timeIntervalSince1970 * 1_000)
-    var authData = try JSONSerialization.data(
-      withJSONObject: [
-        "fixture": [
-          "type": "oauth",
-          "access": String(repeating: "a", count: 32),
-          "refresh": String(repeating: "b", count: 32),
-          "expires": expires,
-          "accountId": "fixture-account",
-        ]
-      ],
-      options: [.sortedKeys]
-    )
-    authData.append(0x0A)
-    try PiTUIFileProtocol.createPrivateFile(data: authData, at: authURL)
-    let retryRuntime = try fixture.reopenedRuntime(
-      hostExecutable: legacyHost,
-      compatibleRecoveryHostSHA256: [legacyHostSHA256],
-      compatibleRecoveryEvidenceHostSHA256: [evidenceHostSHA256],
-      compatibleRecoveryHostURLs: [legacyHostSHA256: legacyHost],
-      providerCredentials: try PiProviderCredentialSnapshotter(sourceURL: authURL),
-      processExecutableURL: { _ in legacyHost }
-    )
-    let retryCandidate = try await retryRuntime.canaryPiFreshRetryCandidate(
-      authorization: recovery,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    let retryAuthorization = JobCanaryPiRetryAuthorization(
-      recovery: recovery,
-      retryEvidenceSHA256: retryCandidate.evidence.evidenceSHA256
-    )
-    #expect(
-      try await fixture.jobs.authorizeCanaryPiFreshRetry(
-        retryAuthorization,
-        evidence: retryCandidate.evidence,
-        now: Date(timeIntervalSince1970: 25)
-      ) == false
-    )
-    var credentialStatus = stat()
-    guard lstat(authURL.path, &credentialStatus) == 0 else {
-      throw CocoaError(.fileReadUnknown)
-    }
-    func driftedCredential(replacing original: String, with replacement: String) throws -> Data {
-      guard original.utf8.count == replacement.utf8.count else {
-        throw CocoaError(.fileWriteUnknown)
-      }
-      var data = authData
-      let originalBytes = Data(original.utf8)
-      guard let range = data.range(of: originalBytes) else {
-        throw CocoaError(.fileReadCorruptFile)
-      }
-      data.replaceSubrange(range, with: Data(replacement.utf8))
-      return data
-    }
-    func overwriteCredential(_ data: Data) throws {
-      let handle = try FileHandle(forWritingTo: authURL)
-      try handle.seek(toOffset: 0)
-      try handle.write(contentsOf: data)
-      try handle.truncate(atOffset: UInt64(data.count))
-      try handle.synchronize()
-      try handle.close()
-      var timestamps = [credentialStatus.st_atimespec, credentialStatus.st_mtimespec]
-      guard utimensat(AT_FDCWD, authURL.path, &timestamps, 0) == 0 else {
-        throw CocoaError(.fileWriteUnknown)
-      }
-      var observed = stat()
-      guard lstat(authURL.path, &observed) == 0 else {
-        throw CocoaError(.fileReadUnknown)
-      }
-      #expect(observed.st_dev == credentialStatus.st_dev)
-      #expect(observed.st_ino == credentialStatus.st_ino)
-      #expect(observed.st_size == credentialStatus.st_size)
-      #expect(observed.st_mtimespec.tv_sec == credentialStatus.st_mtimespec.tv_sec)
-      #expect(observed.st_mtimespec.tv_nsec == credentialStatus.st_mtimespec.tv_nsec)
-    }
-    let driftedCredentials = try [
-      driftedCredential(
-        replacing: String(repeating: "a", count: 32),
-        with: String(repeating: "c", count: 32)
-      ),
-      driftedCredential(replacing: "fixture-account", with: "fixture-drifted"),
-    ]
-    for drifted in driftedCredentials {
-      try overwriteCredential(drifted)
-      let driftedRetry = try await retryRuntime.canaryPiFreshRetryCandidate(
-        authorization: recovery,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedRetryEvidenceSHA256: retryAuthorization.retryEvidenceSHA256
-      )
-      try #require(
-        driftedRetry.evidence.evidenceSHA256 != retryAuthorization.retryEvidenceSHA256
-      )
-      await #expect(throws: HerdrPiWorkflowError.recoveryBoundaryReached) {
-        try await retryRuntime.activateCanaryPiFreshRetry(
-          driftedRetry,
-          authorization: retryAuthorization
-        )
-      }
-      try overwriteCredential(authData)
-    }
-    let authorizedRetry = try await retryRuntime.canaryPiFreshRetryCandidate(
-      authorization: recovery,
-      resourceTreeSHA256: String(repeating: "c", count: 64),
-      authorizedRetryEvidenceSHA256: retryAuthorization.retryEvidenceSHA256
-    )
-    #expect(authorizedRetry.evidence == retryCandidate.evidence)
-    try await retryRuntime.activateCanaryPiFreshRetry(
-      authorizedRetry,
-      authorization: retryAuthorization
-    )
-    await retryRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let retryExecutor = retryRuntime.makeExecutor(
-      preparer: PiJobWorkflowPreparer(context: providerContext)
-    )
-    let retryExecution = Task {
-      try await retryExecutor.execute(
-        PiWorkflowExecutionRequest(
-          jobID: "job-\(jobID)",
-          workflow: .pullRequestReview,
-          role: .architecture,
-          round: 1,
-          artifactSHA256: fixture.artifactSHA256,
-          sessionDirective: .fresh
-        )
-      )
-    }
-    let secondLaunch = try await fixture.waitForLaunch(queueSequence: 2)
-    #expect(secondLaunch.launchMode == .fresh)
-    let secondDescriptor = try HerdrHostDescriptorStore.load(
-      launchAttemptID: secondLaunch.launchAttemptID,
-      from: descriptorRoot,
-      resolvedRuntime: fixture.runtimeResolver.resolve()
-    )
-    let secondInvocation = try #require(secondDescriptor.piTUIInvocation)
-    let secondCredential = URL(fileURLWithPath: secondInvocation.agentDirectory)
-      .appendingPathComponent("auth.json")
-    #expect(
-      try PiTUIFileProtocol.safePrivateFile(
-        secondCredential,
-        maximumBytes: 65_536
-      )
-    )
-    #expect(secondDescriptor.agentAlias.hasSuffix("-q2"))
-    try await fixture.waitForEnqueuedCommand(queueSequence: 2)
-    let secondCommand = try #require(
-      try HerdrRoleHostDescriptorStore.command(
-        roleHostID: secondLaunch.roleHostID,
-        sequence: secondLaunch.queueSequence,
-        root: descriptorRoot
-      )
-    )
-    try HerdrRoleHostDescriptorStore.recordStarted(command: secondCommand, in: descriptorRoot)
-    try HerdrRoleHostDescriptorStore.recordCompletion(
-      HerdrRoleHostCommandCompletion(
-        schemaVersion: 1,
-        roleHostID: secondLaunch.roleHostID,
-        sequence: secondLaunch.queueSequence,
-        launchAttemptID: secondLaunch.launchAttemptID,
-        descriptorSHA256: secondLaunch.descriptorSHA256,
-        status: "failed",
-        failureCode: "HERDR_TRANSACTION_FAILED"
-      ),
-      in: descriptorRoot
-    )
-    await #expect(throws: HerdrPiWorkflowError.runtimeFailure("HERDR_TRANSACTION_FAILED")) {
-      _ = try await retryExecution.value
-    }
-    #expect(!FileManager.default.fileExists(atPath: secondCredential.path))
-    await retryRuntime.closeLaunchAdmission()
-    let transactionStartupRecovery = try await fixture.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 25.5)
-    )
-    #expect(transactionStartupRecovery.first?.job.state == .runningPi)
-
-    let failedTransactionState = try await fixture.jobs.canaryPiFreshRetryState(
-      jobID: fixture.jobID,
-      recoveryEvidenceSHA256: recovery.recoveryEvidenceSHA256
-    )
-    #expect(failedTransactionState.launches.count == 2)
-    #expect(failedTransactionState.launch.failureCode == "HERDR_TRANSACTION_FAILED")
-    let run = failedTransactionState.run
-    await #expect(throws: PiRunStoreError.invalidTransition) {
-      _ = try await fixture.runStore.prepareLaunch(
-        launchAttemptID: "launch-third-without-authorization",
-        runID: run.id,
-        roleHostID: failedTransactionState.launch.roleHostID,
-        launchMode: .fresh,
-        descriptorSHA256: String(repeating: "d", count: 64),
-        expectedSessionID: nil,
-        resumeBoundarySHA256: nil,
-        now: Date(timeIntervalSince1970: 25.75)
-      )
-    }
-    await #expect(throws: SQLiteStoreError.self) {
-      _ = try await fixture.database.execute(
-        """
-        INSERT INTO pi_run_launches(
-          launch_attempt_id, run_id, role_host_id, queue_sequence, launch_mode,
-          descriptor_sha256, expected_session_id, resume_boundary_sha256,
-          state, failure_code, created_at, updated_at
-        ) VALUES (?, ?, ?, 3, 'fresh', ?, NULL, NULL, 'prepared', NULL, 25.75, 25.75)
-        """,
-        bindings: [
-          .text("launch-third-trigger-without-authorization"),
-          .text(run.id),
-          .text(failedTransactionState.launch.roleHostID),
-          .text(String(repeating: "d", count: 64)),
-        ]
-      )
-    }
-    let transactionRetryCandidate = try await retryRuntime.canaryPiFreshRetryCandidate(
-      authorization: recovery,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    #expect(transactionRetryCandidate.evidence.schemaVersion == 2)
-    #expect(transactionRetryCandidate.evidence.childProcessID == 0)
-    let transactionRetryAuthorization = JobCanaryPiRetryAuthorization(
-      recovery: recovery,
-      retryEvidenceSHA256: transactionRetryCandidate.evidence.evidenceSHA256
-    )
-    #expect(
-      try await fixture.jobs.authorizeCanaryPiFreshRetry(
-        transactionRetryAuthorization,
-        evidence: transactionRetryCandidate.evidence,
-        now: Date(timeIntervalSince1970: 26)
-      ) == false
-    )
-    #expect(
-      try await fixture.jobs.authorizeCanaryPiFreshRetry(
-        transactionRetryAuthorization,
-        evidence: transactionRetryCandidate.evidence,
-        now: Date(timeIntervalSince1970: 26.25)
-      ) == true
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM job_transitions WHERE job_id = ? AND event_key GLOB ?",
-        bindings: [.text(jobID), .text(prefix + "pi-fresh-retry:*")]
-      ) == 2
-    )
-    let authorizedTransactionStartupRecovery = try await fixture.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 26.5)
-    )
-    #expect(authorizedTransactionStartupRecovery.first?.job.state == .runningPi)
-    let authorizedTransactionRetry = try await retryRuntime.canaryPiFreshRetryCandidate(
-      authorization: recovery,
-      resourceTreeSHA256: String(repeating: "c", count: 64),
-      authorizedRetryEvidenceSHA256: transactionRetryAuthorization.retryEvidenceSHA256
-    )
-    try await retryRuntime.activateCanaryPiFreshRetry(
-      authorizedTransactionRetry,
-      authorization: transactionRetryAuthorization
-    )
-    await retryRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let transactionRetryExecution = Task {
-      try await retryExecutor.execute(
-        PiWorkflowExecutionRequest(
-          jobID: "job-\(jobID)",
-          workflow: .pullRequestReview,
-          role: .architecture,
-          round: 1,
-          artifactSHA256: fixture.artifactSHA256,
-          sessionDirective: .fresh
-        )
-      )
-    }
-    let thirdLaunch = try await fixture.waitForLaunch(queueSequence: 3)
-    try await fixture.waitForEnqueuedCommand(queueSequence: 3)
-    let thirdDescriptor = try HerdrHostDescriptorStore.load(
-      launchAttemptID: thirdLaunch.launchAttemptID,
-      from: descriptorRoot,
-      resolvedRuntime: fixture.runtimeResolver.resolve()
-    )
-    let thirdInvocation = try #require(thirdDescriptor.piTUIInvocation)
-    let thirdCredential = URL(fileURLWithPath: thirdInvocation.agentDirectory)
-      .appendingPathComponent("auth.json")
-    #expect(try PiTUIFileProtocol.safePrivateFile(thirdCredential, maximumBytes: 65_536))
-    #expect(thirdDescriptor.agentAlias.hasSuffix("-q3"))
-    #expect(thirdDescriptor.agentAlias != secondDescriptor.agentAlias)
-    let thirdCommand = try #require(
-      try HerdrRoleHostDescriptorStore.command(
-        roleHostID: thirdLaunch.roleHostID,
-        sequence: thirdLaunch.queueSequence,
-        root: descriptorRoot
-      )
-    )
-    try HerdrRoleHostDescriptorStore.recordStarted(command: thirdCommand, in: descriptorRoot)
-    try HerdrRoleHostDescriptorStore.recordCompletion(
-      HerdrRoleHostCommandCompletion(
-        schemaVersion: 1,
-        roleHostID: thirdLaunch.roleHostID,
-        sequence: thirdLaunch.queueSequence,
-        launchAttemptID: thirdLaunch.launchAttemptID,
-        descriptorSHA256: thirdLaunch.descriptorSHA256,
-        status: "failed",
-        failureCode: "HERDR_TRANSACTION_FAILED"
-      ),
-      in: descriptorRoot
-    )
-    await #expect(throws: HerdrPiWorkflowError.runtimeFailure("HERDR_TRANSACTION_FAILED")) {
-      _ = try await transactionRetryExecution.value
-    }
-    #expect(!FileManager.default.fileExists(atPath: thirdCredential.path))
-    await retryRuntime.closeLaunchAdmission()
-    let stageThreeState = try await fixture.jobs.canaryPiFreshRetryState(
-      jobID: fixture.jobID,
-      recoveryEvidenceSHA256: recovery.recoveryEvidenceSHA256
-    )
-    #expect(stageThreeState.launches.count == 3)
-    let stageThreeCandidate = try await retryRuntime.canaryPiFreshRetryCandidate(
-      authorization: recovery,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    #expect(stageThreeCandidate.evidence.schemaVersion == 3)
-    #expect(
-      stageThreeCandidate.evidence.legacyAgentPrimeProtocol
-        == JobCanaryPiRetryEvidence.legacyAgentPrimeProtocolV1
-    )
-    let stageThreeAuthorization = JobCanaryPiRetryAuthorization(
-      recovery: recovery,
-      retryEvidenceSHA256: stageThreeCandidate.evidence.evidenceSHA256
-    )
-    #expect(
-      try await fixture.jobs.authorizeCanaryPiFreshRetry(
-        stageThreeAuthorization,
-        evidence: stageThreeCandidate.evidence,
-        now: Date(timeIntervalSince1970: 27)
-      ) == false
-    )
-    let authorizedStageThree = try await retryRuntime.canaryPiFreshRetryCandidate(
-      authorization: recovery,
-      resourceTreeSHA256: String(repeating: "c", count: 64),
-      authorizedRetryEvidenceSHA256: stageThreeAuthorization.retryEvidenceSHA256
-    )
-    try await retryRuntime.activateCanaryPiFreshRetry(
-      authorizedStageThree,
-      authorization: stageThreeAuthorization
-    )
-    await fixture.herdr.setFailNextPrime()
-    await retryRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let failedPrimeExecution = Task {
-      try await retryExecutor.execute(
-        PiWorkflowExecutionRequest(
-          jobID: "job-\(jobID)",
-          workflow: .pullRequestReview,
-          role: .architecture,
-          round: 1,
-          artifactSHA256: fixture.artifactSHA256,
-          sessionDirective: .fresh
-        )
-      )
-    }
-    await #expect(throws: HerdrPiWorkflowError.topologyUnavailable) {
-      _ = try await failedPrimeExecution.value
-    }
-    await retryRuntime.closeLaunchAdmission()
-    #expect(try await fixture.runStore.launches(runID: run.id).count == 3)
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM herdr_topology_intents WHERE kind = 'primeAgentAuthority' AND state = 'unknown'"
-      ) == 1
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM herdr_topology_intents WHERE kind = 'resetAgentAuthority'"
-      ) == 0
-    )
-    let projectedCredentials = try FileManager.default.subpathsOfDirectory(
-      atPath: launchesDirectory.path
-    ).filter { URL(fileURLWithPath: $0).lastPathComponent == "auth.json" }
-    #expect(projectedCredentials.isEmpty)
-
-    let resetState = try await fixture.jobs.canaryPiFreshRetryState(
-      jobID: fixture.jobID,
-      recoveryEvidenceSHA256: recovery.recoveryEvidenceSHA256
-    )
-    let failedPrimeIntent = try #require(resetState.failedPrimeIntent)
-    let resetCandidate = try await retryRuntime.canaryPiFreshRetryCandidate(
-      authorization: recovery,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    #expect(resetCandidate.evidence.schemaVersion == 4)
-    #expect(
-      resetCandidate.evidence.legacyAgentPrimeProtocol
-        == JobCanaryPiRetryEvidence.agentAuthorityResetProtocolV1
-    )
-    #expect(resetCandidate.evidence.failedPrimeIntentID == failedPrimeIntent.id)
-    #expect(resetCandidate.evidence.stalePaneRevision != nil)
-    #expect(resetCandidate.evidence.stalePaneHadTokens != nil)
-    #expect(
-      resetCandidate.evidence.stalePaneTokensSHA256.map(
-        GitHubInputValidation.validSHA256
-      ) == true
-    )
-    let resetAuthorization = JobCanaryPiRetryAuthorization(
-      recovery: recovery,
-      retryEvidenceSHA256: resetCandidate.evidence.evidenceSHA256
-    )
-    #expect(
-      try await fixture.jobs.authorizeCanaryPiFreshRetry(
-        resetAuthorization,
-        evidence: resetCandidate.evidence,
-        now: Date(timeIntervalSince1970: 28)
-      ) == false
-    )
-    let authorizedReset = try await retryRuntime.canaryPiFreshRetryCandidate(
-      authorization: recovery,
-      resourceTreeSHA256: String(repeating: "c", count: 64),
-      authorizedRetryEvidenceSHA256: resetAuthorization.retryEvidenceSHA256
-    )
-    #expect(authorizedReset.evidence == resetCandidate.evidence)
-    try await retryRuntime.activateCanaryPiFreshRetry(
-      authorizedReset,
-      authorization: resetAuthorization
-    )
-    await retryRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let fourthExecution = Task {
-      try await retryExecutor.execute(
-        PiWorkflowExecutionRequest(
-          jobID: "job-\(jobID)",
-          workflow: .pullRequestReview,
-          role: .architecture,
-          round: 1,
-          artifactSHA256: fixture.artifactSHA256,
-          sessionDirective: .fresh
-        )
-      )
-    }
-    let fourthLaunch: PiRunLaunchRecord
-    do {
-      fourthLaunch = try await fixture.waitForLaunch(queueSequence: 4)
-    } catch {
-      do {
-        _ = try await fourthExecution.value
-        Issue.record("fourth execution completed without a durable launch")
-        throw error
-      } catch let executionError {
-        print("fourth_execution_error=\(executionError)")
-        throw executionError
-      }
-    }
-    try await fixture.waitForEnqueuedCommand(queueSequence: 4)
-    let fourthDescriptor = try HerdrHostDescriptorStore.load(
-      launchAttemptID: fourthLaunch.launchAttemptID,
-      from: descriptorRoot,
-      resolvedRuntime: fixture.runtimeResolver.resolve()
-    )
-    let fourthInvocation = try #require(fourthDescriptor.piTUIInvocation)
-    let fourthCredential = URL(fileURLWithPath: fourthInvocation.agentDirectory)
-      .appendingPathComponent("auth.json")
-    #expect(try PiTUIFileProtocol.safePrivateFile(fourthCredential, maximumBytes: 65_536))
-    #expect(fourthDescriptor.agentAlias.hasSuffix("-q4"))
-    #expect(fourthDescriptor.agentAlias != thirdDescriptor.agentAlias)
-    #expect(await fixture.herdr.recordedPrimes().isEmpty)
-    let recordedResets = await fixture.herdr.recordedResets()
-    #expect(recordedResets.count == 1)
-    #expect(recordedResets.first?.prime.alias == fourthDescriptor.agentAlias)
-    #expect(recordedResets.first?.prime.agent.source == "jidoka:host")
-    #expect(recordedResets.first?.prime.agent.sequence == 7)
-    #expect(recordedResets.first?.prime.metadata.source == "jidoka:coordination")
-    #expect(
-      recordedResets.first?.prime.metadata.tokens["launch_attempt_id"]
-        == fourthLaunch.launchAttemptID
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM herdr_topology_intents WHERE kind = 'primeAgentAuthority' AND state = 'unknown'"
-      ) == 1
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM herdr_topology_intents WHERE kind = 'resetAgentAuthority' AND state = 'attributed'"
-      ) == 1
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM job_transitions WHERE job_id = ? AND event_key GLOB ?",
-        bindings: [.text(jobID), .text(prefix + "pi-agent-authority-reset:*")]
-      ) == 1
-    )
-    _ = try #require(
-      try HerdrRoleHostDescriptorStore.command(
-        roleHostID: fourthLaunch.roleHostID,
-        sequence: fourthLaunch.queueSequence,
-        root: descriptorRoot
-      )
-    )
-    let fourthConfiguration = try PiTUIRunConfiguration.load(
-      from: URL(fileURLWithPath: fourthInvocation.tuiConfiguration)
-    )
-    try PiTUIFileProtocol.createPrivateFile(
-      data: try PiTUIFileProtocol.canonicalJSONData([
-        "code": "FIXTURE_FAILURE",
-        "runID": run.id,
-        "runNonce": run.runNonce,
-        "schemaVersion": 1,
-        "status": "failed",
-      ]),
-      at: fourthConfiguration.channelDirectory.appendingPathComponent(
-        PiTUIResultChannel.runtimeFailureFileName
-      )
-    )
-    await #expect(throws: HerdrPiWorkflowError.runtimeFailure("FIXTURE_FAILURE")) {
-      _ = try await fourthExecution.value
-    }
-    #expect(!FileManager.default.fileExists(atPath: fourthCredential.path))
-    await retryRuntime.closeLaunchAdmission()
-
-    _ = try await fixture.database.execute(
-      """
-      INSERT INTO job_transitions(
-        job_id, event_key, from_state, to_state, reason,
-        attempt_before, attempt_after, step_before, step_after, created_at
-      ) VALUES (?, ?, 'runningPi', 'runningPi', 'synthetic fifth launch denial',
-        3, 3, 0, 0, 29)
-      """,
-      bindings: [
-        .text(jobID),
-        .text(
-          prefix + "pi-fresh-retry:" + run.id + ":" + fourthLaunch.launchAttemptID + ":"
-            + String(repeating: "d", count: 64)
-        ),
-      ]
-    )
-    await #expect(throws: PiRunStoreError.invalidTransition) {
-      _ = try await fixture.runStore.prepareLaunch(
-        launchAttemptID: "launch-fifth-denied",
-        runID: run.id,
-        roleHostID: fourthLaunch.roleHostID,
-        launchMode: .fresh,
-        descriptorSHA256: String(repeating: "e", count: 64),
-        expectedSessionID: nil,
-        resumeBoundarySHA256: nil,
-        now: Date(timeIntervalSince1970: 30)
-      )
-    }
-    await #expect(throws: SQLiteStoreError.self) {
-      _ = try await fixture.database.execute(
-        """
-        INSERT INTO pi_run_launches(
-          launch_attempt_id, run_id, role_host_id, queue_sequence, launch_mode,
-          descriptor_sha256, expected_session_id, resume_boundary_sha256,
-          state, failure_code, created_at, updated_at
-        ) VALUES (?, ?, ?, 5, 'fresh', ?, NULL, NULL, 'prepared', NULL, 30, 30)
-        """,
-        bindings: [
-          .text("launch-fifth-trigger-denied"),
-          .text(run.id),
-          .text(fourthLaunch.roleHostID),
-          .text(String(repeating: "f", count: 64)),
-        ]
-      )
-    }
-    #expect(try await fixture.runStore.launches(runID: run.id).count == 4)
-    #expect(await fixture.herdr.launchedCommands().count == 4)
   }
 
   @Test("explicit focus revalidates exact ownership before changing shared-session focus")
@@ -2105,13 +1402,17 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
-    "lost four-host topology rolls to generation two and settles only q4",
+    "historical rollover preserves prepared or enqueued q4 without provider authority",
     arguments: GenerationRolloverRestartLaunchState.allCases
   )
-  func generationRolloverSettlesOnlyQ4(
+  func generationRolloverCannotLaunchQ4(
     restartState: GenerationRolloverRestartLaunchState
   ) async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
+      kind: .prReview,
+      fastRuntime: true
+    )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
       checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
@@ -2304,49 +1605,21 @@ struct HerdrPiWorkflowRuntimeTests {
       authorizedQ4: q4Candidate.authorization
     )
     await preSendRestart.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let q4Task = Task {
+    let commandsBeforeQ4 = await fixture.herdr.launchedCommands()
+    let successorLaunchesBefore = try await fixture.runStore.launches(runID: successorRunID)
+    // Denied at `verifyProviderLaunchAuthority`, reached with no provider permit: the
+    // Q4 rollover path never reserves one, so the executor reports the missing permit
+    // as an identity mismatch rather than the admission closure that the earlier
+    // `.historicalCanary` guard raises for ordinary canary execution.
+    await #expect(throws: RolloutAuthorityError.effectIdentityMismatch) {
       try await preSendRestart.executeCanaryGenerationRolloverQ4(
-        preSendCandidate,
-        authorization: q4Authorization
+        preSendCandidate, authorization: q4Authorization
       )
     }
-    do {
-      _ = try await fixture.launchCheckpoints.wait(
-        for: .commandPublished,
-        queueSequence: 4,
-        runID: successorRunID,
-        timeout: .seconds(5)
-      )
-    } catch {
-      let q4Result = await q4Task.result
-      Issue.record("q4 publication failed: \(error); execution: \(q4Result)")
-      return
-    }
-    let successorRun = try #require(
-      try await fixture.runStore.run(id: successorRunID)
-    )
-    try await fixture.emitReplacementPullRequestReviewResult(
-      run: successorRun,
-      roleHostID: architectureHost.id,
-      launchAttemptID: q4Candidate.authorization.plannedLaunchAttemptID
-    )
-    let settled = try await q4Task.value
     await preSendRestart.closeLaunchAdmission()
-
-    #expect(settled.status == .settled)
     #expect(try await fixture.runStore.launches(runID: incident.run.id) == predecessorLaunches)
-    let successorLaunches = try await fixture.runStore.launches(runID: successorRunID)
-    #expect(successorLaunches.count == 1)
-    #expect(successorLaunches[0].queueSequence == 4)
-    #expect(successorLaunches[0].executionRoleHostID == nil)
-    #expect(successorLaunches[0].state == .released)
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence > 4",
-        bindings: [.text(successorRunID)]
-      ) == 0
-    )
-    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(try await fixture.runStore.launches(runID: successorRunID) == successorLaunchesBefore)
+    #expect(await fixture.herdr.launchedCommands() == commandsBeforeQ4)
     #expect(
       try await fixture.database.query(
         "SELECT * FROM jobs WHERE state = 'queued' ORDER BY id"
@@ -2354,29 +1627,8 @@ struct HerdrPiWorkflowRuntimeTests {
     )
     #expect(
       try await fixture.unrelatedJobSnapshot(incident.unrelatedJobID)
-        == incident.unrelatedJobSnapshot)
-
-    let commandsBeforeReplay = await fixture.herdr.launchedCommands()
-    let restartedRuntime = try fixture.reopenedRuntime(
-      providerCredentials: incident.providerCredentials,
-      processIdentityForRoleHost: fixture.processIdentities.require,
-      roleHostExitObserved: { _, _ in true }
+        == incident.unrelatedJobSnapshot
     )
-    let replayCandidate = try await restartedRuntime.canaryGenerationRolloverQ4Candidate(
-      request: q4Request,
-      resourceTreeSHA256: String(repeating: "c", count: 64),
-      authorizedQ4: q4Candidate.authorization
-    )
-    #expect(replayCandidate.authorization == q4Candidate.authorization)
-    await restartedRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let replayed = try await restartedRuntime.executeCanaryGenerationRolloverQ4(
-      replayCandidate,
-      authorization: q4Authorization
-    )
-    await restartedRuntime.closeLaunchAdmission()
-    #expect(replayed.status == .settled)
-    #expect(replayed.replayed)
-    #expect(await fixture.herdr.launchedCommands() == commandsBeforeReplay)
   }
 
   @Test("schema eight migration reaches current-runtime lost topology recovery")
@@ -2404,7 +1656,7 @@ struct HerdrPiWorkflowRuntimeTests {
       databaseURL: fixture.applicationSupport.appendingPathComponent("state.sqlite3")
     )
     let configuration = ConfigurationStore(database: upgraded)
-    let jobs = DurableJobStore(database: upgraded)
+    let jobs = DurableJobStore(database: upgraded, enforceRolloutAuthority: false)
     let runs = PiRunStore(database: upgraded)
     let intents = SQLiteHerdrTopologyIntentStore(database: upgraded)
     let gate = HerdrTopologyMutationGate(initiallyAllowed: false)
@@ -2431,7 +1683,8 @@ struct HerdrPiWorkflowRuntimeTests {
       resourceTreeAttestation: fixture.resourceTreeAttestation,
       paneTokensSHA256: replacementPaneTokensSHA256,
       processIdentityForRoleHost: fixture.processIdentities.require,
-      roleHostExitObserved: { _, _ in true }
+      roleHostExitObserved: { _, _ in true },
+      rolloutAuthority: ExplicitTestRolloutEffectAuthority()
     )
     let before = await fixture.herdr.remoteSnapshot()
     await fixture.herdr.failAllRoleProcessInfo()
@@ -2462,7 +1715,11 @@ struct HerdrPiWorkflowRuntimeTests {
 
   @Test("generation rollover resumes after a binding and one-host restart cut")
   func generationRolloverResumesPartialTopology() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
+      kind: .prReview,
+      fastRuntime: true
+    )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
       checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
@@ -2567,13 +1824,17 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
-    "schema 9 replacement denies one-field q4 backing drift before remote effects",
+    "historical replacement denies one-field q4 backing drift before remote effects",
     arguments: ReplacementQ4BackingDrift.allCases
   )
   func roleHostReplacementRejectsQ4BackingDrift(
     drift: ReplacementQ4BackingDrift
   ) async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
+      kind: .prReview,
+      fastRuntime: true
+    )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
       checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
@@ -2629,94 +1890,15 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
-    "schema 9 replacement revalidates q4 at send and first remote-effect boundaries",
-    arguments: ReplacementQ4AuthorityBoundary.allCases
-  )
-  func roleHostReplacementRevalidatesQ4AtEffectBoundaries(
-    boundary: ReplacementQ4AuthorityBoundary
-  ) async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let probe = ReplacementCheckpointProbe(failingAt: nil)
-    let incident = try await fixture.prepareReplacementIncident(checkpointProbe: probe)
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    try await incident.runtime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    let q4ConfigurationURL = URL(
-      fileURLWithPath: candidate.q4Plan.invocation.tuiConfiguration
-    )
-    probe.perform(at: boundary.checkpoint) {
-      var drifted = try PiTUIFileProtocol.readPrivateFile(
-        q4ConfigurationURL,
-        maximumBytes: 1_048_576
-      )
-      drifted.append(0x20)
-      try FileManager.default.removeItem(at: q4ConfigurationURL)
-      try PiTUIFileProtocol.createPrivateFile(data: drifted, at: q4ConfigurationURL)
-    }
-    let descriptorRoot =
-      fixture.applicationSupport
-      .appendingPathComponent("HerdrRuntime/Descriptors", isDirectory: true)
-      .standardizedFileURL
-    let shutdownURL =
-      descriptorRoot
-      .appendingPathComponent(incident.predecessor.id, isDirectory: true)
-      .appendingPathComponent("shutdown.json")
-    let q4Credential = URL(
-      fileURLWithPath: candidate.q4Plan.invocation.agentDirectory,
-      isDirectory: true
-    ).appendingPathComponent("auth.json")
-    let beforeRemote = await fixture.herdr.remoteSnapshot()
-    let beforeOperations = await fixture.herdr.recordedReplacementOperations()
-    #expect(probe.snapshot().isEmpty)
-    #expect(!FileManager.default.fileExists(atPath: q4Credential.path))
-
-    await incident.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    await #expect(throws: HerdrPiWorkflowError.recoveryBoundaryReached) {
-      _ = try await incident.runtime.makeExecutor(
-        preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-      ).execute(incident.workflowRequest)
-    }
-    await incident.runtime.closeLaunchAdmission()
-
-    #expect(probe.snapshot() == boundary.expectedCheckpoints)
-    #expect(await fixture.herdr.remoteSnapshot() == beforeRemote)
-    #expect(await fixture.herdr.recordedReplacementOperations() == beforeOperations)
-    #expect(!FileManager.default.fileExists(atPath: shutdownURL.path))
-    #expect(!FileManager.default.fileExists(atPath: q4Credential.path))
-    #expect(
-      try await fixture.database.scalarText(
-        "SELECT state FROM herdr_topology_intents WHERE kind = 'replaceRoleHost'"
-      ) == boundary.expectedIntentState
-    )
-    #expect(try await fixture.runStore.replacementRoleHosts(jobID: fixture.jobID).isEmpty)
-    #expect(try await fixture.runStore.launches(runID: incident.run.id).count == 3)
-    #expect(
-      try HerdrRoleHostDescriptorStore.command(
-        roleHostID: incident.request.plannedReplacementRoleHostID,
-        sequence: 4,
-        root: descriptorRoot
-      ) == nil
-    )
-    let report = try #require(
-      try await fixture.jobs.canaryRoleHostReplacementTerminalReport(
-        request: incident.request
-      )
-    )
-    #expect(report.status == boundary.expectedTerminalStatus)
-  }
-
-  @Test(
-    "schema 9 replacement rejects every authorized q4 digest drift before credentials",
+    "historical replacement rejects every authorized q4 digest drift before credentials",
     arguments: Array(0..<7)
   )
   func roleHostReplacementRejectsAuthorizedQ4DigestDrift(field: Int) async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
+      kind: .prReview,
+      fastRuntime: true
+    )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let incident = try await fixture.prepareReplacementIncident(
       checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
@@ -2753,7 +1935,7 @@ struct HerdrPiWorkflowRuntimeTests {
   }
 
   @Test(
-    "every post-preview one-field drift stops before replacement effects",
+    "historical post-preview scenarios never authorize replacement effects",
     arguments: replacementPostPreviewDriftCases
   )
   func roleHostReplacementRejectsEveryPostPreviewDrift(
@@ -2762,6 +1944,7 @@ struct HerdrPiWorkflowRuntimeTests {
     #expect(replacementPostPreviewDriftCases.count == 51)
     #expect(Set(replacementPostPreviewDriftCases.map(\.name)).count == 51)
     let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
       kind: .prReview,
       fastRuntime: true,
       isolatedResourceRoot: true
@@ -2839,7 +2022,9 @@ struct HerdrPiWorkflowRuntimeTests {
         ).execute(incident.workflowRequest)
         Issue.record("\(drift.name) unexpectedly reached replacement effects")
       } catch {
-        assertReplacementMatrixError(error, expected: drift.expectedError, name: drift.name)
+        // Admission now denies before these downstream drift checks. This matrix
+        // pins denial across the historical scenarios, not reachability of each check.
+        #expect(error as? RolloutAuthorityError == .effectAdmissionClosed, "\(drift.name)")
       }
       await incident.runtime.closeLaunchAdmission()
       #expect(ProcessInfo.processInfo.systemUptime - startedAt < 5)
@@ -2978,9 +2163,20 @@ struct HerdrPiWorkflowRuntimeTests {
         try driftPrivateFile(credential)
       }
     case .pausedState:
-      _ = try await fixture.database.execute(
-        "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
-      )
+      // Schema 10 refuses `paused = 0` outright without an active authorization, so
+      // this drift cannot even be staged through the ordinary write. Prove that first,
+      // then stage it behind the explicit test-only seam so the replacement path is
+      // still exercised against a drifted pause.
+      await #expect(throws: SQLiteStoreError.self) {
+        try await fixture.database.execute(
+          "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+        )
+      }
+      try await fixture.withDurableResumeDenialLifted {
+        _ = try await fixture.database.execute(
+          "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+        )
+      }
     case .activeCanary:
       _ = try await fixture.database.execute(
         "UPDATE jobs SET state = 'blocked' WHERE id = ?",
@@ -2996,215 +2192,13 @@ struct HerdrPiWorkflowRuntimeTests {
     }
   }
 
-  @Test(
-    "every pre-cutover fault preserves typed certainty credentials and other hosts",
-    arguments: replacementPreCutoverFaultCases
-  )
-  func roleHostReplacementPreCutoverFaultMatrix(
-    fault: ReplacementPreCutoverFaultCase
-  ) async throws {
-    #expect(replacementPreCutoverFaultCases.count == 28)
-    #expect(Set(replacementPreCutoverFaultCases.map(\.name)).count == 28)
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let checkpoint: HerdrRoleHostReplacementCheckpoint?
-    if case .checkpoint(let value) = fault.kind {
-      checkpoint = value
-    } else {
-      checkpoint = nil
-    }
-    let probe = ReplacementCheckpointProbe(failingAt: checkpoint)
-    let failPublication: (@Sendable (HerdrRoleHostCommand, URL) throws -> Void)?
-    if case .q4PublicationBeforeVisibility = fault.kind {
-      failPublication = { _, _ in
-        throw ReplacementCommandPublicationFailure.beforeVisibility
-      }
-    } else {
-      failPublication = nil
-    }
-    let incident = try await fixture.prepareReplacementIncident(
-      checkpointProbe: probe,
-      enqueueRoleHostCommand: failPublication
+  @Test("historical replacement preview never grants a launch, including after reopen")
+  func historicalReplacementDenialPreservesEvidence() async throws {
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
+      kind: .prReview,
+      fastRuntime: true
     )
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    try await incident.runtime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    switch fault.kind {
-    case .close:
-      await fixture.herdr.setFailNextClose()
-    case .remote(let remote):
-      await fixture.herdr.setReplacementRemoteFault(remote)
-    case .processDiscovery:
-      probe.perform(at: .replacementLaunched) {
-        let identity = try fixture.processIdentities.require(
-          roleHostID: incident.request.plannedReplacementRoleHostID
-        )
-        try fixture.executableIdentities.drift(
-          processID: identity.processID,
-          field: .inode
-        )
-      }
-    case .prime:
-      await fixture.herdr.setFailNextPrime()
-    case .cutoverWrite:
-      _ = try await fixture.database.execute(
-        """
-        CREATE TEMP TRIGGER w5_cutover_fault
-        BEFORE INSERT ON herdr_replacement_role_hosts
-        BEGIN SELECT RAISE(ABORT, 'w5 cutover fault'); END
-        """
-      )
-    case .checkpoint, .q4PublicationBeforeVisibility:
-      break
-    }
-    let beforeRemote = await fixture.herdr.remoteSnapshot()
-    let projectedCredential = URL(
-      fileURLWithPath: candidate.q4Plan.invocation.agentDirectory,
-      isDirectory: true
-    ).appendingPathComponent("auth.json")
-    await incident.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let startedAt = ProcessInfo.processInfo.systemUptime
-    do {
-      _ = try await incident.runtime.makeExecutor(
-        preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-      ).execute(incident.workflowRequest)
-      Issue.record("\(fault.name) unexpectedly completed")
-    } catch {
-      assertReplacementMatrixError(error, expected: fault.expectedError, name: fault.name)
-    }
-    await incident.runtime.closeLaunchAdmission()
-    #expect(ProcessInfo.processInfo.systemUptime - startedAt < 5)
-
-    let report = try #require(
-      try await fixture.jobs.canaryRoleHostReplacementTerminalReport(
-        request: incident.request
-      )
-    )
-    #expect(report.status == fault.expectedStatus)
-    switch fault.expectedStatus {
-    case .noRemoteEffectFailure:
-      #expect(report.effectCertainty == .knownNoRemoteEffect)
-    case .remoteEffectAmbiguous:
-      #expect(report.effectCertainty == .possibleRemoteEffect)
-    case .q4Prepared, .q4Enqueued:
-      #expect(report.effectCertainty == .confirmedReplacementEffect)
-    default:
-      Issue.record("unexpected fault-matrix terminal status")
-    }
-    if fault.retainsCredential {
-      try assertReplacementCredentialFileIsPrivate(at: projectedCredential)
-      try assertReplacementCredentialProjection(at: projectedCredential)
-    } else {
-      #expect(!FileManager.default.fileExists(atPath: projectedCredential.path))
-    }
-    let launches = try await fixture.runStore.launches(runID: incident.run.id)
-    switch fault.expectedStatus {
-    case .q4Prepared:
-      #expect(launches.count == 4)
-      #expect(launches.last?.state == .prepared)
-    case .q4Enqueued:
-      #expect(launches.count == 4)
-      #expect(launches.last?.state == .enqueued)
-    default:
-      #expect(launches.count == 3)
-    }
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence >= 5",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-    try await assertPreservedRemotePanes(
-      fixture: fixture,
-      incident: incident,
-      before: beforeRemote
-    )
-    #expect(
-      try await fixture.runStore.roleHosts(jobID: fixture.jobID).filter {
-        $0.role != .architecture
-      }.sorted { $0.role.rawValue < $1.role.rawValue } == incident.preservedHosts
-    )
-    let operations = await fixture.herdr.recordedReplacementOperations()
-    let commands = await fixture.herdr.launchedCommands()
-    try assertReplacementSecretsAbsent(
-      encodedValues: [
-        Data(operations.joined(separator: "\n").utf8),
-        Data(commands.flatMap { $0 }.joined(separator: "\n").utf8),
-        Data(String(describing: probe.snapshot()).utf8),
-      ]
-    )
-    let operationsBeforeReplay = operations
-    do {
-      _ = try await incident.runtime.canaryRoleHostReplacementCandidate(
-        request: incident.request,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedReplacementEvidenceSHA256: authorization.replacementEvidenceSHA256,
-        authorizedQ4Binding: authorization.q4Binding
-      )
-      Issue.record("\(fault.name) replay unexpectedly obtained authority")
-    } catch {
-      assertReplacementMatrixError(error, expected: fault.expectedReplayError, name: fault.name)
-    }
-    #expect(await fixture.herdr.recordedReplacementOperations() == operationsBeforeReplay)
-  }
-
-  @Test("credential cleanup failure is exact and bounded before send-start authority")
-  func roleHostReplacementCleanupFailureIsExact() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let probe = ReplacementCheckpointProbe(failingAt: nil)
-    let incident = try await fixture.prepareReplacementIncident(checkpointProbe: probe)
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    try await incident.runtime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    let agentDirectory = URL(
-      fileURLWithPath: candidate.q4Plan.invocation.agentDirectory,
-      isDirectory: true
-    )
-    let credential = agentDirectory.appendingPathComponent("auth.json")
-    let staging = agentDirectory.appendingPathComponent(
-      ".auth.json.11111111-1111-4111-8111-111111111111.staging"
-    )
-    probe.perform(at: .finalQ4PlanValidated) {
-      guard link(credential.path, staging.path) == 0 else {
-        throw POSIXError(.init(rawValue: errno) ?? .EIO)
-      }
-    }
-    await incident.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let startedAt = ProcessInfo.processInfo.systemUptime
-    await #expect(
-      throws: HerdrPiWorkflowError.runtimeFailure("CREDENTIAL_CLEANUP_FAILED")
-    ) {
-      _ = try await incident.runtime.makeExecutor(
-        preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-      ).execute(incident.workflowRequest)
-    }
-    await incident.runtime.closeLaunchAdmission()
-    #expect(ProcessInfo.processInfo.systemUptime - startedAt < 5)
-    #expect(!probe.snapshot().contains(.sendStarted))
-    #expect(await fixture.herdr.recordedReplacementOperations().isEmpty)
-    #expect(try await fixture.runStore.launches(runID: incident.run.id).count == 3)
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence >= 4",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-  }
-
-  @Test("schema 9 replacement retires only architecture and publishes exact q4")
-  func roleHostReplacementHappyPathIsIsolated() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let probe = ReplacementCheckpointProbe(failingAt: nil)
     let incident = try await fixture.prepareReplacementIncident(checkpointProbe: probe)
@@ -3240,902 +2234,63 @@ struct HerdrPiWorkflowRuntimeTests {
     let executor = incident.runtime.makeExecutor(
       preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
     )
-    let execution = try await withThrowingTaskGroup(
-      of: PiWorkflowExecution?.self
-    ) { group in
-      group.addTask {
-        .some(try await executor.execute(incident.workflowRequest))
-      }
-      group.addTask {
-        try await fixture.emitReplacementPullRequestReviewResult(
-          run: incident.run,
-          roleHostID: incident.request.plannedReplacementRoleHostID,
-          launchAttemptID: incident.request.plannedLaunchAttemptID
-        )
-        return nil
-      }
-      var completedExecution: PiWorkflowExecution?
-      for try await result in group {
-        if let result { completedExecution = result }
-      }
-      return try #require(completedExecution)
-    }
-    #expect(execution.result.role == .architecture)
-    await incident.runtime.closeLaunchAdmission()
-
-    let expectedBoundaryCounts: [PiRuntimeResolutionBoundary: Int] = [
-      .initialHerdrPreparation: 1,
-      .herdrRecoveryRetry: 3,
-      .descriptorCreate: 1,
-      .descriptorDecode: 17,
-      .replacementCandidate: 8,
-      .preCredentialExecution: 1,
-      .finalPreSendProof: 2,
-    ]
-    #expect(fixture.runtimeResolutionProbe.boundaryCounts == expectedBoundaryCounts)
-    #expect(fixture.runtimeResolutionProbe.unscopedResolutionCount == 0)
-    let identities = fixture.runtimeResolutionProbe.releaseIdentities
-    let expectedIdentity = try #require(identities[.initialHerdrPreparation]?.first)
-    #expect(
-      identities.allSatisfy { boundary, values in
-        values.count == expectedBoundaryCounts[boundary]
-          && values.allSatisfy { $0 == expectedIdentity }
-      }
-    )
-    #expect(
-      Set(fixture.runtimeResolutionProbe.resolutionBoundaries)
-        == Set([
-          .initialHerdrPreparation,
-          .herdrRecoveryRetry,
-          .descriptorCreate,
-          .descriptorDecode,
-          .replacementCandidate,
-          .preCredentialExecution,
-          .finalPreSendProof,
-        ])
-    )
-    #expect(
-      probe.snapshot()
-        == [.beforeSendStartQ4Revalidation]
-        + replacementFinalAuthorityCheckpoints
-        + [
-          .sendStarted, .beforeRemoteEffectQ4Revalidation, .predecessorShutdownRequested,
-          .predecessorExited, .predecessorPaneClosed, .replacementLaunched,
-          .authorityPrimed, .cutoverCommitted, .q4Published,
-        ]
-    )
-    try await assertReplacementRemoteSequence(
-      fixture: fixture,
-      incident: incident
-    )
-    let launches = try await fixture.runStore.launches(runID: incident.run.id)
-    #expect(launches.count == 4)
-    let q4 = try #require(launches.last)
-    #expect(q4.queueSequence == 4)
-    #expect(q4.state == .released)
-    #expect(q4.roleHostID == incident.predecessor.id)
-    #expect(q4.executionRoleHostID == incident.request.plannedReplacementRoleHostID)
-    #expect(q4.launchAttemptID == incident.request.plannedLaunchAttemptID)
-    let durableReplacement = try #require(
-      try await fixture.jobs.canaryRoleHostReplacementTerminalReport(
-        request: incident.request
-      )
-    )
-    #expect(durableReplacement.status == .q4Settled)
-    #expect(durableReplacement.effectCertainty == .confirmedReplacementEffect)
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence = 5",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_runs WHERE job_id = ?",
-        bindings: [.text(fixture.jobID.uuidString.lowercased())]
-      ) == 1
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_results WHERE run_id = ?",
-        bindings: [.text(incident.run.id)]
-      ) == 1
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM artifacts WHERE job_id = ? AND kind = 'review'",
-        bindings: [.text(fixture.jobID.uuidString.lowercased())]
-      ) == 0
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM job_steps WHERE job_id = ?",
-        bindings: [.text(fixture.jobID.uuidString.lowercased())]
-      ) == 0
-    )
-    #expect(
-      try await fixture.database.scalarText(
-        "SELECT state FROM herdr_topology_intents WHERE kind = 'replaceRoleHost'"
-      ) == "attributed"
-    )
-    let predecessor = try #require(
-      try await fixture.runStore.roleHosts(jobID: fixture.jobID).first(where: {
-        $0.id == incident.predecessor.id
-      })
-    )
-    #expect(predecessor.state == .stopped)
-    #expect(predecessor.paneID == incident.predecessor.paneID)
-    #expect(predecessor.terminalID == incident.predecessor.terminalID)
-    #expect(predecessor.processIdentity == incident.predecessor.processIdentity)
-    #expect(
-      try await fixture.runStore.roleHosts(jobID: fixture.jobID).filter {
-        $0.role != .architecture
-      }.sorted { $0.role.rawValue < $1.role.rawValue } == incident.preservedHosts
-    )
-    let replacement = try #require(
-      try await fixture.runStore.replacementRoleHost(
-        id: incident.request.plannedReplacementRoleHostID
-      )
-    )
-    #expect(replacement.predecessorRoleHostID == incident.predecessor.id)
-    #expect(replacement.paneID == "pane-replacement-1")
-    #expect(replacement.terminalID == "terminal-replacement-1")
-    #expect(replacement.q4Binding == authorization.q4Binding)
-    let descriptorRoot =
-      fixture.applicationSupport
-      .appendingPathComponent("HerdrRuntime/Descriptors", isDirectory: true)
-      .standardizedFileURL
-    let command = try #require(
-      try HerdrRoleHostDescriptorStore.command(
-        roleHostID: replacement.id,
-        sequence: 4,
-        root: descriptorRoot
-      )
-    )
-    #expect(command.roleHostID == replacement.id)
-    #expect(command.launchAttemptID == q4.launchAttemptID)
-    let q4Descriptor = try HerdrHostDescriptorStore.load(
-      launchAttemptID: q4.launchAttemptID,
-      from: descriptorRoot,
-      resolvedRuntime: fixture.runtimeResolver.resolve()
-    )
-    let q4Invocation = try #require(q4Descriptor.piTUIInvocation)
-    #expect(q4.descriptorSHA256 == authorization.q4Binding.descriptorSHA256)
-    #expect(
-      try HerdrRoleHostDescriptorStore.descriptorDigest(
-        launchAttemptID: q4.launchAttemptID,
-        root: descriptorRoot
-      ) == authorization.q4Binding.descriptorSHA256
-    )
-    let q4ConfigurationData = try PiTUIFileProtocol.readPrivateFile(
-      URL(fileURLWithPath: q4Invocation.tuiConfiguration),
-      maximumBytes: 1_048_576
-    )
-    let q4Configuration = try PiTUIRunConfiguration.load(
-      from: URL(fileURLWithPath: q4Invocation.tuiConfiguration)
-    )
-    #expect(
-      PiTUIFileProtocol.sha256(q4ConfigurationData)
-        == authorization.q4Binding.configurationSHA256
-    )
-    #expect(
-      PiTUIFileProtocol.sha256(
-        try PiTUIFileProtocol.readPrivateFile(
-          q4Configuration.promptURL,
-          maximumBytes: 4 * 1_024 * 1_024
-        )
-      ) == authorization.q4Binding.promptSHA256
-    )
-    #expect(
-      PiTUIFileProtocol.sha256(
-        try PiTUIFileProtocol.readPrivateFile(
-          URL(fileURLWithPath: q4Invocation.workflowConfiguration),
-          maximumBytes: 1_048_576
-        )
-      ) == authorization.q4Binding.workflowConfigurationSHA256
-    )
-    let q4Credential = URL(
-      fileURLWithPath: q4Invocation.agentDirectory,
-      isDirectory: true
-    ).appendingPathComponent("auth.json")
-    #expect(!FileManager.default.fileExists(atPath: q4Credential.path))
-    try assertReplacementSecretsAbsent(
-      encodedValues: [
-        try JSONEncoder().encode(q4Descriptor),
-        try JSONEncoder().encode(command),
-        Data(String(describing: probe.snapshot()).utf8),
-      ]
-    )
-    try await assertPreservedRemotePanes(
-      fixture: fixture,
-      incident: incident,
-      before: beforeRemote
-    )
-    #expect(
-      try await fixture.unrelatedJobSnapshot(incident.unrelatedJobID)
-        == incident.unrelatedJobSnapshot
-    )
-    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
-  }
-
-  @Test("schema 9 replacement ambiguity is terminal and cannot replay")
-  func roleHostReplacementAmbiguityIsTerminal() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let probe = ReplacementCheckpointProbe(failingAt: .replacementLaunched)
-    let incident = try await fixture.prepareReplacementIncident(checkpointProbe: probe)
-    let beforeRemote = await fixture.herdr.remoteSnapshot()
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    try await incident.runtime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    await incident.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let executor = incident.runtime.makeExecutor(
-      preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-    )
-    await #expect(throws: ReplacementCheckpointFailure.self) {
-      _ = try await executor.execute(incident.workflowRequest)
-    }
-    let operations = await fixture.herdr.recordedReplacementOperations()
-    #expect(
-      operations.map { $0.split(separator: ":", maxSplits: 1).first.map(String.init) ?? "" }
-        == ["close", "split", "send_text", "send_keys"]
-    )
-    #expect(
-      probe.snapshot()
-        == [.beforeSendStartQ4Revalidation]
-        + replacementFinalAuthorityCheckpoints
-        + [
-          .sendStarted, .beforeRemoteEffectQ4Revalidation, .predecessorShutdownRequested,
-          .predecessorExited, .predecessorPaneClosed, .replacementLaunched,
-        ]
-    )
-    #expect(
-      try await fixture.database.scalarText(
-        "SELECT state FROM herdr_topology_intents WHERE kind = 'replaceRoleHost'"
-      ) == "unknown"
-    )
-    #expect(try await fixture.runStore.replacementRoleHosts(jobID: fixture.jobID).isEmpty)
-    #expect(try await fixture.runStore.launches(runID: incident.run.id).count == 3)
-    await #expect(throws: (any Error).self) {
-      _ = try await executor.execute(incident.workflowRequest)
-    }
-    let deniedResumeDirectives: [PiWorkflowSessionDirective] = [
-      .resume("77777777-7777-4777-8777-777777777777"),
-      .resumeBounded(
-        sessionID: "77777777-7777-4777-8777-777777777777",
-        boundarySHA256: String(repeating: "8", count: 64)
-      ),
-    ]
-    for directive in deniedResumeDirectives {
-      await #expect(throws: (any Error).self) {
-        _ = try await executor.execute(
-          PiWorkflowExecutionRequest(
-            jobID: incident.workflowRequest.jobID,
-            workflow: incident.workflowRequest.workflow,
-            role: incident.workflowRequest.role,
-            round: incident.workflowRequest.round,
-            artifactSHA256: incident.workflowRequest.artifactSHA256,
-            sessionDirective: directive
-          )
-        )
-      }
-    }
-    #expect(await fixture.herdr.recordedReplacementOperations() == operations)
-    await incident.runtime.closeLaunchAdmission()
-    await #expect(throws: DurableJobStoreError.canaryRecoveryRequired) {
-      _ = try await incident.runtime.canaryRoleHostReplacementCandidate(
-        request: incident.request,
-        resourceTreeSHA256: String(repeating: "c", count: 64)
-      )
-    }
-    try await assertPreservedRemotePanes(
-      fixture: fixture,
-      incident: incident,
-      before: beforeRemote
-    )
-    #expect(
-      try await fixture.unrelatedJobSnapshot(incident.unrelatedJobID)
-        == incident.unrelatedJobSnapshot
-    )
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence > 3",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-  }
-
-  @Test("schema 9 terminal replacement ambiguity preserves isolation after reopen")
-  func roleHostReplacementTerminalUnknownCloseReopenIsolation() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let checkpoint = ReplacementCheckpointProbe(failingAt: .replacementLaunched)
-    let incident = try await fixture.prepareReplacementIncident(checkpointProbe: checkpoint)
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    let predecessorBefore = try #require(
-      try await fixture.runStore.roleHosts(jobID: fixture.jobID).first(where: {
-        $0.id == incident.predecessor.id
-      })
-    )
-    let preservedBefore = try await fixture.runStore.roleHosts(jobID: fixture.jobID)
-      .filter { $0.role != .architecture }
-      .sorted { $0.id < $1.id }
-    let bindingBefore = try #require(
-      try await fixture.runStore.jobBinding(jobID: fixture.jobID)
-    )
-    let unrelatedBefore = try await fixture.replacementIsolationSnapshot(
-      database: fixture.database,
-      excluding: fixture.jobID
-    )
-    try await incident.runtime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    await incident.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    await #expect(throws: ReplacementCheckpointFailure.self) {
-      _ = try await incident.runtime.makeExecutor(
-        preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-      ).execute(incident.workflowRequest)
-    }
-    await incident.runtime.closeLaunchAdmission()
-    let operationsAfterCrash = await fixture.herdr.recordedReplacementOperations()
-    let remoteAfterCrash = await fixture.herdr.remoteSnapshot()
-    let intentAfterCrash = try await fixture.database.query(
-      "SELECT * FROM herdr_topology_intents WHERE kind = 'replaceRoleHost' ORDER BY id"
-    )
-    let leaseBefore = try await fixture.database.query(
-      "SELECT * FROM repository_leases WHERE job_id = ? ORDER BY repository_id",
-      bindings: [.text(fixture.jobID.uuidString.lowercased())]
-    )
-    #expect(
-      operationsAfterCrash.map {
-        $0.split(separator: ":", maxSplits: 1).first.map(String.init) ?? ""
-      } == ["close", "split", "send_text", "send_keys"]
-    )
-    #expect(intentAfterCrash.count == 1)
-    #expect(intentAfterCrash.first?["state"] == .text("unknown"))
-    #expect(intentAfterCrash.first?["attribution_json"] == .null)
-    #expect(remoteAfterCrash.panes.contains(where: { $0.paneID == "pane-replacement-1" }))
-    #expect(
-      !remoteAfterCrash.panes.contains(where: {
-        $0.terminalID == incident.predecessor.terminalID
-      })
-    )
-
-    await fixture.database.close()
-    let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials
-    )
-    try await reopened.runtime.recoverDurableState()
-    let firstRecovery = try await reopened.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 50)
-    )
-    try await reopened.runtime.recoverDurableState()
-    let secondRecovery = try await reopened.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 51)
-    )
-
-    #expect(firstRecovery.map(\.job.id) == [fixture.jobID])
-    #expect(secondRecovery.map(\.job.id) == [fixture.jobID])
-    #expect(
-      try await reopened.database.query(
-        "SELECT * FROM herdr_topology_intents WHERE kind = 'replaceRoleHost' ORDER BY id"
-      ) == intentAfterCrash
-    )
-    #expect(
-      try await reopened.runs.roleHosts(jobID: fixture.jobID).first(where: {
-        $0.id == incident.predecessor.id
-      }) == predecessorBefore
-    )
-    #expect(
-      try await reopened.runs.roleHosts(jobID: fixture.jobID)
-        .filter { $0.role != .architecture }
-        .sorted { $0.id < $1.id } == preservedBefore
-    )
-    #expect(try await reopened.runs.jobBinding(jobID: fixture.jobID) == bindingBefore)
-    #expect(
-      try await reopened.database.query(
-        "SELECT * FROM repository_leases WHERE job_id = ? ORDER BY repository_id",
-        bindings: [.text(fixture.jobID.uuidString.lowercased())]
-      ) == leaseBefore
-    )
-    #expect(
-      try await fixture.replacementIsolationSnapshot(
-        database: reopened.database,
-        excluding: fixture.jobID
-      ) == unrelatedBefore
-    )
-    #expect(await fixture.herdr.remoteSnapshot() == remoteAfterCrash)
-    #expect(await fixture.herdr.recordedReplacementOperations() == operationsAfterCrash)
-    #expect(try await reopened.runs.replacementRoleHosts(jobID: fixture.jobID).isEmpty)
-    #expect(try await reopened.runs.launches(runID: incident.run.id).count == 3)
-    #expect(
-      try await reopened.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence >= 4",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-    await #expect(throws: (any Error).self) {
-      _ = try await reopened.runtime.canaryRoleHostReplacementCandidate(
-        request: incident.request,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedReplacementEvidenceSHA256: authorization.replacementEvidenceSHA256
-      )
-    }
-    await #expect(throws: (any Error).self) {
-      _ = try await reopened.runtime.canaryPiFreshRetryCandidate(
-        authorization: incident.request.retry.recovery,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedRetryEvidenceSHA256: incident.request.retry.retryEvidenceSHA256
-      )
-    }
-    await reopened.database.close()
-  }
-
-  @Test("schema 9 reconstructs prepared q4 after restart without replay authority")
-  func roleHostReplacementCrashRecoveryIsIdempotent() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let cutoverProbe = ReplacementCheckpointProbe(failingAt: .cutoverCommitted)
-    let incident = try await fixture.prepareReplacementIncident(checkpointProbe: cutoverProbe)
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    try await incident.runtime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    await incident.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    let executor = incident.runtime.makeExecutor(
-      preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-    )
-    await #expect(throws: ReplacementCheckpointFailure.self) {
-      _ = try await executor.execute(incident.workflowRequest)
-    }
-    await incident.runtime.closeLaunchAdmission()
-    let remoteEffects = await fixture.herdr.recordedReplacementOperations()
-    #expect(cutoverProbe.snapshot().last == .cutoverCommitted)
-    let prepared = try #require(
-      try await fixture.runStore.launches(runID: incident.run.id).last
-    )
-    #expect(prepared.state == .prepared)
-    #expect(prepared.queueSequence == 4)
-    let descriptorRoot =
-      fixture.applicationSupport
-      .appendingPathComponent("HerdrRuntime/Descriptors", isDirectory: true)
-      .standardizedFileURL
-    let q4Descriptor = try HerdrHostDescriptorStore.load(
-      launchAttemptID: incident.request.plannedLaunchAttemptID,
-      from: descriptorRoot,
-      resolvedRuntime: fixture.runtimeResolver.resolve()
-    )
-    let q4Invocation = try #require(q4Descriptor.piTUIInvocation)
-    let q4AgentDirectory = URL(
-      fileURLWithPath: q4Invocation.agentDirectory,
-      isDirectory: true
-    )
-    let q4Credential = q4AgentDirectory.appendingPathComponent("auth.json")
-    defer {
-      _ = Darwin.chmod(q4AgentDirectory.path, 0o700)
-      try? PiProviderCredentialSnapshotter.remove(from: q4AgentDirectory)
-    }
-    #expect(!FileManager.default.fileExists(atPath: q4Credential.path))
-    try assertReplacementSecretsAbsent(
-      encodedValues: [try JSONEncoder().encode(q4Descriptor)]
-    )
-    #expect(
-      try HerdrRoleHostDescriptorStore.command(
-        roleHostID: incident.request.plannedReplacementRoleHostID,
-        sequence: 4,
-        root: descriptorRoot
-      ) == nil
-    )
-    #expect(
-      try await fixture.jobs.canaryRoleHostReplacementTerminalReport(
-        request: incident.request
-      )?.status == .q4Prepared
-    )
-    let startupRecovery = try await fixture.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 40)
-    )
-    #expect(startupRecovery.contains(where: { $0.job.id == fixture.jobID }))
-    #expect(try await fixture.jobs.job(id: fixture.jobID)?.state == .runningPi)
-    #expect(
-      try await fixture.runStore.launches(runID: incident.run.id).last?.state == .prepared
-    )
-    #expect(await fixture.herdr.recordedReplacementOperations() == remoteEffects)
-
-    let recoveredRuntime = try fixture.reopenedRuntime(
-      providerCredentials: incident.providerCredentials,
-      processIdentityForRoleHost: fixture.processIdentities.require
-    )
-    await #expect(throws: HerdrPiWorkflowError.recoveryBoundaryReached) {
-      _ = try await recoveredRuntime.canaryRoleHostReplacementCandidate(
-        request: incident.request,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedReplacementEvidenceSHA256: authorization.replacementEvidenceSHA256,
-        authorizedQ4Binding: authorization.q4Binding
-      )
-    }
-    #expect(await fixture.herdr.recordedReplacementOperations() == remoteEffects)
-    #expect(!FileManager.default.fileExists(atPath: q4Credential.path))
-    #expect(
-      try HerdrRoleHostDescriptorStore.command(
-        roleHostID: incident.request.plannedReplacementRoleHostID,
-        sequence: 4,
-        root: descriptorRoot
-      ) == nil
-    )
-    #expect(try await fixture.runStore.launches(runID: incident.run.id).count == 4)
-    #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence = 5",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-    #expect(
-      try await fixture.unrelatedJobSnapshot(incident.unrelatedJobID)
-        == incident.unrelatedJobSnapshot
-    )
-  }
-
-  @Test(
-    "schema 9 close and reopen preserves prepared and enqueued q4",
-    arguments: ReplacementRestartLaunchState.allCases
-  )
-  func roleHostReplacementCloseReopenRecovery(
-    state: ReplacementRestartLaunchState
-  ) async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let staged = try await stageReplacementRestart(fixture: fixture, state: state)
-    let incident = staged.incident
-    let jobBefore = try #require(try await fixture.jobs.job(id: fixture.jobID))
-    let runBefore = try #require(
-      try await fixture.runStore.runs().first(where: { $0.id == incident.run.id })
-    )
     let launchesBefore = try await fixture.runStore.launches(runID: incident.run.id)
-    let hostsBefore = try await fixture.runStore.roleHosts(jobID: fixture.jobID).sorted {
-      $0.id < $1.id
+    let hostsBefore = try await fixture.runStore.roleHosts(jobID: fixture.jobID)
+    let commandsBefore = await fixture.herdr.launchedCommands()
+    let jobBefore = try await fixture.jobs.job(id: fixture.jobID)
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      try await executor.execute(incident.workflowRequest)
     }
-    let replacementsBefore = try await fixture.runStore.replacementRoleHosts(
-      jobID: fixture.jobID
-    )
-    let leaseBefore = try await fixture.database.query(
-      "SELECT * FROM repository_leases WHERE job_id = ? ORDER BY repository_id",
-      bindings: [.text(fixture.jobID.uuidString.lowercased())]
-    )
-    let intentsBefore = try await fixture.database.query(
-      "SELECT * FROM herdr_topology_intents WHERE job_id = ? ORDER BY id",
-      bindings: [.text(fixture.jobID.uuidString.lowercased())]
-    )
-    let isolationBefore = try await fixture.replacementIsolationSnapshot(
-      database: fixture.database,
-      excluding: fixture.jobID
-    )
-    let q4 = try #require(launchesBefore.last)
-    #expect(jobBefore.state == .runningPi)
-    #expect(leaseBefore.count == 1)
-    #expect(launchesBefore.count == 4)
-    #expect(launchesBefore.prefix(3).map(\.queueSequence) == [1, 2, 3])
-    #expect(
-      launchesBefore.prefix(3).map(\.failureCode)
-        == ["RUNTIME_TIMEOUT", "HERDR_TRANSACTION_FAILED", "HERDR_TRANSACTION_FAILED"]
-    )
-    #expect(q4.queueSequence == 4)
-    #expect(q4.state == state.launchState)
-    #expect(q4.executionRoleHostID == incident.request.plannedReplacementRoleHostID)
-    #expect(replacementsBefore.count == 1)
-    #expect(hostsBefore.first(where: { $0.id == incident.predecessor.id })?.state == .stopped)
-    #expect(
-      hostsBefore.filter { $0.role != .architecture }
-        == incident.preservedHosts.sorted {
-          $0.id < $1.id
-        })
+    await incident.runtime.closeLaunchAdmission()
+    #expect(probe.snapshot().isEmpty)
+    #expect(try await fixture.runStore.launches(runID: incident.run.id) == launchesBefore)
+    #expect(try await fixture.runStore.roleHosts(jobID: fixture.jobID) == hostsBefore)
+    #expect(try await fixture.jobs.job(id: fixture.jobID) == jobBefore)
+    #expect(await fixture.herdr.launchedCommands() == commandsBefore)
+    #expect(await fixture.herdr.remoteSnapshot() == beforeRemote)
+    #expect(await fixture.herdr.recordedReplacementOperations().isEmpty)
+    let credential = URL(fileURLWithPath: candidate.q4Plan.invocation.agentDirectory)
+      .appendingPathComponent("auth.json")
+    #expect(!FileManager.default.fileExists(atPath: credential.path))
     #expect(
       !FileManager.default.fileExists(
-        atPath: fixture.replacementCommandURL(request: incident.request).path
-      )
-    )
+        atPath: fixture.replacementCommandURL(request: incident.request).path))
 
     await fixture.database.close()
     let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials
-    )
-    try await reopened.runtime.recoverDurableState()
-    let recoveredJobs = try await reopened.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 50)
-    )
-
-    #expect(
-      recoveredJobs.map(\.job.id)
-        == [fixture.jobID]
-    )
-    #expect(try await reopened.jobs.job(id: fixture.jobID) == jobBefore)
-    #expect(
-      try await reopened.database.query(
-        "SELECT * FROM repository_leases WHERE job_id = ? ORDER BY repository_id",
-        bindings: [.text(fixture.jobID.uuidString.lowercased())]
-      ) == leaseBefore
-    )
-    #expect(
-      try await reopened.runs.runs().first(where: { $0.id == incident.run.id }) == runBefore
-    )
+      providerCredentials: incident.providerCredentials)
+    try await reopened.runtime.recoverDurableResults()
+    await reopened.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      try await reopened.runtime.makeExecutor(
+        preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
+      ).execute(incident.workflowRequest)
+    }
+    await reopened.runtime.closeLaunchAdmission()
     #expect(try await reopened.runs.launches(runID: incident.run.id) == launchesBefore)
-    #expect(
-      try await reopened.runs.roleHosts(jobID: fixture.jobID).sorted { $0.id < $1.id }
-        == hostsBefore
-    )
-    #expect(
-      try await reopened.runs.replacementRoleHosts(jobID: fixture.jobID)
-        == replacementsBefore
-    )
-    #expect(
-      try await reopened.database.query(
-        "SELECT * FROM herdr_topology_intents WHERE job_id = ? ORDER BY id",
-        bindings: [.text(fixture.jobID.uuidString.lowercased())]
-      ) == intentsBefore
-    )
-    #expect(
-      try await fixture.replacementIsolationSnapshot(
-        database: reopened.database,
-        excluding: fixture.jobID
-      ) == isolationBefore
-    )
-    #expect(try await reopened.database.scalarInt("SELECT paused FROM app_settings") == 1)
-    #expect(
-      try await reopened.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence > 4",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-    #expect(await fixture.herdr.recordedReplacementOperations() == staged.remoteOperations)
-    #expect(
-      !FileManager.default.fileExists(
-        atPath: fixture.replacementCommandURL(request: incident.request).path
-      )
-    )
-    let terminalReport = try #require(
-      try await reopened.jobs.canaryRoleHostReplacementTerminalReport(
-        request: incident.request
-      )
-    )
-    #expect(
-      terminalReport.status == (state == .prepared ? .q4Prepared : .q4Enqueued)
-    )
-    await #expect(throws: HerdrPiWorkflowError.recoveryBoundaryReached) {
-      _ = try await reopened.runtime.canaryRoleHostReplacementCandidate(
-        request: incident.request,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedReplacementEvidenceSHA256: staged.authorization.replacementEvidenceSHA256,
-        authorizedQ4Binding: staged.authorization.q4Binding
-      )
-    }
-    #expect(await fixture.herdr.recordedReplacementOperations() == staged.remoteOperations)
-    await reopened.database.close()
-  }
-
-  @Test("schema 9 known pre-effect failure is durable and has no replay authority")
-  func roleHostReplacementPreparedIntentRestartContinuesOriginalReceipt() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let incident = try await fixture.prepareReplacementIncident(
-      checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
-    )
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    let isolationBefore = try await fixture.replacementIsolationSnapshot(
-      database: fixture.database,
-      excluding: fixture.jobID
-    )
-    let failingIntents = ReplacementSendStartFailureIntentStore(
-      base: SQLiteHerdrTopologyIntentStore(database: fixture.database)
-    )
-    let crashRuntime = try fixture.reopenedRuntime(
-      providerCredentials: incident.providerCredentials,
-      primeIntentStore: failingIntents,
-      processIdentityForRoleHost: fixture.processIdentities.require
-    )
-    try await crashRuntime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    await crashRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    await #expect(throws: ReplacementIntentStoreFailure.self) {
-      _ = try await crashRuntime.makeExecutor(
-        preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-      ).execute(incident.workflowRequest)
-    }
-    await crashRuntime.closeLaunchAdmission()
-
-    let failedIntentRows = try await fixture.database.query(
-      "SELECT * FROM herdr_topology_intents WHERE kind = 'replaceRoleHost' ORDER BY id"
-    )
-    let failedIntent = try #require(failedIntentRows.first)
-    #expect(failedIntentRows.count == 1)
-    #expect(failedIntent["state"] == .text("failedNoRemoteEffect"))
-    #expect(failedIntent["failure_code"] == .text("REPLACEMENT_PRE_EFFECT_FAILED"))
-    #expect(failedIntent["attribution_json"] == .null)
+    #expect(try await reopened.runs.roleHosts(jobID: fixture.jobID) == hostsBefore)
+    #expect(try await reopened.jobs.job(id: fixture.jobID) == jobBefore)
+    #expect(await fixture.herdr.launchedCommands() == commandsBefore)
     #expect(await fixture.herdr.recordedReplacementOperations().isEmpty)
-    #expect(try await fixture.runStore.replacementRoleHosts(jobID: fixture.jobID).isEmpty)
-    #expect(try await fixture.runStore.launches(runID: incident.run.id).count == 3)
     #expect(
-      try await fixture.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence >= 4",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-
-    await fixture.database.close()
-    let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials
-    )
-    try await reopened.runtime.recoverDurableState()
-    let recovered = try await reopened.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 50)
-    )
-    #expect(recovered.map(\.job.id) == [fixture.jobID])
-    let report = try #require(
-      try await reopened.jobs.canaryRoleHostReplacementTerminalReport(
-        request: incident.request
-      )
-    )
-    #expect(report.status == .noRemoteEffectFailure)
-    #expect(report.effectCertainty == .knownNoRemoteEffect)
-    #expect(report.failureCode == "REPLACEMENT_PRE_EFFECT_FAILED")
-    await #expect(throws: HerdrPiWorkflowError.recoveryBoundaryReached) {
-      _ = try await reopened.runtime.canaryRoleHostReplacementCandidate(
-        request: incident.request,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedReplacementEvidenceSHA256: authorization.replacementEvidenceSHA256,
-        authorizedQ4Binding: authorization.q4Binding
-      )
-    }
-    #expect(await fixture.herdr.recordedReplacementOperations().isEmpty)
-    #expect(try await reopened.runs.replacementRoleHosts(jobID: fixture.jobID).isEmpty)
-    #expect(try await reopened.runs.launches(runID: incident.run.id).count == 3)
-    #expect(
-      try await reopened.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence >= 4",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-    #expect(
-      try await fixture.unrelatedJobSnapshot(
-        incident.unrelatedJobID,
-        database: reopened.database
-      ) == incident.unrelatedJobSnapshot
-    )
-    #expect(
-      try await fixture.replacementIsolationSnapshot(
-        database: reopened.database,
-        excluding: fixture.jobID
-      ) == isolationBefore
+      try await fixture.unrelatedJobSnapshot(incident.unrelatedJobID, database: reopened.database)
+        == incident.unrelatedJobSnapshot
     )
     await reopened.database.close()
   }
 
-  @Test("schema 9 sent replacement intent becomes unknown once after reopen")
-  func roleHostReplacementSentIntentRestartIsTerminal() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let incident = try await fixture.prepareReplacementIncident(
-      checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
-    )
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    let failingIntents = ReplacementUnknownWriteFailureIntentStore(
-      base: SQLiteHerdrTopologyIntentStore(database: fixture.database)
-    )
-    let checkpoint = ReplacementCheckpointProbe(failingAt: .sendStarted)
-    let crashRuntime = try fixture.reopenedRuntime(
-      providerCredentials: incident.providerCredentials,
-      primeIntentStore: failingIntents,
-      processIdentityForRoleHost: fixture.processIdentities.require,
-      replacementCheckpoint: checkpoint.record
-    )
-    try await crashRuntime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    await crashRuntime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    await #expect(throws: HerdrPiWorkflowError.resultDivergent) {
-      _ = try await crashRuntime.makeExecutor(
-        preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-      ).execute(incident.workflowRequest)
-    }
-    await crashRuntime.closeLaunchAdmission()
-    #expect(
-      checkpoint.snapshot()
-        == [.beforeSendStartQ4Revalidation]
-        + replacementFinalAuthorityCheckpoints
-        + [.sendStarted]
-    )
-    #expect(
-      try await fixture.database.scalarText(
-        "SELECT state FROM herdr_topology_intents WHERE kind = 'replaceRoleHost'"
-      ) == "sendStarted"
-    )
-    #expect(await fixture.herdr.recordedReplacementOperations().isEmpty)
-    #expect(try await fixture.runStore.replacementRoleHosts(jobID: fixture.jobID).isEmpty)
-    #expect(try await fixture.runStore.launches(runID: incident.run.id).count == 3)
-
-    await fixture.database.close()
-    let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials
-    )
-    try await reopened.runtime.recoverDurableState()
-    let unknownIntent = try await reopened.database.query(
-      "SELECT * FROM herdr_topology_intents WHERE kind = 'replaceRoleHost'"
-    )
-    #expect(unknownIntent.count == 1)
-    #expect(
-      try await reopened.database.scalarText(
-        "SELECT state FROM herdr_topology_intents WHERE kind = 'replaceRoleHost'"
-      ) == "unknown"
-    )
-    try await reopened.runtime.recoverDurableState()
-    #expect(
-      try await reopened.database.query(
-        "SELECT * FROM herdr_topology_intents WHERE kind = 'replaceRoleHost'"
-      ) == unknownIntent
-    )
-    let recovered = try await reopened.jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 51)
-    )
-    #expect(recovered.map(\.job.id) == [fixture.jobID])
-    let report = try #require(
-      try await reopened.jobs.canaryRoleHostReplacementTerminalReport(
-        request: incident.request
-      )
-    )
-    #expect(report.status == .remoteEffectAmbiguous)
-    #expect(report.effectCertainty == .possibleRemoteEffect)
-    await #expect(throws: (any Error).self) {
-      _ = try await reopened.runtime.canaryRoleHostReplacementCandidate(
-        request: incident.request,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedReplacementEvidenceSHA256: authorization.replacementEvidenceSHA256
-      )
-    }
-    await #expect(throws: (any Error).self) {
-      _ = try await reopened.runtime.canaryPiFreshRetryCandidate(
-        authorization: incident.request.retry.recovery,
-        resourceTreeSHA256: String(repeating: "c", count: 64),
-        authorizedRetryEvidenceSHA256: incident.request.retry.retryEvidenceSHA256
-      )
-    }
-    #expect(await fixture.herdr.recordedReplacementOperations().isEmpty)
-    #expect(try await reopened.runs.replacementRoleHosts(jobID: fixture.jobID).isEmpty)
-    #expect(try await reopened.runs.launches(runID: incident.run.id).count == 3)
-    #expect(
-      try await reopened.database.scalarInt(
-        "SELECT COUNT(*) FROM pi_run_launches WHERE run_id = ? AND queue_sequence >= 4",
-        bindings: [.text(incident.run.id)]
-      ) == 0
-    )
-    await reopened.database.close()
-  }
-
-  @Test("production reload keeps paused replacement recovery dispatch closed")
+  @Test("production reload quarantines historical replacement and unrelated jobs")
   func productionReloadPreservesPausedReplacement() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      activateRollout: false,
+      kind: .prReview,
+      fastRuntime: true
+    )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let staged = try await stageReplacementRestart(fixture: fixture, state: .prepared)
-    let incident = staged.incident
+    let incident = try await fixture.prepareReplacementIncident(
+      checkpointProbe: ReplacementCheckpointProbe(failingAt: nil)
+    )
+    let remoteOperations = await fixture.herdr.recordedReplacementOperations()
     try await fixture.seedUnrelatedStartupRecoveryState(incident.unrelatedJobID)
     let launchesBefore = try await fixture.runStore.launches(runID: incident.run.id)
     let hostsBefore = try await fixture.runStore.roleHosts(jobID: fixture.jobID).sorted {
@@ -4144,19 +2299,39 @@ struct HerdrPiWorkflowRuntimeTests {
     let replacementsBefore = try await fixture.runStore.replacementRoleHosts(
       jobID: fixture.jobID
     )
-    let isolationBefore = try await fixture.replacementIsolationSnapshot(
-      database: fixture.database,
-      excluding: fixture.jobID
-    )
     await fixture.database.close()
 
     let reopened = try fixture.reopenReplacementRuntime(
-      providerCredentials: incident.providerCredentials
+      providerCredentials: incident.providerCredentials,
+      migrations: DatabaseSchema.migrations
     )
-    let probe = ReplacementProductionReloadProbe(
+    let isolationBefore = try await fixture.replacementIsolationSnapshot(
+      database: reopened.database,
+      excluding: fixture.jobID
+    )
+    let unused = QuarantinedReloadEffects()
+    let coordinator = JobCoordinator(
+      configuration: reopened.configuration,
+      discovery: GitHubDiscovery(
+        api: unused, jobs: reopened.jobs,
+        reviewedRevisions: ReviewedRevisionStore(database: reopened.database)
+      ),
       jobs: reopened.jobs,
-      expectedRecoveredJobIDs: [fixture.jobID]
+      repositories: try RepositoryStore(
+        rootURL: fixture.applicationSupport, database: reopened.database,
+        transport: SystemGitTransport()
+      ),
+      schedulerPersistence: SchedulerPersistence(database: reopened.database),
+      workflows: JobWorkflowRegistry(
+        pullRequestReview: unused, issueTriage: unused,
+        issueImplementation: unused, complexPlan: unused
+      ),
+      contractVersion: "test-v1",
+      rolloutAuthority: RolloutAuthorityStore(database: reopened.database),
+      newDispatchAllowed: { false },
+      now: { Date(timeIntervalSince1970: 52) }
     )
+    let probe = ReplacementProductionReloadProbe(coordinator: coordinator)
     let composition = ProductionEngineReloadComposition(
       setSchedulerPaused: { paused in await probe.setSchedulerPaused(paused) },
       recoverCoordinatorAtStartup: { try await probe.recoverCoordinatorAtStartup() },
@@ -4192,9 +2367,9 @@ struct HerdrPiWorkflowRuntimeTests {
       await probe.events
         == [
           .schedulerPaused(true),
-          .coordinatorRecovered([fixture.jobID]),
+          .coordinatorRecovered,
           .schedulerPaused(true),
-          .coordinatorRecovered([fixture.jobID]),
+          .coordinatorRecovered,
         ]
     )
     #expect(await probe.startupRequestCount == 0)
@@ -4252,13 +2427,16 @@ struct HerdrPiWorkflowRuntimeTests {
         bindings: [.text(incident.run.id)]
       ) == 0
     )
-    #expect(await fixture.herdr.recordedReplacementOperations() == staged.remoteOperations)
+    #expect(await fixture.herdr.recordedReplacementOperations() == remoteOperations)
     await reopened.database.close()
   }
 
   @Test("exact paused canary startup leaves every unrelated durable row unchanged")
   func exactCanaryStartupRecoveryPreservesUnrelatedDurableState() async throws {
-    let fixture = try await HerdrPiRuntimeFixture.make(kind: .prReview, fastRuntime: true)
+    let fixture = try await HerdrPiRuntimeFixture.make(
+      kind: .prReview,
+      fastRuntime: true
+    )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     await fixture.herdr.enableDistinctRoleHostIdentities()
     try await fixture.preparePartialTopology(
@@ -4286,9 +2464,7 @@ struct HerdrPiWorkflowRuntimeTests {
     let jobID = fixture.jobID.uuidString.lowercased()
     let prefix = "canary:\(canary.authorizationSHA256):m8:"
     let recoveryEvidenceSHA256 = String(repeating: "c", count: 64)
-    _ = try await fixture.database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
+    // Production order: lease first while running, pause afterwards.
     _ = try await fixture.database.execute(
       """
       INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
@@ -4298,6 +2474,9 @@ struct HerdrPiWorkflowRuntimeTests {
         .text(fixture.repositoryID.uuidString.lowercased()),
         .text(jobID),
       ]
+    )
+    _ = try await fixture.database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
     )
     let canaryTransitions: [(String, String, String, Double)] = [
       (prefix + "admit:" + jobID, "queued", "leased", 10),
@@ -4504,41 +2683,6 @@ struct HerdrPiWorkflowRuntimeTests {
     )
     #expect(await probe.startupPassCount == 0)
     #expect(await probe.startupRequestCount == 0)
-  }
-
-  private func stageReplacementRestart(
-    fixture: HerdrPiRuntimeFixture,
-    state: ReplacementRestartLaunchState
-  ) async throws -> StagedReplacementRestart {
-    let checkpoint = ReplacementCheckpointProbe(failingAt: state.checkpoint)
-    let incident = try await fixture.prepareReplacementIncident(checkpointProbe: checkpoint)
-    let (authorization, candidate) = try await authorizedReplacement(
-      incident: incident,
-      resourceTreeSHA256: String(repeating: "c", count: 64)
-    )
-    try await incident.runtime.activateCanaryRoleHostReplacement(
-      candidate,
-      authorization: authorization
-    )
-    await incident.runtime.beginCanaryLaunchAdmission(jobID: fixture.jobID)
-    await #expect(throws: ReplacementCheckpointFailure.self) {
-      _ = try await incident.runtime.makeExecutor(
-        preparer: PiJobWorkflowPreparer(context: fixture.workflowContext)
-      ).execute(incident.workflowRequest)
-    }
-    await incident.runtime.closeLaunchAdmission()
-    let q4 = try #require(try await fixture.runStore.launches(runID: incident.run.id).last)
-    #expect(q4.state == state.launchState)
-    if state == .enqueuedMissingCommand {
-      let commandURL = fixture.replacementCommandURL(request: incident.request)
-      #expect(FileManager.default.fileExists(atPath: commandURL.path))
-      try FileManager.default.removeItem(at: commandURL)
-    }
-    return StagedReplacementRestart(
-      incident: incident,
-      authorization: authorization,
-      remoteOperations: await fixture.herdr.recordedReplacementOperations()
-    )
   }
 
   private func authorizedReplacement(
@@ -5458,19 +3602,15 @@ private actor PausedProductionReloadProbe {
 private actor ReplacementProductionReloadProbe {
   enum Event: Equatable, Sendable {
     case schedulerPaused(Bool)
-    case coordinatorRecovered([UUID])
+    case coordinatorRecovered
     case startupPass(startupReason: Bool)
   }
 
-  private let jobs: DurableJobStore
-  private let expectedRecoveredJobIDs: [UUID]
+  private let coordinator: JobCoordinator
   private(set) var events: [Event] = []
   private(set) var startupRequestCount = 0
-  private var recoveryCount = 0
-
-  init(jobs: DurableJobStore, expectedRecoveredJobIDs: [UUID]) {
-    self.jobs = jobs
-    self.expectedRecoveredJobIDs = expectedRecoveredJobIDs
+  init(coordinator: JobCoordinator) {
+    self.coordinator = coordinator
   }
 
   func setSchedulerPaused(_ paused: Bool) {
@@ -5478,15 +3618,8 @@ private actor ReplacementProductionReloadProbe {
   }
 
   func recoverCoordinatorAtStartup() async throws {
-    recoveryCount += 1
-    let recovered = try await jobs.recoverAtStartup(
-      now: Date(timeIntervalSince1970: 60 + TimeInterval(recoveryCount))
-    )
-    let jobIDs = recovered.map(\.job.id)
-    guard jobIDs == expectedRecoveredJobIDs else {
-      throw DurableJobStoreError.canaryRecoveryRequired
-    }
-    events.append(.coordinatorRecovered(jobIDs))
+    try await coordinator.recoverAtStartup()
+    events.append(.coordinatorRecovered)
   }
 
   func runStartupPass(_ pass: SchedulerPass) {
@@ -5495,6 +3628,23 @@ private actor ReplacementProductionReloadProbe {
 
   func requestStartup() {
     startupRequestCount += 1
+  }
+}
+
+private struct QuarantinedReloadEffects: GitHubReadAPI, JobWorkflowRunning {
+  func listPullRequests(owner _: String, repository _: String) throws -> [GitHubPullRequest] {
+    Issue.record("quarantined reload must not discover pull requests")
+    throw RolloutAuthorityError.effectAdmissionClosed
+  }
+
+  func listIssues(owner _: String, repository _: String) throws -> [GitHubIssue] {
+    Issue.record("quarantined reload must not discover issues")
+    throw RolloutAuthorityError.effectAdmissionClosed
+  }
+
+  func run(jobID _: UUID) throws {
+    Issue.record("quarantined reload must not run a workflow")
+    throw RolloutAuthorityError.effectAdmissionClosed
   }
 }
 
@@ -5814,6 +3964,10 @@ private struct HerdrPiRuntimeFixture: Sendable {
   let workflowContext: PiJobWorkflowContext
 
   static func make(
+    // Historical JobCanaryScope incidents are generation-0 preserved evidence. They run
+    // on full schema 10, but deliberately without an open rollout lane, because no
+    // schema-10 authorization ever bound them.
+    activateRollout: Bool = true,
     kind: JobKind = .issueTriage,
     timeoutSeconds: TimeInterval = 30,
     fastRuntime: Bool = false,
@@ -5841,7 +3995,16 @@ private struct HerdrPiRuntimeFixture: Sendable {
       kind: kind
     )
     let configuration = ConfigurationStore(database: database)
-    let jobs = DurableJobStore(database: database)
+    if activateRollout, try await database.schemaVersion() == 10 {
+      try await activateSchema10RuntimeAdmission(
+        database: database,
+        configuration: configuration,
+        repositoryID: repositoryID,
+        jobID: jobID,
+        kind: kind
+      )
+    }
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let runStore = PiRunStore(database: database)
     let processIdentities = ReplacementProcessIdentityRegistry()
     let executableIdentities = try ReplacementExecutableIdentityRegistry()
@@ -5903,7 +4066,8 @@ private struct HerdrPiRuntimeFixture: Sendable {
       resourceTreeAttestation: resourceTreeAttestation,
       paneTokensSHA256: replacementPaneTokensSHA256,
       launchCheckpoint: launchCheckpoints.record,
-      providerCredentials: providerCredentials
+      providerCredentials: providerCredentials,
+      rolloutAuthority: ExplicitTestRolloutEffectAuthority()
     )
     let artifact = Data("Untrusted synthetic issue artifact.\n".utf8)
     let digest = SHA256.hash(data: artifact).map { String(format: "%02x", $0) }.joined()
@@ -6174,20 +4338,79 @@ private struct HerdrPiRuntimeFixture: Sendable {
       roleHostExitObserved: roleHostExitObserved,
       replacementCheckpoint: replacementCheckpoint,
       launchCheckpoint: launchCheckpoints.record,
-      providerCredentials: providerCredentials
+      providerCredentials: providerCredentials,
+      rolloutAuthority: ExplicitTestRolloutEffectAuthority()
     )
+  }
+
+  /// Run `body` with the durable resume guard lifted, and always put it back.
+  ///
+  /// Restoration covers the throwing path deliberately: a leaked drop would leave
+  /// every later assertion in the fixture passing vacuously, and reopening does not
+  /// recreate the triggers, because migrations only apply `version > current`.
+  func withDurableResumeDenialLifted<Value>(
+    _ body: () async throws -> Value
+  ) async throws -> Value {
+    let restore = try await liftDurableResumeDenial()
+    do {
+      let value = try await body()
+      try await restore()
+      return value
+    } catch {
+      do {
+        try await restore()
+      } catch let restoreError {
+        // The body's error is the one worth propagating, but a failed restore leaves
+        // the guard dropped and every later assertion in this fixture vacuous, so it
+        // must not vanish. Record it and let the original error surface.
+        Issue.record("durable resume guard was not restored: \(restoreError)")
+      }
+      throw error
+    }
+  }
+
+  /// Test-only seam for seeding durable rows that predate the schema-10 resume guard.
+  ///
+  /// Schema 10 refuses `paused = 0` without an active authorization, and these
+  /// historical fixtures deliberately have none. The guard is dropped from its own
+  /// recorded SQL and restored byte-for-byte by the returned closure. Callers use
+  /// `withDurableResumeDenialLifted`, which cannot leak the drop.
+  private func liftDurableResumeDenial() async throws -> @Sendable () async throws -> Void {
+    let names = [
+      "app_settings_rollout_scope_required",
+      "app_settings_rollout_insert_scope_required",
+    ]
+    var recorded: [String] = []
+    for name in names {
+      let rows = try await database.query(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        bindings: [.text(name)]
+      )
+      guard case .text(let sql)? = rows.first?["sql"] else { continue }
+      recorded.append(sql)
+      try await database.execute("DROP TRIGGER \(name)")
+    }
+    let database = self.database
+    let restore = recorded
+    return {
+      for sql in restore {
+        try await database.execute(sql)
+      }
+    }
   }
 
   func reopenReplacementRuntime(
     providerCredentials: PiProviderCredentialSnapshotter? = nil,
+    migrations: [SQLiteMigration] = DatabaseSchema.migrations,
     replacementCheckpoint:
       @escaping @Sendable (HerdrRoleHostReplacementCheckpoint) throws -> Void = { _ in }
   ) throws -> ReopenedReplacementRuntime {
     let reopenedDatabase = try SQLiteStore(
-      databaseURL: applicationSupport.appendingPathComponent("state.sqlite3")
+      databaseURL: applicationSupport.appendingPathComponent("state.sqlite3"),
+      migrations: migrations
     )
     let reopenedConfiguration = ConfigurationStore(database: reopenedDatabase)
-    let reopenedJobs = DurableJobStore(database: reopenedDatabase)
+    let reopenedJobs = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let reopenedRuns = PiRunStore(database: reopenedDatabase)
     let intents = SQLiteHerdrTopologyIntentStore(database: reopenedDatabase)
     let mutationGate = HerdrTopologyMutationGate(initiallyAllowed: false)
@@ -6228,7 +4451,8 @@ private struct HerdrPiRuntimeFixture: Sendable {
       },
       replacementCheckpoint: replacementCheckpoint,
       launchCheckpoint: launchCheckpoints.record,
-      providerCredentials: providerCredentials
+      providerCredentials: providerCredentials,
+      rolloutAuthority: ExplicitTestRolloutEffectAuthority()
     )
     return ReopenedReplacementRuntime(
       database: reopenedDatabase,
@@ -6257,9 +4481,6 @@ private struct HerdrPiRuntimeFixture: Sendable {
       previewEvidenceSHA256: String(repeating: "b", count: 64)
     )
     let prefix = "canary:\(canary.authorizationSHA256):m8:"
-    _ = try await database.execute(
-      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
-    )
     try await configuration.setProfile(
       ModelProfileConfiguration(
         role: .review,
@@ -6269,12 +4490,16 @@ private struct HerdrPiRuntimeFixture: Sendable {
       ),
       now: Date(timeIntervalSince1970: 9)
     )
+    // Production order: lease first while running, pause afterwards.
     _ = try await database.execute(
       """
       INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
       VALUES (?, ?, 1, 10, 1)
       """,
       bindings: [.text(repository), .text(job)]
+    )
+    _ = try await database.execute(
+      "UPDATE app_settings SET paused = 1 WHERE singleton = 1"
     )
     _ = try await database.execute(
       """
@@ -6956,41 +5181,44 @@ private struct HerdrPiRuntimeFixture: Sendable {
       try await database.scalarInt(
         "SELECT paused FROM app_settings WHERE singleton = 1"
       ) ?? 0
-    _ = try await database.execute(
-      "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
-    )
-    let run = try await runStore.prepareRun(
-      id: "run-88888888-8888-4888-8888-888888888888",
-      jobID: unrelatedJobID,
-      workflow: .pullRequestReview,
-      role: .architecture,
-      round: 1,
-      jobAttempt: 2,
-      topologyGeneration: 1,
-      jobStep: 0,
-      runNonce: String(repeating: "6", count: 64),
-      requestSHA256: String(repeating: "7", count: 64),
-      resourceVersion: "isolation-v1",
-      resourceHash: String(repeating: "8", count: 64),
-      model: "fixture/fixture:off",
-      sessionPath: URL(fileURLWithPath: "/private/tmp/unrelated-session"),
-      channelPath: URL(fileURLWithPath: "/private/tmp/unrelated-channel"),
-      now: Date(timeIntervalSince1970: 2)
-    )
-    _ = try await runStore.prepareLaunch(
-      launchAttemptID: "launch-99999999-9999-4999-8999-999999999999",
-      runID: run.id,
-      roleHostID: roleHostID,
-      launchMode: .fresh,
-      descriptorSHA256: String(repeating: "9", count: 64),
-      expectedSessionID: nil,
-      resumeBoundarySHA256: nil,
-      now: Date(timeIntervalSince1970: 2)
-    )
-    _ = try await database.execute(
-      "UPDATE app_settings SET paused = ? WHERE singleton = 1",
-      bindings: [.integer(priorPaused)]
-    )
+    let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+      _ = try await database.execute(
+        "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+      )
+      let seeded = try await runStore.prepareRun(
+        id: "run-88888888-8888-4888-8888-888888888888",
+        jobID: unrelatedJobID,
+        workflow: .pullRequestReview,
+        role: .architecture,
+        round: 1,
+        jobAttempt: 2,
+        topologyGeneration: 1,
+        jobStep: 0,
+        runNonce: String(repeating: "6", count: 64),
+        requestSHA256: String(repeating: "7", count: 64),
+        resourceVersion: "isolation-v1",
+        resourceHash: String(repeating: "8", count: 64),
+        model: "fixture/fixture:off",
+        sessionPath: URL(fileURLWithPath: "/private/tmp/unrelated-session"),
+        channelPath: URL(fileURLWithPath: "/private/tmp/unrelated-channel"),
+        now: Date(timeIntervalSince1970: 2)
+      )
+      _ = try await runStore.prepareLaunch(
+        launchAttemptID: "launch-99999999-9999-4999-8999-999999999999",
+        runID: seeded.id,
+        roleHostID: roleHostID,
+        launchMode: .fresh,
+        descriptorSHA256: String(repeating: "9", count: 64),
+        expectedSessionID: nil,
+        resumeBoundarySHA256: nil,
+        now: Date(timeIntervalSince1970: 2)
+      )
+      _ = try await database.execute(
+        "UPDATE app_settings SET paused = ? WHERE singleton = 1",
+        bindings: [.integer(priorPaused)]
+      )
+      return seeded
+    }
     _ = try await database.execute(
       """
       INSERT INTO approved_command_runs(
@@ -7640,9 +5868,165 @@ private struct HerdrPiRuntimeFixture: Sendable {
         .text(jobID.uuidString.lowercased()),
         .text(repositoryID.uuidString.lowercased()),
         .text(kind.rawValue),
-        .text(kind == .issueTriage ? "triage" : (kind == .prReview ? "review" : "plan")),
+        .text(currentStep(for: kind).rawValue),
       ]
     )
+  }
+
+  private static func activateSchema10RuntimeAdmission(
+    database: SQLiteStore,
+    configuration: ConfigurationStore,
+    repositoryID: UUID,
+    jobID: UUID,
+    kind: JobKind
+  ) async throws {
+    let now = Date()
+    let digest = String(repeating: "a", count: 64)
+    let gitSHA = String(repeating: "1", count: 40)
+    let tokenSHA256 = GitHubMarkerCodec.sha256(Data("herdr-runtime-fixture-token".utf8))
+    _ = try await configuration.prepareCredentialReplacement(
+      account: "owner",
+      authorID: 7,
+      tokenSHA256: tokenSHA256,
+      now: now
+    )
+    try await configuration.commitCredentialReplacement(
+      account: "owner",
+      authorID: 7,
+      tokenSHA256: tokenSHA256,
+      now: now
+    )
+    try await configuration.setMaxConcurrency(1, now: now)
+
+    let authority = RolloutAuthorityStore(
+      database: database,
+      now: { now },
+      enforceFinitePromotion: false
+    )
+    let baseEvidence = try await authority.localEvidence(repositoryID: repositoryID)
+    let step = currentStep(for: kind)
+    let stage = workflowStage(for: kind)
+    let scope = RolloutScope(
+      mode: .exactObject,
+      stage: stage,
+      repository: RolloutRepositoryIdentity(
+        id: repositoryID,
+        nodeID: "repository-node",
+        owner: "owner",
+        name: "repository",
+        defaultBranch: "main",
+        enabled: true,
+        reviewEnabled: true,
+        triageEnabled: true,
+        implementationEnabled: true
+      ),
+      object: RolloutObjectSelector(
+        nodeID: "issue-node",
+        number: 1,
+        revisionKey: "fixture-revision",
+        canonicalInputSHA256: digest,
+        headSHA: stage == .prReview ? gitSHA : nil,
+        baseSHA: gitSHA,
+        narrativeSHA256: stage == .prReview ? digest : nil,
+        labelStateSHA256: stage == .prReview ? nil : digest,
+        currentStep: step.rawValue
+      ),
+      finiteWindow: nil
+    )
+    let localEvidence = try await authority.localEvidence(
+      scope: scope,
+      jobBinding: RolloutJobBinding(
+        jobID: jobID,
+        jobKind: kind,
+        objectNumber: 1,
+        contractVersion: "test",
+        priority: .triage,
+        firstStep: step,
+        currentStep: step.rawValue
+      )
+    )
+    let input = RolloutPreviewInput(
+      releaseIdentity: RolloutReleaseIdentity(
+        sourceCommit: gitSHA,
+        sourceTree: gitSHA,
+        bundleVersion: "0.2.0",
+        bundleBuild: 3,
+        applicationSHA256: digest,
+        helperSHA256: digest,
+        askPassSHA256: digest,
+        pushGuardSHA256: digest,
+        herdrHostSHA256: digest,
+        schemaVersion: 10,
+        engineProtocolVersion: 12,
+        runtimeManifestSHA256: digest,
+        runtimeTreeSHA256: digest,
+        modelProfilesSHA256: baseEvidence.modelProfilesSHA256,
+        workflowResourcesSHA256: digest,
+        githubAccount: "owner",
+        githubAuthorID: 7,
+        repositoryConfigurationSHA256: baseEvidence.repositoryConfigurationSHA256,
+        maxConcurrency: 1
+      ),
+      scope: scope,
+      budgets: RolloutBudgets(
+        jobs: 1,
+        githubReadRequests: 0,
+        githubReadPages: 0,
+        githubReadBytes: 0,
+        gitRemoteReads: 0,
+        providerSessions: 0,
+        approvedCommands: 0,
+        markerParts: 0,
+        labelWrites: 0,
+        branchCreates: 0,
+        pullRequestCreates: 0,
+        githubSends: 0,
+        gitSends: 0
+      ),
+      inventory: localEvidence.inventory,
+      missingLabels: [],
+      commands: [],
+      jobBinding: RolloutJobBinding(
+        jobID: jobID,
+        jobKind: kind,
+        objectNumber: 1,
+        contractVersion: "test",
+        priority: .triage,
+        firstStep: step,
+        currentStep: step.rawValue
+      ),
+      createdAtMilliseconds: Int64(now.timeIntervalSince1970 * 1_000),
+      expiresAtMilliseconds: Int64(now.addingTimeInterval(899).timeIntervalSince1970 * 1_000)
+    )
+    let preview = try await authority.preview(input: input)
+    _ = try await authority.activate(
+      approvedCanonicalJSON: preview.canonicalJSON,
+      confirmedSHA256: preview.sha256,
+      recomputedInput: input,
+      now: now.addingTimeInterval(0.001)
+    )
+  }
+
+  private static func workflowStage(for kind: JobKind) -> RolloutWorkflowStage {
+    switch kind {
+    case .prReview:
+      .prReview
+    case .issueTriage:
+      .issueTriage
+    case .issueImplementation, .complexPlan:
+      .implementationPlan
+    }
+  }
+
+  private static func currentStep(for kind: JobKind) -> JobStepKind {
+    switch kind {
+    case .prReview:
+      .review
+    case .issueTriage:
+      .triage
+    case .issueImplementation, .complexPlan:
+      .claimReady
+    }
   }
 }
 

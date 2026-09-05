@@ -1,0 +1,74 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/25] Write sources
+[2/25] Write swift-version--58304C5D6DBC2206.txt
+[4/27] Compiling JidokaCodeCore ProcessIdentityTracker.swift
+[5/27] Emitting module JidokaCodeCore
+[6/30] Compiling JidokaCodeCore GitProcess.swift
+[7/30] Compiling JidokaCodeCore HerdrHostRuntime.swift
+[8/30] Compiling JidokaCodeCore PiRPCProcess.swift
+[8/39] Write Objects.LinkFileList
+[15/41] Emitting module JidokaCodeHerdrFixture
+[15/41] Write Objects.LinkFileList
+[17/46] Emitting module JidokaCodeEngineProbe
+[17/46] Write Objects.LinkFileList
+[19/46] Compiling JidokaCodeCoreTests ProcessIdentityFixtureCapture.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/ProcessIdentityFixtureCapture.swift:48:12: error: instance method 'lock' is unavailable from asynchronous contexts; Use async-safe scoped locking instead
+46 |   func recordedIdentity() async throws -> SupervisedProcessIdentity {
+47 |     for _ in 0..<4_000 {
+48 |       lock.lock()
+   |            `- error: instance method 'lock' is unavailable from asynchronous contexts; Use async-safe scoped locking instead
+49 |       let current = outcome
+50 |       lock.unlock()
+
+Foundation.NSLock.lock:2:11: note: 'lock()' declared here
+1 | class NSLock {
+2 | open func lock()}
+  |           `- note: 'lock()' declared here
+3 | 
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/ProcessIdentityFixtureCapture.swift:50:12: error: instance method 'unlock' is unavailable from asynchronous contexts; Use async-safe scoped locking instead
+48 |       lock.lock()
+49 |       let current = outcome
+50 |       lock.unlock()
+   |            `- error: instance method 'unlock' is unavailable from asynchronous contexts; Use async-safe scoped locking instead
+51 |       switch current {
+52 |       case .recorded(let identity): return identity
+
+Foundation.NSLock.unlock:2:11: note: 'unlock()' declared here
+1 | class NSLock {
+2 | open func unlock()}
+  |           `- note: 'unlock()' declared here
+3 | 
+[20/46] Emitting module JidokaCodeAppSupport
+[21/50] Emitting module JidokaCodeUIFixture
+[21/50] Write Objects.LinkFileList
+[23/50] Emitting module JidokaCodeAppSupportTests
+[23/50] Linking JidokaCodeBoundedCommand
+[24/50] Linking JidokaCodePushGuard
+[25/50] Linking JidokaCodeAskPass
+[26/50] Linking JidokaCodeLocationProbeEngine
+[27/50] Linking JidokaCodeHerdrHost
+[28/50] Linking JidokaCodeLocationProbeApp
+[29/50] Linking JidokaCodeHerdrFixture
+[31/50] Emitting module JidokaCodeApp
+[31/51] Write Objects.LinkFileList
+[32/51] Applying JidokaCodeLocationProbeEngine
+[33/51] Applying JidokaCodeAskPass
+[33/51] Applying JidokaCodeBoundedCommand
+[35/51] Applying JidokaCodeHerdrHost
+[36/51] Applying JidokaCodePushGuard
+[37/51] Applying JidokaCodeLocationProbeApp
+[38/51] Applying JidokaCodeHerdrFixture
+[39/51] Linking JidokaCodeEngineProbe
+[40/51] Applying JidokaCodeEngineProbe
+[41/51] Linking JidokaCodeUIFixture
+[42/51] Applying JidokaCodeUIFixture
+[43/51] Linking JidokaCodeApp
+[45/51] Compiling JidokaCodeCoreTests PiRPCProcessTests.swift
+[46/51] Compiling JidokaCodeCoreTests HerdrHostRuntimeTests.swift
+[46/51] Applying JidokaCodeApp
+[48/52] Emitting module JidokaCodeAppTests
+[49/52] Compiling JidokaCodeCoreTests GitProcessTests.swift
+[50/52] Emitting module JidokaCodeCoreTests
+error: fatalError

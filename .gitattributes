@@ -1,1 +1,6 @@
 quality_reports/review/2026-08-27_w5-final/tracked-changes.diff -whitespace
+quality_reports/review/2026-09-03_progressive-production-automation/tracked-changes.diff -whitespace
+quality_reports/review/2026-09-03_progressive-production-automation/logs/*.log -whitespace
+quality_reports/review/2026-09-05_round-5-accuracy/logs/*.log -whitespace
+quality_reports/review/2026-09-05_round-6-authority/logs/*.log -whitespace
+quality_reports/review/2026-09-05_round-7-independent-review/logs/*.log -whitespace

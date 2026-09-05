@@ -218,7 +218,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
       enabled: true
     )
     try await configuration.upsertRepository(repository, now: now)
-    jobs = DurableJobStore(database: database)
+    jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repository.id,
@@ -266,6 +266,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
       localFixtureURL: remoteURL
     )
     let intents = MutationIntentStore(database: database)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     let input = SystemIssueTriageJobPreparer(
       configuration: configuration,
       api: api,
@@ -274,7 +275,11 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
       appAuthorID: 7,
       remoteResolver: LocalTriageRemoteResolver(remote: remote)
     )
-    let executor = GitHubMutationExecutor(intents: intents, broker: api)
+    let executor = GitHubMutationExecutor(
+      intents: intents,
+      broker: api,
+      authority: authority
+    )
     let sleeper = IssueTriageImmediateSleeper()
     let crashGate = TriageStepCrashGate(kind: crashAfterStep)
     let invalidationGate = TriageInputInvalidationCrashGate(
@@ -295,6 +300,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 100_001) }
       ),
@@ -302,6 +308,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 100_001) }
       ),
@@ -309,6 +316,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 100_001) }
       ),
@@ -326,7 +334,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
       databaseURL: gitFixture.root.appendingPathComponent("state.sqlite3")
     )
     let reopenedConfiguration = ConfigurationStore(database: reopenedDatabase)
-    let reopenedJobs = DurableJobStore(database: reopenedDatabase)
+    let reopenedJobs = DurableJobStore(database: reopenedDatabase, enforceRolloutAuthority: false)
     let reopenedRepositories = try RepositoryStore(
       rootURL: gitFixture.root.appendingPathComponent("ApplicationSupport", isDirectory: true),
       database: reopenedDatabase,
@@ -341,6 +349,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
       localFixtureURL: remoteURL
     )
     let intents = MutationIntentStore(database: reopenedDatabase)
+    let authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     let inputs = SystemIssueTriageJobPreparer(
       configuration: reopenedConfiguration,
       api: api,
@@ -349,7 +358,11 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
       appAuthorID: 7,
       remoteResolver: LocalTriageRemoteResolver(remote: remote)
     )
-    let executor = GitHubMutationExecutor(intents: intents, broker: api)
+    let executor = GitHubMutationExecutor(
+      intents: intents,
+      broker: api,
+      authority: authority
+    )
     let sleeper = IssueTriageImmediateSleeper()
     let reopenedWorkflow = IssueTriageJobWorkflow(
       jobs: reopenedJobs,
@@ -364,6 +377,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 100_002) }
       ),
@@ -371,6 +385,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 100_002) }
       ),
@@ -378,6 +393,7 @@ private final class IssueTriageJobFixture: @unchecked Sendable {
         executor: executor,
         intents: intents,
         reads: api,
+        authority: authority,
         sleeper: sleeper,
         now: { Date(timeIntervalSince1970: 100_002) }
       ),
@@ -586,9 +602,9 @@ private actor IssueTriageGitHubFixture: GitHubMutationReadAPI, GitHubMutationSen
 
   func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse {
-    try await beforeSend()
+    _ = try await beforeSend()
     switch operation {
     case .createComment(_, _, _, let body):
       commentSendAttempts += 1

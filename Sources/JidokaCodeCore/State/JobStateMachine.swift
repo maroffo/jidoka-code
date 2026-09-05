@@ -68,6 +68,7 @@ public enum JobEvent: String, CaseIterable, Codable, Sendable {
   case piInterruptedUnknown
   case piPermanentFailure
   case localStepCompletedMore
+  case phaseCheckpoint
   case inputsInvalidated
   case mutationNeedsAttribution
   case transientLocalFailure
@@ -232,6 +233,29 @@ public enum JobStateMachine {
         state,
         .preparing,
         lease: .retain,
+        stepDelta: 1,
+        nextStep: context.nextStep
+      )
+    case (.executing, .phaseCheckpoint):
+      return effect(
+        state,
+        .queued,
+        lease: .release,
+        stepDelta: 1,
+        nextStep: context.nextStep
+      )
+    case (.preparing, .phaseCheckpoint):
+      return effect(
+        state,
+        .queued,
+        lease: .release,
+        nextStep: context.nextStep
+      )
+    case (.reconciling, .phaseCheckpoint):
+      return effect(
+        state,
+        .queued,
+        lease: .release,
         stepDelta: 1,
         nextStep: context.nextStep
       )

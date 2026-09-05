@@ -1,0 +1,98 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/24] Write sources
+[2/24] Write swift-version--58304C5D6DBC2206.txt
+[4/26] Emitting module JidokaCodeCore
+[5/26] Compiling JidokaCodeCore ProcessIdentityTracker.swift
+[6/29] Compiling JidokaCodeCore GitProcess.swift
+[7/29] Compiling JidokaCodeCore PiRPCProcess.swift
+[8/29] Compiling JidokaCodeCore HerdrHostRuntime.swift
+[8/38] Write Objects.LinkFileList
+[15/40] Emitting module JidokaCodeHerdrFixture
+[15/40] Write Objects.LinkFileList
+[17/44] Emitting module JidokaCodeEngineProbe
+[17/44] Write Objects.LinkFileList
+[19/44] Emitting module JidokaCodeAppSupport
+[20/48] Emitting module JidokaCodeUIFixture
+[20/48] Write Objects.LinkFileList
+[22/48] Emitting module JidokaCodeAppSupportTests
+[22/48] Linking JidokaCodePushGuard
+[23/48] Linking JidokaCodeBoundedCommand
+[25/48] Emitting module JidokaCodeApp
+[25/48] Linking JidokaCodeAskPass
+[26/48] Linking JidokaCodeHerdrHost
+[27/48] Linking JidokaCodeLocationProbeEngine
+[28/48] Linking JidokaCodeLocationProbeApp
+[29/49] Write Objects.LinkFileList
+[30/49] Linking JidokaCodeHerdrFixture
+[31/49] Applying JidokaCodeBoundedCommand
+[32/49] Applying JidokaCodePushGuard
+[33/49] Applying JidokaCodeHerdrHost
+[33/49] Applying JidokaCodeLocationProbeApp
+[35/49] Linking JidokaCodeEngineProbe
+[36/49] Applying JidokaCodeAskPass
+[37/49] Applying JidokaCodeLocationProbeEngine
+[38/49] Applying JidokaCodeHerdrFixture
+[39/49] Applying JidokaCodeEngineProbe
+[41/49] Compiling JidokaCodeCoreTests PiRPCProcessTests.swift
+[41/49] Linking JidokaCodeUIFixture
+[42/49] Applying JidokaCodeUIFixture
+[43/49] Linking JidokaCodeApp
+[44/49] Applying JidokaCodeApp
+[46/50] Compiling JidokaCodeCoreTests GitProcessTests.swift
+[47/50] Compiling JidokaCodeCoreTests HerdrHostRuntimeTests.swift
+[48/50] Emitting module JidokaCodeAppTests
+[49/51] Emitting module JidokaCodeCoreTests
+[49/51] Write Objects.LinkFileList
+[50/51] Linking JidokaCodePackageTests
+Build complete! (5.97s)
+Test Suite 'Selected tests' started at 2026-09-04 00:41:59.788.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 00:41:59.788.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 00:41:59.788.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 00:41:59.788.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Bounded full-duplex Pi RPC process runner" started.
+◇ Suite "Bounded credentialless process execution" started.
+◇ Test "timeout directly removes an observed session-escaping identity" started.
+◇ Test "an observed session escape stays identity-owned across exact leader outcome" started.
+◇ Test "timeout removes an observed session escape by PID and microsecond start time" started.
+◇ Test "stderr and non-JSONL output fail with exact protocol outcomes" started.
+◇ Test "correlated fake provider transcript settles and every descendant is removed" started.
+◇ Test "a child that closes stdin cannot terminate the engine with SIGPIPE" started.
+◇ Test "invocation builder excludes generic discovery and secret-shaped environment keys" started.
+◇ Test "argv stays discrete and output is captured without a shell" started.
+◇ Test "symlink executables and working directories fail closed" started.
+◇ Test "same-second PID reuse cannot bind an original process group" started.
+◇ Test case passing 1 argument mode → "session-escape-success" to "an observed session escape stays identity-owned across exact leader outcome" started.
+◇ Test case passing 1 argument mode → "session-escape-error" to "an observed session escape stays identity-owned across exact leader outcome" started.
+◇ Test "timeout and output bounds terminate the whole process group" started.
+◇ Test "a child that never reads stdin cannot escape the monotonic timeout" started.
+◇ Test "credentialless environment has exact locked boundaries" started.
+◇ Test "observed session-escaping descendants are identity-cleaned with exact leader status" started.
+◇ Test case passing 1 argument exitCode → 0 to "observed session-escaping descendants are identity-cleaned with exact leader status" started.
+◇ Test case passing 1 argument exitCode → 37 to "observed session-escaping descendants are identity-cleaned with exact leader status" started.
+◇ Test "a settled child must still exit successfully when it exits on its own" started.
+◇ Test "timeout sends one abort, requires acknowledgement, and still cleans descendants" started.
+✔ Test "same-second PID reuse cannot bind an original process group" passed after 0.001 seconds.
+✔ Test "credentialless environment has exact locked boundaries" passed after 0.001 seconds.
+✔ Test "symlink executables and working directories fail closed" passed after 0.003 seconds.
+✔ Test "invocation builder excludes generic discovery and secret-shaped environment keys" passed after 0.006 seconds.
+✔ Test "argv stays discrete and output is captured without a shell" passed after 0.199 seconds.
+✔ Test "a settled child must still exit successfully when it exits on its own" passed after 0.397 seconds.
+✔ Test "correlated fake provider transcript settles and every descendant is removed" passed after 0.431 seconds.
+✔ Test "an observed session escape stays identity-owned across exact leader outcome" with 2 test cases passed after 0.633 seconds.
+✔ Test "timeout removes an observed session escape by PID and microsecond start time" passed after 0.770 seconds.
+✔ Test "observed session-escaping descendants are identity-cleaned with exact leader status" with 2 test cases passed after 0.787 seconds.
+✔ Test "timeout directly removes an observed session-escaping identity" passed after 1.064 seconds.
+✔ Test "a child that closes stdin cannot terminate the engine with SIGPIPE" passed after 1.152 seconds.
+✔ Test "stderr and non-JSONL output fail with exact protocol outcomes" passed after 1.297 seconds.
+✔ Test "timeout sends one abort, requires acknowledgement, and still cleans descendants" passed after 3.326 seconds.
+✔ Test "timeout and output bounds terminate the whole process group" passed after 4.260 seconds.
+✔ Suite "Bounded credentialless process execution" passed after 4.261 seconds.
+✔ Test "a child that never reads stdin cannot escape the monotonic timeout" passed after 5.057 seconds.
+✔ Suite "Bounded full-duplex Pi RPC process runner" passed after 5.057 seconds.
+✔ Test run with 16 tests in 2 suites passed after 5.058 seconds.

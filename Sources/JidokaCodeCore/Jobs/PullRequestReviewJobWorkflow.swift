@@ -131,9 +131,7 @@ public struct SystemPullRequestReviewJobPreparer: PullRequestReviewJobPreparing,
       headSHA: fetch.headSHA,
       mirror: fetch.mirrorURL
     )
-    guard Set(restCommits) == Set(fetched.commitSHAs),
-      restCommits.count == fetched.commitSHAs.count
-    else {
+    guard restCommits == fetched.commitSHAs else {
       throw PullRequestReviewJobError.commitSourcesMismatch
     }
     let materialization = try await repositories.materializeReviewWorkspace(
@@ -161,7 +159,7 @@ public struct SystemPullRequestReviewJobPreparer: PullRequestReviewJobPreparing,
     )
   }
 
-  private static func artifact(
+  static func artifact(
     repository: RepositoryConfiguration,
     pullRequest: GitHubPullRequest,
     restCommitSHAs: [String],
@@ -324,6 +322,7 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
   private let markerPublisher: GitHubMarkerPublisher
   private let reviewedRevisions: ReviewedRevisionStore
   private let repositories: RepositoryStore
+  private let rolloutSnapshots: (any RolloutJobInputSnapshotRecording)?
   private let authorID: Int64
   private let now: @Sendable () -> Date
 
@@ -337,6 +336,7 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
     markerPublisher: GitHubMarkerPublisher,
     reviewedRevisions: ReviewedRevisionStore,
     repositories: RepositoryStore,
+    rolloutSnapshots: (any RolloutJobInputSnapshotRecording)? = nil,
     authorID: Int64,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
@@ -349,11 +349,20 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
     self.markerPublisher = markerPublisher
     self.reviewedRevisions = reviewedRevisions
     self.repositories = repositories
+    self.rolloutSnapshots = rolloutSnapshots
     self.authorID = authorID
     self.now = now
   }
 
   public func run(jobID: UUID) async throws {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .workflow(jobID: jobID))
+    ) {
+      try await self.runAuthorized(jobID: jobID)
+    }
+  }
+
+  private func runAuthorized(jobID: UUID) async throws {
     guard let job = try await jobs.job(id: jobID), job.identity.kind == .prReview else {
       throw PullRequestReviewJobError.invalidJob
     }
@@ -386,6 +395,20 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
   }
 
   public func runRecoveredCanary(
+    jobID: UUID,
+    recoveryEvidenceSHA256: String
+  ) async throws {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .historicalCanary(jobID: jobID))
+    ) {
+      try await self.runRecoveredCanaryAuthorized(
+        jobID: jobID,
+        recoveryEvidenceSHA256: recoveryEvidenceSHA256
+      )
+    }
+  }
+
+  private func runRecoveredCanaryAuthorized(
     jobID: UUID,
     recoveryEvidenceSHA256: String
   ) async throws {
@@ -423,6 +446,22 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
     recoveryEvidenceSHA256: String,
     retryEvidenceSHA256: String
   ) async throws {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(mode: .historicalCanary(jobID: jobID))
+    ) {
+      try await self.runCanaryPiFreshRetryAuthorized(
+        jobID: jobID,
+        recoveryEvidenceSHA256: recoveryEvidenceSHA256,
+        retryEvidenceSHA256: retryEvidenceSHA256
+      )
+    }
+  }
+
+  private func runCanaryPiFreshRetryAuthorized(
+    jobID: UUID,
+    recoveryEvidenceSHA256: String,
+    retryEvidenceSHA256: String
+  ) async throws {
     guard GitHubInputValidation.validSHA256(recoveryEvidenceSHA256),
       GitHubInputValidation.validSHA256(retryEvidenceSHA256)
     else {
@@ -446,6 +485,18 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
   }
 
   public func runCanaryRoleHostReplacement(
+    request: JobCanaryRoleHostReplacementRequest
+  ) async throws {
+    try await RolloutEffectTaskContext.$current.withValue(
+      RolloutEffectExecutionContext(
+        mode: .historicalCanary(jobID: request.retry.recovery.canary.scope.jobID)
+      )
+    ) {
+      try await self.runCanaryRoleHostReplacementAuthorized(request: request)
+    }
+  }
+
+  private func runCanaryRoleHostReplacementAuthorized(
     request: JobCanaryRoleHostReplacementRequest
   ) async throws {
     try request.validate()
@@ -546,6 +597,20 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
 
   private func runReview(_ job: JobRecord) async throws {
     let prepared = try await inputs.prepare(job: job)
+    if let rolloutSnapshots {
+      try await rolloutSnapshots.freezeJobInputSnapshot(
+        RolloutJobInputSnapshot(
+          jobID: job.id,
+          canonicalInputSHA256: GitHubMarkerCodec.sha256(prepared.artifact),
+          narrativeSHA256: try PiPullRequestReviewRouter.commitNarrativeDigest(
+            prepared.fetched.narrative,
+            baseSHA: prepared.pullRequest.base.sha
+          ),
+          baseSHA: prepared.pullRequest.base.sha
+        ),
+        now: now()
+      )
+    }
     let inputArtifact = try await artifacts.write(
       jobID: job.id,
       kind: .input,
@@ -659,6 +724,7 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
       GitHubMarkerPublicationRequest(
         jobID: job.id,
         operation: .createMarkerComment,
+        repositoryID: repository.id,
         repository: GitHubRepositoryCoordinates(
           owner: repository.owner,
           repository: repository.name
@@ -707,6 +773,7 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
       GitHubMarkerPublicationRequest(
         jobID: job.id,
         operation: .createMarkerComment,
+        repositoryID: repository.id,
         repository: GitHubRepositoryCoordinates(
           owner: repository.owner,
           repository: repository.name
@@ -801,6 +868,7 @@ public actor PullRequestReviewJobWorkflow: JobWorkflowRunning {
     GitHubMarkerPublicationRequest(
       jobID: job.id,
       operation: .createMarkerComment,
+      repositoryID: repository.id,
       repository: GitHubRepositoryCoordinates(
         owner: repository.owner,
         repository: repository.name

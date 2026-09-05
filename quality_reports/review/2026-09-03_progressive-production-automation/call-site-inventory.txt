@@ -1,0 +1,302 @@
+Sources/JidokaCodeCore/Application/ProductionEngineExternalServices.swift:167:    let readAuthority = try BoundedRolloutPreviewReadAuthority(
+Sources/JidokaCodeCore/Application/ProductionEngineExternalServices.swift:175:      readAuthority: readAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineExternalServices.swift:249:    let readAuthority = try BoundedRolloutPreviewReadAuthority(
+Sources/JidokaCodeCore/Application/ProductionEngineExternalServices.swift:257:      readAuthority: readAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineExternalServices.swift:353:        readAuthority: identityAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineExternalServices.swift:383:        readAuthority: repositoryAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineExternalServices.swift:394:        readAuthority: repositoryAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1373:        try await rolloutAuthority.openAdmission()
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1413:    rolloutAuthority: RolloutAuthorityStore,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1430:      rolloutAuthority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1444:      rolloutAuthority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1466:    rolloutAuthority: RolloutAuthorityStore,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1485:    let broker = GitHubBroker(tokenStore: tokenStore, authority: rolloutAuthority)
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1489:      rolloutAuthority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1508:      authority: rolloutAuthority
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:150:  private let rolloutAuthority: RolloutAuthorityStore
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1515:      authority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1523:      authority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1530:      authority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1537:      authority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1560:      rolloutSnapshots: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1586:      rolloutSnapshots: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1618:        rolloutAuthority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1628:        authority: rolloutAuthority
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1632:      rolloutSnapshots: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1648:      authority: rolloutAuthority
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1662:      rolloutAuthority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:1671:      rolloutAuthority: rolloutAuthority
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:187:    rolloutAuthority = RolloutAuthorityStore(database: database, now: now)
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:220:    rolloutAuthority = RolloutAuthorityStore(database: database, now: now)
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:243:    await rolloutAuthority.closeAdmission()
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:279:        rolloutAuthority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:319:        rolloutAuthority: rolloutAuthority,
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:360:    await rolloutAuthority.closeAdmission()
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:369:    _ = await rolloutAuthority.waitForDrain(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:390:    return try await rolloutAuthority.preview(input: input)
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:406:    let report = try await rolloutAuthority.activate(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:467:    if let latest = try await rolloutAuthority.latestStatus(),
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:471:        _ = try await rolloutAuthority.activeStatus(now: now())
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:473:        _ = try await rolloutAuthority.markRecoveryRequired(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:482:    return try await rolloutAuthority.latestStatus()
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:489:    guard let current = try await rolloutAuthority.latestStatus(),
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:496:    _ = try await rolloutAuthority.beginDrain(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:512:      let effectsDrained = await rolloutAuthority.waitForDrain(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:525:      return try await rolloutAuthority.revoke(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:531:    return try await rolloutAuthority.markRecoveryRequired(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:542:    guard paused, let report = try await rolloutAuthority.latestStatus(),
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:565:      let current = try await rolloutAuthority.latestStatus(),
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:577:    await rolloutAuthority.closeAdmission()
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:583:    let observed = try await rolloutAuthority.status(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:598:      return try await rolloutAuthority.settle(
+Sources/JidokaCodeCore/Application/ProductionEngineJobRuntime.swift:611:      return try await rolloutAuthority.resumeExactRecovery(
+Sources/JidokaCodeCore/Application/RolloutRemotePreviewRevalidator.swift:112:        rolloutReadAuthority: readAuthority,
+Sources/JidokaCodeCore/Application/RolloutRemotePreviewRevalidator.swift:120:      try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Application/RolloutRemotePreviewRevalidator.swift:45:  private let readAuthority: any RolloutGitRemoteReadAuthorizing
+Sources/JidokaCodeCore/Application/RolloutRemotePreviewRevalidator.swift:52:    readAuthority: any RolloutGitRemoteReadAuthorizing,
+Sources/JidokaCodeCore/Application/RolloutRemotePreviewRevalidator.swift:58:    self.readAuthority = readAuthority
+Sources/JidokaCodeCore/Git/GitPublication.swift:146:    let rolloutAuthority = authority
+Sources/JidokaCodeCore/Git/GitPublication.swift:156:        let permit = try await rolloutAuthority.reserveGitSendAndMarkStarted(
+Sources/JidokaCodeCore/Git/GitPublication.swift:188:    let publication = try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Git/GitPublication.swift:301:    guard let beforeSend else { throw GitTransportError.rolloutAuthorityRequired }
+Sources/JidokaCodeCore/Git/GitPublication.swift:319:      after = try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Git/GitPublication.swift:68:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Git/GitPublication.swift:74:    authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Git/GitTransport.swift:143:      throw GitTransportError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/Git/GitTransport.swift:219:  private let rolloutAuthority: (any RolloutEffectAuthorizing)?
+Sources/JidokaCodeCore/Git/GitTransport.swift:220:  private let rolloutReadAuthority: (any RolloutGitRemoteReadAuthorizing)?
+Sources/JidokaCodeCore/Git/GitTransport.swift:229:    rolloutAuthority: (any RolloutEffectAuthorizing)? = nil,
+Sources/JidokaCodeCore/Git/GitTransport.swift:230:    rolloutReadAuthority: (any RolloutGitRemoteReadAuthorizing)? = nil,
+Sources/JidokaCodeCore/Git/GitTransport.swift:238:    self.rolloutAuthority = rolloutAuthority
+Sources/JidokaCodeCore/Git/GitTransport.swift:239:    self.rolloutReadAuthority = rolloutReadAuthority ?? rolloutAuthority
+Sources/JidokaCodeCore/Git/GitTransport.swift:491:    guard let rolloutAuthority else { throw GitTransportError.rolloutAuthorityRequired }
+Sources/JidokaCodeCore/Git/GitTransport.swift:503:    try await rolloutAuthority.verifyGitSendPermit(permit, effect: effect)
+Sources/JidokaCodeCore/Git/GitTransport.swift:537:      let context = RolloutEffectTaskContext.current,
+Sources/JidokaCodeCore/Git/GitTransport.swift:541:      throw GitTransportError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/Git/GitTransport.swift:550:    let permit = try await rolloutReadAuthority.reserveGitRemoteRead(
+Sources/JidokaCodeCore/Git/GitTransport.swift:556:      try await rolloutReadAuthority.verifyGitRemoteReadPermit(permit, effect: effect)
+Sources/JidokaCodeCore/Git/GitTransport.swift:563:      try await rolloutReadAuthority.settleGitRemoteRead(
+Sources/JidokaCodeCore/Git/GitTransport.swift:572:    try await rolloutReadAuthority.settleGitRemoteRead(
+Sources/JidokaCodeCore/Git/GitTransport.swift:69:  case rolloutAuthorityRequired
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:103:    self.readAuthority = readAuthority
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:104:    self.effectAuthority = effectAuthority
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:116:      throw GitHubBrokerError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:20:  case rolloutAuthorityRequired
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:409:      guard let context = RolloutEffectTaskContext.current ?? defaultReadContext else {
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:410:        throw GitHubBrokerError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:418:      readPermit = try await readAuthority.reserveGitHubRead(
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:457:        try await readAuthority.verifyGitHubReadPermit(readPermit, effect: readEffect)
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:469:      guard let effectAuthority else {
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:470:        throw GitHubBrokerError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:473:      try await effectAuthority.verifyGitHubSendPermit(permit, operation: operation)
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:558:    try await readAuthority.settleGitHubRead(permit, evidenceSHA256: evidence, now: now())
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:74:  private let readAuthority: any RolloutGitHubReadAuthorizing
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:75:  private let effectAuthority: (any RolloutEffectAuthorizing)?
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:82:    authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:86:    readAuthority = authority
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:87:    effectAuthority = authority
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:96:    readAuthority: any RolloutGitHubReadAuthorizing,
+Sources/JidokaCodeCore/GitHub/GitHubBroker.swift:97:    effectAuthority: (any RolloutEffectAuthorizing)? = nil,
+Sources/JidokaCodeCore/Jobs/DurableApprovedCommandExecutor.swift:136:    var permit: RolloutEffectPermit? = try await authority.reserveApprovedCommand(
+Sources/JidokaCodeCore/Jobs/DurableApprovedCommandExecutor.swift:166:          try await authority.verifyApprovedCommandPermit(activePermit, effect: effect)
+Sources/JidokaCodeCore/Jobs/DurableApprovedCommandExecutor.swift:17:    authority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Jobs/DurableApprovedCommandExecutor.swift:187:        try await authority.settleEffect(
+Sources/JidokaCodeCore/Jobs/DurableApprovedCommandExecutor.swift:197:        try await authority.settleEffect(
+Sources/JidokaCodeCore/Jobs/DurableApprovedCommandExecutor.swift:8:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Jobs/GitHubMarkerPublisher.swift:141:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Jobs/GitHubMarkerPublisher.swift:150:    authority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Jobs/GitHubMarkerPublisher.swift:240:      _ = try await authority.reserveMarkerBatch(
+Sources/JidokaCodeCore/Jobs/GitHubPullRequestPublisher.swift:74:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Jobs/GitHubPullRequestPublisher.swift:82:    authority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Jobs/GitHubWorkflowLabelBootstrapper.swift:83:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Jobs/GitHubWorkflowLabelBootstrapper.swift:91:    authority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Jobs/GitHubWorkflowLabelMutator.swift:58:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Jobs/GitHubWorkflowLabelMutator.swift:66:    authority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Jobs/IssueImplementationJobWorkflow.swift:147:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/IssueImplementationJobWorkflow.swift:86:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/IssueTriageJobWorkflow.swift:331:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:1031:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:212:  private let rolloutAuthority: RolloutAuthorityStore?
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:230:    rolloutAuthority: RolloutAuthorityStore? = nil,
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:243:    self.rolloutAuthority = rolloutAuthority
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:252:    if let rolloutAuthority {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:253:      if let interrupted = try await rolloutAuthority.markInterruptedLaneRecoveryRequired(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:273:      let rollout = try await rolloutAuthority?.activeStatus(now: now())
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:274:      if rolloutAuthority != nil, rollout == nil {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:281:      if rolloutAuthority == nil {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:300:          await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:309:          await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:362:        _ = try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:377:      guard rolloutAuthority != nil, let rolloutReadbacks else {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:414:      try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:445:      try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:477:      try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:499:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:52:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:546:        if rolloutAuthority != nil {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:566:      } catch DurableJobStoreError.rolloutAuthorityRequired,
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:576:        if rolloutAuthority != nil {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:584:      } catch DurableJobStoreError.rolloutAuthorityRequired,
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:58:    authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:604:      if rolloutAuthority != nil {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:813:        if rolloutAuthority != nil {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:816:        _ = try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:865:        if rolloutAuthority != nil {
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:871:        DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:883:    guard let rolloutAuthority else { return }
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:884:    let current = try await rolloutAuthority.status(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:895:      _ = try await rolloutAuthority.markRecoveryRequired(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:907:      _ = try await rolloutAuthority.markRecoveryRequired(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:91:      try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:920:      _ = try await rolloutAuthority.fail(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:934:      _ = try await rolloutAuthority.fail(
+Sources/JidokaCodeCore/Jobs/JobCoordinator.swift:947:    _ = try await rolloutAuthority.settle(
+Sources/JidokaCodeCore/Jobs/PiIssueImplementationExecutors.swift:106:  private let rolloutAuthority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Jobs/PiIssueImplementationExecutors.swift:120:    rolloutAuthority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Jobs/PiIssueImplementationExecutors.swift:133:    self.rolloutAuthority = rolloutAuthority
+Sources/JidokaCodeCore/Jobs/PiIssueImplementationExecutors.swift:148:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/PiIssueImplementationExecutors.swift:187:      authority: rolloutAuthority,
+Sources/JidokaCodeCore/Jobs/PullRequestReviewJobWorkflow.swift:358:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/PullRequestReviewJobWorkflow.swift:401:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/PullRequestReviewJobWorkflow.swift:449:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Jobs/PullRequestReviewJobWorkflow.swift:490:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:331:  private let rolloutAuthority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:354:    rolloutAuthority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:384:      rolloutAuthority: rolloutAuthority,
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4159:    if let context = RolloutEffectTaskContext.current {
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4167:    return try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:421:    rolloutAuthority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4232:        rolloutPermit = try await rolloutAuthority.reserveProvider(effect, now: now())
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4236:        try await rolloutAuthority.bindProviderReservation(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4251:          try await rolloutAuthority.settleEffect(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4286:      rolloutPermit = try await rolloutAuthority.reserveProvider(providerEffect, now: now())
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4331:      try await rolloutAuthority.bindProviderReservation(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4361:        try await rolloutAuthority.settleEffect(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4913:      guard RolloutEffectTaskContext.current?.jobID == run.jobID,
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4918:      try await rolloutAuthority.verifyProviderPermit(permit, effect: effect)
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4933:    try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4936:      let historicalPermit = try await self.rolloutAuthority.reserveProvider(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4940:      try await self.rolloutAuthority.bindProviderReservation(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:4946:      try await self.rolloutAuthority.verifyProviderPermit(
+Sources/JidokaCodeCore/Pi/HerdrPiWorkflowExecutor.swift:503:    self.rolloutAuthority = rolloutAuthority
+Sources/JidokaCodeCore/Reconciliation/GitHubMutationExecutor.swift:18:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Reconciliation/GitHubMutationExecutor.swift:23:    authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Reconciliation/GitHubMutationExecutor.swift:61:      let rolloutAuthority = authority
+Sources/JidokaCodeCore/Reconciliation/GitHubMutationExecutor.swift:63:        try await rolloutAuthority.reserveGitHubSendAndMarkStarted(
+Sources/JidokaCodeCore/Reconciliation/MutationReconciler.swift:542:  private let authority: any RolloutEffectAuthorizing
+Sources/JidokaCodeCore/Reconciliation/MutationReconciler.swift:550:    authority: any RolloutEffectAuthorizing,
+Sources/JidokaCodeCore/Reconciliation/MutationReconciler.swift:593:        observation = try await RolloutEffectTaskContext.$current.withValue(
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:353:  private let rolloutAuthority: RolloutAuthorityStore?
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:363:    rolloutAuthority: RolloutAuthorityStore? = nil
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:367:    self.rolloutAuthority = rolloutAuthority
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:373:    if let rolloutAuthority {
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:374:      let admission = (try? await rolloutAuthority.schedulerAdmission(now: instant)) ?? .denied
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:398:    if !paused, let rolloutAuthority,
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:399:      (try? await rolloutAuthority.activeStatus(now: instant)) == nil
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:411:    if let rolloutAuthority {
+Sources/JidokaCodeCore/Scheduler/DurableScheduler.swift:412:      admission = (try? await rolloutAuthority.schedulerAdmission(now: now)) ?? .denied
+Sources/JidokaCodeCore/State/DurableJobStore.swift:131:  case rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/DurableJobStore.swift:1668:        try RolloutAuthorityStore.requireActiveJobBinding(
+Sources/JidokaCodeCore/State/DurableJobStore.swift:187:          throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/DurableJobStore.swift:189:        rolloutSlot = try RolloutAuthorityStore.authorizeJobCreation(
+Sources/JidokaCodeCore/State/DurableJobStore.swift:288:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/DurableJobStore.swift:308:        throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/DurableJobStore.swift:310:      let authorizationID = try RolloutAuthorityStore.requireActiveGeneratedReviewParent(
+Sources/JidokaCodeCore/State/DurableJobStore.swift:392:        throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/DurableJobStore.swift:411:      try RolloutAuthorityStore.requireActiveJobBinding(
+Sources/JidokaCodeCore/State/DurableJobStore.swift:488:        try RolloutAuthorityStore.requireActivePhaseCheckpoint(
+Sources/JidokaCodeCore/State/DurableJobStore.swift:668:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/DurableJobStore.swift:686:        throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/DurableJobStore.swift:704:        throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2475:  static func authorizeJobCreation(
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2488:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2498:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2506:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2514:        throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2527:        throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2594:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2597:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2621:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2657:  static func requireActiveJobBinding(
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2707:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2711:  static func requireActivePhaseCheckpoint(
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2753:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2757:  static func requireActiveGeneratedReviewParent(
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:2791:      throw DurableJobStoreError.rolloutAuthorityRequired
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:345:  public func schedulerAdmission(now: Date) async throws -> RolloutSchedulerAdmission {
+Sources/JidokaCodeCore/State/RolloutAuthorityStore.swift:751:    guard case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:142:  public func reserveGitHubRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:161:  public func verifyGitHubReadPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:174:  public func settleGitHubRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:198:  public func reserveGitRemoteRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:218:  public func verifyGitRemoteReadPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:231:  public func settleGitRemoteRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:30:public enum RolloutEffectTaskContext {
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:491:public protocol RolloutEffectAuthorizing: RolloutGitHubReadAuthorizing,
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:492:  RolloutGitRemoteReadAuthorizing, Sendable
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:494:  func reserveProvider(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:498:  func verifyProviderPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:508:  func reserveApprovedCommand(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:512:  func verifyApprovedCommandPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:524:  func reserveMarkerBatch(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:528:  func reserveGitHubSendAndMarkStarted(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:532:  func reserveGitSendAndMarkStarted(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:536:  func verifyGitHubSendPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:540:  func verifyGitSendPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:550:  func settleEffect(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:560:extension RolloutEffectAuthorizing {
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:561:  public func settleGitRemoteRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:566:    try await settleEffect(permit, evidenceSHA256: evidenceSHA256, now: now)
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:59:public protocol RolloutGitHubReadAuthorizing: Sendable {
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:60:  func reserveGitHubRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:64:  func verifyGitHubReadPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:68:  func settleGitHubRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:75:public protocol RolloutGitRemoteReadAuthorizing: Sendable {
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:76:  func reserveGitRemoteRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:80:  func verifyGitRemoteReadPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:84:  func settleGitRemoteRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:91:public actor BoundedRolloutPreviewReadAuthority: RolloutGitHubReadAuthorizing,
+Sources/JidokaCodeCore/State/RolloutEffectAuthority.swift:92:  RolloutGitRemoteReadAuthorizing
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:11:      RolloutEffectTaskContext.current == effect.context
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:197:  public func settleGitHubRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:240:  public func reserveGitRemoteRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:251:    if case .readback(let jobID, let intentID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:259:    } else if case .historicalCanary(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:265:    guard case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:287:  public func verifyGitRemoteReadPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:301:          RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:333:        guard case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:360:            RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:3:extension RolloutAuthorityStore: RolloutEffectAuthorizing {
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:403:  public func reserveProvider(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:418:    if case .historicalCanary(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:424:    guard case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:465:  public func verifyProviderPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:472:          RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:483:      case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:48:  public func verifyGitHubReadPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:4:  public func reserveGitHubRead(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:535:          RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:546:      case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:55:      RolloutEffectTaskContext.current == effect.context
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:595:  public func reserveApprovedCommand(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:607:    guard case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:626:  public func verifyApprovedCommandPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:633:      case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:689:      case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:799:  public func settleEffect(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStore.swift:806:      try await settleGitHubRead(permit, evidenceSHA256: evidenceSHA256, now: now)
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:1001:    let executionContext = RolloutEffectTaskContext.current
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:547:  public func reserveMarkerBatch(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:562:    if case .historicalCanary(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:568:    guard case .workflow(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:671:  public func reserveGitHubSendAndMarkStarted(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:681:      case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:684:      if case .historicalCanary(let jobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:789:  public func reserveGitSendAndMarkStarted(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:798:      case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:878:  public func verifyGitHubSendPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:889:        case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:934:          RolloutEffectTaskContext.current?.mode,
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:945:  public func verifyGitSendPermit(
+Sources/JidokaCodeCore/State/RolloutEffectAuthorityStoreTransactions.swift:956:      case .workflow(let contextualJobID) = RolloutEffectTaskContext.current?.mode,

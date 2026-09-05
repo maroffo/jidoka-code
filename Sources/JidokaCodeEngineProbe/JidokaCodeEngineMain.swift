@@ -388,7 +388,8 @@ private enum EngineServiceFactory {
     let configuration = ConfigurationStore(database: database)
     let jobs = DurableJobStore(
       database: database,
-      enforceApplicationDispatchGate: true
+      enforceApplicationDispatchGate: true,
+      enforceRolloutAuthority: true
     )
     let intents = MutationIntentStore(database: database)
     let resolver = ReleaseOwnedPiRuntimeResolver(
@@ -415,7 +416,12 @@ private enum EngineServiceFactory {
           "ModelCatalog/Runtime", isDirectory: true
         )
       ),
-      herdrReadiness: herdrReadiness
+      herdrReadiness: herdrReadiness,
+      rolloutDatabase: database,
+      rolloutJobs: jobs,
+      rolloutIntents: intents,
+      rolloutApplicationSupportRoot: paths.applicationSupport,
+      rolloutAskPassExecutable: paths.askPass
     )
     await startup.begin(.hostSnapshot)
     let herdrHost = try PackagedExecutableSnapshot.prepareHerdrHost(

@@ -14,6 +14,13 @@ public protocol EngineExternalServicing: Sendable {
   func preflightPi() async -> EnginePiStatus
   func preflightHerdr() async -> EngineHerdrStatus
   func discoverModelCatalog() async throws -> PiModelCatalog
+  func revalidateRollout(_ preview: RolloutPreview) async throws
+}
+
+extension EngineExternalServicing {
+  public func revalidateRollout(_ preview: RolloutPreview) async throws {
+    throw EngineClientError(.unavailable)
+  }
 }
 
 public protocol EngineJobRuntime: Sendable {
@@ -23,6 +30,16 @@ public protocol EngineJobRuntime: Sendable {
   func waitForPauseDrain() async
   func setPaused(_ paused: Bool) async
   func pollNow() async
+  func previewRollout(_ input: RolloutPreviewInput) async throws -> RolloutPreview
+  func activateRollout(_ request: RolloutActivationRequest) async throws -> RolloutStatusReport
+  func rolloutStatus() async throws -> RolloutStatusReport?
+  func stopAndDrainRollout(_ request: RolloutStopRequest) async throws -> RolloutStatusReport
+  func previewRolloutRecovery(
+    _ request: RolloutRecoveryRequest
+  ) async throws -> RolloutRecoveryPreview
+  func executeRolloutRecovery(
+    _ authorization: RolloutRecoveryAuthorization
+  ) async throws -> RolloutStatusReport
   func requestLifecyclePass(_ reason: SchedulerTriggerReason) async
   func beginExclusiveOperation() async throws
   func endExclusiveOperation() async
@@ -70,6 +87,30 @@ public protocol EngineJobRuntime: Sendable {
 extension EngineJobRuntime {
   public func prepareForPause() async {}
   public func waitForPauseDrain() async {}
+  public func previewRollout(_ input: RolloutPreviewInput) async throws -> RolloutPreview {
+    throw EngineClientError(.unavailable)
+  }
+  public func activateRollout(
+    _ request: RolloutActivationRequest
+  ) async throws -> RolloutStatusReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func rolloutStatus() async throws -> RolloutStatusReport? { nil }
+  public func stopAndDrainRollout(
+    _ request: RolloutStopRequest
+  ) async throws -> RolloutStatusReport {
+    throw EngineClientError(.unavailable)
+  }
+  public func previewRolloutRecovery(
+    _ request: RolloutRecoveryRequest
+  ) async throws -> RolloutRecoveryPreview {
+    throw EngineClientError(.unavailable)
+  }
+  public func executeRolloutRecovery(
+    _ authorization: RolloutRecoveryAuthorization
+  ) async throws -> RolloutStatusReport {
+    throw EngineClientError(.unavailable)
+  }
   public func canaryResourceTreeSHA256() async throws -> String {
     throw EngineClientError(.unavailable)
   }
@@ -390,6 +431,8 @@ public actor EngineService: EngineClient {
     var jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport? = nil
     var jobCanaryGenerationRollover: JobCanaryGenerationRolloverReport? = nil
     var jobCanaryGenerationRolloverQ4: JobCanaryGenerationRolloverQ4Report? = nil
+    var rolloutPreview: RolloutPreview? = nil
+    var rolloutRecoveryPreview: RolloutRecoveryPreview? = nil
     switch command {
     case .snapshot:
       checkpoint = nil
@@ -467,6 +510,9 @@ public actor EngineService: EngineClient {
       checkpoint = nil
       didMutate()
     case .addRepository(let draft):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
       let existing = try await configuration.repositories().first {
         $0.owner.caseInsensitiveCompare(draft.owner) == .orderedSame
           && $0.name.caseInsensitiveCompare(draft.name) == .orderedSame
@@ -477,6 +523,9 @@ public actor EngineService: EngineClient {
       checkpoint = nil
       didMutate()
     case .updateRepository(let repository):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
       guard let existing = try await configuration.repository(id: repository.id),
         existing.nodeID == repository.nodeID,
         existing.owner == repository.owner,
@@ -490,6 +539,9 @@ public actor EngineService: EngineClient {
       checkpoint = nil
       didMutate()
     case .removeRepository(let id):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
       guard
         try await jobs.jobs(nonTerminalOnly: true).allSatisfy({
           $0.identity.repositoryID != id
@@ -502,6 +554,9 @@ public actor EngineService: EngineClient {
       checkpoint = nil
       didMutate()
     case .setProfile(let profile):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
       try await runtime.beginExclusiveOperation()
       do {
         try await configuration.setProfileAndInvalidateProviderDisclosure(profile, now: now())
@@ -515,10 +570,17 @@ public actor EngineService: EngineClient {
       checkpoint = nil
       didMutate()
     case .setMaxConcurrency(let value):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
       try await configuration.setMaxConcurrency(value, now: now())
       checkpoint = nil
       didMutate()
     case .setPaused(let paused):
+      let rollout = try await runtime.rolloutStatus()
+      guard paused, rollout?.authorization.state.isOpenLane != true else {
+        throw EngineClientError(.invalidCommand)
+      }
       if paused { await runtime.prepareForPause() }
       do {
         try await configuration.setPaused(paused, now: now())
@@ -540,8 +602,73 @@ public actor EngineService: EngineClient {
       checkpoint = nil
       didMutate()
     case .pollNow:
+      guard let rollout = try await runtime.rolloutStatus(),
+        rollout.authorization.state == .active,
+        rollout.scope.mode == .finiteWindow
+      else {
+        throw EngineClientError(.invalidCommand)
+      }
       await runtime.pollNow()
       checkpoint = nil
+      didMutate()
+    case .previewRollout(let input), .previewFiniteWindow(let input):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
+      let preview = try await runtime.previewRollout(input)
+      try await external.revalidateRollout(preview)
+      rolloutPreview = preview
+      checkpoint = nil
+    case .activateRollout(let request), .activateFiniteWindow(let request):
+      guard try await rolloutActivationReady() else {
+        throw EngineClientError(.onboardingIncomplete)
+      }
+      let approved = try RolloutPreviewBuilder.parseCanonical(
+        request.approvedCanonicalJSON
+      )
+      try await external.revalidateRollout(approved)
+      _ = try await runtime.activateRollout(request)
+      await runtime.setPaused(false)
+      await runtime.setDispatchAllowed(try await dispatchAllowed())
+      await runtime.pollNow()
+      _ = try await database.checkpoint()
+      checkpoint = try await checkpointReceipt()
+      didMutate()
+    case .rolloutStatus:
+      _ = try await runtime.rolloutStatus()
+      checkpoint = nil
+    case .stopAndDrainRollout(let request):
+      _ = try await runtime.stopAndDrainRollout(request)
+      await runtime.setDispatchAllowed(false)
+      await runtime.setPaused(true)
+      _ = try await database.checkpoint()
+      checkpoint = try await checkpointReceipt()
+      didMutate()
+    case .previewRolloutRecovery(let request):
+      rolloutRecoveryPreview = try await runtime.previewRolloutRecovery(request)
+      checkpoint = nil
+    case .executeRolloutRecovery(let authorization):
+      guard try await rolloutActivationReady() else {
+        throw EngineClientError(.onboardingIncomplete)
+      }
+      try await runtime.beginExclusiveOperation()
+      do {
+        let report = try await runtime.executeRolloutRecovery(authorization)
+        let resumeDispatch =
+          report.authorization.state == .active
+          ? try await dispatchAllowed() : false
+        _ = try await database.checkpoint()
+        checkpoint = try await checkpointReceipt()
+        await runtime.endExclusiveOperation()
+        if resumeDispatch {
+          await runtime.setPaused(false)
+          await runtime.setDispatchAllowed(true)
+          await runtime.pollNow()
+        }
+      } catch {
+        await runtime.endExclusiveOperation()
+        throw error
+      }
       didMutate()
     case .recheckAmbiguousMutation(let evidence):
       try await runtime.beginExclusiveOperation()
@@ -834,7 +961,9 @@ public actor EngineService: EngineClient {
       jobCanaryPiRetry: jobCanaryPiRetry,
       jobCanaryRoleHostReplacement: jobCanaryRoleHostReplacement,
       jobCanaryGenerationRollover: jobCanaryGenerationRollover,
-      jobCanaryGenerationRolloverQ4: jobCanaryGenerationRolloverQ4
+      jobCanaryGenerationRolloverQ4: jobCanaryGenerationRolloverQ4,
+      rolloutPreview: rolloutPreview,
+      rolloutRecoveryPreview: rolloutRecoveryPreview
     )
   }
 
@@ -853,6 +982,23 @@ public actor EngineService: EngineClient {
       && Set(snapshot.profiles.map(\.role)) == Set(ModelProfileRole.allCases)
   }
 
+  private func rolloutActivationReady() async throws -> Bool {
+    let snapshot = try await configuration.snapshot()
+    return snapshot.app.onboardingComplete
+      && snapshot.app.externalAutomationAcknowledged
+      && snapshot.app.providerDisclosureAcknowledged
+      && snapshot.app.loginItemSelected
+      && snapshot.app.loginItemStatus == .enabled
+      && snapshot.app.paused
+      && snapshot.app.maxConcurrency == 1
+      && snapshot.app.githubAccount != nil
+      && snapshot.app.githubAuthorID.map({ $0 > 0 }) == true
+      && credentialStatus.state == .valid
+      && piStatus.state == .ready
+      && herdrStatus.state == .ready
+      && Set(snapshot.profiles.map(\.role)) == Set(ModelProfileRole.allCases)
+  }
+
   private func makeState() async throws -> EngineUIState {
     let configuration = try await configuration.snapshot()
     let currentJobs = try await jobs.jobs(nonTerminalOnly: true)
@@ -863,6 +1009,13 @@ public actor EngineService: EngineClient {
     )
     let timing = await runtime.timingSnapshot()
     let coordinator = await runtime.coordinatorSnapshot()
+    let rollout = try await runtime.rolloutStatus()
+    let rolloutReport: RolloutOperatorReport?
+    if let rollout {
+      rolloutReport = try await operatorReport(rollout)
+    } else {
+      rolloutReport = nil
+    }
     let coordinatorFailures =
       coordinator?.failures.map {
         "\($0.stage):\($0.errorType)"
@@ -926,7 +1079,42 @@ public actor EngineService: EngineClient {
         coordinatorFailureCodes: coordinatorFailures,
         piIssueCode: piStatus.issueCode,
         herdrIssueCode: herdrStatus.issueCode
+      ),
+      rollout: rolloutReport
+    )
+  }
+
+  private func operatorReport(_ status: RolloutStatusReport) async throws
+    -> RolloutOperatorReport
+  {
+    var boundJobs: [RolloutOperatorJob] = []
+    boundJobs.reserveCapacity(status.boundJobIDs.count)
+    for id in status.boundJobIDs {
+      guard let job = try await jobs.job(id: id) else {
+        throw EngineClientError(.invalidResponse)
+      }
+      boundJobs.append(
+        RolloutOperatorJob(
+          id: job.id,
+          kind: job.identity.kind,
+          objectNumber: job.objectNumber,
+          revisionKey: job.identity.revisionKey,
+          state: job.state,
+          attempt: job.attempt,
+          currentStep: job.currentStep,
+          currentStepKind: job.currentStepKind,
+          terminalReason: job.terminalReason
+        )
       )
+    }
+    let checkpoint = status.events.last(where: {
+      $0.kind == .settled || $0.kind == .recoveryRequired || $0.kind == .failed
+        || $0.kind == .revoked || $0.kind == .expired
+    })?.checkpointSHA256
+    return RolloutOperatorReport(
+      status: status,
+      jobs: boundJobs,
+      checkpointSHA256: checkpoint
     )
   }
 
@@ -1091,6 +1279,10 @@ public actor EngineService: EngineClient {
       .previewJobCanaryRoleHostReplacement, .executeJobCanaryRoleHostReplacement,
       .previewJobCanaryGenerationRollover, .executeJobCanaryGenerationRollover,
       .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
+      .staleEvidence
+    case .previewRollout, .activateRollout, .rolloutStatus, .stopAndDrainRollout,
+      .previewRolloutRecovery, .executeRolloutRecovery, .previewFiniteWindow,
+      .activateFiniteWindow:
       .staleEvidence
     case .completeOnboarding: .onboardingIncomplete
     case .prepareForHandoff, .prepareForQuit: .checkpointFailed

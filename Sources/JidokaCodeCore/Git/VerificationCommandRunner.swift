@@ -640,6 +640,15 @@ public actor VerificationCommandRunner {
     )
   }
 
+  func repositoryHeadSHA(workspace: URL) async throws -> String {
+    let environment = try CredentiallessEnvironment.make(
+      developerDirectory: developerDirectory,
+      homeDirectory: homeDirectory,
+      temporaryDirectory: temporaryDirectory
+    )
+    return try await committedHead(repository: workspace, environment: environment)
+  }
+
   private func committedHead(
     repository: URL,
     environment: [String: String]

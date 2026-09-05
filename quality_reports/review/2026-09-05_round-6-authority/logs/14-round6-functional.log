@@ -1,0 +1,382 @@
+UTC start: 2026-09-05T15:49:11Z
+Command: xcrun swift test --filter productionReloadPreservesPausedReplacement\|ProductionRolloutOperatorTests\|HistoricalCanaryEffectDenialTests\|ExplicitCommandAuthorityDoubleTests\|RolloutCLITests\|rolloutPreviewInputGate\|launchDenialPreservesAcceptedResult\|existingDispositionRefusesAnotherExactJob\|SQLiteStoreTests
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/7] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+[4/7] Emitting module JidokaCodeCoreTests
+[5/7] Compiling JidokaCodeCoreTests HistoricalCanaryEffectDenialTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HistoricalCanaryEffectDenialTests.swift:155:5: warning: no calls to throwing functions occur within 'try' expression
+153 |       _ = try await double.reserveApprovedCommand(valid, now: fixture.now)
+154 |     }
+155 |     try await RolloutEffectTaskContext.$current.withValue(
+    |     `- warning: no calls to throwing functions occur within 'try' expression
+156 |       RolloutEffectExecutionContext(mode: .workflow(jobID: UUID()))
+157 |     ) {
+[5/7] Write Objects.LinkFileList
+[6/7] Linking JidokaCodePackageTests
+Build complete! (5.94s)
+Test Suite 'Selected tests' started at 2026-09-05 17:49:18.603.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 17:49:18.605.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 17:49:18.605.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 17:49:18.605.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Fake-first application flow" started.
+◇ Suite "Historical canary effect denial" started.
+◇ Suite "SQLite durable store" started.
+◇ Suite "Rollout operator CLI" started.
+◇ Test "rollout preview requires a paused engine and a canonical bounded valid input" started.
+◇ Suite "Production Herdr Pi workflow runtime" started.
+◇ Suite "Progressive rollout authority" started.
+◇ Suite "Durable approved command authority" started.
+◇ Test "a historical canary permit cannot be verified or settled" started.
+◇ Suite "Production rollout operator commands" started.
+◇ Test "the explicit test double denies a historical canary provider reservation like the store" started.
+◇ Test "a historical canary context cannot reserve any fresh effect" started.
+◇ Test "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Suite "Explicit command authority double" started.
+◇ Test "symbolic-link database and parent paths fail closed" started.
+◇ Test "a database this binary refuses as too new is never written to" started.
+◇ Test "explicit WAL checkpoint is durable and closed stores reject it" started.
+◇ Test "applied migrations record their body digest and reopen idempotently" started.
+◇ Test "failed migration rolls back schema and migration version" started.
+◇ Test "production schema upgrades through architecture role-host replacement authority" started.
+◇ Test "explicit backup is consistent and closed stores fail closed" started.
+◇ Test "typed transaction commits once and rolls back on error" started.
+◇ Test "a historical canary send is denied and marks no intent as started" started.
+◇ Test case passing 1 argument useDouble → true to "a historical canary permit cannot be verified or settled" started.
+◇ Test case passing 1 argument completedStatementCount → 5 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument useDouble → false to "a historical canary permit cannot be verified or settled" started.
+◇ Test case passing 1 argument completedStatementCount → 2 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 1 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 4 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 3 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument useDouble → false to "a historical canary context cannot reserve any fresh effect" started.
+◇ Test "foreign keys and append-only triggers reject invalid writes" started.
+◇ Test case passing 1 argument completedStatementCount → 6 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument useDouble → true to "a historical canary context cannot reserve any fresh effect" started.
+◇ Test "a schema-10 database stamped by an unshipped migration body fails closed" started.
+◇ Test "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 7 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "production schema upgrades to rollout authority without manufacturing authority" started.
+◇ Test "empty database migrates with required pragmas and permissions" started.
+◇ Test "irreversible upgrade creates a readable pre-migration backup" started.
+◇ Test "base64 decoding is canonical, nonempty and bounded before JSON parsing" started.
+◇ Test case passing 1 argument completedStatementCount → 8 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 9 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "production reload quarantines historical replacement and unrelated jobs" started.
+◇ Test "stop and recovery allow the bounded engine drain budget" started.
+◇ Test case passing 1 argument completedStatementCount → 10 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 1 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 2 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 4 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 10 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 6 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 3 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 7 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 9 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 5 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 8 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test "each operator action parses its exact payload and rejects extra or missing arguments" started.
+◇ Test "mode, UUID, digest, JSON and timeout mismatches are refused" started.
+◇ Test case passing 1 argument completedStatementCount → 11 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 11 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test "exact activation refuses another job's disposition without rewriting history" started.
+◇ Test "launch denial supersedes only a started command without accepted results" started.
+◇ Test case passing 1 argument completedStatementCount → 12 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 12 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test "release mismatch and local identity drift leave operator admission closed" started.
+◇ Test "a busy command times out into recovery without reopening admission" started.
+◇ Test "recovery rejects unpaused, expired and drifted evidence" started.
+◇ Test case passing 1 argument completedStatementCount → 13 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 13 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test "stop closes actual dispatch and command gates and pauses the scheduler" started.
+◇ Test "preview and activation enforce paused, exclusive and checkpoint boundaries" started.
+◇ Test case passing 1 argument completedStatementCount → 14 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 14 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 15 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 15 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test "command reservation requires the workflow identity and every effect field" started.
+◇ Test case passing 1 argument completedStatementCount → 16 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 16 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 17 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 17 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 18 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 18 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 19 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 19 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 20 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 20 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 21 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 22 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 21 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 23 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 22 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 23 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 24 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 24 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 25 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 25 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 26 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 26 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "applied migrations record their body digest and reopen idempotently" recorded an issue at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 27 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 27 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 28 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 28 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument useDouble → false to "a historical canary send is denied and marks no intent as started" started.
+◇ Test case passing 1 argument completedStatementCount → 29 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 29 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument useDouble → true to "a historical canary send is denied and marks no intent as started" started.
+◇ Test case passing 1 argument completedStatementCount → 30 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 30 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 31 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 31 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 32 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 32 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 33 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 33 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 34 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 34 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 35 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 35 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 36 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 36 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 37 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 37 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 38 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 38 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 39 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 39 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 40 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 40 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 41 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 41 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 42 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 42 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 43 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 43 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 44 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 44 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 45 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 45 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 46 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 47 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 47 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 48 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 46 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 48 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 49 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 49 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 50 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 50 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 51 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 51 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 52 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 52 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 53 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 53 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 54 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 54 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 55 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 55 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 56 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 57 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 56 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 57 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 58 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 58 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 59 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 59 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 60 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 60 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 61 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 61 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "a schema-10 database stamped by an unshipped migration body fails closed" recorded an issue at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 62 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 62 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 63 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 63 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 64 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 64 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 65 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 65 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 1 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 2 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+✘ Test "production schema upgrades to rollout authority without manufacturing authority" recorded an issue at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 66 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 66 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 3 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 4 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 67 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 67 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 5 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 68 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 68 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 6 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 69 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 69 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 7 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 8 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 70 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 70 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 9 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 71 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 71 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 10 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 72 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 72 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 11 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 73 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 73 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 12 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 74 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 74 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 13 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 14 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 75 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 75 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 15 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 76 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 76 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 16 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 17 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 77 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 18 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 77 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 78 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 78 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 19 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 20 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 21 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 22 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 23 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 24 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 25 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 79 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 79 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 26 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 27 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 28 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 29 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 80 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 80 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 30 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 81 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 31 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 81 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 82 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 32 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 82 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 83 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 83 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 33 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 34 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 84 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 35 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 85 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 84 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 36 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 86 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 37 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 85 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 86 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 87 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 87 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 38 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 88 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 88 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 39 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 89 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 89 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 40 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 41 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 90 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 90 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 42 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 91 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" recorded an issue with 1 argument completedStatementCount → 91 at SQLiteStoreTests.swift:1246:3: Expectation failed: (migrationDigest(migration) → "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991") == (expectedSchemaTenMigrationDigest → "7593a0c8a74c9ec4f9713a8393a3359fad32cbd3aca6e468b3eb4c82876ee114")
+◇ Test case passing 1 argument completedStatementCount → 43 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 44 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 45 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 46 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 47 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 48 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 49 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 50 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 51 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 52 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 53 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 54 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 55 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 56 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 57 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 58 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 59 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 60 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 61 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 62 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 63 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 64 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 65 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 66 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 67 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 68 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 69 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 70 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 71 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 72 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 73 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 74 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 75 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 76 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+✔ Test "symbolic-link database and parent paths fail closed" passed after 1.893 seconds.
+✔ Test "a historical canary context cannot reserve any fresh effect" with 2 test cases passed after 1.895 seconds.
+✔ Test "explicit WAL checkpoint is durable and closed stores reject it" passed after 1.899 seconds.
+✔ Test "the explicit test double denies a historical canary provider reservation like the store" passed after 1.940 seconds.
+✔ Test "a historical canary permit cannot be verified or settled" with 2 test cases passed after 1.940 seconds.
+✔ Test "failed migration rolls back schema and migration version" passed after 1.955 seconds.
+✘ Test "production schema 9 to 10 rolls back after every exact migration statement" with 91 test cases failed after 1.955 seconds with 91 issues.
+✔ Test "a database this binary refuses as too new is never written to" passed after 1.956 seconds.
+✔ Test "production schema upgrades through architecture role-host replacement authority" passed after 1.956 seconds.
+✔ Test "typed transaction commits once and rolls back on error" passed after 1.956 seconds.
+✘ Test "applied migrations record their body digest and reopen idempotently" failed after 1.956 seconds with 1 issue.
+✔ Test "explicit backup is consistent and closed stores fail closed" passed after 1.956 seconds.
+✔ Test "a historical canary send is denied and marks no intent as started" with 2 test cases passed after 1.956 seconds.
+✔ Test "foreign keys and append-only triggers reject invalid writes" passed after 1.956 seconds.
+✔ Test "irreversible upgrade creates a readable pre-migration backup" passed after 1.956 seconds.
+✔ Test "empty database migrates with required pragmas and permissions" passed after 1.956 seconds.
+✔ Test "base64 decoding is canonical, nonempty and bounded before JSON parsing" passed after 1.956 seconds.
+✘ Test "production schema upgrades to rollout authority without manufacturing authority" failed after 1.956 seconds with 1 issue.
+✘ Test "a schema-10 database stamped by an unshipped migration body fails closed" failed after 1.956 seconds with 1 issue.
+✔ Test "stop and recovery allow the bounded engine drain budget" passed after 1.956 seconds.
+✔ Test "mode, UUID, digest, JSON and timeout mismatches are refused" passed after 1.952 seconds.
+✔ Test "each operator action parses its exact payload and rejects extra or missing arguments" passed after 1.952 seconds.
+✔ Suite "Historical canary effect denial" passed after 1.957 seconds.
+✔ Suite "Rollout operator CLI" passed after 1.957 seconds.
+✔ Test "exact activation refuses another job's disposition without rewriting history" passed after 1.828 seconds.
+✔ Suite "Progressive rollout authority" passed after 1.972 seconds.
+✔ Test "launch denial supersedes only a started command without accepted results" passed after 1.839 seconds.
+✔ Suite "Durable approved command authority" passed after 1.984 seconds.
+✔ Test "release mismatch and local identity drift leave operator admission closed" passed after 1.831 seconds.
+✔ Test "recovery rejects unpaused, expired and drifted evidence" passed after 1.834 seconds.
+✔ Test "preview and activation enforce paused, exclusive and checkpoint boundaries" passed after 1.840 seconds.
+✔ Test "production schema 8 to 9 rolls back after every exact migration statement" with 76 test cases passed after 1.996 seconds.
+✘ Suite "SQLite durable store" failed after 1.996 seconds with 94 issues.
+✔ Test "stop closes actual dispatch and command gates and pauses the scheduler" passed after 1.843 seconds.
+✔ Test "command reservation requires the workflow identity and every effect field" passed after 1.775 seconds.
+✔ Suite "Explicit command authority double" passed after 2.004 seconds.
+✔ Test "rollout preview requires a paused engine and a canonical bounded valid input" passed after 2.236 seconds.
+✔ Suite "Fake-first application flow" passed after 2.236 seconds.
+✔ Test "production reload quarantines historical replacement and unrelated jobs" passed after 2.309 seconds.
+✔ Suite "Production Herdr Pi workflow runtime" passed after 2.309 seconds.
+✔ Test "a busy command times out into recovery without reopening admission" passed after 2.872 seconds.
+✔ Suite "Production rollout operator commands" passed after 3.027 seconds.
+✘ Test run with 33 tests in 9 suites failed after 3.027 seconds with 94 issues.
+
+Exit status: 1
+UTC end: 2026-09-05T15:49:21Z

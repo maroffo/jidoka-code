@@ -188,6 +188,7 @@ struct MutationReconcilerTests {
     let runner = MutationReconciliationRunner(
       store: fixture.store,
       reader: reader,
+      authority: ExplicitTestRolloutEffectAuthority(),
       sleeper: sleeper,
       now: { Date(timeIntervalSince1970: 10_001) }
     )
@@ -219,6 +220,7 @@ struct MutationReconcilerTests {
     let runner = MutationReconciliationRunner(
       store: fixture.store,
       reader: reader,
+      authority: ExplicitTestRolloutEffectAuthority(),
       sleeper: sleeper,
       now: { Date(timeIntervalSince1970: 10_002) }
     )
@@ -352,7 +354,7 @@ private final class MutationFixture: @unchecked Sendable {
         .real(now.timeIntervalSince1970),
       ]
     )
-    let jobs = DurableJobStore(database: database)
+    let jobs = DurableJobStore(database: database, enforceRolloutAuthority: false)
     let created = try await jobs.createJob(
       identity: LogicalJobIdentity(
         repositoryID: repositoryID,

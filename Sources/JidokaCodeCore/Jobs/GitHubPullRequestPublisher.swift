@@ -71,6 +71,7 @@ public actor GitHubPullRequestPublisher {
   private let executor: GitHubMutationExecutor
   private let intents: MutationIntentStore
   private let reads: any GitHubMutationReadAPI
+  private let authority: any RolloutEffectAuthorizing
   private let sleeper: any MutationReconciliationSleeper
   private let now: @Sendable () -> Date
 
@@ -78,12 +79,14 @@ public actor GitHubPullRequestPublisher {
     executor: GitHubMutationExecutor,
     intents: MutationIntentStore,
     reads: any GitHubMutationReadAPI,
+    authority: any RolloutEffectAuthorizing,
     sleeper: any MutationReconciliationSleeper = SystemMutationReconciliationSleeper(),
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     self.executor = executor
     self.intents = intents
     self.reads = reads
+    self.authority = authority
     self.sleeper = sleeper
     self.now = now
   }
@@ -191,6 +194,7 @@ public actor GitHubPullRequestPublisher {
     let reconciler = MutationReconciliationRunner(
       store: intents,
       reader: reader,
+      authority: authority,
       sleeper: sleeper,
       now: now
     )

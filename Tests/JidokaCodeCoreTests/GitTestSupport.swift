@@ -6,6 +6,7 @@ import Testing
 
 final class GitTestRoot: @unchecked Sendable {
   let root: URL
+  let authority: ExplicitTestRolloutEffectAuthority
   let git: SystemGitTransport
 
   init(prefix: String, installPushGuard: Bool = false) throws {
@@ -44,10 +45,13 @@ final class GitTestRoot: @unchecked Sendable {
     } else {
       pushGuard = SystemGitTransport.packagedPushGuardExecutable
     }
+    authority = ExplicitTestRolloutEffectAuthority()
     git = SystemGitTransport(
       homeDirectory: home.path,
       temporaryDirectory: root.path,
-      pushGuardExecutable: pushGuard
+      pushGuardExecutable: pushGuard,
+      rolloutAuthority: authority,
+      now: { Date(timeIntervalSince1970: 1) }
     )
   }
 

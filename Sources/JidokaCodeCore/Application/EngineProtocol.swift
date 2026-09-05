@@ -1,7 +1,7 @@
 import Foundation
 
 public enum EngineProtocolVersion {
-  public static let current = 11
+  public static let current = 12
 }
 
 public enum LifecycleProbeProtocolVersion {
@@ -134,6 +134,7 @@ public struct EngineHerdrStatus: Codable, Equatable, Sendable {
 public struct EngineRepositoryDraft: Codable, Equatable, Sendable {
   public let owner: String
   public let name: String
+  public let enabled: Bool
   public let reviewEnabled: Bool
   public let triageEnabled: Bool
   public let implementationEnabled: Bool
@@ -141,12 +142,14 @@ public struct EngineRepositoryDraft: Codable, Equatable, Sendable {
   public init(
     owner: String,
     name: String,
+    enabled: Bool = false,
     reviewEnabled: Bool,
     triageEnabled: Bool,
     implementationEnabled: Bool
   ) {
     self.owner = owner
     self.name = name
+    self.enabled = enabled
     self.reviewEnabled = reviewEnabled
     self.triageEnabled = triageEnabled
     self.implementationEnabled = implementationEnabled
@@ -314,6 +317,7 @@ public struct EngineUIState: Codable, Equatable, Sendable {
   public let onboarding: EngineOnboardingSnapshot
   public let settings: EngineSettingsSnapshot
   public let diagnostics: EngineDiagnostics
+  public let rollout: RolloutOperatorReport?
 
   public init(
     revision: Int,
@@ -325,7 +329,8 @@ public struct EngineUIState: Codable, Equatable, Sendable {
     ambiguousMutations: [EngineAmbiguousMutation],
     onboarding: EngineOnboardingSnapshot,
     settings: EngineSettingsSnapshot,
-    diagnostics: EngineDiagnostics
+    diagnostics: EngineDiagnostics,
+    rollout: RolloutOperatorReport? = nil
   ) {
     self.revision = revision
     self.lifecycle = lifecycle
@@ -337,6 +342,7 @@ public struct EngineUIState: Codable, Equatable, Sendable {
     self.onboarding = onboarding
     self.settings = settings
     self.diagnostics = diagnostics
+    self.rollout = rollout
   }
 }
 
@@ -381,6 +387,14 @@ public enum EngineCommandKind: String, CaseIterable, Codable, Hashable, Sendable
   case setMaxConcurrency
   case setPaused
   case pollNow
+  case previewRollout
+  case activateRollout
+  case rolloutStatus
+  case stopAndDrainRollout
+  case previewRolloutRecovery
+  case executeRolloutRecovery
+  case previewFiniteWindow
+  case activateFiniteWindow
   case recheckAmbiguousMutation
   case authorizeRetry
   case previewJobMaintenance
@@ -423,6 +437,14 @@ extension EngineCommandKind {
     .setMaxConcurrency,
     .setPaused,
     .pollNow,
+    .previewRollout,
+    .activateRollout,
+    .rolloutStatus,
+    .stopAndDrainRollout,
+    .previewRolloutRecovery,
+    .executeRolloutRecovery,
+    .previewFiniteWindow,
+    .activateFiniteWindow,
     .recheckAmbiguousMutation,
     .authorizeRetry,
     .previewJobMaintenance,
@@ -463,6 +485,14 @@ public enum EngineCommand: Codable, Equatable, Sendable {
   case setMaxConcurrency(Int)
   case setPaused(Bool)
   case pollNow
+  case previewRollout(RolloutPreviewInput)
+  case activateRollout(RolloutActivationRequest)
+  case rolloutStatus
+  case stopAndDrainRollout(RolloutStopRequest)
+  case previewRolloutRecovery(RolloutRecoveryRequest)
+  case executeRolloutRecovery(RolloutRecoveryAuthorization)
+  case previewFiniteWindow(RolloutPreviewInput)
+  case activateFiniteWindow(RolloutActivationRequest)
   case recheckAmbiguousMutation(EngineAmbiguousMutationEvidence)
   case authorizeRetry(EngineAmbiguousMutationEvidence)
   case previewJobMaintenance(JobMaintenanceScope)
@@ -506,6 +536,14 @@ public enum EngineCommand: Codable, Equatable, Sendable {
     case .setMaxConcurrency: .setMaxConcurrency
     case .setPaused: .setPaused
     case .pollNow: .pollNow
+    case .previewRollout: .previewRollout
+    case .activateRollout: .activateRollout
+    case .rolloutStatus: .rolloutStatus
+    case .stopAndDrainRollout: .stopAndDrainRollout
+    case .previewRolloutRecovery: .previewRolloutRecovery
+    case .executeRolloutRecovery: .executeRolloutRecovery
+    case .previewFiniteWindow: .previewFiniteWindow
+    case .activateFiniteWindow: .activateFiniteWindow
     case .recheckAmbiguousMutation: .recheckAmbiguousMutation
     case .authorizeRetry: .authorizeRetry
     case .previewJobMaintenance: .previewJobMaintenance
@@ -558,7 +596,55 @@ public enum EngineCommand: Codable, Equatable, Sendable {
         throw EngineClientError(.invalidCommand)
       }
     case .setMaxConcurrency(let value):
-      guard (1...8).contains(value) else {
+      guard value == 1 else {
+        throw EngineClientError(.invalidCommand)
+      }
+    case .setPaused(let paused):
+      guard paused else { throw EngineClientError(.invalidCommand) }
+    case .previewRollout(let input):
+      do {
+        guard try RolloutPreviewBuilder.make(input).payload.scope.mode == .exactObject else {
+          throw EngineClientError(.invalidCommand)
+        }
+      } catch {
+        throw EngineClientError(.invalidCommand)
+      }
+    case .activateRollout(let request):
+      do {
+        try request.validate(mode: .exactObject)
+      } catch {
+        throw EngineClientError(.invalidCommand)
+      }
+    case .stopAndDrainRollout(let request):
+      do {
+        try request.validate()
+      } catch {
+        throw EngineClientError(.invalidCommand)
+      }
+    case .previewRolloutRecovery(let request):
+      do {
+        try request.validate()
+      } catch {
+        throw EngineClientError(.invalidCommand)
+      }
+    case .executeRolloutRecovery(let authorization):
+      do {
+        try authorization.validate()
+      } catch {
+        throw EngineClientError(.invalidCommand)
+      }
+    case .previewFiniteWindow(let input):
+      do {
+        guard try RolloutPreviewBuilder.make(input).payload.scope.mode == .finiteWindow else {
+          throw EngineClientError(.invalidCommand)
+        }
+      } catch {
+        throw EngineClientError(.invalidCommand)
+      }
+    case .activateFiniteWindow(let request):
+      do {
+        try request.validate(mode: .finiteWindow)
+      } catch {
         throw EngineClientError(.invalidCommand)
       }
     case .recheckAmbiguousMutation(let evidence), .authorizeRetry(let evidence):
@@ -598,7 +684,7 @@ public enum EngineCommand: Codable, Equatable, Sendable {
     case .snapshot, .refreshModelCatalog, .acknowledgeExternalAutomation,
       .acknowledgeProviderDisclosure,
       .runPiPreflight, .runHerdrPreflight, .focusInHerdr, .deleteCredential,
-      .removeRepository, .setPaused, .pollNow,
+      .removeRepository, .pollNow, .rolloutStatus,
       .setLoginEnabled, .synchronizeLoginStatus, .completeOnboarding, .rollbackOnboarding,
       .prepareForHandoff, .prepareForQuit:
       break
@@ -639,6 +725,8 @@ public struct EngineCommandResponse: Codable, Equatable, Sendable {
   public let jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport?
   public let jobCanaryGenerationRollover: JobCanaryGenerationRolloverReport?
   public let jobCanaryGenerationRolloverQ4: JobCanaryGenerationRolloverQ4Report?
+  public let rolloutPreview: RolloutPreview?
+  public let rolloutRecoveryPreview: RolloutRecoveryPreview?
 
   public init(
     command: EngineCommandKind,
@@ -650,7 +738,9 @@ public struct EngineCommandResponse: Codable, Equatable, Sendable {
     jobCanaryPiRetry: JobCanaryPiRetryReport? = nil,
     jobCanaryRoleHostReplacement: JobCanaryRoleHostReplacementReport? = nil,
     jobCanaryGenerationRollover: JobCanaryGenerationRolloverReport? = nil,
-    jobCanaryGenerationRolloverQ4: JobCanaryGenerationRolloverQ4Report? = nil
+    jobCanaryGenerationRolloverQ4: JobCanaryGenerationRolloverQ4Report? = nil,
+    rolloutPreview: RolloutPreview? = nil,
+    rolloutRecoveryPreview: RolloutRecoveryPreview? = nil
   ) {
     self.command = command
     self.state = state
@@ -662,6 +752,8 @@ public struct EngineCommandResponse: Codable, Equatable, Sendable {
     self.jobCanaryRoleHostReplacement = jobCanaryRoleHostReplacement
     self.jobCanaryGenerationRollover = jobCanaryGenerationRollover
     self.jobCanaryGenerationRolloverQ4 = jobCanaryGenerationRolloverQ4
+    self.rolloutPreview = rolloutPreview
+    self.rolloutRecoveryPreview = rolloutRecoveryPreview
   }
 }
 
@@ -776,7 +868,99 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
     try Self.validateCanaryPiRetry(result, for: request.command)
     try Self.validateCanaryRoleHostReplacement(result, for: request.command)
     try Self.validateCanaryGenerationRollover(result, for: request.command)
+    try Self.validateRollout(result, for: request.command)
     return result
+  }
+
+  private static func validateRollout(
+    _ result: EngineCommandResponse,
+    for command: EngineCommand
+  ) throws {
+    if let report = result.state.rollout {
+      let status = report.status
+      guard RolloutPreviewBuilder.validLowercaseUUID(status.authorization.id),
+        GitHubInputValidation.validSHA256(status.authorization.previewSHA256),
+        status.authorization.scopeMode == status.scope.mode,
+        status.authorization.workflowStage == status.scope.stage,
+        status.authorization.repositoryID.uuidString.lowercased() == status.scope.repository.id,
+        Set(report.jobs.map(\.id)) == Set(status.boundJobIDs),
+        report.checkpointSHA256.map(GitHubInputValidation.validSHA256) ?? true,
+        status.reservations.allSatisfy({ reservation in
+          RolloutPreviewBuilder.validLowercaseUUID(reservation.id)
+            && GitHubInputValidation.validSHA256(reservation.request.operationSHA256)
+            && GitHubInputValidation.validSHA256(reservation.request.targetSHA256)
+        })
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    }
+    switch command {
+    case .previewRollout(let input), .previewFiniteWindow(let input):
+      let expected = try RolloutPreviewBuilder.make(input)
+      guard result.state.paused,
+        result.rolloutPreview == expected,
+        result.rolloutRecoveryPreview == nil
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .activateRollout(let request), .activateFiniteWindow(let request):
+      guard result.rolloutPreview == nil,
+        result.rolloutRecoveryPreview == nil,
+        result.state.rollout?.status.authorization.id
+          == request.authorizationID.uuidString.lowercased(),
+        result.state.rollout?.status.authorization.previewSHA256 == request.confirmedSHA256,
+        result.state.rollout?.status.authorization.state == .active,
+        result.state.paused == false
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .rolloutStatus:
+      guard result.rolloutPreview == nil, result.rolloutRecoveryPreview == nil else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .stopAndDrainRollout(let request):
+      guard result.state.paused,
+        result.rolloutPreview == nil,
+        result.rolloutRecoveryPreview == nil,
+        result.state.rollout?.status.authorization.id == request.authorizationID,
+        result.state.rollout?.status.authorization.previewSHA256 == request.previewSHA256,
+        result.state.rollout.map({
+          [.revoked, .recoveryRequired].contains($0.status.authorization.state)
+        }) == true
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .previewRolloutRecovery(let request):
+      guard result.state.paused,
+        result.rolloutPreview == nil,
+        let preview = result.rolloutRecoveryPreview,
+        preview.payload.authorizationID == request.authorizationID,
+        preview.payload.previewSHA256 == request.previewSHA256,
+        try RolloutRecoveryPreviewBuilder.parseCanonical(preview.canonicalJSON) == preview
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .executeRolloutRecovery(let authorization):
+      let approved = try RolloutRecoveryPreviewBuilder.parseCanonical(
+        authorization.approvedCanonicalJSON
+      )
+      let resultingState = result.state.rollout?.status.authorization.state
+      guard result.state.paused == (resultingState != .active),
+        result.rolloutPreview == nil,
+        result.rolloutRecoveryPreview == nil,
+        result.state.rollout?.status.authorization.id == approved.payload.authorizationID,
+        resultingState.map({
+          [.active, .recoveryRequired, .settled, .failed].contains($0)
+        }) == true,
+        resultingState != .active || approved.payload.action == .readbackThenContinueExact
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    default:
+      guard result.rolloutPreview == nil, result.rolloutRecoveryPreview == nil else {
+        throw EngineClientError(.invalidResponse)
+      }
+    }
   }
 
   private static func validateMaintenance(

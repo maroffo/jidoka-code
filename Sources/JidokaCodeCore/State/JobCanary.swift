@@ -1236,6 +1236,23 @@ extension DurableJobStore {
     }
   }
 
+  func hasCanaryPiRoleAuthorization(
+    jobID: UUID,
+    workflow: PiWorkflowKind,
+    role: PiWorkflowRole,
+    round: Int
+  ) async throws -> Bool {
+    try await database.transaction { database in
+      guard let active = try Self.activeCanary(database: database),
+        active.jobID == jobID, workflow == .pullRequestReview, round == 1
+      else {
+        return false
+      }
+      let roleKey = Self.canaryEventPrefix(active) + "pi:\(role.rawValue):r\(round)"
+      return try Self.eventExists(roleKey, ownedBy: jobID, database: database)
+    }
+  }
+
   public func authorizeCanaryMarkerBatch(
     jobID: UUID,
     operation: MutationOperation,

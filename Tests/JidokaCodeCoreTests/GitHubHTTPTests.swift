@@ -215,7 +215,9 @@ struct GitHubHTTPTests {
     configuration.protocolClasses = [GitHubFixtureURLProtocol.self]
     let broker = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: Data(repeating: 0x74, count: 32)),
-      transport: GitHubURLSessionTransport(configuration: configuration)
+      transport: GitHubURLSessionTransport(configuration: configuration),
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
 
     let identity = try await broker.authenticatedIdentity()
@@ -228,6 +230,46 @@ struct GitHubHTTPTests {
       request.value(forHTTPHeaderField: "Authorization")
         == "Bearer \(String(repeating: "t", count: 32))")
     #expect(request.value(forHTTPHeaderField: "X-GitHub-Api-Version") == "2022-11-28")
+  }
+
+  @Test("the internal read path rejects writes before credential or transport access")
+  func internalReadPathRejectsWrites() async throws {
+    let transport = ScriptedGitHubTransport(stubs: [
+      .response(status: 201, headers: [:], body: Data("{}".utf8))
+    ])
+    let broker = GitHubBroker(
+      tokenProvider: StaticGitHubTokenProvider(value: Data(repeating: 0x74, count: 32)),
+      transport: transport,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
+    )
+
+    await #expect(throws: GitHubBrokerError.writeOperationRequired) {
+      _ = try await broker.perform(
+        .createComment(owner: "owner", repository: "repo", number: 1, body: "body")
+      )
+    }
+    #expect((await transport.requests()).isEmpty)
+  }
+
+  @Test("closing read admission after reservation prevents GitHub transport")
+  func readAdmissionClosesBeforeTransport() async throws {
+    let authority = ExplicitTestRolloutEffectAuthority()
+    let transport = ScriptedGitHubTransport(stubs: [
+      .response(status: 200, headers: [:], body: Data("{}".utf8))
+    ])
+    let broker = GitHubBroker(
+      tokenProvider: ClosingGitHubTokenProvider(authority: authority),
+      transport: transport,
+      readAuthority: authority,
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
+    )
+
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await broker.perform(.authenticatedIdentity)
+    }
+    #expect((await transport.requests()).isEmpty)
+    #expect(await authority.waitForDrain(until: Date(timeIntervalSince1970: 1)))
   }
 
   @Test("broker paginates to exhaustion and attaches the token only to the fixed host")
@@ -246,6 +288,8 @@ struct GitHubHTTPTests {
     let broker = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: token),
       transport: transport,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
       now: { Date(timeIntervalSince1970: 1_000) }
     )
 
@@ -274,7 +318,9 @@ struct GitHubHTTPTests {
     ])
     let invalidBroker = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: token),
-      transport: invalidTransport
+      transport: invalidTransport,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
     await #expect(throws: GitHubBrokerError.decodingFailed(.listPullRequests)) {
       _ = try await invalidBroker.listPullRequests(owner: "owner", repository: "repo")
@@ -296,7 +342,9 @@ struct GitHubHTTPTests {
     ])
     let broker = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: token),
-      transport: transport
+      transport: transport,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
 
     let commits = try await broker.listPullRequestCommits(
@@ -320,7 +368,9 @@ struct GitHubHTTPTests {
       tokenProvider: StaticGitHubTokenProvider(value: token),
       transport: ScriptedGitHubTransport(stubs: [
         .response(status: 200, headers: [:], body: duplicate)
-      ])
+      ]),
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
     await #expect(throws: GitHubBrokerError.decodingFailed(.listPullRequestCommits)) {
       _ = try await duplicateBroker.listPullRequestCommits(
@@ -345,7 +395,9 @@ struct GitHubHTTPTests {
     ])
     let broker = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: Data(repeating: 0x74, count: 32)),
-      transport: transport
+      transport: transport,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
     let value = try await broker.repository(
       owner: "old-owner",
@@ -369,7 +421,9 @@ struct GitHubHTTPTests {
     ])
     let validBroker = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: Data(repeating: 0x74, count: 32)),
-      transport: validTransport
+      transport: validTransport,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
     #expect(
       try await validBroker.repository(
@@ -383,7 +437,9 @@ struct GitHubHTTPTests {
     ])
     let mismatchBroker = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: Data(repeating: 0x74, count: 32)),
-      transport: mismatchTransport
+      transport: mismatchTransport,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
     await #expect(throws: GitHubBrokerError.redirectedRepositoryIdentityMismatch) {
       _ = try await mismatchBroker.repository(
@@ -405,7 +461,9 @@ struct GitHubHTTPTests {
     ])
     let broker = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: Data(repeating: 0x74, count: 32)),
-      transport: oversized
+      transport: oversized,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
     await #expect(throws: GitHubBrokerError.responseTooLarge) {
       _ = try await broker.perform(.authenticatedIdentity)
@@ -414,7 +472,9 @@ struct GitHubHTTPTests {
     let crossHost = CrossHostGitHubTransport()
     let second = GitHubBroker(
       tokenProvider: StaticGitHubTokenProvider(value: Data(repeating: 0x74, count: 32)),
-      transport: crossHost
+      transport: crossHost,
+      readAuthority: ExplicitTestRolloutEffectAuthority(),
+      defaultReadContext: RolloutEffectExecutionContext(mode: .discovery)
     )
     await #expect(throws: GitHubBrokerError.unexpectedResponseURL) {
       _ = try await second.perform(.authenticatedIdentity)
@@ -480,6 +540,15 @@ private struct StaticGitHubTokenProvider: GitHubTokenProviding {
   let value: Data
 
   func token() async throws -> Data { value }
+}
+
+private struct ClosingGitHubTokenProvider: GitHubTokenProviding {
+  let authority: ExplicitTestRolloutEffectAuthority
+
+  func token() async throws -> Data {
+    await authority.closeAdmission()
+    return Data(repeating: 0x74, count: 32)
+  }
 }
 
 private enum ScriptedGitHubStub: Sendable {

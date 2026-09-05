@@ -5,7 +5,7 @@ import Testing
 
 @Suite("Durable Pi and Herdr ownership store")
 struct PiRunStoreTests {
-  @Test("schema v9 preserves legacy RPC runs and creates each migration backup")
+  @Test("schema v10 preserves legacy RPC runs and creates each migration backup")
   func migrationPreservesLegacyRun() async throws {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-run-migration")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -39,8 +39,8 @@ struct PiRunStoreTests {
     await legacy.close()
 
     let migrated = try SQLiteStore(databaseURL: databaseURL)
-    #expect(try await migrated.schemaVersion() == 9)
-    #expect(migrated.migrationBackups.count == 7)
+    #expect(try await migrated.schemaVersion() == 10)
+    #expect(migrated.migrationBackups.count == 8)
     let v3Backup = try SQLiteStore(
       databaseURL: try #require(migrated.migrationBackups.first),
       migrations: Array(DatabaseSchema.migrations.prefix(2))
@@ -78,7 +78,7 @@ struct PiRunStoreTests {
     )
     await v7Backup.close()
     let v8Backup = try SQLiteStore(
-      databaseURL: try #require(migrated.migrationBackups.last),
+      databaseURL: migrated.migrationBackups[6],
       migrations: Array(DatabaseSchema.migrations.prefix(8))
     )
     #expect(try await v8Backup.schemaVersion() == 8)
@@ -86,6 +86,15 @@ struct PiRunStoreTests {
       try await v8Backup.scalarInt("SELECT COUNT(*) FROM pi_runs WHERE id = 'legacy-run'") == 1
     )
     await v8Backup.close()
+    let v9Backup = try SQLiteStore(
+      databaseURL: try #require(migrated.migrationBackups.last),
+      migrations: Array(DatabaseSchema.migrations.prefix(9))
+    )
+    #expect(try await v9Backup.schemaVersion() == 9)
+    #expect(
+      try await v9Backup.scalarInt("SELECT COUNT(*) FROM pi_runs WHERE id = 'legacy-run'") == 1
+    )
+    await v9Backup.close()
     let rows = try await migrated.query("SELECT * FROM pi_runs WHERE id = 'legacy-run'")
     #expect(rows.count == 1)
     #expect(rows[0]["runtime_kind"] == .text("rpcLegacy"))
@@ -98,7 +107,9 @@ struct PiRunStoreTests {
   func topologyActivationIsAtomic() async throws {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-topology-activation")
     defer { try? FileManager.default.removeItem(at: root) }
-    let database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
+    let database = try schemaNinePiDatabase(
+      at: root.appendingPathComponent("state.sqlite3")
+    )
     let repositoryID = UUID(uuidString: "11000000-0000-0000-0000-000000000011")!
     let jobID = UUID(uuidString: "22000000-0000-0000-0000-000000000022")!
     try await insertRepositoryAndJob(
@@ -906,7 +917,7 @@ struct PiRunStoreTests {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-prime-fourth")
     defer { try? FileManager.default.removeItem(at: root) }
     let databaseURL = root.appendingPathComponent("state.sqlite3")
-    let database = try SQLiteStore(databaseURL: databaseURL)
+    let database = try schemaNinePiDatabase(at: databaseURL)
     let repositoryID = UUID(uuidString: "31000000-0000-0000-0000-000000000003")!
     let jobID = UUID(uuidString: "41000000-0000-0000-0000-000000000004")!
     try await insertRepositoryAndJob(
@@ -1268,7 +1279,7 @@ struct PiRunStoreTests {
     try await intentStore.markSendStarted(receipt)
     if crashAfterSendStarted {
       await database.close()
-      let restartedDatabase = try SQLiteStore(databaseURL: databaseURL)
+      let restartedDatabase = try schemaNinePiDatabase(at: databaseURL)
       let restartedIntentStore = SQLiteHerdrTopologyIntentStore(
         database: restartedDatabase,
         now: { Date(timeIntervalSince1970: 21.75) }
@@ -2035,7 +2046,7 @@ struct PiRunStoreTests {
     }
     let rolloverConfiguration = ConfigurationStore(database: fixture.database)
     await #expect(
-      throws: ConfigurationStoreError.generationRolloverRequiresAuthorization
+      throws: ConfigurationStoreError.rolloutActivationRequired
     ) {
       try await rolloverConfiguration.setPaused(
         false,
@@ -2107,7 +2118,7 @@ struct PiRunStoreTests {
     )
 
     await fixture.database.close()
-    let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let reopenedDatabase = try schemaNinePiDatabase(at: fixture.databaseURL)
     let reopenedStore = PiRunStore(database: reopenedDatabase)
     #expect(
       try await reopenedStore.persistGenerationRolloverAuthorization(
@@ -2844,7 +2855,7 @@ struct PiRunStoreTests {
       )
     }
     await fixture.database.close()
-    let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let reopenedDatabase = try schemaNinePiDatabase(at: fixture.databaseURL)
     #expect(
       try await PiRunStore(database: reopenedDatabase).persistRoleHostReplacementAuthorization(
         fixture.replacementAuthorization,
@@ -3062,8 +3073,10 @@ struct PiRunStoreTests {
   func replacementStateRejectsForgedAuthorizationDigest() async throws {
     let valid = try await ReplacementCutoverFixture.make(prepareIntent: false)
     defer { try? FileManager.default.removeItem(at: valid.root) }
-    let validState = try await DurableJobStore(database: valid.database)
-      .canaryRoleHostReplacementState(request: valid.replacementAuthorization.request)
+    let validState = try await DurableJobStore(
+      database: valid.database, enforceRolloutAuthority: false
+    )
+    .canaryRoleHostReplacementState(request: valid.replacementAuthorization.request)
     #expect(validState.replacementHost == nil)
     #expect(validState.replacementLaunch == nil)
 
@@ -3083,7 +3096,7 @@ struct PiRunStoreTests {
       ) == forgedDigest
     )
     await #expect(throws: DurableJobStoreError.canaryRecoveryRequired) {
-      _ = try await DurableJobStore(database: forged.database)
+      _ = try await DurableJobStore(database: forged.database, enforceRolloutAuthority: false)
         .canaryRoleHostReplacementState(request: forged.replacementAuthorization.request)
     }
   }
@@ -3270,17 +3283,17 @@ struct PiRunStoreTests {
     let fixture = try await ReplacementCutoverFixture.make(sendIntentStarted: false)
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     #expect(
-      try await DurableJobStore(database: fixture.database)
+      try await DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
         .canaryRoleHostReplacementTerminalReport(
           request: fixture.replacementAuthorization.request
         ) == nil
     )
-    _ = try await DurableJobStore(database: fixture.database)
+    _ = try await DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
       .canaryRoleHostReplacementState(request: fixture.replacementAuthorization.request)
     await fixture.database.close()
 
-    let reopened = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let jobs = DurableJobStore(database: reopened)
+    let reopened = try schemaNinePiDatabase(at: fixture.databaseURL)
+    let jobs = DurableJobStore(database: reopened, enforceRolloutAuthority: false)
     #expect(
       try await jobs.canaryRoleHostReplacementTerminalReport(
         request: fixture.replacementAuthorization.request
@@ -3387,8 +3400,8 @@ struct PiRunStoreTests {
     }
 
     await fixture.database.close()
-    let reopened = try SQLiteStore(databaseURL: fixture.databaseURL)
-    let jobs = DurableJobStore(database: reopened)
+    let reopened = try schemaNinePiDatabase(at: fixture.databaseURL)
+    let jobs = DurableJobStore(database: reopened, enforceRolloutAuthority: false)
     let report = try #require(
       try await jobs.canaryRoleHostReplacementTerminalReport(
         request: fixture.replacementAuthorization.request
@@ -3562,7 +3575,7 @@ struct PiRunStoreTests {
     }
     await fixture.database.close()
 
-    let reopened = try SQLiteStore(databaseURL: fixture.databaseURL)
+    let reopened = try schemaNinePiDatabase(at: fixture.databaseURL)
     let after = try await fixture.snapshot(database: reopened)
     #expect(after == before)
     #expect(try await reopened.query("PRAGMA foreign_key_check").isEmpty)
@@ -3672,7 +3685,7 @@ private struct ReplacementCutoverFixture {
   ) async throws -> Self {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-replacement-cutover")
     let databaseURL = root.appendingPathComponent("state.sqlite3")
-    let database = try SQLiteStore(databaseURL: databaseURL)
+    let database = try schemaNinePiDatabase(at: databaseURL)
     do {
       let repositoryID = UUID(uuidString: "32000000-0000-0000-0000-000000000003")!
       let jobID = UUID(uuidString: "42000000-0000-0000-0000-000000000004")!
@@ -4775,6 +4788,13 @@ private struct ReplacementCutoverFixture {
   }
 }
 
+private func schemaNinePiDatabase(at databaseURL: URL) throws -> SQLiteStore {
+  try SQLiteStore(
+    databaseURL: databaseURL,
+    migrations: Array(DatabaseSchema.migrations.prefix(9))
+  )
+}
+
 private struct StoreFixture {
   let root: URL
   let database: SQLiteStore
@@ -4785,7 +4805,9 @@ private struct StoreFixture {
 
   static func make(role: PiWorkflowRole = .triage) async throws -> Self {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-run-store")
-    let database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
+    let database = try schemaNinePiDatabase(
+      at: root.appendingPathComponent("state.sqlite3")
+    )
     let repositoryID = UUID(uuidString: "30000000-0000-0000-0000-000000000003")!
     let jobID = UUID(uuidString: "40000000-0000-0000-0000-000000000004")!
     try await insertRepositoryAndJob(

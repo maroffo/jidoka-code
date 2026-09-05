@@ -1,0 +1,146 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/24] Write sources
+[2/24] Write swift-version--58304C5D6DBC2206.txt
+[4/26] Compiling JidokaCodeCore RolloutAuthorityStore.swift
+[5/26] Emitting module JidokaCodeCore
+[5/36] Write Objects.LinkFileList
+[15/45] Linking JidokaCodePushGuard
+[16/45] Linking JidokaCodeAskPass
+[17/45] Linking JidokaCodeLocationProbeEngine
+[18/45] Linking JidokaCodeBoundedCommand
+[19/45] Linking JidokaCodeHerdrHost
+[20/45] Linking JidokaCodeHerdrFixture
+[21/45] Linking JidokaCodeLocationProbeApp
+[22/45] Linking JidokaCodeEngineProbe
+[23/45] Linking JidokaCodeUIFixture
+[24/45] Applying JidokaCodeHerdrHost
+[25/45] Applying JidokaCodeBoundedCommand
+[26/45] Applying JidokaCodeLocationProbeApp
+[27/45] Applying JidokaCodeAskPass
+[28/45] Applying JidokaCodeEngineProbe
+[29/45] Applying JidokaCodeHerdrFixture
+[30/45] Applying JidokaCodePushGuard
+[31/45] Applying JidokaCodeLocationProbeEngine
+[32/45] Linking JidokaCodeApp
+[33/45] Applying JidokaCodeUIFixture
+[34/45] Applying JidokaCodeApp
+[36/46] Emitting module JidokaCodeAppTests
+[37/47] Compiling JidokaCodeCoreTests PiRunStoreTests.swift
+[38/47] Compiling JidokaCodeCoreTests DurableJobStoreTests.swift
+[39/47] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+[40/47] Compiling JidokaCodeCoreTests GitHubPullRequestPublisherTests.swift
+[41/47] Compiling JidokaCodeCoreTests GitHubMarkerPublisherTests.swift
+[42/47] Emitting module JidokaCodeCoreTests
+[43/47] Compiling JidokaCodeCoreTests GitHubWorkflowLabelBootstrapperTests.swift
+[44/47] Compiling JidokaCodeCoreTests GitPublicationTests.swift
+[45/47] Compiling JidokaCodeCoreTests GitHubWorkflowLabelMutatorTests.swift
+[45/47] Write Objects.LinkFileList
+[46/47] Linking JidokaCodePackageTests
+Build complete! (11.87s)
+Test Suite 'Selected tests' started at 2026-09-04 11:34:11.265.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 11:34:11.266.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 11:34:11.266.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 11:34:11.266.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "SQLite durable store" started.
+◇ Test "production schema upgrades to rollout authority without manufacturing authority" started.
+◇ Test "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 1 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 2 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 3 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 4 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 5 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 6 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 7 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 8 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 9 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 10 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 11 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 12 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 13 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 14 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 15 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 16 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 17 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 18 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 19 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 20 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 21 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 22 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 23 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 24 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 25 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 26 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 27 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 28 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 29 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 30 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 31 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 32 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 33 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 34 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 35 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 36 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 37 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 38 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 39 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 40 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 41 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 42 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 43 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 44 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 45 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 46 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 47 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 48 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 49 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 50 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 51 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 52 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 53 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 54 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 55 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 56 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 57 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 58 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 59 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 60 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 61 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 62 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 63 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 64 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 65 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 66 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 67 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 68 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 69 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 70 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 71 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 72 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 73 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 74 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 75 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 76 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 77 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 78 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 79 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 80 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 81 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 82 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 83 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 84 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 85 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 86 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 87 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 88 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 89 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 90 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✔ Test "production schema upgrades to rollout authority without manufacturing authority" passed after 1.080 seconds.
+✔ Test "production schema 9 to 10 rolls back after every exact migration statement" with 90 test cases passed after 1.186 seconds.
+✔ Suite "SQLite durable store" passed after 1.186 seconds.
+✔ Test run with 2 tests in 1 suite passed after 1.187 seconds.

@@ -1,0 +1,136 @@
+UTC start: 2026-09-05T08:10:36Z
+Command: xcrun swift test --filter RolloutLeaseAuthorityTests\|RolloutRemotePreviewRevalidatorTests\|SQLiteStoreTests/productionRolloutAuthorityMigration\$
+[0/1] Planning build
+Building for debugging...
+[0/24] Write sources
+[2/24] Write swift-version--58304C5D6DBC2206.txt
+[4/26] Compiling JidokaCodeCore DatabaseSchema.swift
+[5/26] Emitting module JidokaCodeCore
+[6/27] Compiling JidokaCodeCore SQLiteStore.swift
+[6/36] Write Objects.LinkFileList
+[13/38] Emitting module JidokaCodeHerdrFixture
+[13/38] Write Objects.LinkFileList
+[15/46] Emitting module JidokaCodeEngineProbe
+[15/46] Write Objects.LinkFileList
+[17/46] Emitting module JidokaCodeAppSupport
+[18/50] Emitting module JidokaCodeUIFixture
+[18/50] Write Objects.LinkFileList
+[20/50] Emitting module JidokaCodeAppSupportTests
+[21/50] Emitting module JidokaCodeApp
+[21/51] Write Objects.LinkFileList
+[22/51] Linking JidokaCodeHerdrFixture
+[22/51] Linking JidokaCodeLocationProbeEngine
+[22/51] Linking JidokaCodePushGuard
+[24/51] Linking JidokaCodeAskPass
+[26/51] Linking JidokaCodeBoundedCommand
+[26/51] Linking JidokaCodeHerdrHost
+[28/51] Linking JidokaCodeLocationProbeApp
+[29/51] Applying JidokaCodeAskPass
+[29/51] Applying JidokaCodeHerdrHost
+[31/51] Applying JidokaCodeHerdrFixture
+[31/51] Applying JidokaCodeLocationProbeApp
+[33/51] Applying JidokaCodeBoundedCommand
+[34/51] Applying JidokaCodePushGuard
+[35/51] Applying JidokaCodeLocationProbeEngine
+[36/51] Linking JidokaCodeEngineProbe
+[37/51] Applying JidokaCodeEngineProbe
+[38/51] Linking JidokaCodeUIFixture
+[39/51] Applying JidokaCodeUIFixture
+[40/51] Linking JidokaCodeApp
+[41/51] Applying JidokaCodeApp
+[43/52] Emitting module JidokaCodeAppTests
+[44/53] Compiling JidokaCodeCoreTests ConfigurationStoreTests.swift
+[45/53] Compiling JidokaCodeCoreTests RolloutRemotePreviewRevalidatorTests.swift
+[46/53] Compiling JidokaCodeCoreTests DurableJobStoreTests.swift
+[47/53] Emitting module JidokaCodeCoreTests
+[48/53] Compiling JidokaCodeCoreTests PiRunStoreTests.swift
+[49/53] Compiling JidokaCodeCoreTests SQLiteStoreTests.swift
+[50/53] Compiling JidokaCodeCoreTests RolloutLeaseAuthorityTests.swift
+[51/53] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:7119:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7117 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+7118 |       ) ?? 0
+7119 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7120 |       _ = try await database.execute(
+7121 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[51/53] Write Objects.LinkFileList
+[52/53] Linking JidokaCodePackageTests
+Build complete! (12.06s)
+Test Suite 'Selected tests' started at 2026-09-05 10:10:50.759.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 10:10:50.761.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 10:10:50.761.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 10:10:50.761.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Repository lease rollout authority" started.
+◇ Suite "Rollout remote preview revalidation" started.
+◇ Test "every closed authorization state releases the gate for ordinary jobs" started.
+◇ Test "transferring a live lease to the bound job stays gated during drain or recovery" started.
+◇ Test "a generation-1 job stays gated even where no lane was ever opened" started.
+◇ Test "the insert and update gates share the active-row condition and an identical tail" started.
+◇ Test "a paused or draining lane still refuses fresh admission" started.
+◇ Test "the builder refuses a step the workflow-label switch does not cover" started.
+◇ Test "an empty authorization table leaves ordinary generation-0 leases admissible" started.
+◇ Test "reactivating a released lease is admission and stays gated while a lane is open" started.
+◇ Test "the builder refuses a non-positive object number, so discovery never sees one" started.
+◇ Test "a transport failure during revalidation is drift, never a pass" started.
+◇ Test "exact execution preview binds the approved waiting-human checkpoint" started.
+◇ Test "exact triage preview rejects issue-label and repository-label drift" started.
+◇ Test "a live lease's identity changes are checked as admission" started.
+◇ Test "a lease the open lane does not bind stops being a continuation" started.
+◇ Test "repository-label inventory drift is rejected in every shape" started.
+◇ Test "the builder refuses a missing job binding, so no preview carries one" started.
+◇ Test "a generation-1 job stays gated after its own lane has closed" started.
+◇ Test "a preview whose canonical bytes no longer round-trip is rejected" started.
+◇ Test "pause and drain stop admission but never a held lease's heartbeat" started.
+◇ Test "a review-stage preview cannot be built with missing labels at all" started.
+◇ Test "the upsert lease shape is gated exactly like the plain statements" started.
+◇ Test "an open lane rejects an unbound generation-0 lease on its own repository" started.
+◇ Test "a missing lease still reports a typed error rather than a raw SQLite abort" started.
+◇ Test "exact PR preview rejects every independently drifted remote binding" started.
+◇ Test "issue identity and default-branch reference drift are rejected" started.
+◇ Test "an open lane on one repository never gates another repository" started.
+◇ Test "finite preview binds the complete deterministic candidate set" started.
+◇ Test "exact triage preview binds issue, labels, and default-branch base" started.
+◇ Test "the builder refuses a finite window at the exact-only stages" started.
+◇ Test "a finite window binds its observed object-number upper bound" started.
+✔ Test "the insert and update gates share the active-row condition and an identical tail" passed after 0.206 seconds.
+✔ Test "the builder refuses a missing job binding, so no preview carries one" passed after 0.206 seconds.
+✔ Test "a preview whose canonical bytes no longer round-trip is rejected" passed after 0.206 seconds.
+✔ Test "an empty authorization table leaves ordinary generation-0 leases admissible" passed after 0.206 seconds.
+✔ Test "the builder refuses a non-positive object number, so discovery never sees one" passed after 0.206 seconds.
+✔ Test "a generation-1 job stays gated even where no lane was ever opened" passed after 0.207 seconds.
+✔ Test "a transport failure during revalidation is drift, never a pass" passed after 0.206 seconds.
+✔ Test "reactivating a released lease is admission and stays gated while a lane is open" passed after 0.206 seconds.
+✔ Test "pause and drain stop admission but never a held lease's heartbeat" passed after 0.206 seconds.
+✔ Test "a lease the open lane does not bind stops being a continuation" passed after 0.232 seconds.
+✔ Test "the builder refuses a step the workflow-label switch does not cover" passed after 0.232 seconds.
+✔ Test "a review-stage preview cannot be built with missing labels at all" passed after 0.260 seconds.
+✔ Test "the upsert lease shape is gated exactly like the plain statements" passed after 0.265 seconds.
+✔ Test "exact execution preview binds the approved waiting-human checkpoint" passed after 0.270 seconds.
+✔ Test "a missing lease still reports a typed error rather than a raw SQLite abort" passed after 0.277 seconds.
+✔ Test "an open lane rejects an unbound generation-0 lease on its own repository" passed after 0.277 seconds.
+✔ Test "finite preview binds the complete deterministic candidate set" passed after 0.307 seconds.
+✔ Test "exact triage preview binds issue, labels, and default-branch base" passed after 0.310 seconds.
+✔ Test "a finite window binds its observed object-number upper bound" passed after 0.318 seconds.
+✔ Test "an open lane on one repository never gates another repository" passed after 0.319 seconds.
+✔ Test "transferring a live lease to the bound job stays gated during drain or recovery" passed after 0.324 seconds.
+✔ Test "repository-label inventory drift is rejected in every shape" passed after 0.327 seconds.
+✔ Test "exact triage preview rejects issue-label and repository-label drift" passed after 0.334 seconds.
+✔ Test "the builder refuses a finite window at the exact-only stages" passed after 0.357 seconds.
+✔ Test "a live lease's identity changes are checked as admission" passed after 0.368 seconds.
+✔ Test "a paused or draining lane still refuses fresh admission" passed after 0.369 seconds.
+✔ Test "issue identity and default-branch reference drift are rejected" passed after 0.394 seconds.
+✔ Test "every closed authorization state releases the gate for ordinary jobs" passed after 0.408 seconds.
+✔ Test "a generation-1 job stays gated after its own lane has closed" passed after 0.408 seconds.
+✔ Suite "Repository lease rollout authority" passed after 0.409 seconds.
+✔ Test "exact PR preview rejects every independently drifted remote binding" passed after 0.779 seconds.
+✔ Suite "Rollout remote preview revalidation" passed after 0.780 seconds.
+✔ Test run with 30 tests in 2 suites passed after 0.780 seconds.
+
+Exit status: 0
+UTC end: 2026-09-05T08:10:51Z

@@ -1,0 +1,38 @@
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/6] Compiling JidokaCodeCoreTests SQLiteStoreTests.swift
+[4/6] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1352:5: warning: no calls to throwing functions occur within 'try' expression
+1350 |       )
+1351 |     }
+1352 |     try await RolloutEffectTaskContext.$current.withValue(
+     |     `- warning: no calls to throwing functions occur within 'try' expression
+1353 |       RolloutEffectExecutionContext(mode: .historicalCanary(jobID: fixture.jobID))
+1354 |     ) {
+[5/6] Emitting module JidokaCodeCoreTests
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/RolloutAuthorityStoreTests.swift:1100:17: warning: no calls to throwing functions occur within 'try' expression
+1098 |     func integers(_ sql: String, bindings: [SQLiteValue]) async throws -> [String: Int64] {
+1099 |       let rows = try await fixture.database.query(sql, bindings: bindings)
+1100 |       let row = try #require(rows.first)
+     |                 `- warning: no calls to throwing functions occur within 'try' expression
+1101 |       var values: [String: Int64] = [:]
+1102 |       for column in row.columns {
+[6/13] Compiling JidokaCodeCoreTests PackagedExecutableSnapshotTests.swift
+[7/13] Compiling JidokaCodeCoreTests GitTestSupport.swift
+[8/13] Compiling JidokaCodeCoreTests PiRunStoreTests.swift
+[9/13] Compiling JidokaCodeCoreTests VerificationCommandRunnerTests.swift
+[10/13] Compiling JidokaCodeCoreTests PiJobWorkflowPreparerTests.swift
+[11/13] Compiling JidokaCodeCoreTests EngineRedactedLogTests.swift
+[12/13] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:5184:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+5182 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+5183 |       ) ?? 0
+5184 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+5185 |       _ = try await database.execute(
+5186 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[12/14] Write Objects.LinkFileList
+[13/14] Linking JidokaCodePackageTests
+Build complete! (9.86s)
+BUILD_EXIT=0

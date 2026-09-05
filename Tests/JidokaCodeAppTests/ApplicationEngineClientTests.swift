@@ -659,7 +659,7 @@ struct ApplicationEngineClientTests {
     await mutationGate.waitUntilStarted()
 
     await #expect(throws: EngineClientError(.busy)) {
-      _ = try await client.send(.setMaxConcurrency(3))
+      _ = try await client.send(.setMaxConcurrency(1))
     }
     await mutationGate.release()
     _ = try await addRepository.value

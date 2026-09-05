@@ -36,9 +36,14 @@ struct GitHubMarkerPublisherTests {
     defer { fixture.remove() }
     let authorizer = MarkerCanaryAuthorizer(maximumParts: 1)
     let publisher = GitHubMarkerPublisher(
-      executor: GitHubMutationExecutor(intents: fixture.intents, broker: fixture.api),
+      executor: GitHubMutationExecutor(
+        intents: fixture.intents,
+        broker: fixture.api,
+        authority: fixture.authority
+      ),
       intents: fixture.intents,
       reads: fixture.api,
+      authority: fixture.authority,
       canaryAuthorizer: authorizer,
       sleeper: ImmediateMutationSleeper(),
       now: { Date(timeIntervalSince1970: 80_002) }
@@ -147,7 +152,11 @@ struct GitHubMarkerPublisherTests {
       ])
     )
     let parts = try GitHubMarkerCodec.build(document: document, identity: identity)
-    let executor = GitHubMutationExecutor(intents: fixture.intents, broker: fixture.api)
+    let executor = GitHubMutationExecutor(
+      intents: fixture.intents,
+      broker: fixture.api,
+      authority: fixture.authority
+    )
     for part in parts {
       _ = try await executor.prepareAndSend(
         jobID: request.jobID,
@@ -177,10 +186,16 @@ struct GitHubMarkerPublisherTests {
       databaseURL: fixture.root.appendingPathComponent("state.sqlite3")
     )
     let reopenedIntents = MutationIntentStore(database: reopenedDatabase)
+    let reopenedAuthority = ExplicitTestRolloutEffectAuthority(intents: reopenedIntents)
     let reopenedPublisher = GitHubMarkerPublisher(
-      executor: GitHubMutationExecutor(intents: reopenedIntents, broker: fixture.api),
+      executor: GitHubMutationExecutor(
+        intents: reopenedIntents,
+        broker: fixture.api,
+        authority: reopenedAuthority
+      ),
       intents: reopenedIntents,
       reads: fixture.api,
+      authority: reopenedAuthority,
       sleeper: ImmediateMutationSleeper(),
       now: { Date(timeIntervalSince1970: 80_002) }
     )
@@ -215,7 +230,7 @@ struct GitHubMarkerPublisherTests {
     #expect(await fixture.api.sendCount == 1)
     #expect(
       (try await fixture.intents.intents(jobID: fixture.job.id)).map(\.state) == [
-        .escalated
+        .escalated, .escalated,
       ])
   }
 }
@@ -248,9 +263,11 @@ private final class MarkerPublisherFixture: @unchecked Sendable {
   let root: URL
   let database: SQLiteStore
   let intents: MutationIntentStore
+  let authority: ExplicitTestRolloutEffectAuthority
   let api: MarkerGitHubAPI
   let publisher: GitHubMarkerPublisher
   let job: JobRecord
+  let repositoryID: UUID
   let now = Date(timeIntervalSince1970: 80_000)
 
   init(
@@ -263,7 +280,7 @@ private final class MarkerPublisherFixture: @unchecked Sendable {
     )
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     database = try SQLiteStore(databaseURL: root.appendingPathComponent("state.sqlite3"))
-    let repositoryID = UUID()
+    repositoryID = UUID()
     try await ConfigurationStore(database: database).upsertRepository(
       RepositoryConfiguration(
         id: repositoryID,
@@ -278,33 +295,40 @@ private final class MarkerPublisherFixture: @unchecked Sendable {
       ),
       now: now
     )
-    let created = try await DurableJobStore(database: database).createJob(
-      identity: LogicalJobIdentity(
-        repositoryID: repositoryID,
-        kind: .prReview,
-        objectNodeID: "pr-node",
-        revisionKey: String(repeating: "a", count: 40)
-      ),
-      objectNumber: 1,
-      contractVersionUsed: "w6-test",
-      priority: .prReview,
-      firstStep: .review,
-      now: now
-    )
+    let created = try await DurableJobStore(database: database, enforceRolloutAuthority: false)
+      .createJob(
+        identity: LogicalJobIdentity(
+          repositoryID: repositoryID,
+          kind: .prReview,
+          objectNodeID: "pr-node",
+          revisionKey: String(repeating: "a", count: 40)
+        ),
+        objectNumber: 1,
+        contractVersionUsed: "w6-test",
+        priority: .prReview,
+        firstStep: .review,
+        now: now
+      )
     guard case .created(let job) = created else {
       throw MarkerPublisherFixtureError.suppressed
     }
     self.job = job
     intents = MutationIntentStore(database: database)
+    authority = ExplicitTestRolloutEffectAuthority(intents: intents)
     api = MarkerGitHubAPI(
       failAfterFirstCreate: failAfterFirstCreate,
       dropFirstCreate: dropFirstCreate
     )
-    let executor = GitHubMutationExecutor(intents: intents, broker: api)
+    let executor = GitHubMutationExecutor(
+      intents: intents,
+      broker: api,
+      authority: authority
+    )
     publisher = GitHubMarkerPublisher(
       executor: executor,
       intents: intents,
       reads: api,
+      authority: authority,
       sleeper: ImmediateMutationSleeper(),
       now: { Date(timeIntervalSince1970: 80_001) }
     )
@@ -314,6 +338,7 @@ private final class MarkerPublisherFixture: @unchecked Sendable {
     GitHubMarkerPublicationRequest(
       jobID: job.id,
       operation: .createMarkerComment,
+      repositoryID: repositoryID,
       repository: GitHubRepositoryCoordinates(owner: "owner", repository: "repo"),
       repositoryNodeID: "repository-node",
       objectNodeID: "pr-node",
@@ -355,9 +380,9 @@ private actor MarkerGitHubAPI: GitHubMutationSending, GitHubMutationReadAPI {
 
   func performMutation(
     _ operation: GitHubOperation,
-    beforeSend: @escaping @Sendable () async throws -> Void
+    beforeSend: @escaping @Sendable () async throws -> RolloutEffectPermit
   ) async throws -> GitHubBrokerResponse {
-    try await beforeSend()
+    _ = try await beforeSend()
     guard case .createComment(_, _, _, let body) = operation else {
       throw MarkerPublisherFixtureError.unexpectedOperation
     }

@@ -1,0 +1,405 @@
+UTC start: 2026-09-05T16:08:17Z
+Command: make test-e2e
+./scripts/spikes/test-s1-package.sh
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+[1/3] Write sources
+[3/4] Compiling JidokaCodeCore EngineProtocol.swift
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:319:32: warning: 'SecKeychainItemGetTypeID()' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+317 |     case errSecSuccess:
+318 |       guard let result,
+319 |         CFGetTypeID(result) == SecKeychainItemGetTypeID()
+    |                                `- warning: 'SecKeychainItemGetTypeID()' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+320 |       else {
+321 |         throw GitHubTokenStoreError.inconsistentMutation
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:333:11: warning: 'SecKeychainItemCopyAccess' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+331 |   private func access(for item: SecKeychainItem) throws -> SecAccess {
+332 |     var access: SecAccess?
+333 |     guard SecKeychainItemCopyAccess(item, &access) == errSecSuccess,
+    |           `- warning: 'SecKeychainItemCopyAccess' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+334 |       let access
+335 |     else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:625:9: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+623 |       var application: SecTrustedApplication?
+624 |       let status = path.withCString {
+625 |         SecTrustedApplicationCreateFromPath($0, &application)
+    |         `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+626 |       }
+627 |       guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:633:18: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+631 |     }
+632 |     var access: SecAccess?
+633 |     let status = SecAccessCreate(
+    |                  `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+634 |       descriptor as CFString,
+635 |       trustedApplications as CFArray,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:706:7: warning: 'SecAccessCopyOwnerAndACL' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+704 |     var ownerType = SecAccessOwnerType()
+705 |     guard
+706 |       SecAccessCopyOwnerAndACL(
+    |       `- warning: 'SecAccessCopyOwnerAndACL' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+707 |         access,
+708 |         &userID,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:717:11: warning: 'SecAccessCopyACLList' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+715 |     }
+716 |     var list: CFArray?
+717 |     guard SecAccessCopyACLList(access, &list) == errSecSuccess,
+    |           `- warning: 'SecAccessCopyACLList' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+718 |       let entries = list as? [SecACL],
+719 |       (1...32).contains(entries.count)
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:727:30: warning: 'SecACLCopyAuthorizations' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+725 |     for entry in entries {
+726 |       guard
+727 |         let authorizations = SecACLCopyAuthorizations(entry) as? [String],
+    |                              `- warning: 'SecACLCopyAuthorizations' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+728 |         (1...32).contains(authorizations.count)
+729 |       else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:736:9: warning: 'SecACLCopyContents' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+734 |       var prompt = SecKeychainPromptSelector()
+735 |       guard
+736 |         SecACLCopyContents(
+    |         `- warning: 'SecACLCopyContents' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+737 |           entry,
+738 |           &applicationList,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:754:17: warning: 'SecTrustedApplicationCopyData' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+752 |         for application in applications {
+753 |           var value: CFData?
+754 |           guard SecTrustedApplicationCopyData(application, &value) == errSecSuccess,
+    |                 `- warning: 'SecTrustedApplicationCopyData' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+755 |             let value,
+756 |             (value as Data).count <= 16_384
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[4/5] Compiling JidokaCodeBoundedCommand main.swift
+[4/6] Write Objects.LinkFileList
+[5/6] Linking JidokaCodeBoundedCommand
+Build of product 'JidokaCodeBoundedCommand' complete! (73.94s)
+Building for production...
+[0/6] Write sources
+[3/6] Write swift-version--58304C5D6DBC2206.txt
+[5/7] Compiling JidokaCodeCore EngineProtocol.swift
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:319:32: warning: 'SecKeychainItemGetTypeID()' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+317 |     case errSecSuccess:
+318 |       guard let result,
+319 |         CFGetTypeID(result) == SecKeychainItemGetTypeID()
+    |                                `- warning: 'SecKeychainItemGetTypeID()' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+320 |       else {
+321 |         throw GitHubTokenStoreError.inconsistentMutation
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:333:11: warning: 'SecKeychainItemCopyAccess' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+331 |   private func access(for item: SecKeychainItem) throws -> SecAccess {
+332 |     var access: SecAccess?
+333 |     guard SecKeychainItemCopyAccess(item, &access) == errSecSuccess,
+    |           `- warning: 'SecKeychainItemCopyAccess' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+334 |       let access
+335 |     else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:625:9: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+623 |       var application: SecTrustedApplication?
+624 |       let status = path.withCString {
+625 |         SecTrustedApplicationCreateFromPath($0, &application)
+    |         `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+626 |       }
+627 |       guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:633:18: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+631 |     }
+632 |     var access: SecAccess?
+633 |     let status = SecAccessCreate(
+    |                  `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+634 |       descriptor as CFString,
+635 |       trustedApplications as CFArray,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:706:7: warning: 'SecAccessCopyOwnerAndACL' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+704 |     var ownerType = SecAccessOwnerType()
+705 |     guard
+706 |       SecAccessCopyOwnerAndACL(
+    |       `- warning: 'SecAccessCopyOwnerAndACL' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+707 |         access,
+708 |         &userID,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:717:11: warning: 'SecAccessCopyACLList' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+715 |     }
+716 |     var list: CFArray?
+717 |     guard SecAccessCopyACLList(access, &list) == errSecSuccess,
+    |           `- warning: 'SecAccessCopyACLList' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+718 |       let entries = list as? [SecACL],
+719 |       (1...32).contains(entries.count)
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:727:30: warning: 'SecACLCopyAuthorizations' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+725 |     for entry in entries {
+726 |       guard
+727 |         let authorizations = SecACLCopyAuthorizations(entry) as? [String],
+    |                              `- warning: 'SecACLCopyAuthorizations' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+728 |         (1...32).contains(authorizations.count)
+729 |       else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:736:9: warning: 'SecACLCopyContents' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+734 |       var prompt = SecKeychainPromptSelector()
+735 |       guard
+736 |         SecACLCopyContents(
+    |         `- warning: 'SecACLCopyContents' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+737 |           entry,
+738 |           &applicationList,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:754:17: warning: 'SecTrustedApplicationCopyData' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+752 |         for application in applications {
+753 |           var value: CFData?
+754 |           guard SecTrustedApplicationCopyData(application, &value) == errSecSuccess,
+    |                 `- warning: 'SecTrustedApplicationCopyData' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+755 |             let value,
+756 |             (value as Data).count <= 16_384
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[6/8] Compiling JidokaCodeAppSupport AppViewModel.swift
+[7/9] Compiling JidokaCodeApp ApplicationComposition.swift
+[7/9] Write Objects.LinkFileList
+[8/9] Linking JidokaCodeApp
+Build of product 'JidokaCodeApp' complete! (84.56s)
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/native-code-identity-runtime/pi/node_modules/@mariozechner/clipboard-darwin-universal/clipboard.darwin-universal.node: replacing existing signature
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+[0/1] Planning build
+Building for production...
+[0/4] Write sources
+[2/4] Write swift-version--58304C5D6DBC2206.txt
+[4/5] Compiling JidokaCodeCore EngineProtocol.swift
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:319:32: warning: 'SecKeychainItemGetTypeID()' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+317 |     case errSecSuccess:
+318 |       guard let result,
+319 |         CFGetTypeID(result) == SecKeychainItemGetTypeID()
+    |                                `- warning: 'SecKeychainItemGetTypeID()' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+320 |       else {
+321 |         throw GitHubTokenStoreError.inconsistentMutation
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:333:11: warning: 'SecKeychainItemCopyAccess' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+331 |   private func access(for item: SecKeychainItem) throws -> SecAccess {
+332 |     var access: SecAccess?
+333 |     guard SecKeychainItemCopyAccess(item, &access) == errSecSuccess,
+    |           `- warning: 'SecKeychainItemCopyAccess' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+334 |       let access
+335 |     else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:625:9: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+623 |       var application: SecTrustedApplication?
+624 |       let status = path.withCString {
+625 |         SecTrustedApplicationCreateFromPath($0, &application)
+    |         `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+626 |       }
+627 |       guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:633:18: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+631 |     }
+632 |     var access: SecAccess?
+633 |     let status = SecAccessCreate(
+    |                  `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+634 |       descriptor as CFString,
+635 |       trustedApplications as CFArray,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:706:7: warning: 'SecAccessCopyOwnerAndACL' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+704 |     var ownerType = SecAccessOwnerType()
+705 |     guard
+706 |       SecAccessCopyOwnerAndACL(
+    |       `- warning: 'SecAccessCopyOwnerAndACL' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+707 |         access,
+708 |         &userID,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:717:11: warning: 'SecAccessCopyACLList' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+715 |     }
+716 |     var list: CFArray?
+717 |     guard SecAccessCopyACLList(access, &list) == errSecSuccess,
+    |           `- warning: 'SecAccessCopyACLList' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+718 |       let entries = list as? [SecACL],
+719 |       (1...32).contains(entries.count)
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:727:30: warning: 'SecACLCopyAuthorizations' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+725 |     for entry in entries {
+726 |       guard
+727 |         let authorizations = SecACLCopyAuthorizations(entry) as? [String],
+    |                              `- warning: 'SecACLCopyAuthorizations' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+728 |         (1...32).contains(authorizations.count)
+729 |       else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:736:9: warning: 'SecACLCopyContents' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+734 |       var prompt = SecKeychainPromptSelector()
+735 |       guard
+736 |         SecACLCopyContents(
+    |         `- warning: 'SecACLCopyContents' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+737 |           entry,
+738 |           &applicationList,
+
+/private/tmp/jidoka-code-progressive-production-automation/Sources/JidokaCodeCore/Keychain/GitHubTokenStore.swift:754:17: warning: 'SecTrustedApplicationCopyData' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+752 |         for application in applications {
+753 |           var value: CFData?
+754 |           guard SecTrustedApplicationCopyData(application, &value) == errSecSuccess,
+    |                 `- warning: 'SecTrustedApplicationCopyData' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+755 |             let value,
+756 |             (value as Data).count <= 16_384
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[5/6] Compiling JidokaCodeAppSupport AppViewModel.swift
+[6/7] Compiling JidokaCodeApp ApplicationComposition.swift
+[6/8] Write Objects.LinkFileList
+[7/8] Linking JidokaCodeApp
+Build of product 'JidokaCodeApp' complete! (78.04s)
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+[2/3] Compiling JidokaCodeBoundedCommand main.swift
+[2/4] Write Objects.LinkFileList
+[3/4] Linking JidokaCodeBoundedCommand
+Build of product 'JidokaCodeBoundedCommand' complete! (1.24s)
+staged_runtime_verifier_seconds=3.377 runtime_id=node-26.7.0-pi-0.84.2-darwin-arm64-v1 manifest_sha256=fe15573a58a4604a3695b092ba8b07ae2432da7b7f07743a8d54a4421ab3aa83 runtime_identity_sha256=395686a5ff9bd1ae473bed14235be74ec28c773798f62d014cf18d4113162b11
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+[2/4] Compiling JidokaCodeEngineProbe JidokaCodeEngineMain.swift
+[2/4] Write Objects.LinkFileList
+[3/4] Linking JidokaCodeEngineProbe
+Build of product 'JidokaCodeEngineProbe' complete! (1.40s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+[2/3] Compiling JidokaCodeAskPass main.swift
+[2/4] Write Objects.LinkFileList
+[3/4] Linking JidokaCodeAskPass
+Build of product 'JidokaCodeAskPass' complete! (0.90s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+[2/4] Compiling JidokaCodePushGuard main.swift
+[2/4] Write Objects.LinkFileList
+[3/4] Linking JidokaCodePushGuard
+Build of product 'JidokaCodePushGuard' complete! (0.94s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+[2/4] Compiling JidokaCodeHerdrHost main.swift
+[2/4] Write Objects.LinkFileList
+[3/4] Linking JidokaCodeHerdrHost
+Build of product 'JidokaCodeHerdrHost' complete! (0.91s)
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app/Contents/Info.plist: OK
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist: OK
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app/Contents/Helpers/JidokaCodeEngineProbe: replacing existing signature
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app/Contents/Helpers/JidokaCodeAskPass: replacing existing signature
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app/Contents/Helpers/GitHooks/pre-push: replacing existing signature
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app/Contents/Helpers/JidokaCodeHerdrHost: replacing existing signature
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app: replacing existing signature
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app: replacing existing signature
+signing=adhoc
+packaged=/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+Jidoka extension RPC preflight: PASS, providerCalls=0
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app/Contents/Info.plist: OK
+/private/tmp/jidoka-code-progressive-production-automation/build/Jidoka Code.app/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist: OK
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Executable Mutated.app: replacing existing signature
+production_authority_rejection_seconds=1.670
+push_guard_open_stdin_seconds=0.031
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Release Runtime Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Release Runtime Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Release Runtime Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Release Runtime Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Release Runtime Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Release Runtime Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Release Runtime Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Release Runtime Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Runner Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Attestation Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Policy Mutated.app: replacing existing signature
+/private/var/folders/ch/j0_jqg3x7v9c_lxrqdd1p97m0000gn/T/jidoka-code-s1.sWoy8Z/Jidoka Code Workflow Mutated.app: replacing existing signature
+S1 package E2E: PASS
+app_minos=14.0 engine_minos=14.0 askpass_minos=14.0 push_guard_minos=14.0 herdr_host_minos=14.0
+manifest_sha256=a21a11ebdc6f0a613356f6e8730a7ffd4beaab68a9904d5a68580f98e28d79a0 mutated_sha256=8569c91a97d69879d7e5d35ec2982aabfa1838a6ffb75f6f3c388a97bcc08e66
+preflight={"bundleIdentifier":"com.maroffo.JidokaCode","manifestSHA256":"a21a11ebdc6f0a613356f6e8730a7ffd4beaab68a9904d5a68580f98e28d79a0","resourceName":"jidoka-code","schemaVersion":1,"status":"ok","workingDirectory":"/"}
+engine={"identifier":"com.maroffo.JidokaCode.Engine","status":"ok","workingDirectory":"/"}
+./scripts/spikes/test-s10-ui.sh
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.21s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.11s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeUIFixture' complete! (0.20s)
+/private/tmp/jidoka-code-progressive-production-automation/build/w7-ui-flow/Jidoka Code UI Fixture.app: replacing existing signature
+ui_fixture_bundle=/private/tmp/jidoka-code-progressive-production-automation/build/w7-ui-flow/Jidoka Code UI Fixture.app
+ui_flow_report=/private/tmp/jidoka-code-progressive-production-automation/build/w7-ui-flow/evidence/ui-flow-report.json
+ui_screenshot_sha256=4176d47d13d4047acd72c96faaa5ee97dd5262718de467d06f1e82fb30d4e647 onboarding-first-run.png
+ui_screenshot_sha256=a506d619275ea6bbc162a65fbbc57d88a84f9772239c982f7fa9f9367967a2f7 settings-accessibility-type.png
+ui_screenshot_sha256=fc4536fe08497cc550cf4e5582f346a875f699bee16b09d298fe43c7b5982c62 settings-catalog-unavailable.png
+ui_screenshot_sha256=78d8d52e330dd6a296fb27b2617daf21f769761d6edca6cf0f70208aa242431f menu-warning.png
+accessibility_evidence=declared-production-contract-plus-rendered-screenshots
+runtime_ax_identifiers=unavailable-in-offscreen-hosting-fixture
+network_boundary=sandbox-deny-network
+side_effects=keychain:0,network:0,provider:0,service_management:0
+./scripts/spikes/test-s11-herdr.sh
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.11s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrHost' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrFixture' complete! (0.11s)
+S11 Herdr isolated E2E: PASS
+session=jidoka-s11-lg2ulo workspace=w2 panes=w2:p2,w2:p3 default_socket_contacts=0
+roles=plan,review launch=exact-argv lifecycle=custom-no-session-ref child_herdr_env=0 focus_changes=0 terminal_close=after-done
+./scripts/spikes/test-s12-pi-tui.sh
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.11s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.11s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+Pi runtime attestation tests: PASS
+[0/1] Planning build
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.21s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrHost' complete! (0.11s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrFixture' complete! (0.11s)
+S12 exact Pi TUI isolated E2E: PASS
+session=jidoka-s12-yyakby workspace=w2 panes=w2:p2,w2:p3,w2:p4 model=jidoka-fixture/fixture:off provider_calls=2
+fresh_prompt=1 causal_tool_loop=1 recorded_before_crash=1 side_channel_before_crash=0 causal_resume=1 resume_prompt=0 cross_run_resume_boundary=1 cross_run_null_downgrade_blocked=1 result=1 acknowledgement=1 typed_runtime_failure=1 manual_input_context=0 pre_result_input_blocked=1 built_in_input_blocked=1 builder_parity=1 exact_process_group=1 child_process_identity=1 old_pane_removed=1 pane_retained_until_release=1 focus_changes=0 provider_network_measured=1 provider_network=0
+
+Exit status: 0
+UTC end: 2026-09-05T16:16:57Z

@@ -445,12 +445,12 @@ assert_component_relocation_policy() {
         --ownership recommended \
         --install-location "/Library/Application Support" \
         --identifier com.maroffo.JidokaCode.pkg \
-        --version 0.1.1 \
+        --version 0.2.0 \
         "$locked_package" >/dev/null
     /usr/sbin/pkgutil --expand "$locked_package" "$locked_expanded"
     locked_package_info="$locked_expanded/PackageInfo"
     [[ "$(/usr/bin/xmllint --xpath \
-        "count(/pkg-info[@identifier='com.maroffo.JidokaCode.pkg' and @version='0.1.1' and @install-location='/Library/Application Support' and @postinstall-action='none' and @auth='root' and @relocatable='false'])" \
+        "count(/pkg-info[@identifier='com.maroffo.JidokaCode.pkg' and @version='0.2.0' and @install-location='/Library/Application Support' and @postinstall-action='none' and @auth='root' and @relocatable='false'])" \
         "$locked_package_info")" == "1" ]] || fail "locked component package policy differs"
     [[ "$(/usr/bin/xmllint --xpath 'count(/pkg-info/bundle)' \
         "$locked_package_info")" == "1" && \
@@ -1052,11 +1052,44 @@ actual_inventory="$(cd "$SOURCE_APP" && /usr/bin/find . -print | LC_ALL=C /usr/b
 [[ -z "$(/usr/bin/find "$SOURCE_APP" -type l \
     ! -path "$SOURCE_APP/Contents/Resources/PiRuntime/pi/*" -print)" ]] || \
     fail "bundle contains a non-runtime symbolic link"
+release_runtime_stdout="$TEMP_ROOT/release-runtime-packaged.json"
+release_runtime_stderr="$TEMP_ROOT/release-runtime-packaged.stderr"
 run_packaged_command \
     "$SOURCE_EXECUTABLE" \
-    /dev/null \
-    /dev/stderr \
+    "$release_runtime_stdout" \
+    "$release_runtime_stderr" \
     --release-runtime-verify-adhoc || fail "packaged release runtime verifier failed"
+[[ -s "$release_runtime_stdout" && ! -s "$release_runtime_stderr" ]] || \
+    fail "packaged release runtime verifier output differs"
+assert_exact_json_keys \
+    "$release_runtime_stdout" schemaVersion runtimeID manifestSHA256 runtimeIdentitySHA256
+
+release_identity_manifest="$SOURCE_APP/Contents/Resources/progressive-production-release.json"
+release_identity_regenerated="$TEMP_ROOT/progressive-production-release.json"
+[[ -f "$release_identity_manifest" && ! -L "$release_identity_manifest" ]] || \
+    fail "packaged progressive release identity is unavailable"
+"$NODE_BIN" "$ROOT/scripts/generate-progressive-production-release.mjs" \
+    "$(/usr/bin/git -C "$ROOT" rev-parse --verify HEAD)" \
+    "$(/usr/bin/git -C "$ROOT" rev-parse --verify 'HEAD^{tree}')" \
+    "$(/usr/bin/plutil -extract CFBundleShortVersionString raw \
+        "$SOURCE_APP/Contents/Info.plist")" \
+    "$(/usr/bin/plutil -extract CFBundleVersion raw "$SOURCE_APP/Contents/Info.plist")" \
+    "$(/usr/bin/shasum -a 256 "$SOURCE_ENGINE" | /usr/bin/awk '{print $1}')" \
+    "$(/usr/bin/shasum -a 256 "$SOURCE_ASKPASS" | /usr/bin/awk '{print $1}')" \
+    "$(/usr/bin/shasum -a 256 "$SOURCE_PUSH_GUARD" | /usr/bin/awk '{print $1}')" \
+    "$(/usr/bin/shasum -a 256 "$SOURCE_HERDR_HOST" | /usr/bin/awk '{print $1}')" \
+    "10" \
+    "12" \
+    "$(/usr/bin/shasum -a 256 \
+        "$SOURCE_APP/Contents/Resources/PiRuntime/runtime-manifest.json" | \
+        /usr/bin/awk '{print $1}')" \
+    "$(/usr/bin/plutil -extract runtimeIdentitySHA256 raw "$release_runtime_stdout")" \
+    "$(/usr/bin/shasum -a 256 \
+        "$SOURCE_APP/Contents/Resources/Pi/workflow-resources.json" | \
+        /usr/bin/awk '{print $1}')" \
+    >"$release_identity_regenerated"
+/usr/bin/cmp -s "$release_identity_manifest" "$release_identity_regenerated" || \
+    fail "packaged progressive release identity differs from final nested artifacts"
 
 launch_agent_plist="$SOURCE_APP/Contents/Library/LaunchAgents/com.maroffo.JidokaCode.Engine.plist"
 /usr/bin/plutil -lint "$launch_agent_plist"
@@ -1209,6 +1242,7 @@ for path in \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-pr-fidelity/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Pi/workflow-skills/jidoka-code-triage-fidelity/SKILL.md" \
     "$SOURCE_APP/Contents/Resources/Spikes/jidoka-local-spikes.mjs" \
+    "$SOURCE_APP/Contents/Resources/progressive-production-release.json" \
     "$SOURCE_APP/Contents/Resources/PiRuntime/runtime-manifest.json" \
     "$SOURCE_APP/Contents/Resources/PiRuntime/licenses/node-LICENSE" \
     "$SOURCE_APP/Contents/_CodeSignature/CodeResources"

@@ -1,0 +1,24 @@
+--- variant A (shipped): rows 0,1,2 present; s3,s4 unconsumed
+A1 seq 2 citing s3 (previous=1 is not latest):
+Error near line 26: A: lacks exact contiguous source
+A2 seq 1 citing s3 (previous=0 is not latest):
+Error near line 28: A: lacks exact contiguous source
+A3 seq 4 citing s3 (no previous):
+Error near line 30: A: lacks exact contiguous source
+A4 seq 3 citing s3 exact (honest):
+A rows|4
+--- variant B (M8): rows 0..3 present; s4 unconsumed
+B1 seq 2 citing s4 (previous=1 not latest, arithmetic exact vs row 1):
+Error near line 44: UNIQUE constraint failed: usage.auth, usage.seq
+B2 seq 1 citing s4 (previous=0 not latest):
+Error near line 46: UNIQUE constraint failed: usage.auth, usage.seq
+B3 seq 5 citing s4 (no previous):
+Error near line 48: B: lacks exact contiguous source
+B4 seq 4 citing s4 exact (honest):
+B rows|5
+--- the only separating state is a gap (0,2 without 1); show it is unreachable
+delete row 1:
+Error near line 54: append only
+renumber row 1:
+Error near line 56: append only
+final rows|0,1,2,3,4

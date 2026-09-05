@@ -1,0 +1,22 @@
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.22s)
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeBoundedCommand' complete! (0.11s)
+toolchain=ok xcode=26.6 build=17F113 sdk=26.5 swift=6.3.3 swift-format=6.3.0
+Pi runtime attestation tests: PASS
+[0/1] Planning build
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeApp' complete! (0.24s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrHost' complete! (0.11s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'JidokaCodeHerdrFixture' complete! (0.11s)
+Swift/ErrorType.swift:254: Fatal error: Error raised at top level: JidokaCodeCore.HerdrHostError.invalidDescriptor
+./scripts/spikes/test-s12-pi-tui.sh: line 289: 90958 Trace/BPT trap: 5       "$PREPARER" --prepare-h3 "$TMP/fresh-spec.json" > "$TMP/descriptor.json"
+S12 artifacts retained at /private/tmp/jidoka-code-progressive-production-automation/build/evidence/jidoka-herdr-s12.YsMXx8

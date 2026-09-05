@@ -96,11 +96,15 @@ public final class SettingsViewModel {
   public var message: PresentationMessage?
   public var replacementToken = ""
   public var repositoryReference = ""
-  public var newRepositoryReviewEnabled = true
-  public var newRepositoryTriageEnabled = true
-  public var newRepositoryImplementationEnabled = true
-  public var maxConcurrency = 2
+  public var newRepositoryReviewEnabled = false
+  public var newRepositoryTriageEnabled = false
+  public var newRepositoryImplementationEnabled = false
+  public var maxConcurrency = 1
   public var profileDrafts: [ModelProfileRole: ModelProfileDraft] = [:]
+  public var rolloutInputBase64 = ""
+  public var rolloutConfirmationSHA256 = ""
+  public private(set) var pendingRolloutInput: RolloutPreviewInput?
+  public private(set) var pendingRolloutPreview: RolloutPreview?
   public private(set) var modelCatalogNotice: String?
 
   @ObservationIgnored private let client: any EngineClient
@@ -146,6 +150,15 @@ public final class SettingsViewModel {
 
   public var canSubmitCredential: Bool {
     (20...2_048).contains(replacementToken.utf8.count)
+  }
+
+  public var canPreviewRollout: Bool {
+    !isWorking && state?.paused == true && decodedRolloutInput() != nil
+  }
+
+  public var canActivateRollout: Bool {
+    !isWorking && state?.paused == true && pendingRolloutInput != nil
+      && rolloutConfirmationSHA256 == pendingRolloutPreview?.sha256
   }
 
   public var diagnostics: [String] {
@@ -296,6 +309,7 @@ public final class SettingsViewModel {
         EngineRepositoryDraft(
           owner: repository.owner,
           name: repository.name,
+          enabled: false,
           reviewEnabled: newRepositoryReviewEnabled,
           triageEnabled: newRepositoryTriageEnabled,
           implementationEnabled: newRepositoryImplementationEnabled
@@ -309,6 +323,42 @@ public final class SettingsViewModel {
 
   public func removeRepository(_ repository: RepositoryConfiguration) async {
     _ = await execute(.removeRepository(repository.id))
+  }
+
+  public func previewRollout() async {
+    guard let input = decodedRolloutInput() else { return }
+    let command: EngineCommand =
+      input.scope.mode == .exactObject
+      ? .previewRollout(input) : .previewFiniteWindow(input)
+    guard let preview = await execute(command)?.rolloutPreview else { return }
+    pendingRolloutInput = input
+    pendingRolloutPreview = preview
+    rolloutConfirmationSHA256 = ""
+  }
+
+  public func activateRollout() async {
+    guard canActivateRollout, let input = pendingRolloutInput,
+      let preview = pendingRolloutPreview
+    else { return }
+    let request = RolloutActivationRequest(
+      authorizationID: UUID(),
+      approvedCanonicalJSON: preview.canonicalJSON,
+      confirmedSHA256: rolloutConfirmationSHA256
+    )
+    let command: EngineCommand =
+      input.scope.mode == .exactObject
+      ? .activateRollout(request) : .activateFiniteWindow(request)
+    guard await execute(command) != nil else { return }
+    rolloutInputBase64 = ""
+    rolloutConfirmationSHA256 = ""
+    pendingRolloutInput = nil
+    pendingRolloutPreview = nil
+  }
+
+  public func clearRolloutPreview() {
+    rolloutConfirmationSHA256 = ""
+    pendingRolloutInput = nil
+    pendingRolloutPreview = nil
   }
 
   public func setProfileSource(_ source: ModelProfileSource, role: ModelProfileRole) {
@@ -451,6 +501,23 @@ public final class SettingsViewModel {
   public func deleteCredential() async {
     replacementToken = ""
     _ = await execute(.deleteCredential)
+  }
+
+  private func decodedRolloutInput() -> RolloutPreviewInput? {
+    guard rolloutInputBase64.utf8.count <= 1_398_104,
+      let data = Data(base64Encoded: rolloutInputBase64),
+      !data.isEmpty,
+      data.count <= 1_048_576,
+      data.base64EncodedString() == rolloutInputBase64,
+      let input = try? RolloutCanonicalJSON.decodeCanonical(
+        RolloutPreviewInput.self,
+        from: data
+      ),
+      (try? RolloutPreviewBuilder.make(input)) != nil
+    else {
+      return nil
+    }
+    return input
   }
 
   private func update(

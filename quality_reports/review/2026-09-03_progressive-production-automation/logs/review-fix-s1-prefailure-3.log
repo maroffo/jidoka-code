@@ -1,0 +1,24 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Emitting module JidokaCodeCoreTests
+[4/5] Compiling JidokaCodeCoreTests DurableJobStoreTests.swift
+[4/6] Write Objects.LinkFileList
+[5/6] Linking JidokaCodePackageTests
+Build complete! (5.13s)
+Test Suite 'Selected tests' started at 2026-09-04 10:35:07.327.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 10:35:07.329.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 10:35:07.329.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 10:35:07.329.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Durable jobs, dispositions, leases, and recovery" started.
+◇ Test "exact paused canary admits one repaired PR and bounds every effect" started.
+✘ Test "exact paused canary admits one repaired PR and bounds every effect" recorded an issue at DurableJobStoreTests.swift:1076:11: Expectation failed: an error was expected but none was thrown
+✘ Test "exact paused canary admits one repaired PR and bounds every effect" failed after 0.032 seconds with 1 issue.
+✘ Suite "Durable jobs, dispositions, leases, and recovery" failed after 0.032 seconds with 1 issue.
+✘ Test run with 1 test in 1 suite failed after 0.032 seconds with 1 issue.

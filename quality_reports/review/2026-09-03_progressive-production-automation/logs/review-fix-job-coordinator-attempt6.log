@@ -1,0 +1,49 @@
+^D[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Emitting module JidokaCodeCoreTests
+[4/5] Compiling JidokaCodeCoreTests JobCoordinatorTests.swift
+[4/6] Write Objects.LinkFileList
+[5/6] Linking JidokaCodePackageTests
+Build complete! (4.98s)
+Test Suite 'Selected tests' started at 2026-09-04 11:56:54.365.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-04 11:56:54.367.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-04 11:56:54.367.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-04 11:56:54.367.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "End-to-end scheduler job coordinator" started.
+◇ Test "paused legacy passes promote exactly-due and overdue retries but not future deadlines" started.
+◇ Test "one pass dispatches only the exact bound workflow and leaves other jobs queued" started.
+◇ Test "direct canary runs exactly one leased job and never walks the queue" started.
+◇ Test "W0: repository flag drift leaves an already queued job inert" started.
+◇ Test "discovery failure persists repository backoff without terminal skip" started.
+◇ Test "recovery that needs a guarded rerun preserves the current step in backoff" started.
+◇ Test "W0: an unscoped pass cannot dispatch two serial queued jobs" started.
+◇ Test "startup sweep finishes cleanup stranded by a terminal crash boundary" started.
+◇ Test "the first real scheduler pass recovers an interrupted leased job before discovery" started.
+◇ Test "durable pause atomically rejects discovery creation and new leases" started.
+◇ Test "Pi transport interruption is classified as unknown writer state, never blind retry" started.
+◇ Test "reconciliation dispatch runs before any new discovery read" started.
+◇ Test "transient workflow failure enters durable backoff instead of terminal block" started.
+◇ Test "W0: pause suppresses unbound recovery as well as discovery" started.
+✔ Test "Pi transport interruption is classified as unknown writer state, never blind retry" passed after 0.001 seconds.
+✔ Test "W0: an unscoped pass cannot dispatch two serial queued jobs" passed after 0.098 seconds.
+✔ Test "discovery failure persists repository backoff without terminal skip" passed after 0.101 seconds.
+✔ Test "W0: repository flag drift leaves an already queued job inert" passed after 0.102 seconds.
+✔ Test "the first real scheduler pass recovers an interrupted leased job before discovery" passed after 0.104 seconds.
+✔ Test "startup sweep finishes cleanup stranded by a terminal crash boundary" passed after 0.105 seconds.
+✔ Test "durable pause atomically rejects discovery creation and new leases" passed after 0.106 seconds.
+✔ Test "paused legacy passes promote exactly-due and overdue retries but not future deadlines" passed after 0.107 seconds.
+✔ Test "transient workflow failure enters durable backoff instead of terminal block" passed after 0.109 seconds.
+✔ Test "reconciliation dispatch runs before any new discovery read" passed after 0.109 seconds.
+✔ Test "recovery that needs a guarded rerun preserves the current step in backoff" passed after 0.110 seconds.
+✔ Test "one pass dispatches only the exact bound workflow and leaves other jobs queued" passed after 0.110 seconds.
+✔ Test "direct canary runs exactly one leased job and never walks the queue" passed after 0.110 seconds.
+✔ Test "W0: pause suppresses unbound recovery as well as discovery" passed after 0.110 seconds.
+✔ Suite "End-to-end scheduler job coordinator" passed after 0.110 seconds.
+✔ Test run with 14 tests in 1 suite passed after 0.110 seconds.
