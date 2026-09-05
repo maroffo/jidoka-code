@@ -1,0 +1,38 @@
+UTC start: 2026-09-05T15:32:18Z
+Command: xcrun swift test --filter productionReloadPreservesPausedReplacement
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:5224:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+5222 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+5223 |       ) ?? 0
+5224 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+5225 |       _ = try await database.execute(
+5226 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[4/5] Emitting module JidokaCodeCoreTests
+[4/6] Write Objects.LinkFileList
+[5/6] Linking JidokaCodePackageTests
+Build complete! (9.27s)
+Test Suite 'Selected tests' started at 2026-09-05 17:32:28.879.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 17:32:28.880.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 17:32:28.880.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 17:32:28.880.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Production Herdr Pi workflow runtime" started.
+◇ Test "production reload keeps paused replacement recovery dispatch closed" started.
+✘ Test "production reload keeps paused replacement recovery dispatch closed" recorded an issue at HerdrPiWorkflowRuntimeTests.swift:2405:19: Issue recorded
+↳ reload phases: [Optional(JidokaCodeCore.EngineStartupPhase.runtimeQuiesce), Optional(JidokaCodeCore.EngineStartupPhase.runtimeSnapshot), Optional(JidokaCodeCore.EngineStartupPhase.runtimeOwnership), Optional(JidokaCodeCore.EngineStartupPhase.runtimeRecovery), Optional(JidokaCodeCore.EngineStartupPhase.runtimeComponents), Optional(JidokaCodeCore.EngineStartupPhase.runtimeCoordinatorRecovery)]; events: [JidokaCodeCoreTests.(unknown context at $10b164aa4).ReplacementProductionReloadProbe.Event.schedulerPaused(true)]
+historical reload checkpoint: first reload
+✘ Test "production reload keeps paused replacement recovery dispatch closed" recorded an issue at HerdrPiWorkflowRuntimeTests.swift:2276:4: Caught error: .canaryRecoveryRequired
+✘ Test "production reload keeps paused replacement recovery dispatch closed" failed after 0.465 seconds with 2 issues.
+✘ Suite "Production Herdr Pi workflow runtime" failed after 0.465 seconds with 2 issues.
+✘ Test run with 1 test in 1 suite failed after 0.465 seconds with 2 issues.
+
+Exit status: 1
+UTC end: 2026-09-05T15:32:29Z

@@ -1,0 +1,71 @@
+UTC start: 2026-09-05T14:27:33Z
+Command: xcrun swift test --filter ProductionRolloutOperatorTests\|HerdrPiWorkflowRuntimeTests/pausedExactCanaryCannotLaunch\|HerdrPiWorkflowRuntimeTests/explicitUnknownTopologyRecovery\|HerdrPiWorkflowRuntimeTests/generationRolloverCannotLaunchQ4\|HerdrPiWorkflowRuntimeTests/roleHostReplacementRejectsEveryPostPreviewDrift
+Building for debugging...
+[0/24] Write sources
+[2/24] Write swift-version--58304C5D6DBC2206.txt
+[4/27] Compiling JidokaCodeCore HerdrPiWorkflowExecutor.swift
+[5/27] Compiling JidokaCodeCore ProductionEngineJobRuntime.swift
+[6/27] Emitting module JidokaCodeCore
+[6/36] Write Objects.LinkFileList
+[13/39] Emitting module JidokaCodeTestSupport
+[14/39] Emitting module JidokaCodeHerdrFixture
+[14/39] Write Objects.LinkFileList
+[16/39] Emitting module JidokaCodeEngineProbe
+[16/39] Write Objects.LinkFileList
+[18/42] Emitting module JidokaCodeAppSupport
+[19/46] Emitting module JidokaCodeUIFixture
+[19/46] Write Objects.LinkFileList
+[21/46] Emitting module JidokaCodeAppSupportTests
+[22/46] Emitting module JidokaCodeApp
+[22/47] Write Objects.LinkFileList
+[23/47] Linking JidokaCodeHerdrFixture
+[24/47] Linking JidokaCodeLocationProbeApp
+[25/47] Linking JidokaCodeAskPass
+[26/47] Linking JidokaCodeBoundedCommand
+[26/47] Linking JidokaCodePushGuard
+[26/47] Linking JidokaCodeHerdrHost
+[26/47] Linking JidokaCodeLocationProbeEngine
+[27/47] Linking JidokaCodeEngineProbe
+[31/47] Applying JidokaCodeAskPass
+[32/47] Applying JidokaCodeHerdrFixture
+[33/47] Applying JidokaCodeLocationProbeApp
+[34/47] Applying JidokaCodeEngineProbe
+[35/47] Applying JidokaCodePushGuard
+[36/47] Applying JidokaCodeLocationProbeEngine
+[37/47] Applying JidokaCodeBoundedCommand
+[38/47] Applying JidokaCodeHerdrHost
+[39/47] Linking JidokaCodeUIFixture
+[40/47] Applying JidokaCodeUIFixture
+[41/47] Linking JidokaCodeApp
+[42/47] Applying JidokaCodeApp
+[44/48] Emitting module JidokaCodeAppTests
+[45/49] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+[46/49] Emitting module JidokaCodeCoreTests
+[47/49] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:646:46: error: cannot find 'evidenceHostSHA256' in scope
+ 644 |       hostExecutable: legacyHost,
+ 645 |       compatibleRecoveryHostSHA256: [legacyHostSHA256],
+ 646 |       compatibleRecoveryEvidenceHostSHA256: [evidenceHostSHA256],
+     |                                              `- error: cannot find 'evidenceHostSHA256' in scope
+ 647 |       compatibleRecoveryHostURLs: [legacyHostSHA256: legacyHost],
+ 648 |       processExecutableURL: { _ in legacyHost }
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:713:5: warning: no 'async' operations occur within 'await' expression
+ 711 |     let commandsBefore = await fixture.herdr.launchedCommands()
+ 712 |     let hostsBefore = try await fixture.runStore.roleHosts(jobID: fixture.jobID)
+ 713 |     await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+     |     `- warning: no 'async' operations occur within 'await' expression
+ 714 |       try await recoveredExecutor.execute(
+ 715 |         PiWorkflowExecutionRequest(
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:6353:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+6351 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+6352 |       ) ?? 0
+6353 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+6354 |       _ = try await database.execute(
+6355 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+error: fatalError
+
+Exit status: 1
+UTC end: 2026-09-05T14:27:47Z

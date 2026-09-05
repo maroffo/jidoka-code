@@ -1,0 +1,151 @@
+UTC start: 2026-09-05T13:51:35Z
+Command: xcrun swift test --filter RolloutCLITests\|ViewModelFlowTests/rolloutPreviewInputGate\|RolloutAuthorityStoreTests\|SQLiteStoreTests\|HistoricalCanaryEffectDenialTests
+[0/1] Planning build
+Building for debugging...
+[0/25] Write sources
+[6/29] Write swift-version--58304C5D6DBC2206.txt
+[8/31] Emitting module JidokaCodeCore
+[9/31] Compiling JidokaCodeCore ProductionEngineJobRuntime.swift
+[9/40] Write Objects.LinkFileList
+[19/44] Emitting module JidokaCodeTestSupport
+[20/44] Compiling JidokaCodeTestSupport RolloutOperatorFixture.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:15:3: error: attribute 'public' can only be used in a non-local scope
+ 13 | 
+ 14 | public func rolloutOperatorFixture() throws -> RolloutOperatorFixture {
+ 15 |   public let digest = String(repeating: "a", count: 64)
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 16 |   public let repositoryID = UUID(uuidString: "81000000-0000-4000-8000-000000000081")!
+ 17 |   public let authorizationID = UUID(uuidString: "82000000-0000-4000-8000-000000000082")!
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:16:3: error: attribute 'public' can only be used in a non-local scope
+ 14 | public func rolloutOperatorFixture() throws -> RolloutOperatorFixture {
+ 15 |   public let digest = String(repeating: "a", count: 64)
+ 16 |   public let repositoryID = UUID(uuidString: "81000000-0000-4000-8000-000000000081")!
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 17 |   public let authorizationID = UUID(uuidString: "82000000-0000-4000-8000-000000000082")!
+ 18 |   public let jobID = UUID(uuidString: "83000000-0000-4000-8000-000000000083")!
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:17:3: error: attribute 'public' can only be used in a non-local scope
+ 15 |   public let digest = String(repeating: "a", count: 64)
+ 16 |   public let repositoryID = UUID(uuidString: "81000000-0000-4000-8000-000000000081")!
+ 17 |   public let authorizationID = UUID(uuidString: "82000000-0000-4000-8000-000000000082")!
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 18 |   public let jobID = UUID(uuidString: "83000000-0000-4000-8000-000000000083")!
+ 19 |   public let repository = RolloutRepositoryIdentity(
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:18:3: error: attribute 'public' can only be used in a non-local scope
+ 16 |   public let repositoryID = UUID(uuidString: "81000000-0000-4000-8000-000000000081")!
+ 17 |   public let authorizationID = UUID(uuidString: "82000000-0000-4000-8000-000000000082")!
+ 18 |   public let jobID = UUID(uuidString: "83000000-0000-4000-8000-000000000083")!
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 19 |   public let repository = RolloutRepositoryIdentity(
+ 20 |     id: repositoryID,
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:19:3: error: attribute 'public' can only be used in a non-local scope
+ 17 |   public let authorizationID = UUID(uuidString: "82000000-0000-4000-8000-000000000082")!
+ 18 |   public let jobID = UUID(uuidString: "83000000-0000-4000-8000-000000000083")!
+ 19 |   public let repository = RolloutRepositoryIdentity(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 20 |     id: repositoryID,
+ 21 |     nodeID: "R_protocol",
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:30:3: error: attribute 'public' can only be used in a non-local scope
+ 28 |     implementationEnabled: false
+ 29 |   )
+ 30 |   public let release = RolloutReleaseIdentity(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 31 |     sourceCommit: String(repeating: "1", count: 40),
+ 32 |     sourceTree: String(repeating: "2", count: 40),
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:51:3: error: attribute 'public' can only be used in a non-local scope
+ 49 |     maxConcurrency: 1
+ 50 |   )
+ 51 |   public let inventory = RolloutInventory(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 52 |     queueSHA256: digest,
+ 53 |     recoverySHA256: digest,
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:65:3: error: attribute 'public' can only be used in a non-local scope
+ 63 |     outsideScopeMutationItemCount: 0
+ 64 |   )
+ 65 |   public let budgets = RolloutBudgets(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 66 |     jobs: 1,
+ 67 |     githubReadRequests: 10,
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:80:3: error: attribute 'public' can only be used in a non-local scope
+ 78 |     gitSends: 0
+ 79 |   )
+ 80 |   public let exactInput = RolloutPreviewInput(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+ 81 |     releaseIdentity: release,
+ 82 |     scope: RolloutScope(
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:114:3: error: attribute 'public' can only be used in a non-local scope
+112 |     expiresAtMilliseconds: 601_000
+113 |   )
+114 |   public let exactPreview = try RolloutPreviewBuilder.make(exactInput)
+    |   `- error: attribute 'public' can only be used in a non-local scope
+115 |   public let exactActivation = RolloutActivationRequest(
+116 |     authorizationID: authorizationID,
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:115:3: error: attribute 'public' can only be used in a non-local scope
+113 |   )
+114 |   public let exactPreview = try RolloutPreviewBuilder.make(exactInput)
+115 |   public let exactActivation = RolloutActivationRequest(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+116 |     authorizationID: authorizationID,
+117 |     approvedCanonicalJSON: exactPreview.canonicalJSON,
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:120:3: error: attribute 'public' can only be used in a non-local scope
+118 |     confirmedSHA256: exactPreview.sha256
+119 |   )
+120 |   public let finiteInput = RolloutPreviewInput(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+121 |     releaseIdentity: release,
+122 |     scope: RolloutScope(
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:144:3: error: attribute 'public' can only be used in a non-local scope
+142 |     expiresAtMilliseconds: 601_000
+143 |   )
+144 |   public let finitePreview = try RolloutPreviewBuilder.make(finiteInput)
+    |   `- error: attribute 'public' can only be used in a non-local scope
+145 |   public let finiteActivation = RolloutActivationRequest(
+146 |     authorizationID: UUID(uuidString: "84000000-0000-4000-8000-000000000084")!,
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:145:3: error: attribute 'public' can only be used in a non-local scope
+143 |   )
+144 |   public let finitePreview = try RolloutPreviewBuilder.make(finiteInput)
+145 |   public let finiteActivation = RolloutActivationRequest(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+146 |     authorizationID: UUID(uuidString: "84000000-0000-4000-8000-000000000084")!,
+147 |     approvedCanonicalJSON: finitePreview.canonicalJSON,
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:150:3: error: attribute 'public' can only be used in a non-local scope
+148 |     confirmedSHA256: finitePreview.sha256
+149 |   )
+150 |   public let recoveryReport = RolloutStatusReport(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+151 |     authorization: RolloutAuthorization(
+152 |       id: authorizationID.uuidString.lowercased(),
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift:174:3: error: attribute 'public' can only be used in a non-local scope
+172 |     events: []
+173 |   )
+174 |   public let recoveryPreview = try RolloutRecoveryPreviewBuilder.make(
+    |   `- error: attribute 'public' can only be used in a non-local scope
+175 |     report: recoveryReport,
+176 |     createdAtMilliseconds: 2_000
+[20/44] Linking JidokaCodeHerdrHost
+[20/44] Linking JidokaCodeBoundedCommand
+[20/44] Linking JidokaCodeHerdrFixture
+[20/44] Linking JidokaCodeLocationProbeEngine
+[20/44] Linking JidokaCodeUIFixture
+[20/44] Linking JidokaCodeAskPass
+[20/44] Linking JidokaCodeLocationProbeApp
+[20/44] Linking JidokaCodePushGuard
+[20/44] Linking JidokaCodeEngineProbe
+error: fatalError
+
+Exit status: 1
+UTC end: 2026-09-05T13:51:39Z

@@ -1,0 +1,57 @@
+UTC start: 2026-09-05T13:35:33Z
+Command: xcrun swift test --filter RolloutAuthorityStoreTests/usageInsertCannotForgeBudget\|RolloutAuthorityStoreTests/readbackDuringDrain
+Building for debugging...
+[0/24] Write sources
+[2/24] Write swift-version--58304C5D6DBC2206.txt
+[4/26] Emitting module JidokaCodeCore
+[5/26] Compiling JidokaCodeCore RolloutAuthorityStore.swift
+[5/33] Write Objects.LinkFileList
+[15/38] Linking JidokaCodeHerdrHost
+[16/38] Linking JidokaCodeHerdrFixture
+[17/38] Linking JidokaCodeLocationProbeEngine
+[18/38] Linking JidokaCodePushGuard
+[19/38] Linking JidokaCodeAskPass
+[20/38] Linking JidokaCodeLocationProbeApp
+[20/38] Linking JidokaCodeBoundedCommand
+[22/38] Linking JidokaCodeEngineProbe
+[23/38] Applying JidokaCodeHerdrHost
+[24/38] Applying JidokaCodeLocationProbeEngine
+[25/38] Applying JidokaCodeHerdrFixture
+[26/38] Applying JidokaCodeAskPass
+[27/38] Applying JidokaCodePushGuard
+[28/38] Applying JidokaCodeBoundedCommand
+[29/38] Applying JidokaCodeLocationProbeApp
+[30/38] Applying JidokaCodeEngineProbe
+[31/38] Linking JidokaCodeApp
+[32/38] Linking JidokaCodeUIFixture
+[33/38] Applying JidokaCodeApp
+[34/38] Applying JidokaCodeUIFixture
+[36/39] Emitting module JidokaCodeAppTests
+[37/40] Emitting module JidokaCodeCoreTests
+[38/40] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+[38/40] Write Objects.LinkFileList
+[39/40] Linking JidokaCodePackageTests
+Build complete! (7.44s)
+Test Suite 'Selected tests' started at 2026-09-05 15:35:41.830.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 15:35:41.831.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 15:35:41.831.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 15:35:41.831.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Progressive rollout authority" started.
+◇ Test "usage INSERT cannot reset a consumed cap, skip sequence or invent a source" started.
+◇ Test "a send-started mutation's readback is reservable while the lane is draining" started.
+✘ Test "usage INSERT cannot reset a consumed cap, skip sequence or invent a source" recorded an issue at RolloutAuthorityStoreTests.swift:996:13: Expectation failed: an error was expected but none was thrown and "1" was returned
+✘ Test "usage INSERT cannot reset a consumed cap, skip sequence or invent a source" recorded an issue at RolloutAuthorityStoreTests.swift:996:13: Expectation failed: an error was expected but none was thrown and "1" was returned
+✘ Test "usage INSERT cannot reset a consumed cap, skip sequence or invent a source" recorded an issue at RolloutAuthorityStoreTests.swift:1010:5: Expectation failed: try await fixture.database.scalarInt("SELECT COUNT(*) FROM rollout_authorization_usage") == 5
+✘ Test "usage INSERT cannot reset a consumed cap, skip sequence or invent a source" failed after 0.048 seconds with 3 issues.
+✘ Test "a send-started mutation's readback is reservable while the lane is draining" recorded an issue at RolloutAuthorityStoreTests.swift:2985:4: Caught error: .effectIdentityMismatch
+✘ Test "a send-started mutation's readback is reservable while the lane is draining" failed after 0.051 seconds with 1 issue.
+✘ Suite "Progressive rollout authority" failed after 0.051 seconds with 4 issues.
+✘ Test run with 2 tests in 1 suite failed after 0.051 seconds with 4 issues.
+
+Exit status: 1
+UTC end: 2026-09-05T13:35:41Z

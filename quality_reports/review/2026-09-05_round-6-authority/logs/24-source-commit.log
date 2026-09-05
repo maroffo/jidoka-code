@@ -1,0 +1,9 @@
+UTC start: 2026-09-05T16:39:20Z
+Command: git commit -m fix\(automation\):\ align\ rollout\ authority\ and\ operator\ boundaries -m $'Resolve PR 18 round-6 M1-M4 from review 5551140217, preserving the executable evidence supplied in 4206456.\n\nPause durably with drain, bind every usage append to its exact source, and deny historical canary effects in both the production executor boundary and the shared test double. Replace counterfactual canary launch expectations with denial and evidence-preservation coverage.\n\nExercise CLI parsing, settings eligibility and production operator commands through the real store and gates. Fix the additional status/recovery failures exposed by those tests and the bounded Minor findings recorded in plan E16-E19.\n\nFresh sequential gates pass: make check 770 tests / 88 suites; E2E S1/S10/S11/S12; acceptance 770 / 88 with 21 required suites; strict format; release App, EngineProbe and HerdrHost; diff check. No known issues or cleanupFailed in the final aggregate runs.\n\nIndependent review of this resulting source commit remains required. No merge, W7 or production effect is authorized.'
+[feat/progressive-production-automation d123a41] fix(automation): align rollout authority and operator boundaries
+ 27 files changed, 2659 insertions(+), 3685 deletions(-)
+ create mode 100644 Tests/JidokaCodeAppTests/RolloutCLITests.swift
+ create mode 100644 Tests/JidokaCodeTestSupport/RolloutOperatorFixture.swift
+
+Exit status: 0
+UTC end: 2026-09-05T16:39:20Z

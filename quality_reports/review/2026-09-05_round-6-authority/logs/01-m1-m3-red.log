@@ -1,0 +1,40 @@
+UTC start: 2026-09-05T13:33:35Z
+Command: xcrun swift test --filter RolloutAuthorityStoreTests/readbackDuringDrain\|HistoricalCanaryEffectDenialTests/explicitDoubleMatchesStoreForCanaryProvider
+[0/1] Planning build
+Building for debugging...
+[0/23] Write sources
+[1/23] Write swift-version--58304C5D6DBC2206.txt
+[3/6] Emitting module JidokaCodeCoreTests
+[4/6] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+[5/6] Compiling JidokaCodeCoreTests HistoricalCanaryEffectDenialTests.swift
+[5/7] Write Objects.LinkFileList
+[6/7] Linking JidokaCodePackageTests
+Build complete! (6.07s)
+Test Suite 'Selected tests' started at 2026-09-05 15:33:43.008.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 15:33:43.010.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 15:33:43.010.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 15:33:43.010.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Historical canary effect denial" started.
+◇ Suite "Progressive rollout authority" started.
+◇ Test "the explicit test double denies a historical canary provider reservation like the store" started.
+◇ Test "a send-started mutation's readback is reservable while the lane is draining" started.
+✘ Test "the explicit test double denies a historical canary provider reservation like the store" recorded an issue at HistoricalCanaryEffectDenialTests.swift:56:13: Expectation failed: an error was expected but none was thrown
+✘ Test "the explicit test double denies a historical canary provider reservation like the store" failed after 0.040 seconds with 1 issue.
+↳ // Review finding M3 (PR #18): the shared explicit double grants a historical-canary provider
+↳ // permit that `RolloutAuthorityStore.reserveProvider` always denies, so the executor's canary
+↳ // launch branch is exercised only against a double that contradicts production. The known-issue
+↳ // wrapper keeps the suite green while the finding is open and fails once the double is aligned,
+↳ // at which point the wrapper must be removed.
+✘ Suite "Historical canary effect denial" failed after 0.040 seconds with 1 issue.
+✘ Test "a send-started mutation's readback is reservable while the lane is draining" recorded an issue at RolloutAuthorityStoreTests.swift:2947:4: Caught error: .statementFailed(code: 19, message: "rollout readback lacks an exact started effect or budget")
+✘ Test "a send-started mutation's readback is reservable while the lane is draining" failed after 0.052 seconds with 1 issue.
+✘ Suite "Progressive rollout authority" failed after 0.052 seconds with 1 issue.
+✘ Test run with 2 tests in 2 suites failed after 0.052 seconds with 2 issues.
+
+Exit status: 1
+UTC end: 2026-09-05T13:33:43Z

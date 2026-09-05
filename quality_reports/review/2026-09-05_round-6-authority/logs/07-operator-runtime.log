@@ -1,0 +1,543 @@
+UTC start: 2026-09-05T14:01:08Z
+Command: xcrun swift test --filter ProductionRolloutOperatorTests\|RolloutCLITests\|ViewModelFlowTests/rolloutPreviewInputGate\|SQLiteStoreTests\|HistoricalCanaryEffectDenialTests
+[0/1] Planning build
+Building for debugging...
+[0/24] Write sources
+[3/26] Write swift-version--58304C5D6DBC2206.txt
+[5/28] Compiling JidokaCodeCore ProductionEngineJobRuntime.swift
+[6/28] Emitting module JidokaCodeCore
+[7/29] Compiling JidokaCodeCore RolloutReleaseIdentityAttestor.swift
+[8/59] Emitting module JidokaCodeAskPass
+[9/59] Compiling JidokaCodeAskPass main.swift
+[10/59] Compiling JidokaCodeTestSupport RolloutOperatorFixture.swift
+[11/59] Emitting module JidokaCodeTestSupport
+[11/60] Write Objects.LinkFileList
+[13/60] Emitting module JidokaCodePushGuard
+[14/60] Compiling JidokaCodePushGuard main.swift
+[15/60] Compiling JidokaCodeHerdrHost main.swift
+[16/60] Emitting module JidokaCodeHerdrHost
+[16/60] Write Objects.LinkFileList
+[19/60] Compiling JidokaCodeAppSupport PresentationModels.swift
+[20/60] Compiling JidokaCodeBoundedCommand main.swift
+[21/60] Emitting module JidokaCodeBoundedCommand
+[22/60] Emitting module JidokaCodeLocationProbeEngine
+[23/60] Compiling JidokaCodeLocationProbeEngine main.swift
+[23/61] Write Objects.LinkFileList
+[26/61] Emitting module JidokaCodeHerdrFixture
+[27/61] Compiling JidokaCodeHerdrFixture main.swift
+[27/61] Write Objects.LinkFileList
+[29/61] Compiling JidokaCodeAppSupport OnboardingViewModel.swift
+[30/61] Emitting module JidokaCodeLocationProbeApp
+[31/61] Compiling JidokaCodeLocationProbeApp main.swift
+[31/61] Write Objects.LinkFileList
+[33/145] Emitting module JidokaCodeEngineProbe
+[34/145] Compiling JidokaCodeEngineProbe JidokaCodeEngineMain.swift
+[34/145] Write Objects.LinkFileList
+[36/145] Compiling JidokaCodeAppSupport SettingsViewModel.swift
+[36/145] Linking JidokaCodeLocationProbeApp
+[36/145] Linking JidokaCodePushGuard
+[36/145] Linking JidokaCodeBoundedCommand
+[39/145] Linking JidokaCodeLocationProbeEngine
+[40/145] Linking JidokaCodeAskPass
+[40/145] Linking JidokaCodeHerdrHost
+[40/145] Linking JidokaCodeHerdrFixture
+[40/145] Linking JidokaCodeEngineProbe
+[44/145] Applying JidokaCodeHerdrFixture
+[44/145] Applying JidokaCodeEngineProbe
+[46/145] Applying JidokaCodeLocationProbeApp
+[47/145] Applying JidokaCodeAskPass
+[47/145] Applying JidokaCodePushGuard
+[49/145] Applying JidokaCodeBoundedCommand
+[49/145] Applying JidokaCodeHerdrHost
+[51/145] Applying JidokaCodeLocationProbeEngine
+[53/145] Emitting module JidokaCodeAppSupport
+[54/145] Compiling JidokaCodeAppSupport AppViewModel.swift
+[55/145] Compiling JidokaCodeAppSupport JidokaViews.swift
+[56/164] Compiling JidokaCodeApp JobMaintenanceCLI.swift
+[57/164] Compiling JidokaCodeApp JobCanaryCLI.swift
+[58/164] Emitting module JidokaCodeApp
+[59/164] Compiling JidokaCodeApp ApplicationComposition.swift
+[60/164] Compiling JidokaCodeApp ApplicationEngineClient.swift
+[61/164] Compiling JidokaCodeApp WorkflowProbeCLI.swift
+[62/164] Compiling JidokaCodeApp PiProbeCLI.swift
+[63/164] Compiling JidokaCodeApp RolloutCLI.swift
+[64/164] Compiling JidokaCodeApp KeychainCLI.swift
+[65/164] Compiling JidokaCodeApp LocalSpikeCLI.swift
+[66/164] Compiling JidokaCodeApp JidokaCodeApp.swift
+[67/164] Compiling JidokaCodeApp HerdrReadinessProbeCLI.swift
+[68/164] Compiling JidokaCodeApp LifecycleCLI.swift
+[68/165] Write Objects.LinkFileList
+[70/165] Emitting module JidokaCodeUIFixture
+[71/165] Compiling JidokaCodeUIFixture JidokaCodeUIFixtureMain.swift
+[71/165] Write Objects.LinkFileList
+[73/165] Compiling JidokaCodeCoreTests PiModelCatalogTests.swift
+[74/165] Compiling JidokaCodeCoreTests PiProbeContractTests.swift
+[75/165] Compiling JidokaCodeCoreTests PiProviderCredentialSnapshotTests.swift
+[76/165] Compiling JidokaCodeCoreTests PiRPCProcessTests.swift
+[77/165] Compiling JidokaCodeCoreTests PiRPCProtocolTests.swift
+[78/169] Compiling JidokaCodeCoreTests LocalSpikeContractTests.swift
+[79/169] Compiling JidokaCodeCoreTests LocationProbeProtocolTests.swift
+[80/169] Compiling JidokaCodeCoreTests MutationReconcilerTests.swift
+[81/169] Compiling JidokaCodeCoreTests PackagedExecutableSnapshotTests.swift
+[82/169] Compiling JidokaCodeCoreTests PackagedPiResourceSnapshotTests.swift
+[82/169] Linking JidokaCodeApp
+[83/169] Applying JidokaCodeApp
+[84/172] Linking JidokaCodeUIFixture
+[85/172] Applying JidokaCodeUIFixture
+[87/172] Compiling JidokaCodeCoreTests PackagedPreflightTests.swift
+[88/172] Compiling JidokaCodeCoreTests PackagedResourceSnapshotTests.swift
+[89/172] Compiling JidokaCodeCoreTests PiIssueImplementationOrchestratorTests.swift
+[90/172] Compiling JidokaCodeCoreTests PiJobWorkflowPreparerTests.swift
+[91/172] Compiling JidokaCodeCoreTests PiModelCatalogDiscoveryTests.swift
+[92/172] Compiling JidokaCodeCoreTests GitHubPullRequestPublisherTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:446:7: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+444 |     var application: SecTrustedApplication?
+445 |     let status = path.withCString {
+446 |       SecTrustedApplicationCreateFromPath($0, &application)
+    |       `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+447 |     }
+448 |     guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:454:16: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+452 |   }
+453 |   var access: SecAccess?
+454 |   let status = SecAccessCreate(
+    |                `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+455 |     descriptor as CFString,
+456 |     trustedApplications as CFArray,
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[93/172] Compiling JidokaCodeCoreTests GitHubRequestTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:446:7: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+444 |     var application: SecTrustedApplication?
+445 |     let status = path.withCString {
+446 |       SecTrustedApplicationCreateFromPath($0, &application)
+    |       `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+447 |     }
+448 |     guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:454:16: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+452 |   }
+453 |   var access: SecAccess?
+454 |   let status = SecAccessCreate(
+    |                `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+455 |     descriptor as CFString,
+456 |     trustedApplications as CFArray,
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[94/172] Compiling JidokaCodeCoreTests GitHubTokenStoreTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:446:7: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+444 |     var application: SecTrustedApplication?
+445 |     let status = path.withCString {
+446 |       SecTrustedApplicationCreateFromPath($0, &application)
+    |       `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+447 |     }
+448 |     guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:454:16: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+452 |   }
+453 |   var access: SecAccess?
+454 |   let status = SecAccessCreate(
+    |                `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+455 |     descriptor as CFString,
+456 |     trustedApplications as CFArray,
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[95/172] Compiling JidokaCodeCoreTests GitHubWorkflowLabelBootstrapperTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:446:7: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+444 |     var application: SecTrustedApplication?
+445 |     let status = path.withCString {
+446 |       SecTrustedApplicationCreateFromPath($0, &application)
+    |       `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+447 |     }
+448 |     guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:454:16: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+452 |   }
+453 |   var access: SecAccess?
+454 |   let status = SecAccessCreate(
+    |                `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+455 |     descriptor as CFString,
+456 |     trustedApplications as CFArray,
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[96/172] Compiling JidokaCodeCoreTests GitHubWorkflowLabelMutatorTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:446:7: warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+444 |     var application: SecTrustedApplication?
+445 |     let status = path.withCString {
+446 |       SecTrustedApplicationCreateFromPath($0, &application)
+    |       `- warning: 'SecTrustedApplicationCreateFromPath' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+447 |     }
+448 |     guard status == errSecSuccess, let application else {
+
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/GitHubTokenStoreTests.swift:454:16: warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+452 |   }
+453 |   var access: SecAccess?
+454 |   let status = SecAccessCreate(
+    |                `- warning: 'SecAccessCreate' was deprecated in macOS 10.10: SecKeychain is deprecated [#DeprecatedDeclaration]
+455 |     descriptor as CFString,
+456 |     trustedApplications as CFArray,
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[97/172] Compiling JidokaCodeCoreTests WorkflowProbeContractTests.swift
+[98/172] Compiling JidokaCodeCoreTests WorkspaceApprovedCommandExecutorTests.swift
+[99/172] Compiling JidokaCodeCoreTests WorkspaceImporterTests.swift
+[100/172] Compiling JidokaCodeCoreTests XCTestSmokeTests.swift
+[101/172] Emitting module JidokaCodeAppSupportTests
+[102/172] Compiling JidokaCodeAppSupportTests AppSupportSmokeTests.swift
+[103/172] Compiling JidokaCodeAppSupportTests ViewModelFlowTests.swift
+[104/172] Emitting module JidokaCodeCoreTests
+[105/172] Compiling JidokaCodeCoreTests IssueTriageJobWorkflowTests.swift
+[106/172] Compiling JidokaCodeCoreTests JobCoordinatorTests.swift
+[107/172] Compiling JidokaCodeCoreTests JobStateMachineTests.swift
+[108/172] Compiling JidokaCodeCoreTests KeychainProbeTests.swift
+[109/172] Compiling JidokaCodeCoreTests LifecycleProbeTests.swift
+[110/172] Compiling JidokaCodeCoreTests SQLiteStoreTests.swift
+[111/172] Compiling JidokaCodeCoreTests SingleInstanceLockTests.swift
+[112/172] Compiling JidokaCodeCoreTests SubmoduleManagerTests.swift
+[113/172] Compiling JidokaCodeCoreTests VerificationCommandRunnerTests.swift
+[114/172] Compiling JidokaCodeCoreTests RolloutEffectAuthorityTestSupport.swift
+[115/172] Compiling JidokaCodeCoreTests RolloutLeaseAuthorityTests.swift
+[116/172] Compiling JidokaCodeCoreTests RolloutReleaseIdentityAttestorTests.swift
+[117/172] Compiling JidokaCodeCoreTests RolloutRemotePreviewRevalidatorTests.swift
+[118/172] Compiling JidokaCodeAppTests ApplicationEngineClientTests.swift
+[119/172] Emitting module JidokaCodeAppTests
+[120/172] Compiling JidokaCodeAppTests RolloutCLITests.swift
+[121/172] Compiling JidokaCodeCoreTests ApprovedCommandRunStoreTests.swift
+[122/172] Compiling JidokaCodeCoreTests ArtifactStoreTests.swift
+[123/172] Compiling JidokaCodeCoreTests ComplexityClassifierTests.swift
+[124/172] Compiling JidokaCodeCoreTests ConfigurationStoreTests.swift
+[125/172] Compiling JidokaCodeCoreTests DurableApprovedCommandExecutorTests.swift
+[126/172] Compiling JidokaCodeCoreTests HerdrRuntimeReadinessTests.swift
+[127/172] Compiling JidokaCodeCoreTests HerdrTopologyTests.swift
+[128/172] Compiling JidokaCodeCoreTests HistoricalCanaryEffectDenialTests.swift
+[129/172] Compiling JidokaCodeCoreTests IssueImplementationJobWorkflowTests.swift
+[130/172] Compiling JidokaCodeCoreTests IssueRevisionTests.swift
+[131/172] Compiling JidokaCodeCoreTests GitHubJobMutationObservationReaderTests.swift
+[132/172] Compiling JidokaCodeCoreTests GitHubMarkerPublisherTests.swift
+[133/172] Compiling JidokaCodeCoreTests GitHubMarkerTests.swift
+[134/172] Compiling JidokaCodeCoreTests GitHubMutationExecutorTests.swift
+[135/172] Compiling JidokaCodeCoreTests GitHubMutationObservationsTests.swift
+[136/172] Compiling JidokaCodeCoreTests PiWorkflowResourceTests.swift
+[137/172] Compiling JidokaCodeCoreTests PiWorkflowRouterTests.swift
+[138/172] Compiling JidokaCodeCoreTests ProcessIdentityFixtureRecord.swift
+[139/172] Compiling JidokaCodeCoreTests ProductionEngineExternalServicesTests.swift
+[140/172] Compiling JidokaCodeCoreTests ProductionHerdrCompositionTests.swift
+[141/172] Compiling JidokaCodeCoreTests PullRequestCommitDeriverTests.swift
+[142/172] Compiling JidokaCodeCoreTests PullRequestReviewJobWorkflowTests.swift
+[143/172] Compiling JidokaCodeCoreTests RepositoryStoreFaultTests.swift
+[144/172] Compiling JidokaCodeCoreTests RepositoryStoreTests.swift
+[145/172] Compiling JidokaCodeCoreTests RolloutAuthorityStoreTests.swift
+[146/172] Compiling JidokaCodeCoreTests DurableJobStoreTests.swift
+[147/172] Compiling JidokaCodeCoreTests DurableSchedulerTests.swift
+[148/172] Compiling JidokaCodeCoreTests EngineProtocolTests.swift
+[149/172] Compiling JidokaCodeCoreTests EngineRedactedLogTests.swift
+[150/172] Compiling JidokaCodeCoreTests EngineServiceTests.swift
+[151/172] Compiling JidokaCodeCoreTests EngineXPCPeerValidatorTests.swift
+[152/172] Compiling JidokaCodeCoreTests FrozenCommandPlanCodecTests.swift
+[153/172] Compiling JidokaCodeCoreTests GitAskPassTests.swift
+[154/172] Compiling JidokaCodeCoreTests GitHubDiscoveryTests.swift
+[155/172] Compiling JidokaCodeCoreTests GitHubHTTPTests.swift
+[156/172] Compiling JidokaCodeCoreTests PiRPCWorkflowExecutorTests.swift
+[157/172] Compiling JidokaCodeCoreTests PiRunStoreTests.swift
+[158/172] Compiling JidokaCodeCoreTests PiRuntimeResolverTests.swift
+[159/172] Compiling JidokaCodeCoreTests PiTUIRuntimeTests.swift
+[160/172] Compiling JidokaCodeCoreTests PiWorkflowReplayTests.swift
+[161/172] Compiling JidokaCodeCoreTests GitProcessTests.swift
+[162/172] Compiling JidokaCodeCoreTests GitPublicationTests.swift
+[163/172] Compiling JidokaCodeCoreTests GitPushGuardTests.swift
+[164/172] Compiling JidokaCodeCoreTests GitRolloutPreviewTests.swift
+[165/172] Compiling JidokaCodeCoreTests GitTestSupport.swift
+[166/172] Compiling JidokaCodeCoreTests HerdrFakeSocket.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:7119:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7117 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+7118 |       ) ?? 0
+7119 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7120 |       _ = try await database.execute(
+7121 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[167/172] Compiling JidokaCodeCoreTests HerdrHostRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:7119:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7117 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+7118 |       ) ?? 0
+7119 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7120 |       _ = try await database.execute(
+7121 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[168/172] Compiling JidokaCodeCoreTests HerdrPiWorkflowRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:7119:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7117 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+7118 |       ) ?? 0
+7119 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7120 |       _ = try await database.execute(
+7121 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[169/172] Compiling JidokaCodeCoreTests HerdrProtocolTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:7119:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7117 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+7118 |       ) ?? 0
+7119 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7120 |       _ = try await database.execute(
+7121 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[170/172] Compiling JidokaCodeCoreTests HerdrRoleHostRuntimeTests.swift
+/private/tmp/jidoka-code-progressive-production-automation/Tests/JidokaCodeCoreTests/HerdrPiWorkflowRuntimeTests.swift:7119:9: warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7117 |         "SELECT paused FROM app_settings WHERE singleton = 1"
+7118 |       ) ?? 0
+7119 |     let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+     |         `- warning: initialization of immutable value 'run' was never used; consider replacing with assignment to '_' or removing it [#no-usage]
+7120 |       _ = try await database.execute(
+7121 |         "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+[170/172] Write Objects.LinkFileList
+[171/172] Linking JidokaCodePackageTests
+Build complete! (31.03s)
+Test Suite 'Selected tests' started at 2026-09-05 16:01:41.010.
+Test Suite 'JidokaCodePackageTests.xctest' started at 2026-09-05 16:01:41.012.
+Test Suite 'JidokaCodePackageTests.xctest' passed at 2026-09-05 16:01:41.012.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-05 16:01:41.012.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "Fake-first application flow" started.
+◇ Suite "Production rollout operator commands" started.
+◇ Suite "Historical canary effect denial" started.
+◇ Suite "Rollout operator CLI" started.
+◇ Suite "SQLite durable store" started.
+◇ Test "rollout preview requires a paused engine and a canonical bounded valid input" started.
+◇ Test "release mismatch and local identity drift leave operator admission closed" started.
+◇ Test "the explicit test double denies a historical canary provider reservation like the store" started.
+◇ Test "recovery rejects unpaused, expired and drifted evidence" started.
+◇ Test "a historical canary permit cannot be verified or settled" started.
+◇ Test "a busy command times out into recovery without reopening admission" started.
+◇ Test "a historical canary context cannot reserve any fresh effect" started.
+◇ Test "mode, UUID, digest, JSON and timeout mismatches are refused" started.
+◇ Test "a schema-10 database stamped by an unshipped migration body fails closed" started.
+◇ Test "a database this binary refuses as too new is never written to" started.
+◇ Test "stop and recovery allow the bounded engine drain budget" started.
+◇ Test "each operator action parses its exact payload and rejects extra or missing arguments" started.
+◇ Test "base64 decoding is canonical, nonempty and bounded before JSON parsing" started.
+◇ Test "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "production schema upgrades through architecture role-host replacement authority" started.
+◇ Test "stop closes actual dispatch and command gates and pauses the scheduler" started.
+◇ Test "empty database migrates with required pragmas and permissions" started.
+◇ Test "explicit backup is consistent and closed stores fail closed" started.
+◇ Test "irreversible upgrade creates a readable pre-migration backup" started.
+◇ Test "failed migration rolls back schema and migration version" started.
+◇ Test "explicit WAL checkpoint is durable and closed stores reject it" started.
+◇ Test "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test "a historical canary send is denied and marks no intent as started" started.
+◇ Test "foreign keys and append-only triggers reject invalid writes" started.
+◇ Test "production schema upgrades to rollout authority without manufacturing authority" started.
+◇ Test "symbolic-link database and parent paths fail closed" started.
+◇ Test case passing 1 argument completedStatementCount → 1 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "typed transaction commits once and rolls back on error" started.
+◇ Test case passing 1 argument completedStatementCount → 2 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test "preview and activation enforce paused, exclusive and checkpoint boundaries" started.
+◇ Test "applied migrations record their body digest and reopen idempotently" started.
+◇ Test case passing 1 argument completedStatementCount → 3 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 4 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 5 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 6 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 7 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 8 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 9 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 10 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 11 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "recovery rejects unpaused, expired and drifted evidence" recorded an issue at RolloutAuthorityStoreTests.swift:3113:4: Caught error: .statementFailed(code: 19, message: "invalid rollout authorization state transition")
+◇ Test case passing 1 argument completedStatementCount → 12 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✘ Test "release mismatch and local identity drift leave operator admission closed" recorded an issue at RolloutAuthorityStoreTests.swift:3158:4: Caught error: .statementFailed(code: 19, message: "invalid rollout authorization state transition")
+◇ Test case passing 1 argument completedStatementCount → 13 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 14 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 15 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 16 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 17 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 18 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 19 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 20 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 21 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 22 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 23 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 24 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 1 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 25 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 26 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 2 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 3 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 27 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 4 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 28 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 5 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 29 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 30 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 31 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 6 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 7 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 8 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 32 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 9 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 33 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 10 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 11 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 12 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 13 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 14 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 15 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 34 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 16 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 35 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 36 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 17 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 37 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 18 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 38 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 19 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 39 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 20 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 40 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 21 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 41 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 22 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 42 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 43 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 23 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 24 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 25 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 26 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 44 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 27 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 28 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 45 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 29 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 46 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 30 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 47 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 31 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 48 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 49 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 32 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 33 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 50 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 51 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 34 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 52 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 35 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 53 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 36 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 54 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 37 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 38 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 55 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 39 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 40 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 56 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 41 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 57 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 42 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 58 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 43 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 59 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 44 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 60 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 45 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 61 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 46 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 47 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 48 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 49 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 50 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 51 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 52 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 53 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 62 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 54 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 55 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 56 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 63 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 57 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 64 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 58 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 59 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 65 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 60 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 61 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 62 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 63 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 64 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 65 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 66 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 66 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 67 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 68 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 69 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 67 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 70 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 71 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 72 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+✔ Test "stop and recovery allow the bounded engine drain budget" passed after 1.420 seconds.
+◇ Test case passing 1 argument completedStatementCount → 68 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 69 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 70 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 71 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 73 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 72 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 73 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 74 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 75 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 76 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 77 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 78 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 74 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 79 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 80 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 81 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 82 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 75 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 83 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 76 to "production schema 8 to 9 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 84 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 85 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 86 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 87 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 88 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 89 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 90 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+◇ Test case passing 1 argument completedStatementCount → 91 to "production schema 9 to 10 rolls back after every exact migration statement" started.
+✔ Test "each operator action parses its exact payload and rejects extra or missing arguments" passed after 1.692 seconds.
+✔ Test "mode, UUID, digest, JSON and timeout mismatches are refused" passed after 1.693 seconds.
+✔ Test "base64 decoding is canonical, nonempty and bounded before JSON parsing" passed after 1.693 seconds.
+✔ Test "a historical canary context cannot reserve any fresh effect" passed after 1.693 seconds.
+✔ Test "empty database migrates with required pragmas and permissions" passed after 1.694 seconds.
+✘ Test "recovery rejects unpaused, expired and drifted evidence" failed after 1.694 seconds with 1 issue.
+✘ Test "release mismatch and local identity drift leave operator admission closed" failed after 1.694 seconds with 1 issue.
+✔ Test "a historical canary permit cannot be verified or settled" passed after 1.694 seconds.
+✔ Test "the explicit test double denies a historical canary provider reservation like the store" passed after 1.694 seconds.
+✔ Test "production schema upgrades through architecture role-host replacement authority" passed after 1.694 seconds.
+✔ Test "irreversible upgrade creates a readable pre-migration backup" passed after 1.694 seconds.
+✔ Test "a database this binary refuses as too new is never written to" passed after 1.694 seconds.
+✔ Test "failed migration rolls back schema and migration version" passed after 1.694 seconds.
+✔ Test "stop closes actual dispatch and command gates and pauses the scheduler" passed after 1.694 seconds.
+✔ Test "explicit backup is consistent and closed stores fail closed" passed after 1.694 seconds.
+✔ Test "explicit WAL checkpoint is durable and closed stores reject it" passed after 1.694 seconds.
+✔ Test "a schema-10 database stamped by an unshipped migration body fails closed" passed after 1.694 seconds.
+✔ Test "a historical canary send is denied and marks no intent as started" passed after 1.694 seconds.
+✔ Test "symbolic-link database and parent paths fail closed" passed after 1.694 seconds.
+✔ Test "foreign keys and append-only triggers reject invalid writes" passed after 1.694 seconds.
+✔ Test "production schema upgrades to rollout authority without manufacturing authority" passed after 1.694 seconds.
+✔ Test "typed transaction commits once and rolls back on error" passed after 1.694 seconds.
+✔ Test "preview and activation enforce paused, exclusive and checkpoint boundaries" passed after 1.694 seconds.
+✔ Test "applied migrations record their body digest and reopen idempotently" passed after 1.694 seconds.
+✔ Suite "Rollout operator CLI" passed after 1.695 seconds.
+✔ Suite "Historical canary effect denial" passed after 1.695 seconds.
+✔ Test "rollout preview requires a paused engine and a canonical bounded valid input" passed after 1.712 seconds.
+✔ Suite "Fake-first application flow" passed after 1.712 seconds.
+✔ Test "production schema 8 to 9 rolls back after every exact migration statement" with 76 test cases passed after 1.757 seconds.
+✔ Test "production schema 9 to 10 rolls back after every exact migration statement" with 91 test cases passed after 1.795 seconds.
+✔ Suite "SQLite durable store" passed after 1.795 seconds.
+✔ Test "a busy command times out into recovery without reopening admission" passed after 2.711 seconds.
+✘ Suite "Production rollout operator commands" failed after 2.711 seconds with 2 issues.
+✘ Test run with 29 tests in 5 suites failed after 2.711 seconds with 2 issues.
+
+Exit status: 1
+UTC end: 2026-09-05T14:01:43Z
