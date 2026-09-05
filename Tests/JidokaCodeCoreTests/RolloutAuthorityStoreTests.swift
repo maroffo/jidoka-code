@@ -2936,3 +2936,91 @@ private struct RolloutNoReadAPI: GitHubReadAPI {
 private struct RolloutNoReadback: RolloutStartedEffectReconciling {
   func reconcileStartedEffects(now _: Date) async throws {}
 }
+
+// Review finding M1 (PR #18): while a lane is draining the database holds `state = 'draining'`
+// with `app_settings.paused = 0`, which satisfies neither disjunct of the readback insert
+// triggers, so the readback of a send-started mutation is refused with an untyped SQLite abort
+// although `waitForDrain` waits on exactly that mutation. The known-issue wrapper keeps the suite
+// green while the finding is open and fails once either layer is fixed, at which point the
+// wrapper must be removed.
+extension RolloutAuthorityStoreTests {
+  @Test("a send-started mutation's readback is reservable while the lane is draining")
+  func readbackDuringDrain() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    try await fixture.activate()
+    try await fixture.setJob(state: .executing, currentStep: 1, kind: .publish)
+    let intents = MutationIntentStore(database: fixture.database)
+    let operation = fixture.commentOperation(body: "review-marker")
+    let requestSHA256 = try GitHubMutationExecutor.requestDigest(operation)
+    let documentSHA256 = GitHubMarkerCodec.sha256(Data("review-document".utf8))
+    let intent = try await intents.prepare(
+      jobID: fixture.jobID,
+      idempotencyKey: GitHubMarkerCodec.sha256(Data("review-marker-intent".utf8)),
+      operation: .createMarkerComment,
+      target: fixture.markerTarget,
+      expectedStateDigest: documentSHA256,
+      requestDigest: requestSHA256,
+      now: fixture.now.addingTimeInterval(2)
+    )
+    let sendPermit = try await withTestRolloutWorkflow(jobID: fixture.jobID) {
+      _ = try await fixture.authority.reserveMarkerBatch(
+        fixture.markerBatch(intentIDs: [intent.id], documentSHA256: documentSHA256),
+        now: fixture.now.addingTimeInterval(3)
+      )
+      return try await fixture.authority.reserveGitHubSendAndMarkStarted(
+        RolloutGitHubSendEffect(
+          jobID: fixture.jobID,
+          intentID: intent.id,
+          mutation: .createMarkerComment,
+          target: fixture.markerTarget,
+          expectedStateSHA256: documentSHA256,
+          requestSHA256: requestSHA256,
+          operation: operation
+        ),
+        now: fixture.now.addingTimeInterval(4)
+      )
+    }
+    guard case .reservation = sendPermit else {
+      Issue.record("send did not return a durable reservation")
+      return
+    }
+    #expect(try await intents.intent(id: intent.id)?.state == .sendStarted)
+
+    let draining = try await fixture.authority.beginDrain(
+      authorizationID: fixture.authorizationID.uuidString.lowercased(),
+      reasonCode: "OPERATOR_STOP_REQUESTED",
+      now: fixture.now.addingTimeInterval(5)
+    )
+    #expect(draining.authorization.state == .draining)
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 0)
+
+    let readbackContext = RolloutEffectExecutionContext(
+      mode: .readback(jobID: fixture.jobID, intentID: intent.id)
+    )
+    let readbackEffect = RolloutGitHubReadEffect(
+      operation: .listComments(
+        owner: "fixture-owner",
+        repository: "fixture-repository",
+        number: 17,
+        page: 1
+      ),
+      maximumResponseBytes: 4_096,
+      context: readbackContext
+    )
+    await withKnownIssue(
+      "PR #18 review M1: readback insert triggers deny the drain window (draining, paused = 0)"
+    ) {
+      let permit = try await RolloutEffectTaskContext.$current.withValue(readbackContext) {
+        try await fixture.authority.reserveGitHubRead(
+          readbackEffect,
+          now: fixture.now.addingTimeInterval(6)
+        )
+      }
+      guard case .readback = permit else {
+        Issue.record("unexpected permit kind during drain: \(permit)")
+        return
+      }
+    }
+  }
+}

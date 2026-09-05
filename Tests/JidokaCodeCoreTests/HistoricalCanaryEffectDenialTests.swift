@@ -41,6 +41,29 @@ struct HistoricalCanaryEffectDenialTests {
     await fixture.database.close()
   }
 
+  // Review finding M3 (PR #18): the shared explicit double grants a historical-canary provider
+  // permit that `RolloutAuthorityStore.reserveProvider` always denies, so the executor's canary
+  // launch branch is exercised only against a double that contradicts production. The known-issue
+  // wrapper keeps the suite green while the finding is open and fails once the double is aligned,
+  // at which point the wrapper must be removed.
+  @Test("the explicit test double denies a historical canary provider reservation like the store")
+  func explicitDoubleMatchesStoreForCanaryProvider() async throws {
+    let fixture = try await HistoricalCanaryFixture()
+    defer { fixture.remove() }
+    let double = ExplicitTestRolloutEffectAuthority()
+
+    try await fixture.asHistoricalCanary {
+      await withKnownIssue(
+        "PR #18 review M3: ExplicitTestRolloutEffectAuthority grants canary provider permits"
+      ) {
+        await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+          _ = try await double.reserveProvider(fixture.providerEffect(), now: fixture.now)
+        }
+      }
+    }
+    await fixture.database.close()
+  }
+
   @Test("a historical canary send is denied and marks no intent as started")
   func historicalCanarySendMarksNothing() async throws {
     let fixture = try await HistoricalCanaryFixture()
