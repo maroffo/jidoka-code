@@ -32,26 +32,44 @@ public struct SQLiteMigration: Equatable, Sendable {
   public let requiresBackup: Bool
   public let statements: [String]
 
+  /// Whether a database stamped with this migration must prove which body wrote it.
+  ///
+  /// Opt-in per migration rather than a version floor on the store. The fact that
+  /// justifies it — "this migration has never shipped, so any recorded body other
+  /// than mine is a pre-release database" — belongs to the migration, not to a
+  /// generic SQLite engine whose migration list is caller-supplied. A floor would
+  /// silently extend to every future migration, where the same reasoning is false
+  /// and the operator remedy (delete the database) would be wrong.
+  public let verifiesContent: Bool
+
   public init(
     version: Int,
     name: String,
     requiresBackup: Bool,
-    statements: [String]
+    statements: [String],
+    verifiesContent: Bool = false
   ) {
     self.version = version
     self.name = name
     self.requiresBackup = requiresBackup
     self.statements = statements
+    self.verifiesContent = verifiesContent
   }
 
-  /// Digest of the exact statements this migration applies.
+  /// Digest of the exact migration this applies.
   ///
   /// A stamped `schema_migrations` row records this value so a later binary can
-  /// prove that the database was built by the same migration body it now carries.
+  /// prove that the database was built by the same migration it now carries.
   /// Version and name alone cannot: both stay constant when a migration is edited.
+  ///
+  /// `requiresBackup` is folded in because the digest must pin the safety protocol
+  /// the migration ran under, not only what it did to the schema. `verifiesContent`
+  /// is not: it is this binary's policy about the row, not a property of the
+  /// database the row describes.
   public var statementsSHA256: String {
     var hasher = SHA256()
-    hasher.update(data: Data("v\(version)\u{1F}\(name)\u{1E}".utf8))
+    hasher.update(
+      data: Data("v\(version)\u{1F}\(name)\u{1F}backup:\(requiresBackup ? 1 : 0)\u{1E}".utf8))
     for statement in statements {
       hasher.update(data: Data(statement.utf8))
       hasher.update(data: Data("\u{1E}".utf8))
@@ -380,13 +398,12 @@ public actor SQLiteStore {
     }
   }
 
-  /// First migration version whose recorded content digest is mandatory.
+  /// Create the ledger only. Deliberately does not add the digest column.
   ///
-  /// Migrations 1 through 9 were applied by released binaries that predate the
-  /// digest column, so their rows legitimately carry no digest. Migration 10 has
-  /// never shipped, so every schema-10 row must prove which body produced it.
-  static let firstContentVerifiedMigrationVersion = 10
-
+  /// This runs before the too-new guard and before the digest check, so anything it
+  /// writes lands in a database this binary may be about to refuse. `CREATE TABLE IF
+  /// NOT EXISTS` is a no-op on every database that already has a ledger, which makes
+  /// this read-only in practice for exactly the cases that can be refused.
   private static func bootstrapMigrationTable(_ connection: SQLiteConnection) throws {
     try executeRaw(
       """
@@ -398,17 +415,30 @@ public actor SQLiteStore {
       """,
       connection: connection
     )
-    let columns = try query("PRAGMA table_info(schema_migrations)", connection: connection)
-    let hasDigest = columns.contains { row in
-      if case .text("statements_sha256")? = row["name"] { return true }
-      return false
-    }
-    if !hasDigest {
-      try executeRaw(
-        "ALTER TABLE schema_migrations ADD COLUMN statements_sha256 TEXT",
-        connection: connection
-      )
-    }
+  }
+
+  private static func hasStatementsDigestColumn(
+    _ connection: SQLiteConnection
+  ) throws -> Bool {
+    try query("PRAGMA table_info(schema_migrations)", connection: connection)
+      .contains { row in
+        if case .text("statements_sha256")? = row["name"] { return true }
+        return false
+      }
+  }
+
+  /// Add the digest column, once both refusal guards have passed.
+  ///
+  /// Additive, nullable, metadata-only, and it does not fire the ledger's append-only
+  /// triggers. It must still not run before `migrationTooNew` or the content check,
+  /// or a database this binary refuses would have been written to on the way to the
+  /// refusal.
+  private static func addStatementsDigestColumn(_ connection: SQLiteConnection) throws {
+    guard try !hasStatementsDigestColumn(connection) else { return }
+    try executeRaw(
+      "ALTER TABLE schema_migrations ADD COLUMN statements_sha256 TEXT",
+      connection: connection
+    )
   }
 
   /// Fail closed when an applied migration's recorded body differs from this binary's.
@@ -416,40 +446,37 @@ public actor SQLiteStore {
   /// The migrator only runs `migration.version > current`, so a database stamped at a
   /// version by a different body would otherwise skip the differences silently and run
   /// with a schema this binary never wrote.
+  ///
+  /// Only migrations that declare `verifiesContent` are checked. A database written
+  /// before the column existed has no digest at all, which is a mismatch, not a pass:
+  /// the whole point is that such a database was stamped by an unshipped body.
   private static func verifyAppliedMigrationContent(
     _ migrations: [SQLiteMigration],
     connection: SQLiteConnection
   ) throws {
-    let applied = try query(
-      "SELECT version, statements_sha256 FROM schema_migrations WHERE version >= ?",
-      bindings: [.integer(Int64(firstContentVerifiedMigrationVersion))],
-      connection: connection
-    )
-    guard !applied.isEmpty else { return }
-    let expectedByVersion = Dictionary(
-      uniqueKeysWithValues: migrations.map { ($0.version, $0.statementsSHA256) }
-    )
-    for row in applied.sorted(by: { lhs, rhs in
-      guard case .integer(let left)? = lhs["version"],
-        case .integer(let right)? = rhs["version"]
-      else { return false }
-      return left < right
-    }) {
-      guard case .integer(let version)? = row["version"] else {
-        throw SQLiteStoreError.unexpectedResult("schema_migrations.version is not an integer")
-      }
-      guard let expected = expectedByVersion[Int(version)] else { continue }
+    let verified = migrations.filter(\.verifiesContent).sorted { $0.version < $1.version }
+    guard !verified.isEmpty else { return }
+    let columnExists = try hasStatementsDigestColumn(connection)
+    let projection =
+      columnExists ? "version, statements_sha256" : "version, NULL AS statements_sha256"
+    for migration in verified {
+      let applied = try query(
+        "SELECT \(projection) FROM schema_migrations WHERE version = ?",
+        bindings: [.integer(Int64(migration.version))],
+        connection: connection
+      )
+      guard let row = applied.first else { continue }
       let recorded: String?
       if case .text(let value)? = row["statements_sha256"] {
         recorded = value
       } else {
         recorded = nil
       }
-      guard recorded == expected else {
+      guard recorded == migration.statementsSHA256 else {
         throw SQLiteStoreError.migrationContentMismatch(
-          version: Int(version),
+          version: migration.version,
           recorded: recorded,
-          expected: expected
+          expected: migration.statementsSHA256
         )
       }
     }
@@ -474,6 +501,12 @@ public actor SQLiteStore {
       throw SQLiteStoreError.migrationTooNew(database: current, supported: supported)
     }
     try verifyAppliedMigrationContent(migrations, connection: connection)
+    // Both refusal guards have passed, so it is now safe to write. Only bother when
+    // a migration is actually going to record a digest: opening an already-current
+    // database must stay read-only.
+    if migrations.contains(where: { $0.version > current }) {
+      try addStatementsDigestColumn(connection)
+    }
 
     for migration in migrations where migration.version > current {
       if migration.requiresBackup && databaseExistedBeforeOpen {

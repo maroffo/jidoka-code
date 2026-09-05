@@ -164,6 +164,178 @@ struct RolloutLeaseAuthorityTests {
     }
   }
 
+  @Test("a generation-1 job stays gated after its own lane has closed")
+  func generationOneLeaseGatedAfterLaneClosed() async throws {
+    for (state, reason) in [
+      ("settled", "completed"), ("revoked", "operator"), ("expired", "expiry"),
+      ("failed", "fault"),
+    ] {
+      let fixture = try await RolloutLeaseFixture()
+      let bound = try await fixture.createJob(repositoryID: fixture.repositoryA, revision: "rev-a")
+      _ = try await fixture.activateExactPullRequestRollout(
+        repositoryID: fixture.repositoryA,
+        job: bound
+      )
+      #expect(try await fixture.rolloutGeneration(jobID: bound.id) == 1, "\(state)")
+      try await fixture.close(state: state, reason: reason)
+
+      // Arming on lane state alone would leave this job ungated for ever once its
+      // lane closed. A job an authorization promoted always needs one.
+      await #expect(throws: SQLiteStoreError.self, "\(state)") {
+        try await fixture.insertLease(repositoryID: fixture.repositoryA, jobID: bound.id)
+      }
+      #expect(try await fixture.activeLeaseCount() == 0, "\(state)")
+      await fixture.database.close()
+      fixture.remove()
+    }
+  }
+
+  @Test("a generation-1 job stays gated even where no lane was ever opened")
+  func generationOneLeaseGatedWithoutAnyLane() async throws {
+    let fixture = try await RolloutLeaseFixture()
+    defer { fixture.remove() }
+    let bound = try await fixture.createJob(repositoryID: fixture.repositoryA, revision: "rev-a")
+    _ = try await fixture.activateExactPullRequestRollout(
+      repositoryID: fixture.repositoryA,
+      job: bound
+    )
+    try await fixture.close(state: "settled", reason: "completed")
+    // Move the promoted job to a repository that never had an authorization at all.
+    try await fixture.database.execute(
+      "UPDATE jobs SET repository_id = ? WHERE id = ?",
+      bindings: [
+        .text(fixture.repositoryB.uuidString.lowercased()),
+        .text(bound.id.uuidString.lowercased()),
+      ]
+    )
+
+    await #expect(throws: SQLiteStoreError.self) {
+      try await fixture.insertLease(repositoryID: fixture.repositoryB, jobID: bound.id)
+    }
+    #expect(try await fixture.activeLeaseCount() == 0)
+    await fixture.database.close()
+  }
+
+  @Test("a lease the open lane does not bind stops being a continuation")
+  func unboundLeaseLosesContinuationWhenALaneOpens() async throws {
+    let fixture = try await RolloutLeaseFixture()
+    defer { fixture.remove() }
+    // Ordinary generation-0 work, admitted before any lane exists and therefore
+    // never seen by the gate.
+    let ordinary = try await fixture.createJob(
+      repositoryID: fixture.repositoryA, revision: "rev-ord")
+    try await fixture.insertLease(repositoryID: fixture.repositoryA, jobID: ordinary.id)
+    try await fixture.jobs.heartbeat(jobID: ordinary.id, now: fixture.now.addingTimeInterval(30))
+
+    // Activation deliberately does not require a lease-free repository: a rollout
+    // binds a job already in flight, which legitimately holds the lease. What must
+    // not survive is a continuation for a lease the lane never bound.
+    let bound = try await fixture.createJob(repositoryID: fixture.repositoryA, revision: "rev-a")
+    _ = try await fixture.activateExactPullRequestRollout(
+      repositoryID: fixture.repositoryA,
+      job: bound
+    )
+    await #expect(throws: (any Error).self) {
+      try await fixture.jobs.heartbeat(
+        jobID: ordinary.id,
+        now: fixture.now.addingTimeInterval(60)
+      )
+    }
+    #expect(try await fixture.leaseHeartbeat() == fixture.now.addingTimeInterval(30))
+
+    // The lane's own bound job is the contrast: same open lane, and it continues.
+    try await fixture.releaseLease(repositoryID: fixture.repositoryA)
+    try await fixture.reactivateLease(repositoryID: fixture.repositoryA, jobID: bound.id)
+    try await fixture.jobs.heartbeat(jobID: bound.id, now: fixture.now.addingTimeInterval(90))
+    #expect(try await fixture.leaseHeartbeat() == fixture.now.addingTimeInterval(90))
+    await fixture.database.close()
+  }
+
+  @Test("a live lease cannot be handed to another job or repository")
+  func continuationRequiresUnchangedIdentity() async throws {
+    for drift in LeaseIdentityDrift.allCases {
+      let fixture = try await RolloutLeaseFixture()
+      let bound = try await fixture.createJob(repositoryID: fixture.repositoryA, revision: "rev-a")
+      _ = try await fixture.activateExactPullRequestRollout(
+        repositoryID: fixture.repositoryA,
+        job: bound
+      )
+      try await fixture.insertLease(repositoryID: fixture.repositoryA, jobID: bound.id)
+      let other = try await fixture.createJob(
+        repositoryID: fixture.repositoryA, revision: "rev-other")
+
+      // Each of these keeps OLD.active = 1, so only the exemption's identity
+      // conjuncts separate them from an ordinary heartbeat. The generation case
+      // pauses first: a fencing bump on the lane's own bound job is legitimate
+      // while the lane is running, so what must be proved is that it is *gated*
+      // rather than exempt — under pause it has to abort where a plain heartbeat,
+      // which changes no identity, still succeeds.
+      if drift == .generation {
+        try await fixture.setPaused(true)
+        try await fixture.jobs.heartbeat(jobID: bound.id, now: fixture.now.addingTimeInterval(5))
+      }
+      await #expect(throws: SQLiteStoreError.self, "\(drift)") {
+        switch drift {
+        case .job:
+          try await fixture.database.execute(
+            "UPDATE repository_leases SET job_id = ? WHERE repository_id = ?",
+            bindings: [
+              .text(other.id.uuidString.lowercased()),
+              .text(fixture.repositoryA.uuidString.lowercased()),
+            ]
+          )
+        case .repository:
+          try await fixture.database.execute(
+            "UPDATE repository_leases SET repository_id = ? WHERE repository_id = ?",
+            bindings: [
+              .text(fixture.repositoryB.uuidString.lowercased()),
+              .text(fixture.repositoryA.uuidString.lowercased()),
+            ]
+          )
+        case .generation:
+          try await fixture.database.execute(
+            "UPDATE repository_leases SET generation = generation + 1 WHERE repository_id = ?",
+            bindings: [.text(fixture.repositoryA.uuidString.lowercased())]
+          )
+        }
+      }
+      await fixture.database.close()
+      fixture.remove()
+    }
+  }
+
+  @Test("the upsert lease shape is gated exactly like the plain statements")
+  func upsertShapeMatchesPlainStatements() async throws {
+    let fixture = try await RolloutLeaseFixture()
+    defer { fixture.remove() }
+    let bound = try await fixture.createJob(repositoryID: fixture.repositoryA, revision: "rev-a")
+    _ = try await fixture.activateExactPullRequestRollout(
+      repositoryID: fixture.repositoryA,
+      job: bound
+    )
+    let unbound = try await fixture.createJob(
+      repositoryID: fixture.repositoryA, revision: "rev-unbound")
+
+    // JobCanary acquires leases with INSERT ... ON CONFLICT DO UPDATE, so the gate has
+    // to hold on both branches of that one statement. The insert branch first, with no
+    // row to conflict with.
+    await #expect(throws: SQLiteStoreError.self, "unbound upsert, insert branch") {
+      try await fixture.upsertLease(repositoryID: fixture.repositoryA, jobID: unbound.id)
+    }
+    try await fixture.upsertLease(repositoryID: fixture.repositoryA, jobID: bound.id)
+    #expect(try await fixture.activeLeaseCount() == 1)
+
+    // And now the conflict branch, which is the one the INSERT trigger would miss if
+    // SQLite only fired it when a row is actually inserted. It does not: BEFORE INSERT
+    // runs before the conflict is resolved, so the same verdict applies.
+    await #expect(throws: SQLiteStoreError.self, "unbound upsert, conflict branch") {
+      try await fixture.upsertLease(repositoryID: fixture.repositoryA, jobID: unbound.id)
+    }
+    #expect(try await fixture.leaseJobID() == bound.id)
+    #expect(try await fixture.activeLeaseCount() == 1)
+    await fixture.database.close()
+  }
+
   @Test("a missing lease still reports a typed error rather than a raw SQLite abort")
   func heartbeatWithoutLeaseIsTyped() async throws {
     let fixture = try await RolloutLeaseFixture()
@@ -180,6 +352,12 @@ struct RolloutLeaseAuthorityTests {
     }
     await fixture.database.close()
   }
+}
+
+private enum LeaseIdentityDrift: CaseIterable {
+  case job
+  case repository
+  case generation
 }
 
 private final class RolloutLeaseFixture: @unchecked Sendable {
@@ -285,6 +463,24 @@ private final class RolloutLeaseFixture: @unchecked Sendable {
     )
   }
 
+  /// The shape `JobCanary` uses: SQLite fires BEFORE INSERT here even on conflict.
+  func upsertLease(repositoryID: UUID, jobID: UUID) async throws {
+    try await database.execute(
+      """
+      INSERT INTO repository_leases(repository_id, job_id, generation, heartbeat, active)
+      VALUES (?, ?, 1, ?, 1)
+      ON CONFLICT(repository_id) DO UPDATE SET
+        job_id = excluded.job_id, generation = excluded.generation,
+        heartbeat = excluded.heartbeat, active = 1
+      """,
+      bindings: [
+        .text(repositoryID.uuidString.lowercased()),
+        .text(jobID.uuidString.lowercased()),
+        .real(now.timeIntervalSince1970),
+      ]
+    )
+  }
+
   func reactivateLease(repositoryID: UUID, jobID: UUID) async throws {
     try await database.execute(
       """
@@ -358,6 +554,12 @@ private final class RolloutLeaseFixture: @unchecked Sendable {
         bindings: [.text(jobID.uuidString.lowercased())]
       ) ?? -1
     )
+  }
+
+  func leaseJobID() async throws -> UUID? {
+    let rows = try await database.query("SELECT job_id FROM repository_leases")
+    guard case .text(let value)? = rows.first?["job_id"] else { return nil }
+    return UUID(uuidString: value)
   }
 
   func leaseHeartbeat() async throws -> Date? {

@@ -128,13 +128,19 @@ struct RolloutRemotePreviewRevalidatorTests {
   // object-number upper bound.
   //
   // Not independently drivable from a valid preview, and therefore second-line
-  // defensive arms: the review-stage missing-label guard, which the preview builder
-  // already refuses to produce (asserted below); the stage arms whose callers have
-  // already switched on stage; the malformed-binding arms whose inputs the builder
-  // cannot emit; the workflow-label default arm for a stage/step pair the builder
-  // never produces; and the non-positive object numbers GitHub discovery cannot
-  // return. Reaching any of those needs a hand-forged preview, which the canonical
-  // round-trip guard rejects first.
+  // defensive arms. Each category is asserted at the edge that actually enforces it,
+  // rather than argued in prose:
+  //   - the review-stage missing-label guard, refused by the preview builder
+  //     (`reviewStageRejectsMissingLabels`);
+  //   - the malformed-binding arms, refused by the builder before a preview exists
+  //     (`builderRefusesMissingJobBinding`);
+  //   - the non-positive object number, refused by the object selector itself
+  //     (`builderRefusesNonPositiveObjectNumber`);
+  //   - the stage arms whose callers have already switched on stage, and the
+  //     workflow-label default arm for a stage/step pair the builder never emits.
+  //     Both are unreachable by construction rather than by validation.
+  // Reaching any of them at the revalidator would need a hand-forged preview, which
+  // the canonical round-trip guard rejects first.
 
   @Test("a preview whose canonical bytes no longer round-trip is rejected")
   func canonicalRoundTripDrift() async throws {
@@ -202,6 +208,29 @@ struct RolloutRemotePreviewRevalidatorTests {
       _ = try fixture.exactPreview(missingLabels: [
         RolloutLabelDefinition(name: "agent:ready", color: "0e8a16", description: "ready")
       ])
+    }
+    await fixture.database.close()
+  }
+
+  @Test("the builder refuses a missing job binding, so no preview carries one")
+  func builderRefusesMissingJobBinding() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    // An exact-object scope with no job binding is the malformed shape the
+    // revalidator's binding arms exist to catch. The builder rejects it first, so
+    // the arm is unreachable from a real preview rather than merely untested.
+    #expect(throws: RolloutAuthorityError.invalidJobBinding) {
+      _ = try fixture.exactPreview(jobBinding: .some(nil))
+    }
+    await fixture.database.close()
+  }
+
+  @Test("the builder refuses a non-positive object number, so discovery never sees one")
+  func builderRefusesNonPositiveObjectNumber() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    #expect(throws: (any Error).self) {
+      _ = try fixture.exactPreview(objectNumber: 0)
     }
     await fixture.database.close()
   }
@@ -439,7 +468,11 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     )
   }
 
-  func exactPreview(missingLabels: [RolloutLabelDefinition] = []) throws -> RolloutPreview {
+  func exactPreview(
+    missingLabels: [RolloutLabelDefinition] = [],
+    objectNumber: Int? = nil,
+    jobBinding: RolloutJobBinding?? = nil
+  ) throws -> RolloutPreview {
     let pullRequest = Self.makePullRequest(
       number: 10,
       suffix: "preview",
@@ -468,7 +501,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     )
     let object = RolloutObjectSelector(
       nodeID: pullRequest.nodeID,
-      number: pullRequest.number,
+      number: objectNumber ?? pullRequest.number,
       revisionKey: headSHA,
       canonicalInputSHA256: GitHubMarkerCodec.sha256(artifact),
       headSHA: headSHA,
@@ -489,15 +522,16 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
           finiteWindow: nil
         ),
         jobs: 1,
-        jobBinding: RolloutJobBinding(
-          jobID: job.id,
-          jobKind: .prReview,
-          objectNumber: 10,
-          contractVersion: job.contractVersionUsed,
-          priority: .prReview,
-          firstStep: .review,
-          currentStep: JobStepKind.review.rawValue
-        ),
+        jobBinding: jobBinding
+          ?? RolloutJobBinding(
+            jobID: job.id,
+            jobKind: .prReview,
+            objectNumber: objectNumber ?? 10,
+            contractVersion: job.contractVersionUsed,
+            priority: .prReview,
+            firstStep: .review,
+            currentStep: JobStepKind.review.rawValue
+          ),
         missingLabels: missingLabels
       )
     )

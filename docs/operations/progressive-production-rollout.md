@@ -37,16 +37,20 @@ a database already stamped at version 10 by an earlier body would otherwise skip
 change silently and run on a schema this binary never wrote.
 
 `schema_migrations` therefore records `statements_sha256`, the digest of the exact statements
-each applied migration ran, and opening a database verifies it for every applied migration from
-version 10 upward. A mismatch, or a schema-10 row with no digest at all, fails closed before any
-statement runs:
+each applied migration ran, and opening a database verifies it for every migration that declares
+`verifiesContent`. A mismatch, or a verified row with no digest at all, fails closed before any
+statement runs and before this binary writes anything to the database:
 
 ```
 migrationContentMismatch(version: 10, recorded: <digest or nil>, expected: <digest>)
 ```
 
-Versions 1 through 9 shipped in binaries that predate the column, so their blank rows are
-expected and are not verified.
+Only version 10 declares it today. The flag is a per-migration opt-in rather than a version
+floor on purpose: the fact that justifies it, "this migration has never shipped, so any other
+recorded body is a pre-release database", belongs to migration 10 and is false for migration 11.
+A floor would silently extend the operator action below to a future migration where deleting the
+database would be exactly the wrong advice. Versions 1 through 9 shipped in binaries that predate
+the column, so their blank rows are expected and are not verified.
 
 **Operator action when this fires.** It means the database was created by a pre-release build of
 this branch, so it is a development or CI database, never a production one: production has never
@@ -72,23 +76,34 @@ expiry, or revocation. Each readback is bound to the original mutation intent, r
 object, target, and the operation-specific lookup class. Every fresh read outside that exact
 readback, provider launch, command, send, ref creation, or child launch is denied.
 
-The database independently enforces active repository leases. While a repository has an open
-authorization (`active`, `draining`, or `recoveryRequired`), an inserted or reactivated lease on
-that repository must name the generation-1 job bound to the current unpaused authorization,
-stage, enabled workflow, and nonterminal phase. Application-only checks are not sufficient
-authority.
+The database independently enforces active repository leases. The gate arms when the leased job
+is `rollout_generation = 1`, or when the repository has an open authorization (`active`,
+`draining`, or `recoveryRequired`). Once armed, an inserted or reactivated lease must name the
+generation-1 job bound to the current unpaused authorization, stage, enabled workflow, and
+nonterminal phase. Application-only checks are not sufficient authority.
 
-The gate is scoped to the repository and to open lanes on purpose. `rollout_authorizations` is
-append-only, so a gate armed by the mere existence of any row would make the first authorization
+Both halves are needed. Arming on lane state alone would leave a promoted job ungated for ever
+once its lane settled; arming on generation alone would let ordinary generation-0 work join a
+rollout already in flight. Neither half may become a bare existence check over
+`rollout_authorizations`: the table is append-only, so that would make the first authorization
 ever created a permanent bar on every repository, including repositories a rollout never
-touched. Closing a lane (`settled`, `revoked`, `expired`, `failed`) therefore disarms it again,
+touched. Closing a lane (`settled`, `revoked`, `expired`, `failed`) disarms the lane half again,
 and the closed row stays as evidence.
 
 A heartbeat on a lease the repository already holds is a continuation, not admission: same row,
-same job, already active. It stays possible while the application is paused and while the lane
-is draining, because pausing is the mandatory first step of closing a lane and a drain that
-could not heartbeat would abort itself. Reactivating a released lease, moving a lease to another
+same job, same fencing generation, already active. It stays possible while the application is
+paused and while the lane is draining, because pausing is the mandatory first step of closing a
+lane and a drain that could not heartbeat would abort itself. The exemption applies only while an
+open lane on that repository actually binds the leased job, so a generation-0 lease admitted
+before the lane opened does not ride the rollout out: its next heartbeat is refused and the lease
+expires. Reactivating a released lease, bumping the fencing generation, moving a lease to another
 job, and taking a fresh lease all remain admission and stay gated.
+
+Activating a lane deliberately does not require the repository to be lease-free. A rollout binds
+a job that is already in flight (an `implementationExecute` lane is only previewable once that
+job has produced its plan artifacts), so the bound job legitimately holds the lease at activation
+time. The continuation rule above, not an activation-time emptiness check, is what bounds a lease
+the lane does not bind.
 
 ## Generated-review quarantine
 

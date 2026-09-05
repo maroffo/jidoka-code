@@ -2635,6 +2635,12 @@ public enum DatabaseSchema {
           WHERE singleton = 1 AND paused = 1
             AND active_rollout_authorization_id IS NULL AND max_concurrency = 1
         )
+        -- Deliberately not conditioned on repository_leases being empty. A rollout
+        -- binds a job that is already in flight -- an implementationExecute lane is
+        -- only previewable once that job has produced its plan artifacts -- so the
+        -- bound job legitimately holds the lease at activation time. The lease
+        -- admitted before the lane opened is bounded instead by the continuation
+        -- exemption below, which only exempts a lease the open lane actually binds.
         BEGIN
           SELECT RAISE(ABORT, 'rollout authorization activation requires paused empty scope');
         END
@@ -2810,13 +2816,30 @@ public enum DatabaseSchema {
         CREATE TRIGGER repository_leases_rollout_authority_insert
         BEFORE INSERT ON repository_leases
         WHEN NEW.active = 1
-          -- Only an open lane on THIS repository arms the gate. rollout_authorizations
-          -- is append-only, so a global EXISTS would make the first authorization ever
-          -- created a permanent bar on every repository.
-          AND EXISTS (
-            SELECT 1 FROM rollout_authorizations AS open_authorization
-            WHERE open_authorization.repository_id = NEW.repository_id
-              AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+          -- The gate arms on either half, and needs both to stay honest.
+          --
+          -- A generation-1 job is one an authorization promoted, so a lease on it
+          -- always needs a matching active authorization, including after its lane
+          -- closed. Arming on lane state alone would leave that job ungated for
+          -- ever once the lane settled.
+          --
+          -- An open lane on THIS repository additionally gates unbound generation-0
+          -- jobs, so a rollout in flight cannot be joined by ordinary work. Arming
+          -- on generation alone would let that through.
+          --
+          -- Neither half may become a global EXISTS over rollout_authorizations:
+          -- the table is append-only, so that would make the first authorization
+          -- ever created a permanent bar on every repository.
+          AND (
+            EXISTS (
+              SELECT 1 FROM jobs AS leased_job
+              WHERE leased_job.id = NEW.job_id AND leased_job.rollout_generation = 1
+            )
+            OR EXISTS (
+              SELECT 1 FROM rollout_authorizations AS open_authorization
+              WHERE open_authorization.repository_id = NEW.repository_id
+                AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+            )
           )
           AND NOT EXISTS (
             SELECT 1
@@ -2863,24 +2886,64 @@ public enum DatabaseSchema {
         """,
         """
         CREATE TRIGGER repository_leases_rollout_authority_update
-        BEFORE UPDATE OF repository_id, job_id, heartbeat, active ON repository_leases
+        BEFORE UPDATE OF repository_id, job_id, generation, heartbeat, active
+        ON repository_leases
         WHEN NEW.active = 1
           -- A heartbeat continues a lease this repository already holds: same row,
-          -- same job, already active. It grants no admission, so pause and drain
-          -- must not abort it. Reactivation (OLD.active = 0) and any identity change
-          -- are admission and stay gated.
+          -- same job, same fencing generation, already active. It grants no
+          -- admission, so pause and drain must not abort it -- pausing is the
+          -- mandatory first step of closing a lane, and a drain that could not
+          -- heartbeat would abort itself.
+          --
+          -- The exemption is bounded by an open lane that binds THIS job. Once the
+          -- lane is terminal there is nothing left to continue, and an unbounded
+          -- exemption would let a lease advance its heartbeat past the finite window
+          -- its authorization declared. Requiring the binding is what keeps ordinary
+          -- generation-0 work from riding out a rollout it was never part of: such a
+          -- lease was admitted before the lane opened, so the gate never saw it, and
+          -- without the binding conjunct it would stay exempt for the lane's life.
+          --
+          -- Reactivation (OLD.active = 0), a generation bump, and any identity
+          -- change are admission, not continuation, and stay gated.
           AND NOT (
             OLD.active = 1
             AND NEW.repository_id = OLD.repository_id
             AND NEW.job_id = OLD.job_id
+            AND NEW.generation = OLD.generation
+            AND EXISTS (
+              SELECT 1
+              FROM rollout_authorizations AS open_authorization
+              JOIN rollout_job_bindings AS open_binding
+                ON open_binding.authorization_id = open_authorization.id
+              WHERE open_authorization.repository_id = NEW.repository_id
+                AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+                AND open_binding.job_id = NEW.job_id
+            )
           )
-          -- Only an open lane on THIS repository arms the gate. rollout_authorizations
-          -- is append-only, so a global EXISTS would make the first authorization ever
-          -- created a permanent bar on every repository.
-          AND EXISTS (
-            SELECT 1 FROM rollout_authorizations AS open_authorization
-            WHERE open_authorization.repository_id = NEW.repository_id
-              AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+          -- The gate arms on either half, and needs both to stay honest.
+          --
+          -- A generation-1 job is one an authorization promoted, so a lease on it
+          -- always needs a matching active authorization, including after its lane
+          -- closed. Arming on lane state alone would leave that job ungated for
+          -- ever once the lane settled.
+          --
+          -- An open lane on THIS repository additionally gates unbound generation-0
+          -- jobs, so a rollout in flight cannot be joined by ordinary work. Arming
+          -- on generation alone would let that through.
+          --
+          -- Neither half may become a global EXISTS over rollout_authorizations:
+          -- the table is append-only, so that would make the first authorization
+          -- ever created a permanent bar on every repository.
+          AND (
+            EXISTS (
+              SELECT 1 FROM jobs AS leased_job
+              WHERE leased_job.id = NEW.job_id AND leased_job.rollout_generation = 1
+            )
+            OR EXISTS (
+              SELECT 1 FROM rollout_authorizations AS open_authorization
+              WHERE open_authorization.repository_id = NEW.repository_id
+                AND open_authorization.state IN ('active', 'draining', 'recoveryRequired')
+            )
           )
           AND NOT EXISTS (
             SELECT 1
@@ -3439,7 +3502,12 @@ public enum DatabaseSchema {
           SELECT RAISE(ABORT, 'production rollout concurrency must remain one');
         END
         """,
-      ]
+      ],
+      // Schema 10 has never shipped, and its body was edited more than once while
+      // this branch was in review. Any database recording a different body, or no
+      // body at all, was written by a pre-release build and must fail closed rather
+      // than silently skip the difference.
+      verifiesContent: true
     ),
   ]
 

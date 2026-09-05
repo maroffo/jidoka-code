@@ -115,15 +115,10 @@ struct HistoricalCanaryEffectDenialTests {
     await fixture.database.close()
   }
 
-  @Test("the historical canary permit case still decodes and stays denied")
-  func historicalCanaryPermitStillDecodes() async throws {
-    // The case is preserved so historical rows and their permits keep decoding; what
-    // was removed is every path that could mint one.
-    let jobID = UUID()
-    let permit = RolloutEffectPermit.historicalCanary(jobID: jobID)
-    #expect(permit == .historicalCanary(jobID: jobID))
-    #expect(permit != .historicalCanary(jobID: UUID()))
-  }
+  // `RolloutEffectPermit.historicalCanary` is deliberately kept so historical rows and
+  // permits keep decoding. The compiler enforces that: this file would not build
+  // without the case. There is no test for it, because asserting that a value built one
+  // line earlier equals itself would exercise synthesized Equatable and nothing else.
 }
 
 private final class HistoricalCanaryFixture: @unchecked Sendable {

@@ -390,15 +390,22 @@ struct SQLiteStoreTests {
       try await historicalRows(in: untouched, snapshot: fixture.snapshot) == fixture.snapshot.rows)
     await untouched.close()
 
-    // eb01640 predates the digest column entirely, so its schema-10 row carries no
-    // digest at all. That absence must be a refusal, not a silent pass.
+    // eb01640 predates the digest column entirely: its ledger has no such column at
+    // all, not a NULL in one. Reproduce that exact shape — dropping the column, not
+    // blanking it — because the column's absence is what a real pre-digest database
+    // presents and the guard has to read it without erroring.
     let legacy = try await PopulatedSchemaNineFixture.make()
     defer { legacy.remove() }
     let legacyStamped = try SQLiteStore(
       databaseURL: legacy.databaseURL,
       migrations: schemaNineMigrations + [unshipped]
     )
-    try await clearRecordedMigrationDigest(in: legacyStamped, version: 10)
+    try await dropRecordedMigrationDigestColumn(in: legacyStamped)
+    #expect(
+      try await legacyStamped.scalarInt(
+        "SELECT COUNT(*) FROM pragma_table_info('schema_migrations') WHERE name = 'statements_sha256'"
+      ) == 0
+    )
     await legacyStamped.close()
     #expect(
       throws: SQLiteStoreError.migrationContentMismatch(
@@ -409,6 +416,58 @@ struct SQLiteStoreTests {
     ) {
       _ = try SQLiteStore(databaseURL: legacy.databaseURL, migrations: DatabaseSchema.migrations)
     }
+
+    // And the refusal happened before this binary wrote anything: the column it would
+    // have added is still absent. Reopening with the list that created the database
+    // has nothing pending, so the check itself does not add it either.
+    let legacyAfter = try SQLiteStore(
+      databaseURL: legacy.databaseURL,
+      migrations: schemaNineMigrations + [unshipped]
+    )
+    #expect(
+      try await legacyAfter.scalarInt(
+        """
+        SELECT COUNT(*) FROM pragma_table_info('schema_migrations')
+        WHERE name = 'statements_sha256'
+        """
+      ) == 0
+    )
+    await legacyAfter.close()
+  }
+
+  @Test("a database this binary refuses as too new is never written to")
+  func tooNewDatabaseIsNotWrittenTo() async throws {
+    let fixture = try await PopulatedSchemaNineFixture.make()
+    defer { fixture.remove() }
+    let unshipped = SQLiteMigration(
+      version: 10,
+      name: "progressive-production-rollout-authority",
+      requiresBackup: false,
+      statements: ["CREATE TABLE unshipped_schema_ten_marker (id TEXT PRIMARY KEY) STRICT"]
+    )
+    let creating = schemaNineMigrations + [unshipped]
+    let store = try SQLiteStore(databaseURL: fixture.databaseURL, migrations: creating)
+    try await dropRecordedMigrationDigestColumn(in: store)
+    await store.close()
+
+    // Refusing an unsupported database must not be the moment this binary first
+    // writes to it: the digest column is added only after both guards have passed.
+    #expect(throws: SQLiteStoreError.migrationTooNew(database: 10, supported: 9)) {
+      _ = try SQLiteStore(databaseURL: fixture.databaseURL, migrations: schemaNineMigrations)
+    }
+    let reopened = try SQLiteStore(databaseURL: fixture.databaseURL, migrations: creating)
+    #expect(
+      try await reopened.scalarInt(
+        """
+        SELECT COUNT(*) FROM pragma_table_info('schema_migrations')
+        WHERE name = 'statements_sha256'
+        """
+      ) == 0
+    )
+    // No row comparison here: this test drops a ledger column on purpose, so the
+    // fixture's own snapshot no longer describes the database. Historical row
+    // preservation is pinned by the migration tests that leave the schema alone.
+    await reopened.close()
   }
 
   @Test("applied migrations record their body digest and reopen idempotently")
@@ -676,12 +735,12 @@ private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
 private let expectedSchemaNineMigrationDigest =
   "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
 private let expectedSchemaTenMigrationDigest =
-  "bf0ab2562655fc647c3778abc7e6c9a5b7773920a7be7d549e50ec7fd11159e2"
+  "115d612da27955c9139586c9609e4a0455c79c25d7a3ecc348d7699aea1309d6"
 // Widened when `schema_migrations` gained `statements_sha256`: the snapshot projects
 // every column of every table, so one added column moves the digest. The historical
 // row values themselves are unchanged and still compared row-for-row above.
 private let expectedPopulatedSchemaEightDigest =
-  "95265886128c0fd7691d3c5b9e683dc98bac25e5ce8594ac00c31599478f64d8"
+  "2974d081eb94497cacd50bb1badb19ab2f761a287812e3fc976fb5b78cc2f186"
 private let v9AddedObjects: Set<String> = [
   "app_settings_generation_rollover_delete_denied",
   "app_settings_generation_rollover_insert_resume_denied",
@@ -1192,6 +1251,19 @@ private func productionSchemaTenMigration() throws -> SQLiteMigration {
 ///
 /// The table is append-only by trigger, so the guard is lifted for exactly this edit
 /// and restored immediately: the test needs the historical shape, not a lasting hole.
+/// Reproduce a ledger written before `statements_sha256` existed: no column at all.
+private func dropRecordedMigrationDigestColumn(in database: SQLiteStore) async throws {
+  let present =
+    try await database.scalarInt(
+      """
+      SELECT COUNT(*) FROM pragma_table_info('schema_migrations')
+      WHERE name = 'statements_sha256'
+      """
+    ) ?? 0
+  guard present == 1 else { return }
+  try await database.execute("ALTER TABLE schema_migrations DROP COLUMN statements_sha256")
+}
+
 private func clearRecordedMigrationDigest(
   in database: SQLiteStore,
   version: Int

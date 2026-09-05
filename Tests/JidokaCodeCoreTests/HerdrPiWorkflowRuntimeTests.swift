@@ -3016,11 +3016,11 @@ struct HerdrPiWorkflowRuntimeTests {
           "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
         )
       }
-      let restoreResumeDenial = try await fixture.liftDurableResumeDenial()
-      _ = try await fixture.database.execute(
-        "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
-      )
-      try await restoreResumeDenial()
+      try await fixture.withDurableResumeDenialLifted {
+        _ = try await fixture.database.execute(
+          "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+        )
+      }
     case .activeCanary:
       _ = try await fixture.database.execute(
         "UPDATE jobs SET state = 'blocked' WHERE id = ?",
@@ -6278,13 +6278,32 @@ private struct HerdrPiRuntimeFixture: Sendable {
     )
   }
 
+  /// Run `body` with the durable resume guard lifted, and always put it back.
+  ///
+  /// Restoration covers the throwing path deliberately: a leaked drop would leave
+  /// every later assertion in the fixture passing vacuously, and reopening does not
+  /// recreate the triggers, because migrations only apply `version > current`.
+  func withDurableResumeDenialLifted<Value>(
+    _ body: () async throws -> Value
+  ) async throws -> Value {
+    let restore = try await liftDurableResumeDenial()
+    do {
+      let value = try await body()
+      try await restore()
+      return value
+    } catch {
+      try? await restore()
+      throw error
+    }
+  }
+
   /// Test-only seam for seeding durable rows that predate the schema-10 resume guard.
   ///
   /// Schema 10 refuses `paused = 0` without an active authorization, and these
   /// historical fixtures deliberately have none. The guard is dropped from its own
-  /// recorded SQL and restored byte-for-byte by the returned closure, so no production
-  /// path and no later assertion runs without it.
-  func liftDurableResumeDenial() async throws -> @Sendable () async throws -> Void {
+  /// recorded SQL and restored byte-for-byte by the returned closure. Callers use
+  /// `withDurableResumeDenialLifted`, which cannot leak the drop.
+  private func liftDurableResumeDenial() async throws -> @Sendable () async throws -> Void {
     let names = [
       "app_settings_rollout_scope_required",
       "app_settings_rollout_insert_scope_required",
@@ -7090,43 +7109,44 @@ private struct HerdrPiRuntimeFixture: Sendable {
       try await database.scalarInt(
         "SELECT paused FROM app_settings WHERE singleton = 1"
       ) ?? 0
-    let restoreResumeDenial = try await liftDurableResumeDenial()
-    _ = try await database.execute(
-      "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
-    )
-    let run = try await runStore.prepareRun(
-      id: "run-88888888-8888-4888-8888-888888888888",
-      jobID: unrelatedJobID,
-      workflow: .pullRequestReview,
-      role: .architecture,
-      round: 1,
-      jobAttempt: 2,
-      topologyGeneration: 1,
-      jobStep: 0,
-      runNonce: String(repeating: "6", count: 64),
-      requestSHA256: String(repeating: "7", count: 64),
-      resourceVersion: "isolation-v1",
-      resourceHash: String(repeating: "8", count: 64),
-      model: "fixture/fixture:off",
-      sessionPath: URL(fileURLWithPath: "/private/tmp/unrelated-session"),
-      channelPath: URL(fileURLWithPath: "/private/tmp/unrelated-channel"),
-      now: Date(timeIntervalSince1970: 2)
-    )
-    _ = try await runStore.prepareLaunch(
-      launchAttemptID: "launch-99999999-9999-4999-8999-999999999999",
-      runID: run.id,
-      roleHostID: roleHostID,
-      launchMode: .fresh,
-      descriptorSHA256: String(repeating: "9", count: 64),
-      expectedSessionID: nil,
-      resumeBoundarySHA256: nil,
-      now: Date(timeIntervalSince1970: 2)
-    )
-    _ = try await database.execute(
-      "UPDATE app_settings SET paused = ? WHERE singleton = 1",
-      bindings: [.integer(priorPaused)]
-    )
-    try await restoreResumeDenial()
+    let run = try await withDurableResumeDenialLifted { () async throws -> PiRunRecord in
+      _ = try await database.execute(
+        "UPDATE app_settings SET paused = 0 WHERE singleton = 1"
+      )
+      let seeded = try await runStore.prepareRun(
+        id: "run-88888888-8888-4888-8888-888888888888",
+        jobID: unrelatedJobID,
+        workflow: .pullRequestReview,
+        role: .architecture,
+        round: 1,
+        jobAttempt: 2,
+        topologyGeneration: 1,
+        jobStep: 0,
+        runNonce: String(repeating: "6", count: 64),
+        requestSHA256: String(repeating: "7", count: 64),
+        resourceVersion: "isolation-v1",
+        resourceHash: String(repeating: "8", count: 64),
+        model: "fixture/fixture:off",
+        sessionPath: URL(fileURLWithPath: "/private/tmp/unrelated-session"),
+        channelPath: URL(fileURLWithPath: "/private/tmp/unrelated-channel"),
+        now: Date(timeIntervalSince1970: 2)
+      )
+      _ = try await runStore.prepareLaunch(
+        launchAttemptID: "launch-99999999-9999-4999-8999-999999999999",
+        runID: seeded.id,
+        roleHostID: roleHostID,
+        launchMode: .fresh,
+        descriptorSHA256: String(repeating: "9", count: 64),
+        expectedSessionID: nil,
+        resumeBoundarySHA256: nil,
+        now: Date(timeIntervalSince1970: 2)
+      )
+      _ = try await database.execute(
+        "UPDATE app_settings SET paused = ? WHERE singleton = 1",
+        bindings: [.integer(priorPaused)]
+      )
+      return seeded
+    }
     _ = try await database.execute(
       """
       INSERT INTO approved_command_runs(
