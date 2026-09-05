@@ -108,7 +108,8 @@ moving a lease to another job, and taking a fresh lease all remain admission and
 
 Note what that exemption is and is not. No production code emits a continuation heartbeat today:
 `DurableJobStore.heartbeat` is public API with no caller in `Sources`, every production write to
-`repository_leases` is either acquisition (a generation bump, which is gated) or release, and
+`repository_leases` is either acquisition (an initial INSERT or a generation-changing
+reacquisition, both gated) or release, and
 nothing expires a lease by heartbeat age. The exemption keeps the store's public contract coherent
 and bounds a future heartbeat writer. It is not a mechanism that reclaims a live lease.
 

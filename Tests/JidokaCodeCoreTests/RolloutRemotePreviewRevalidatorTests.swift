@@ -138,9 +138,9 @@ struct RolloutRemotePreviewRevalidatorTests {
   //     (`builderRefusesNonPositiveObjectNumber`);
   //   - the finite-window stage arms, refused by the builder for any stage other than
   //     the two it accepts (`builderRefusesFiniteWindowAtExactOnlyStages`);
-  //   - the workflow-label default arm, refused by `RolloutAuthority.validCurrentStep`,
-  //     whose whitelist is exactly that switch's case set
-  //     (`builderRefusesAStepTheLabelSwitchDoesNotCover`).
+  //   - unsupported implementation-stage steps, refused by
+  //     `RolloutAuthority.validCurrentStep` before the workflow-label switch;
+  //     `builderRefusesAStepTheLabelSwitchDoesNotCover` checks execution at `.replan`.
   // An earlier version of this comment called the last two unreachable "by
   // construction rather than by validation". That was wrong: they are refused by a
   // validating edge like the others, so they are asserted at it like the others.
@@ -242,14 +242,15 @@ struct RolloutRemotePreviewRevalidatorTests {
 
   @Test("the builder refuses a step the workflow-label switch does not cover")
   func builderRefusesAStepTheLabelSwitchDoesNotCover() async throws {
-    // The workflow-label switch's `default:` arm exists for a stage/step pair outside
-    // its case set. `RolloutAuthority.validCurrentStep` enumerates exactly that set
-    // per stage and refuses anything else, so the arm cannot be reached from a built
-    // preview. `.replan` belongs to `implementationPlan`, never to `prReview`.
+    // Implementation execution reaches issue/label validation, unlike PR review.
+    // Its `.publishPlan` preview is valid; `.replan` belongs to implementation
+    // planning and is refused by the builder before the label switch's default arm.
     let fixture = try await RolloutRemotePreviewFixture()
     defer { fixture.remove() }
-    #expect(throws: RolloutAuthorityError.invalidObjectSelector) {
-      _ = try fixture.exactPreview(currentStep: .replan)
+    let preview = try await fixture.exactWaitingExecutionPreview()
+    try await fixture.revalidator.revalidate(preview)
+    await #expect(throws: RolloutAuthorityError.invalidObjectSelector) {
+      _ = try await fixture.exactWaitingExecutionPreview(currentStep: .replan)
     }
     await fixture.database.close()
   }
@@ -505,8 +506,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
   func exactPreview(
     missingLabels: [RolloutLabelDefinition] = [],
     objectNumber: Int? = nil,
-    jobBinding: RolloutJobBinding?? = nil,
-    currentStep: JobStepKind = .review
+    jobBinding: RolloutJobBinding?? = nil
   ) throws -> RolloutPreview {
     let pullRequest = Self.makePullRequest(
       number: 10,
@@ -545,7 +545,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
         derivation.narrative,
         baseSHA: baseSHA
       ),
-      currentStep: currentStep.rawValue
+      currentStep: JobStepKind.review.rawValue
     )
     return try RolloutPreviewBuilder.make(
       previewInput(
@@ -565,7 +565,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
             contractVersion: job.contractVersionUsed,
             priority: .prReview,
             firstStep: .review,
-            currentStep: currentStep.rawValue
+            currentStep: JobStepKind.review.rawValue
           ),
         missingLabels: missingLabels
       )
@@ -678,7 +678,9 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     )
   }
 
-  func exactWaitingExecutionPreview() async throws -> RolloutPreview {
+  func exactWaitingExecutionPreview(
+    currentStep: JobStepKind = .publishPlan
+  ) async throws -> RolloutPreview {
     await api.setWorkflowLabels(["agent:plan-review", "plan:approved"])
     let issue = await api.currentIssue()
     let labels = await api.currentIssueLabels()
@@ -715,7 +717,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
       baseSHA: base.sha,
       planSHA256: String(repeating: "d", count: 64),
       labelStateSHA256: try RolloutPreviewBuilder.labelStateSHA256(labels),
-      currentStep: JobStepKind.publishPlan.rawValue
+      currentStep: currentStep.rawValue
     )
     let scope = RolloutScope(
       mode: .exactObject,
@@ -735,7 +737,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
           contractVersion: implementationJob.contractVersionUsed,
           priority: .issueImplementation,
           firstStep: .claimApprovedPlan,
-          currentStep: JobStepKind.publishPlan.rawValue
+          currentStep: currentStep.rawValue
         )
       )
     )

@@ -266,7 +266,7 @@ struct RolloutLeaseAuthorityTests {
     await fixture.database.close()
   }
 
-  @Test("a live lease cannot be handed to another job or repository")
+  @Test("a live lease's identity changes are checked as admission")
   func continuationRequiresUnchangedIdentity() async throws {
     for drift in LeaseIdentityDrift.allCases {
       let fixture = try await RolloutLeaseFixture()
@@ -279,22 +279,17 @@ struct RolloutLeaseAuthorityTests {
       let other = try await fixture.createJob(
         repositoryID: fixture.repositoryA, revision: "rev-other")
 
-      // Each of these keeps OLD.active = 1, so only the exemption's identity
-      // conjuncts separate them from an ordinary heartbeat. The generation case
+      // Each of these keeps OLD.active = 1 but changes a lease identity field.
+      // Such a change must pass admission rather than continue the lease. The generation case
       // pauses first: a fencing bump on the lane's own bound job is legitimate
       // while the lane is running, so what must be proved is that it is *gated*
-      // rather than exempt — under pause it has to abort where a plain heartbeat,
+      // rather than exempt: under pause it has to abort where a plain heartbeat,
       // which changes no identity, still succeeds.
       //
-      // What this test does and does not pin, measured rather than assumed: deleting
-      // `NEW.generation = OLD.generation` from the exemption fails the generation
-      // case. Deleting `NEW.job_id = OLD.job_id` or `NEW.repository_id =
-      // OLD.repository_id` fails nothing, because the exemption's own binding
-      // subquery already keys on `open_binding.job_id = NEW.job_id` and
-      // `open_authorization.repository_id = NEW.repository_id` and subsumes them.
-      // The two conjuncts are kept as local, readable statements of intent that do
-      // not depend on the subquery's shape; the drift cases below assert the
-      // behaviour, which is what matters, not which conjunct produces it.
+      // The job and repository cases below move away from the bound identity, so
+      // the binding subquery also rejects them. They do not independently pin those
+      // equality conjuncts. The subquery checks NEW values, not equality to OLD:
+      // transferToBoundJobDuringDrainRemainsAdmission covers the other direction.
       if drift == .generation {
         try await fixture.setPaused(true)
         try await fixture.jobs.heartbeat(jobID: bound.id, now: fixture.now.addingTimeInterval(5))
@@ -326,6 +321,38 @@ struct RolloutLeaseAuthorityTests {
       }
       await fixture.database.close()
       fixture.remove()
+    }
+  }
+
+  @Test("transferring a live lease to the bound job stays gated during drain or recovery")
+  func transferToBoundJobDuringDrainRemainsAdmission() async throws {
+    for state in ["draining", "recoveryRequired"] {
+      let fixture = try await RolloutLeaseFixture()
+      defer { fixture.remove() }
+      let ordinary = try await fixture.createJob(
+        repositoryID: fixture.repositoryA, revision: "rev-ordinary")
+      try await fixture.insertLease(repositoryID: fixture.repositoryA, jobID: ordinary.id)
+      let bound = try await fixture.createJob(repositoryID: fixture.repositoryA, revision: "rev-a")
+      _ = try await fixture.activateExactPullRequestRollout(
+        repositoryID: fixture.repositoryA, job: bound)
+      try await fixture.setPaused(true)
+      try await fixture.setAuthorizationState(state)
+
+      // NEW.job_id matches the lane's binding, but OLD.job_id does not. Without
+      // their equality check the exemption would admit this transfer even though
+      // fresh admission requires an active, unpaused lane.
+      await #expect(throws: SQLiteStoreError.self, "\(state)") {
+        try await fixture.database.execute(
+          "UPDATE repository_leases SET job_id = ? WHERE repository_id = ?",
+          bindings: [
+            .text(bound.id.uuidString.lowercased()),
+            .text(fixture.repositoryA.uuidString.lowercased()),
+          ]
+        )
+      }
+      #expect(try await fixture.leaseJobID() == ordinary.id, "\(state)")
+      #expect(try await fixture.activeLeaseCount() == 1, "\(state)")
+      await fixture.database.close()
     }
   }
 
@@ -361,12 +388,12 @@ struct RolloutLeaseAuthorityTests {
     await fixture.database.close()
   }
 
-  @Test("the insert and update gates share a byte-identical arming and binding tail")
+  @Test("the insert and update gates share the active-row condition and an identical tail")
   func bothTriggersShareTheSameGate() async throws {
     // The two triggers hand-duplicate 67 lines. Factoring them into one emitter would
     // restructure a security trigger, so the duplication stays and this test carries
-    // the risk it creates instead: silent drift between the copies. A mismatch here
-    // fails at test time rather than at database-open time via the migration digest.
+    // the risk of drift in that common tail. The WHEN condition is pinned separately;
+    // the update-only continuation exemption is covered by the behavioral tests.
     let migration = try #require(DatabaseSchema.migrations.first { $0.version == 10 })
     let marker = "-- The gate arms on either half, and needs both to stay honest."
 
@@ -375,6 +402,11 @@ struct RolloutLeaseAuthorityTests {
         migration.statements.first { $0.contains("CREATE TRIGGER \(triggerName)") },
         "\(triggerName) statement"
       )
+      let whenLine = try #require(
+        statement.split(separator: "\n").first { $0.hasPrefix("WHEN ") },
+        "\(triggerName) active-row condition"
+      )
+      #expect(whenLine == "WHEN NEW.active = 1", "\(triggerName)")
       let range = try #require(statement.range(of: marker), "\(triggerName) marker")
       return String(statement[range.lowerBound...])
     }

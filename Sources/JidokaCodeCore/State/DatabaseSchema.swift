@@ -2641,8 +2641,8 @@ public enum DatabaseSchema {
         -- bound job legitimately holds the lease at activation time.
         --
         -- What this means for a lease the new lane does not bind: it keeps the row.
-        -- Production writes repository_leases only to acquire (a generation bump,
-        -- which is admission and is gated) and to release (active = 0, ungated), and
+        -- Production writes repository_leases only to acquire (an initial INSERT or
+        -- a generation-changing reacquisition, both gated) or release (active = 0), and
         -- nothing expires a lease by heartbeat age, so such a job runs to completion
         -- and releases normally. It gains no rollout authority while it does: every
         -- effect is bound through rollout_job_bindings, where it has no row.
@@ -2902,16 +2902,17 @@ public enum DatabaseSchema {
           --
           -- Scope, stated honestly: no production code emits this shape today.
           -- DurableJobStore.heartbeat is public API with no caller in Sources, and
-          -- every production write to repository_leases is either acquisition (a
-          -- generation bump, gated below) or release (active = 0, excluded by
-          -- WHEN NEW.active = 1). This exemption therefore keeps the store's public
-          -- contract coherent and bounds a future heartbeat writer; it is not an
+          -- every production write to repository_leases is either acquisition (an
+          -- initial INSERT or a generation-changing reacquisition, both gated) or
+          -- release (active = 0, excluded by WHEN NEW.active = 1). This exemption
+          -- keeps the store's public contract coherent and bounds a future
+          -- heartbeat writer; it is not an
           -- operative bound on a live lease, and nothing here expires one.
           --
           -- Given that it exists, it is bounded by an open lane that binds THIS job,
           -- so it cannot become a way for ordinary generation-0 work to inherit a
-          -- rollout it was never part of, and cannot carry a lease past the finite
-          -- window its authorization declared.
+          -- rollout it was never part of. It checks open-lane state, not expiry;
+          -- a held lease may continue past expiry until the lane closes.
           --
           -- Reactivation (OLD.active = 0), a generation bump, and any identity
           -- change are admission, not continuation, and stay gated.
