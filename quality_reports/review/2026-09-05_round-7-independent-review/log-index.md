@@ -3,7 +3,7 @@
 
 # Round-7 log index
 
-All 15 raw logs are preserved, including the two red runs. Only 07-14 are the required final gates, bound in order by 15. Exit zero without test execution is never treated as test evidence. The four reviewer reports are in [reviews/](reviews/).
+All 17 raw logs are preserved, including the two red runs; 16-17 come from the focused re-review of the fix. Only 07-14 are the required final gates, bound in order by 15. Exit zero without test execution is never treated as test evidence. The four reviewer reports are in [reviews/](reviews/).
 
 | Raw log | Exit | Purpose and disposition | SHA-256 |
 |---|---:|---|---|
@@ -22,3 +22,5 @@ All 15 raw logs are preserved, including the two red runs. Only 07-14 are the re
 | [13-release-herdr-host.log](logs/13-release-herdr-host.log) | 0 | FINAL release JidokaCodeHerdrHost build complete, cached. | `fa1e9f9f29a6376e04045081f48cc91fecd4cfb4589cd1ee79abf1206ca5fdea` |
 | [14-diff-check.log](logs/14-diff-check.log) | 0 | FINAL required diff whitespace check PASS (empty output). | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 | [15-gate-status.txt](logs/15-gate-status.txt) | 0 | Start/exit timestamps and exit codes of gates 07-14 in execution order. | `3cebc03b9a33640fd4ae1f9f246e538bacd7cd9d251560af78ca1ce85406dc57` |
+| [16-rereview-m2-sweep-summary.txt](logs/16-rereview-m2-sweep-summary.txt) | 0 | Focused re-review: independent eleven-mutant sweep on 157d57c, ten KILLED, M8 SURVIVED (equivalent). | `a321f4fa48f188eabe5aa0492f003349a85727747b8d6b3fa921bfbcde601c3e` |
+| [17-rereview-m8-equivalence-probe.out](logs/17-rereview-m8-equivalence-probe.out) | 0 | Focused re-review: SQL probe showing every forgery refused with and without the M8 conjunct. | `2537b291eecfa1685d59d70d10ff5e148e2e2337f197df5103f3667dd35b3c88` |

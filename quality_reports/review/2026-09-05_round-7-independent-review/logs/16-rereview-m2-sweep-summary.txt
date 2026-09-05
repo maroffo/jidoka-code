@@ -1,0 +1,17 @@
+export=/Users/maroffo/Development/public/jidoka-code/.claude/worktrees/agent-a9f5a5f52c16f778e/export sha=157d57c orig sha256 bdfe12bbc7400d92dcaea07ae24ea4bcdb893403d2eb6dc728b0457a66a3168b
+baseline build ok
+baseline: exit=0 | ✔ Test run with 49 tests in 2 suites passed after 1.253 seconds.
+M8_previous_is_latest: SURVIVED build=ok | ✔ Test run with 49 tests in 2 suites passed after 1.236 seconds.
+M1_contiguity: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.251 seconds with 18 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M2_provider_counter: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.269 seconds with 10 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M3_source_id: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.249 seconds with 16 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M4_source_kind: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.255 seconds with 17 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M5_timestamp: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.292 seconds with 15 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M6_seed_provider_zero: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.246 seconds with 25 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M7_seed_activated_at: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.287 seconds with 40 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M9_read_bytes_counter: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.262 seconds with 12 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M10_seed_source_kind: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.263 seconds with 46 issues. | failed: ✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+M11_whole_trigger: KILLED build=ok test_exit=1 | ✘ Test run with 49 tests in 2 suites failed after 1.245 seconds with 52 issues. | failed: ✘ Test "usage INSERT cannot reset a consumed cap, skip sequence or invent a source";✘ Test "usage ledger refuses every single-fault forgery of a seed or append row";
+restored sha256 bdfe12bbc7400d92dcaea07ae24ea4bcdb893403d2eb6dc728b0457a66a3168b (match=yes)
+restore build exit=0
+DONE

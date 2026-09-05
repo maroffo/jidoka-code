@@ -101,6 +101,14 @@ All times are 2026-09-05. The six new tests bring the suite from 770 to 776 test
 
 Logs 01, 03 are diagnostic red runs (compile errors in the first draft of the new tests, then a wrong seed-branch strategy that activation refused with `decode("rollout usage ledger")`); 02, 04, 05 are the green rebuild and store-suite runs; 06 is the mutation sweep summary; 07-14 are the required gates; 15 binds their order and exit codes. Pre-existing Keychain deprecation warnings are unchanged.
 
+## Focused re-review of the fix
+
+The test reviewer re-reviewed the delta `d123a41 -> 157d57c` in a fresh isolated worktree ([report](reviews/test-reviewer-rereview.md)). Verdict on the Major: closed. It re-ran the eleven-mutant sweep in its own export with the same result (ten killed, M8 survived; [16-rereview-m2-sweep-summary.txt](logs/16-rereview-m2-sweep-summary.txt)), confirmed M8 equivalent by a SQL probe on a temp database in which every forgery is refused with and without the conjunct ([17-rereview-m8-equivalence-probe.out](logs/17-rereview-m8-equivalence-probe.out)), and checked that the test is not a tautology and that `withTriggersLifted` cannot leak a dropped trigger. The five Minor closures were found sound; the double's new denials were verified against store source and no existing test runs the double under a historical context for the wrong reason.
+
+One new Minor, recorded as debt, not fixed: the cross-lane conjunct `source.authorization_id = previous.authorization_id` (DatabaseSchema.swift:2804) has no test; mutant M12 (`ON 1 = 1`) builds and survives. It is fail-closed (a cross-lane citation could only inflate usage, never reset a cap), the clause is present in source, and the database reviewer's SQL probe refused a foreign-lane source on the rebuilt schema. A two-lane Swift test needs a second activation on a settled first lane and is deferred to the tech-debt register.
+
+Round-7 totals on the fixed HEAD `157d57c`: 0 Critical, 0 Major supported; 18 Minor dispositioned (17 above plus this one).
+
 ## Gates that remain closed
 
 No rollout activation, finite promotion, live provider/model call, live workflow Git/GitHub effect, Developer ID signing, notarization, installation, deploy, merge, rollback, tag, release or W7 is performed. Authorized publication is limited to this branch and PR #18. The preceding UI fixture was preserved at `build/round7/preserved-ui-d123a41` (verified identical) before E2E recreated its working fixture; `build/round6/preserved-ui-4206456` is untouched.
