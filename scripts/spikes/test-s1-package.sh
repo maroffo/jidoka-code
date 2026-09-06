@@ -245,7 +245,8 @@ assert_release_runtime_valid() {
     [[ -s "$stdout_path" && ! -s "$stderr_path" ]] || \
         fail "fresh release runtime clone emitted invalid verification output"
     assert_exact_json_keys \
-        "$stdout_path" schemaVersion runtimeID manifestSHA256 runtimeIdentitySHA256
+        "$stdout_path" schemaVersion runtimeID manifestSHA256 runtimeIdentitySHA256 \
+        runtimeTreeSHA256
 }
 
 assert_release_runtime_failure() {
@@ -1062,7 +1063,10 @@ run_packaged_command \
 [[ -s "$release_runtime_stdout" && ! -s "$release_runtime_stderr" ]] || \
     fail "packaged release runtime verifier output differs"
 assert_exact_json_keys \
-    "$release_runtime_stdout" schemaVersion runtimeID manifestSHA256 runtimeIdentitySHA256
+    "$release_runtime_stdout" schemaVersion runtimeID manifestSHA256 runtimeIdentitySHA256 \
+    runtimeTreeSHA256
+[[ "$(/usr/bin/plutil -extract schemaVersion raw "$release_runtime_stdout")" == "2" ]] || \
+    fail "packaged release runtime verifier schema differs"
 
 release_identity_manifest="$SOURCE_APP/Contents/Resources/progressive-production-release.json"
 release_identity_regenerated="$TEMP_ROOT/progressive-production-release.json"
@@ -1083,7 +1087,7 @@ release_identity_regenerated="$TEMP_ROOT/progressive-production-release.json"
     "$(/usr/bin/shasum -a 256 \
         "$SOURCE_APP/Contents/Resources/PiRuntime/runtime-manifest.json" | \
         /usr/bin/awk '{print $1}')" \
-    "$(/usr/bin/plutil -extract runtimeIdentitySHA256 raw "$release_runtime_stdout")" \
+    "$(/usr/bin/plutil -extract runtimeTreeSHA256 raw "$release_runtime_stdout")" \
     "$(/usr/bin/shasum -a 256 \
         "$SOURCE_APP/Contents/Resources/Pi/workflow-resources.json" | \
         /usr/bin/awk '{print $1}')" \
@@ -1327,6 +1331,32 @@ normalize_unsigned_product "$SOURCE_HERDR_HOST" "$TEMP_ROOT/actual-herdr-host"
 /usr/bin/ditto "$SOURCE_APP" "$COPIED_APP"
 [[ "$COPIED_APP" != "$ROOT"/* ]]
 /usr/bin/codesign --verify --strict --deep "$COPIED_APP"
+copied_runtime_stdout="$TEMP_ROOT/release-runtime-copied.json"
+copied_runtime_stderr="$TEMP_ROOT/release-runtime-copied.stderr"
+run_packaged_command \
+    "$COPIED_APP/Contents/MacOS/Jidoka Code" \
+    "$copied_runtime_stdout" \
+    "$copied_runtime_stderr" \
+    --release-runtime-verify-adhoc || fail "copied release runtime verifier failed"
+[[ -s "$copied_runtime_stdout" && ! -s "$copied_runtime_stderr" ]] || \
+    fail "copied release runtime verifier output differs"
+assert_exact_json_keys \
+    "$copied_runtime_stdout" schemaVersion runtimeID manifestSHA256 runtimeIdentitySHA256 \
+    runtimeTreeSHA256
+source_runtime_identity="$(
+    /usr/bin/plutil -extract runtimeIdentitySHA256 raw "$release_runtime_stdout"
+)"
+copied_runtime_identity="$(
+    /usr/bin/plutil -extract runtimeIdentitySHA256 raw "$copied_runtime_stdout"
+)"
+source_runtime_tree="$(/usr/bin/plutil -extract runtimeTreeSHA256 raw "$release_runtime_stdout")"
+copied_runtime_tree="$(/usr/bin/plutil -extract runtimeTreeSHA256 raw "$copied_runtime_stdout")"
+declared_runtime_tree="$(/usr/bin/plutil -extract runtimeTreeSHA256 raw "$release_identity_manifest")"
+[[ "$source_runtime_identity" != "$copied_runtime_identity" ]] || \
+    fail "copied release runtime retained the source vnode authority"
+[[ "$source_runtime_tree" == "$copied_runtime_tree" && \
+    "$copied_runtime_tree" == "$declared_runtime_tree" ]] || \
+    fail "portable release runtime binding changed after bundle copy"
 
 /usr/bin/ditto "$COPIED_APP" "$MUTATED_APP_EXECUTABLE_APP"
 original_app_executable_sha256="$(

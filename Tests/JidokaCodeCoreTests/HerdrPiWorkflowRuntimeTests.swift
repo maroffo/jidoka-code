@@ -5950,7 +5950,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
         sourceCommit: gitSHA,
         sourceTree: gitSHA,
         bundleVersion: "0.2.0",
-        bundleBuild: 3,
+        bundleBuild: 4,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,

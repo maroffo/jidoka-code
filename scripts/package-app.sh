@@ -79,8 +79,9 @@ RUNTIME_INVENTORY_TEMP=""
 RELEASE_IDENTITY_TEMP=""
 SOURCE_COMMIT=""
 SOURCE_TREE=""
-STAGED_RUNTIME_IDENTITY_SHA256=""
+STAGED_RUNTIME_TREE_SHA256=""
 PACKAGED_RUNTIME_IDENTITY_SHA256=""
+PACKAGED_RUNTIME_TREE_SHA256=""
 
 fail() {
     printf 'packaging failed: %s\n' "$1" >&2
@@ -168,6 +169,7 @@ verify_staged_runtime_performance() {
     local identity
     local report
     local started
+    local tree
 
     started="$(monotonic_seconds)"
     if ! report="$(
@@ -188,17 +190,21 @@ verify_staged_runtime_performance() {
         printf '%s\n' "$report" | \
             /usr/bin/plutil -extract runtimeIdentitySHA256 raw -o - -
     )"
-    [[ "$identity" =~ ^[0-9a-f]{64}$ ]] || \
+    tree="$(
+        printf '%s\n' "$report" | \
+            /usr/bin/plutil -extract runtimeTreeSHA256 raw -o - -
+    )"
+    [[ "$identity" =~ ^[0-9a-f]{64}$ && "$tree" =~ ^[0-9a-f]{64}$ ]] || \
         fail "staged release runtime verifier reported an invalid identity"
     expected_report="$(printf \
-        '{"manifestSHA256":"%s","runtimeID":"%s","runtimeIdentitySHA256":"%s","schemaVersion":1}' \
-        "$RUNTIME_MANIFEST_SHA256" "$RUNTIME_ID" "$identity")"
+        '{"manifestSHA256":"%s","runtimeID":"%s","runtimeIdentitySHA256":"%s","runtimeTreeSHA256":"%s","schemaVersion":2}' \
+        "$RUNTIME_MANIFEST_SHA256" "$RUNTIME_ID" "$identity" "$tree")"
     [[ "$report" == "$expected_report" ]] || \
         fail "staged release runtime verifier reported unexpected identity fields"
-    STAGED_RUNTIME_IDENTITY_SHA256="$identity"
+    STAGED_RUNTIME_TREE_SHA256="$tree"
     printf \
-        'staged_runtime_verifier_seconds=%s runtime_id=%s manifest_sha256=%s runtime_identity_sha256=%s\n' \
-        "$elapsed" "$RUNTIME_ID" "$RUNTIME_MANIFEST_SHA256" "$identity"
+        'staged_runtime_verifier_seconds=%s runtime_id=%s manifest_sha256=%s runtime_identity_sha256=%s runtime_tree_sha256=%s\n' \
+        "$elapsed" "$RUNTIME_ID" "$RUNTIME_MANIFEST_SHA256" "$identity" "$tree"
 }
 
 capture_source_identity() {
@@ -227,12 +233,12 @@ generate_release_identity_manifest() {
     local helper_sha256
     local herdr_host_sha256
     local push_guard_sha256
-    local runtime_identity_sha256="$1"
     local runtime_manifest_sha256
+    local runtime_tree_sha256="$1"
     local workflow_resources_sha256
 
-    [[ "$runtime_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || \
-        fail "release runtime identity is unavailable"
+    [[ "$runtime_tree_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+        fail "release runtime tree identity is unavailable"
     if [[ -e "$RELEASE_IDENTITY_MANIFEST" || -L "$RELEASE_IDENTITY_MANIFEST" ]]; then
         [[ -f "$RELEASE_IDENTITY_MANIFEST" && ! -L "$RELEASE_IDENTITY_MANIFEST" && \
             "$(/usr/bin/stat -f '%OLp' "$RELEASE_IDENTITY_MANIFEST")" == "644" && \
@@ -286,7 +292,7 @@ generate_release_identity_manifest() {
         "10" \
         "12" \
         "$runtime_manifest_sha256" \
-        "$runtime_identity_sha256" \
+        "$runtime_tree_sha256" \
         "$workflow_resources_sha256" \
         >"$RELEASE_IDENTITY_TEMP"
     [[ "$(/usr/bin/stat -f '%z' "$RELEASE_IDENTITY_TEMP")" -gt 0 && \
@@ -302,6 +308,7 @@ capture_packaged_runtime_identity() {
     local expected_report
     local identity
     local report
+    local tree
 
     if [[ "$SIGN_IDENTITY" == "-" ]]; then
         report="$(
@@ -321,21 +328,28 @@ capture_packaged_runtime_identity() {
         printf '%s\n' "$report" | \
             /usr/bin/plutil -extract runtimeIdentitySHA256 raw -o - -
     )"
-    [[ "$identity" =~ ^[0-9a-f]{64}$ ]] || \
+    tree="$(
+        printf '%s\n' "$report" | \
+            /usr/bin/plutil -extract runtimeTreeSHA256 raw -o - -
+    )"
+    [[ "$identity" =~ ^[0-9a-f]{64}$ && "$tree" =~ ^[0-9a-f]{64}$ ]] || \
         fail "packaged release runtime verifier reported an invalid identity"
     expected_report="$(printf \
-        '{"manifestSHA256":"%s","runtimeID":"%s","runtimeIdentitySHA256":"%s","schemaVersion":1}' \
-        "$RUNTIME_MANIFEST_SHA256" "$RUNTIME_ID" "$identity")"
+        '{"manifestSHA256":"%s","runtimeID":"%s","runtimeIdentitySHA256":"%s","runtimeTreeSHA256":"%s","schemaVersion":2}' \
+        "$RUNTIME_MANIFEST_SHA256" "$RUNTIME_ID" "$identity" "$tree")"
     [[ "$report" == "$expected_report" ]] || \
         fail "packaged release runtime verifier reported unexpected identity fields"
     PACKAGED_RUNTIME_IDENTITY_SHA256="$identity"
+    PACKAGED_RUNTIME_TREE_SHA256="$tree"
 }
 
 verify_packaged_runtime_identity() {
     local expected_identity="$PACKAGED_RUNTIME_IDENTITY_SHA256"
+    local expected_tree="$PACKAGED_RUNTIME_TREE_SHA256"
 
     capture_packaged_runtime_identity
-    [[ "$PACKAGED_RUNTIME_IDENTITY_SHA256" == "$expected_identity" ]] || \
+    [[ "$PACKAGED_RUNTIME_IDENTITY_SHA256" == "$expected_identity" && \
+        "$PACKAGED_RUNTIME_TREE_SHA256" == "$expected_tree" ]] || \
         fail "outer signing changed the packaged release runtime identity"
 }
 
@@ -986,10 +1000,10 @@ sign_path "$ENGINE_EXECUTABLE" com.maroffo.JidokaCode.Engine
 sign_path "$ASKPASS_EXECUTABLE" com.maroffo.JidokaCode.AskPass
 sign_path "$PUSH_GUARD_EXECUTABLE" com.maroffo.JidokaCode.PushGuard
 sign_path "$HERDR_HOST_EXECUTABLE" com.maroffo.JidokaCode.HerdrHost
-generate_release_identity_manifest "$STAGED_RUNTIME_IDENTITY_SHA256"
+generate_release_identity_manifest "$STAGED_RUNTIME_TREE_SHA256"
 sign_path "$APP" com.maroffo.JidokaCode
 capture_packaged_runtime_identity
-generate_release_identity_manifest "$PACKAGED_RUNTIME_IDENTITY_SHA256"
+generate_release_identity_manifest "$PACKAGED_RUNTIME_TREE_SHA256"
 sign_path "$APP" com.maroffo.JidokaCode
 verify_bundle_modes
 /usr/bin/codesign --verify --strict "$ENGINE_EXECUTABLE"

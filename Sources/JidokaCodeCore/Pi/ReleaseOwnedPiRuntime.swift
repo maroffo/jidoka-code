@@ -50,6 +50,19 @@ public struct PiReleaseRuntimeIdentity: Codable, Equatable, Sendable {
     return Self.sha256(data)
   }
 
+  public var releaseContentSHA256: String {
+    let content = PiReleaseRuntimeContentIdentity(
+      runtimeID: runtimeID,
+      manifestSHA256: manifestSHA256,
+      nodeCodeDirectorySHA256: nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: piPackageTreeSHA256
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    guard let data = try? encoder.encode(content) else { return "" }
+    return Self.sha256(data)
+  }
+
   public func containingApplicationURL() throws -> URL {
     let root = URL(fileURLWithPath: canonicalRoot, isDirectory: true)
     guard root.lastPathComponent == "PiRuntime",
@@ -80,6 +93,14 @@ public struct PiReleaseRuntimeIdentity: Codable, Equatable, Sendable {
   private static func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }
+}
+
+private struct PiReleaseRuntimeContentIdentity: Encodable {
+  let schemaVersion = 1
+  let runtimeID: String
+  let manifestSHA256: String
+  let nodeCodeDirectorySHA256: String
+  let piPackageTreeSHA256: String
 }
 
 #if DEBUG
@@ -430,7 +451,9 @@ public struct ReleaseOwnedPiRuntimeResolver: PiRuntimeResolving, Sendable {
       nodeCodeDirectorySHA256: selectedNodeCodeDirectorySHA256,
       piPackageTreeSHA256: tree.sha256
     )
-    guard GitHubInputValidation.validSHA256(identity.authoritySHA256) else {
+    guard GitHubInputValidation.validSHA256(identity.authoritySHA256),
+      GitHubInputValidation.validSHA256(identity.releaseContentSHA256)
+    else {
       throw PiRuntimeResolutionError(
         code: .releaseRuntimeDrift,
         detail: "release runtime authority digest is invalid"

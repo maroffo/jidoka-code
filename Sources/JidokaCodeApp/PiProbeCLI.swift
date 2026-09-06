@@ -88,7 +88,8 @@ enum ReleaseRuntimeProbeCLI {
         "manifestSHA256": identity.manifestSHA256,
         "runtimeID": identity.runtimeID,
         "runtimeIdentitySHA256": identity.authoritySHA256,
-        "schemaVersion": 1,
+        "runtimeTreeSHA256": identity.releaseContentSHA256,
+        "schemaVersion": 2,
       ],
       options: [.sortedKeys, .withoutEscapingSlashes]
     ) + Data([0x0A])

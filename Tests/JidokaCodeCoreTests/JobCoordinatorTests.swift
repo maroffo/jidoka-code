@@ -919,7 +919,7 @@ private final class JobCoordinatorFixture: @unchecked Sendable {
       sourceCommit: String(repeating: "1", count: 40),
       sourceTree: String(repeating: "2", count: 40),
       bundleVersion: "0.2.0",
-      bundleBuild: 3,
+      bundleBuild: 4,
       applicationSHA256: digest,
       helperSHA256: digest,
       askPassSHA256: digest,

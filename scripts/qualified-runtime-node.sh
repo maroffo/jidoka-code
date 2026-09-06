@@ -96,12 +96,16 @@ manifest_sha256="$(
 identity_sha256="$(
     printf '%s\n' "$report" | /usr/bin/plutil -extract runtimeIdentitySHA256 raw -o - -
 )"
+tree_sha256="$(
+    printf '%s\n' "$report" | /usr/bin/plutil -extract runtimeTreeSHA256 raw -o - -
+)"
 schema_version="$(
     printf '%s\n' "$report" | /usr/bin/plutil -extract schemaVersion raw -o - -
 )"
 [[ "$runtime_id" == "$EXPECTED_RUNTIME_ID" && \
     "$manifest_sha256" == "$EXPECTED_MANIFEST_SHA256" && \
-    "$identity_sha256" =~ ^[0-9a-f]{64}$ && "$schema_version" == "1" ]] || \
+    "$identity_sha256" =~ ^[0-9a-f]{64}$ && \
+    "$tree_sha256" =~ ^[0-9a-f]{64}$ && "$schema_version" == "2" ]] || \
     fail "release-built staged verifier returned unexpected identity"
 
 NODE_BIN="$RUNTIME_ROOT/node/bin/node"
