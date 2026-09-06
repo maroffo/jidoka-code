@@ -22,7 +22,7 @@
     "release": {
       "additionalProperties": false,
       "properties": {
-        "bundleBuild": { "const": 3, "type": "integer" },
+        "bundleBuild": { "const": 4, "type": "integer" },
         "bundleVersion": { "const": "0.2.0", "type": "string" },
         "databaseSchemaVersion": { "const": 10, "type": "integer" },
         "engineProtocolVersion": { "const": 12, "type": "integer" },

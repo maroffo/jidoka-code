@@ -1,7 +1,7 @@
 # Progressive production rollout
 
 This runbook covers source qualification and operation of schema-10 rollout authority for
-Jidoka Code `0.2.0` build `3`, engine protocol `12`, policy version `1`. It does not authorize
+Jidoka Code `0.2.0` build `4`, engine protocol `12`, policy version `1`. It does not authorize
 signing, notarization, installation, a provider session, a GitHub or Git remote operation,
 activation, promotion, merge, deployment, rollback, or deletion of historical evidence.
 
@@ -205,6 +205,12 @@ manifest changes the application signature and therefore the executable bytes. I
 freezes the final signed application digest as external package evidence, the activation binds
 that digest, and the runtime rehashes the installed final executable before accepting it. The
 runtime boundary also strictly validates the final app, nested code, and resource seal.
+
+The signed `runtimeTreeSHA256` is a location-independent canonical digest of the runtime ID,
+runtime-manifest digest, signed Node CodeDirectory, and complete Pi package tree. The separate
+runtime authority additionally binds canonical path, device, and inode for same-process TOCTOU
+checks; it is never embedded as the portable package identity because package expansion and
+installation necessarily create a new vnode and path.
 
 An identity-signed package requires a clean worktree and records its exact `HEAD` commit and
 tree. The ad hoc S1 package is deterministic source testing only: it records the checked-out

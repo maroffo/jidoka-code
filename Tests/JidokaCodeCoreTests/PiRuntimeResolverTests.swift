@@ -843,6 +843,95 @@ struct PiRuntimeResolverTests {
     }
   }
 
+  @Test("release content binding is portable while runtime authority stays vnode-bound")
+  func releaseContentBindingIsPortable() throws {
+    let baseline = try PiReleaseRuntimeIdentity(
+      runtimeID: "node-26.7.0-pi-0.84.2-test-arm64-v1",
+      manifestSHA256: String(repeating: "a", count: 64),
+      canonicalRoot: "/tmp/source/Jidoka Code.app/Contents/Resources/PiRuntime",
+      rootDevice: 1,
+      rootInode: 2,
+      nodeCodeDirectorySHA256: String(repeating: "b", count: 64),
+      piPackageTreeSHA256: String(repeating: "c", count: 64)
+    )
+    let relocated = try PiReleaseRuntimeIdentity(
+      runtimeID: baseline.runtimeID,
+      manifestSHA256: baseline.manifestSHA256,
+      canonicalRoot:
+        "/Library/Application Support/JidokaCode/Applications/Jidoka Code.app/Contents/Resources/PiRuntime",
+      rootDevice: baseline.rootDevice,
+      rootInode: baseline.rootInode,
+      nodeCodeDirectorySHA256: baseline.nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: baseline.piPackageTreeSHA256
+    )
+    let changedDevice = try PiReleaseRuntimeIdentity(
+      runtimeID: baseline.runtimeID,
+      manifestSHA256: baseline.manifestSHA256,
+      canonicalRoot: baseline.canonicalRoot,
+      rootDevice: 3,
+      rootInode: baseline.rootInode,
+      nodeCodeDirectorySHA256: baseline.nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: baseline.piPackageTreeSHA256
+    )
+    let changedInode = try PiReleaseRuntimeIdentity(
+      runtimeID: baseline.runtimeID,
+      manifestSHA256: baseline.manifestSHA256,
+      canonicalRoot: baseline.canonicalRoot,
+      rootDevice: baseline.rootDevice,
+      rootInode: 4,
+      nodeCodeDirectorySHA256: baseline.nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: baseline.piPackageTreeSHA256
+    )
+    let changedNode = try PiReleaseRuntimeIdentity(
+      runtimeID: baseline.runtimeID,
+      manifestSHA256: baseline.manifestSHA256,
+      canonicalRoot: baseline.canonicalRoot,
+      rootDevice: baseline.rootDevice,
+      rootInode: baseline.rootInode,
+      nodeCodeDirectorySHA256: String(repeating: "d", count: 64),
+      piPackageTreeSHA256: baseline.piPackageTreeSHA256
+    )
+    let changedPiTree = try PiReleaseRuntimeIdentity(
+      runtimeID: baseline.runtimeID,
+      manifestSHA256: baseline.manifestSHA256,
+      canonicalRoot: baseline.canonicalRoot,
+      rootDevice: baseline.rootDevice,
+      rootInode: baseline.rootInode,
+      nodeCodeDirectorySHA256: baseline.nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: String(repeating: "e", count: 64)
+    )
+    let changedManifest = try PiReleaseRuntimeIdentity(
+      runtimeID: baseline.runtimeID,
+      manifestSHA256: String(repeating: "f", count: 64),
+      canonicalRoot: baseline.canonicalRoot,
+      rootDevice: baseline.rootDevice,
+      rootInode: baseline.rootInode,
+      nodeCodeDirectorySHA256: baseline.nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: baseline.piPackageTreeSHA256
+    )
+    let changedRuntime = try PiReleaseRuntimeIdentity(
+      runtimeID: "node-26.7.0-pi-0.84.2-test-arm64-v2",
+      manifestSHA256: baseline.manifestSHA256,
+      canonicalRoot: baseline.canonicalRoot,
+      rootDevice: baseline.rootDevice,
+      rootInode: baseline.rootInode,
+      nodeCodeDirectorySHA256: baseline.nodeCodeDirectorySHA256,
+      piPackageTreeSHA256: baseline.piPackageTreeSHA256
+    )
+
+    #expect(baseline.authoritySHA256 != relocated.authoritySHA256)
+    #expect(baseline.authoritySHA256 != changedDevice.authoritySHA256)
+    #expect(baseline.authoritySHA256 != changedInode.authoritySHA256)
+    #expect(baseline.releaseContentSHA256 == relocated.releaseContentSHA256)
+    #expect(baseline.releaseContentSHA256 == changedDevice.releaseContentSHA256)
+    #expect(baseline.releaseContentSHA256 == changedInode.releaseContentSHA256)
+    #expect(baseline.releaseContentSHA256.count == 64)
+    #expect(baseline.releaseContentSHA256 != changedNode.releaseContentSHA256)
+    #expect(baseline.releaseContentSHA256 != changedPiTree.releaseContentSHA256)
+    #expect(baseline.releaseContentSHA256 != changedManifest.releaseContentSHA256)
+    #expect(baseline.releaseContentSHA256 != changedRuntime.releaseContentSHA256)
+  }
+
   @Test("release signing mode binds distinct exact Node CodeDirectories")
   func releaseSigningModeBindsCodeDirectory() throws {
     let fixture = try ReleaseOwnedRuntimeFixture()

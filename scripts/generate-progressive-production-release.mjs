@@ -41,8 +41,8 @@ if (
 ) {
   fail("digest is malformed");
 }
-if (bundleVersion !== "0.2.0" || bundleBuildText !== "3") {
-  fail("bundle identity differs from release 0.2.0 build 3");
+if (bundleVersion !== "0.2.0" || bundleBuildText !== "4") {
+  fail("bundle identity differs from release 0.2.0 build 4");
 }
 if (databaseSchemaVersionText !== "10" || engineProtocolVersionText !== "12") {
   fail("schema or protocol identity differs");

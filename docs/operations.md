@@ -1,6 +1,6 @@
 # Jidoka Code operations
 
-Progressive production authority for release `0.2.0` build `3` is documented in
+Progressive production authority for release `0.2.0` build `4` is documented in
 `docs/operations/progressive-production-rollout.md`. Its source-only and installed-stopped
 preflight is separate from the historical `0.1.1` cutover procedure below.
 

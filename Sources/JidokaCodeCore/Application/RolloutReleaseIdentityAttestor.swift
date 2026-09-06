@@ -110,7 +110,7 @@ struct ProductionRolloutReleaseIdentityRevalidator: RolloutReleaseIdentityRevali
       GitHubInputValidation.validGitSHA(declared.sourceCommit),
       GitHubInputValidation.validGitSHA(declared.sourceTree),
       declared.bundleVersion == "0.2.0",
-      declared.bundleBuild == 3,
+      declared.bundleBuild == 4,
       declared.databaseSchemaVersion == 10,
       declared.engineProtocolVersion == EngineProtocolVersion.current,
       declaredDigests.allSatisfy(GitHubInputValidation.validSHA256)
@@ -198,7 +198,7 @@ struct ProductionRolloutReleaseIdentityRevalidator: RolloutReleaseIdentityRevali
       pushGuardSHA256 == declared.pushGuardSHA256,
       herdrHostSHA256 == declared.herdrHostSHA256,
       runtimeIdentity.manifestSHA256 == declared.runtimeManifestSHA256,
-      runtimeIdentity.authoritySHA256 == declared.runtimeTreeSHA256,
+      runtimeIdentity.releaseContentSHA256 == declared.runtimeTreeSHA256,
       workflowResources.manifestSHA256 == declared.workflowResourcesSHA256
     else {
       throw RolloutAuthorityError.previewDrift

@@ -110,7 +110,7 @@ manifest="$("$NODE" "$RELEASE_MANIFEST_GENERATOR" \
     "$(printf '1%.0s' {1..40})" \
     "$(printf '2%.0s' {1..40})" \
     "0.2.0" \
-    "3" \
+    "4" \
     "$(printf 'b%.0s' {1..64})" \
     "$(printf 'c%.0s' {1..64})" \
     "$(printf 'd%.0s' {1..64})" \
@@ -121,11 +121,11 @@ manifest="$("$NODE" "$RELEASE_MANIFEST_GENERATOR" \
     "$(printf '6%.0s' {1..64})" \
     "$(printf '7%.0s' {1..64})")"
 readonly manifest
-expected_manifest="{\"askPassSHA256\":\"$(printf 'c%.0s' {1..64})\",\"bundleBuild\":3,\"bundleVersion\":\"0.2.0\",\"databaseSchemaVersion\":10,\"engineProtocolVersion\":12,\"helperSHA256\":\"$(printf 'b%.0s' {1..64})\",\"herdrHostSHA256\":\"$(printf 'e%.0s' {1..64})\",\"manifestSchemaVersion\":2,\"pushGuardSHA256\":\"$(printf 'd%.0s' {1..64})\",\"runtimeManifestSHA256\":\"$(printf 'f%.0s' {1..64})\",\"runtimeTreeSHA256\":\"$(printf '6%.0s' {1..64})\",\"sourceCommit\":\"$(printf '1%.0s' {1..40})\",\"sourceTree\":\"$(printf '2%.0s' {1..40})\",\"workflowResourcesSHA256\":\"$(printf '7%.0s' {1..64})\"}"
+expected_manifest="{\"askPassSHA256\":\"$(printf 'c%.0s' {1..64})\",\"bundleBuild\":4,\"bundleVersion\":\"0.2.0\",\"databaseSchemaVersion\":10,\"engineProtocolVersion\":12,\"helperSHA256\":\"$(printf 'b%.0s' {1..64})\",\"herdrHostSHA256\":\"$(printf 'e%.0s' {1..64})\",\"manifestSchemaVersion\":2,\"pushGuardSHA256\":\"$(printf 'd%.0s' {1..64})\",\"runtimeManifestSHA256\":\"$(printf 'f%.0s' {1..64})\",\"runtimeTreeSHA256\":\"$(printf '6%.0s' {1..64})\",\"sourceCommit\":\"$(printf '1%.0s' {1..40})\",\"sourceTree\":\"$(printf '2%.0s' {1..40})\",\"workflowResourcesSHA256\":\"$(printf '7%.0s' {1..64})\"}"
 readonly expected_manifest
 [[ "$manifest" == "$expected_manifest" ]] || fail "release manifest is not canonical"
 if "$NODE" "$RELEASE_MANIFEST_GENERATOR" \
-    malformed malformed 0.2.0 3 x x x x 10 12 x x x >/dev/null 2>&1
+    malformed malformed 0.2.0 4 x x x x 10 12 x x x >/dev/null 2>&1
 then
     fail "release manifest generator accepted malformed identities"
 fi

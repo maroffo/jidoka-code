@@ -94,13 +94,20 @@ EXPECTED_RELEASE_IDENTITY_SHA256="$(
         /usr/bin/plutil -extract runtimeIdentitySHA256 raw -o - -
 )"
 readonly EXPECTED_RELEASE_IDENTITY_SHA256
-[[ "$EXPECTED_RELEASE_IDENTITY_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
+EXPECTED_RELEASE_TREE_SHA256="$(
+    printf '%s\n' "$runtime_verification" | \
+        /usr/bin/plutil -extract runtimeTreeSHA256 raw -o - -
+)"
+readonly EXPECTED_RELEASE_TREE_SHA256
+[[ "$EXPECTED_RELEASE_IDENTITY_SHA256" =~ ^[0-9a-f]{64}$ && \
+    "$EXPECTED_RELEASE_TREE_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
     fail "release runtime verifier emitted an invalid identity"
 expected_runtime_verification="$(printf \
-    '{"manifestSHA256":"%s","runtimeID":"%s","runtimeIdentitySHA256":"%s","schemaVersion":1}' \
+    '{"manifestSHA256":"%s","runtimeID":"%s","runtimeIdentitySHA256":"%s","runtimeTreeSHA256":"%s","schemaVersion":2}' \
     "$EXPECTED_RELEASE_MANIFEST_SHA256" \
     "$EXPECTED_RELEASE_RUNTIME_ID" \
-    "$EXPECTED_RELEASE_IDENTITY_SHA256")"
+    "$EXPECTED_RELEASE_IDENTITY_SHA256" \
+    "$EXPECTED_RELEASE_TREE_SHA256")"
 readonly expected_runtime_verification
 [[ "$runtime_verification" == "$expected_runtime_verification" ]] || \
     fail "release runtime verifier emitted unexpected authority fields"
