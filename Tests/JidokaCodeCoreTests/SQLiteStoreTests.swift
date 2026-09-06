@@ -400,6 +400,54 @@ struct SQLiteStoreTests {
     await schemaNineBackup.close()
   }
 
+  @Test("a schema-9 database stamped by the rewritten migration 9 fails closed by name")
+  func schemaNineStampedByRewrittenMigrationFailsClosed() async throws {
+    // Source once rewrote migration 9 after it shipped (base 6e2343e: 76 statements under
+    // a longer name). A pre-release database carrying that stamp has objects migration 10
+    // now creates, so it must be refused by name before a backup or the digest column
+    // is written, not fail mid-transaction on "table already exists".
+    let shipped = try productionSchemaNineMigration()
+    let rewrittenName = "authorized-architecture-role-host-replacement-and-generation-rollover"
+    let rewritten = SQLiteMigration(
+      version: 9,
+      name: rewrittenName,
+      requiresBackup: true,
+      statements: shipped.statements + [
+        "CREATE TABLE herdr_generation_rollover_authorizations (id INTEGER PRIMARY KEY) STRICT"
+      ]
+    )
+    let fixture = try await PopulatedSchemaEightFixture.make()
+    defer { fixture.remove() }
+    let stamped = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaEightMigrations + [rewritten]
+    )
+    #expect(try await stamped.schemaVersion() == 9)
+    let rowsBefore = try await applicationRows(
+      in: stamped, tableColumns: fixture.snapshot.tableColumns)
+    await stamped.close()
+
+    #expect(
+      throws: SQLiteStoreError.migrationNameMismatch(
+        version: 9, recorded: rewrittenName, expected: shipped.name)
+    ) {
+      _ = try SQLiteStore(databaseURL: fixture.databaseURL, migrations: DatabaseSchema.migrations)
+    }
+    #expect(try migrationBackupURLs(in: fixture.root, beforeVersion: 10).isEmpty)
+    let untouched = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaEightMigrations + [rewritten]
+    )
+    #expect(try await untouched.schemaVersion() == 9)
+    #expect(
+      try await applicationRows(in: untouched, tableColumns: fixture.snapshot.tableColumns)
+        == rowsBefore)
+    #expect(
+      try await untouched.scalarInt(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'rollout_authorizations'") == 0)
+    await untouched.close()
+  }
+
   @Test("a schema-10 database stamped by an unshipped migration body fails closed")
   func schemaTenStampedByAnotherBodyFailsClosed() async throws {
     let migration = try productionSchemaTenMigration()
@@ -801,7 +849,7 @@ private let expectedSchemaTenMigrationDigest =
 // every column of every table, so one added column moves the digest. The historical
 // row values themselves are unchanged and still compared row-for-row above.
 private let expectedPopulatedSchemaEightDigest =
-  "2974d081eb94497cacd50bb1badb19ab2f761a287812e3fc976fb5b78cc2f186"
+  "c25d452793427c87dc0d90156f4cf4d28519c0e4bc4fa236d36d5a33836dfd8a"
 // Objects the shipped migration 9 adds to schema 8.
 private let v9AddedObjects: Set<String> = [
   "herdr_ordinary_role_host_replacement_insert_collision_denied",
@@ -954,6 +1002,21 @@ private struct PopulatedSchemaEightFixture {
       """,
       bindings: [.text(unrelatedJobID), .text(unrelatedRepositoryID)]
     )
+    // Two history rows so the migration-10 rebuild of this table copies data on every
+    // upgrade path, not only on the shipped-fixture test.
+    for (id, invalidatedAt) in [(7, 103.0), (9, 104.0)] {
+      _ = try await database.execute(
+        """
+        INSERT INTO herdr_repository_binding_history(
+          id, repository_id, workspace_id, identity_root, herdr_version, herdr_protocol,
+          socket_device, socket_inode, socket_owner, socket_permissions, reason,
+          invalidated_at
+        ) VALUES (?, ?, 'workspace-schema8', '/private/schema8/identity', '0.8.0', 19,
+          1, 2, 501, 384, 'SOCKET_CHANGED', ?)
+        """,
+        bindings: [.integer(Int64(id)), .text(repository), .real(invalidatedAt)]
+      )
+    }
     _ = try await database.execute(
       "UPDATE app_settings SET paused = 1, updated_at = 100 WHERE singleton = 1"
     )

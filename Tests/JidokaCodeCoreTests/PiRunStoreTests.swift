@@ -107,7 +107,7 @@ struct PiRunStoreTests {
   func topologyActivationIsAtomic() async throws {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-topology-activation")
     defer { try? FileManager.default.removeItem(at: root) }
-    let database = try schemaNinePiDatabase(
+    let database = try await makeProductionPiDatabase(
       at: root.appendingPathComponent("state.sqlite3")
     )
     let repositoryID = UUID(uuidString: "11000000-0000-0000-0000-000000000011")!
@@ -917,7 +917,7 @@ struct PiRunStoreTests {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-prime-fourth")
     defer { try? FileManager.default.removeItem(at: root) }
     let databaseURL = root.appendingPathComponent("state.sqlite3")
-    let database = try schemaNinePiDatabase(at: databaseURL)
+    let database = try await makeProductionPiDatabase(at: databaseURL)
     let repositoryID = UUID(uuidString: "31000000-0000-0000-0000-000000000003")!
     let jobID = UUID(uuidString: "41000000-0000-0000-0000-000000000004")!
     try await insertRepositoryAndJob(
@@ -1264,7 +1264,7 @@ struct PiRunStoreTests {
       payloadSHA256: payload.payloadSHA256,
       socketIdentity: HerdrSocketIdentityRecord(socket.socketIdentity)
     )
-    _ = try await database.execute("UPDATE app_settings SET paused = 0 WHERE singleton = 1")
+    try await resumeSchedulerWithoutRolloutLane(database)
     await #expect(throws: SQLiteStoreError.self) {
       _ = try await intentStore.prepare(authorityIntent)
     }
@@ -1279,7 +1279,7 @@ struct PiRunStoreTests {
     try await intentStore.markSendStarted(receipt)
     if crashAfterSendStarted {
       await database.close()
-      let restartedDatabase = try schemaNinePiDatabase(at: databaseURL)
+      let restartedDatabase = try productionPiDatabase(at: databaseURL)
       let restartedIntentStore = SQLiteHerdrTopologyIntentStore(
         database: restartedDatabase,
         now: { Date(timeIntervalSince1970: 21.75) }
@@ -1741,13 +1741,10 @@ struct PiRunStoreTests {
 
   @Test("lost generation retry lineage advances through one q4 successor")
   func lostGenerationRetryLineageRequiresQ4Successor() async throws {
-    // Generation-rollover authority exists only from schema 10: the shipped schema 9
-    // never carried it.
     let fixture = try await ReplacementCutoverFixture.make(
       persistAuthorization: false,
       prepareIntent: false,
-      sendIntentStarted: false,
-      migrations: DatabaseSchema.migrations
+      sendIntentStarted: false
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
 
@@ -2858,7 +2855,7 @@ struct PiRunStoreTests {
       )
     }
     await fixture.database.close()
-    let reopenedDatabase = try schemaNinePiDatabase(at: fixture.databaseURL)
+    let reopenedDatabase = try productionPiDatabase(at: fixture.databaseURL)
     #expect(
       try await PiRunStore(database: reopenedDatabase).persistRoleHostReplacementAuthorization(
         fixture.replacementAuthorization,
@@ -3295,7 +3292,7 @@ struct PiRunStoreTests {
       .canaryRoleHostReplacementState(request: fixture.replacementAuthorization.request)
     await fixture.database.close()
 
-    let reopened = try schemaNinePiDatabase(at: fixture.databaseURL)
+    let reopened = try productionPiDatabase(at: fixture.databaseURL)
     let jobs = DurableJobStore(database: reopened, enforceRolloutAuthority: false)
     #expect(
       try await jobs.canaryRoleHostReplacementTerminalReport(
@@ -3403,7 +3400,7 @@ struct PiRunStoreTests {
     }
 
     await fixture.database.close()
-    let reopened = try schemaNinePiDatabase(at: fixture.databaseURL)
+    let reopened = try productionPiDatabase(at: fixture.databaseURL)
     let jobs = DurableJobStore(database: reopened, enforceRolloutAuthority: false)
     let report = try #require(
       try await jobs.canaryRoleHostReplacementTerminalReport(
@@ -3578,7 +3575,7 @@ struct PiRunStoreTests {
     }
     await fixture.database.close()
 
-    let reopened = try schemaNinePiDatabase(at: fixture.databaseURL)
+    let reopened = try productionPiDatabase(at: fixture.databaseURL)
     let after = try await fixture.snapshot(database: reopened)
     #expect(after == before)
     #expect(try await reopened.query("PRAGMA foreign_key_check").isEmpty)
@@ -3684,12 +3681,11 @@ private struct ReplacementCutoverFixture {
     collision: Int = 0,
     persistAuthorization: Bool = true,
     prepareIntent: Bool = true,
-    sendIntentStarted: Bool = true,
-    migrations: [SQLiteMigration] = shippedSchemaNineMigrations
+    sendIntentStarted: Bool = true
   ) async throws -> Self {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-replacement-cutover")
     let databaseURL = root.appendingPathComponent("state.sqlite3")
-    let database = try SQLiteStore(databaseURL: databaseURL, migrations: migrations)
+    let database = try await makeProductionPiDatabase(at: databaseURL)
     do {
       let repositoryID = UUID(uuidString: "32000000-0000-0000-0000-000000000003")!
       let jobID = UUID(uuidString: "42000000-0000-0000-0000-000000000004")!
@@ -4792,12 +4788,50 @@ private struct ReplacementCutoverFixture {
   }
 }
 
-/// The schema the signed 0.1.0 helper shipped. Store behaviour that needs no later
-/// object is exercised here; generation-rollover authority needs schema 10.
-private let shippedSchemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
+/// The production schema. The store's launch, rollover and cutover authority lives in
+/// the triggers migration 10 creates, so nothing here runs against the shipped schema 9.
+private func productionPiDatabase(at databaseURL: URL) throws -> SQLiteStore {
+  try SQLiteStore(databaseURL: databaseURL, migrations: DatabaseSchema.migrations)
+}
 
-private func schemaNinePiDatabase(at databaseURL: URL) throws -> SQLiteStore {
-  try SQLiteStore(databaseURL: databaseURL, migrations: shippedSchemaNineMigrations)
+/// A fresh production database with the scheduler resumed, which is the state every
+/// store fixture here assumes: launch eligibility short-circuits on `paused = 0`.
+private func makeProductionPiDatabase(at databaseURL: URL) async throws -> SQLiteStore {
+  let database = try productionPiDatabase(at: databaseURL)
+  try await resumeSchedulerWithoutRolloutLane(database)
+  return database
+}
+
+/// Test-only seam, the same one `HerdrPiWorkflowRuntimeTests` uses: schema 10 refuses
+/// `paused = 0` without an active rollout authorization, and these store fixtures
+/// deliberately have none. The two guards are dropped from their own recorded SQL and
+/// restored byte for byte before this returns, so no test observes the hole.
+private func resumeSchedulerWithoutRolloutLane(_ database: SQLiteStore) async throws {
+  let names = [
+    "app_settings_rollout_scope_required",
+    "app_settings_rollout_insert_scope_required",
+  ]
+  var recorded: [String] = []
+  for name in names {
+    let rows = try await database.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+      bindings: [.text(name)]
+    )
+    guard case .text(let sql)? = rows.first?["sql"] else { continue }
+    recorded.append(sql)
+    try await database.execute("DROP TRIGGER \(name)")
+  }
+  // A failed resume must not skip restoration: rethrow only after every guard is back.
+  var resumeError: Error?
+  do {
+    _ = try await database.execute("UPDATE app_settings SET paused = 0 WHERE singleton = 1")
+  } catch {
+    resumeError = error
+  }
+  for sql in recorded {
+    try await database.execute(sql)
+  }
+  if let resumeError { throw resumeError }
 }
 
 private struct StoreFixture {
@@ -4810,7 +4844,7 @@ private struct StoreFixture {
 
   static func make(role: PiWorkflowRole = .triage) async throws -> Self {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-run-store")
-    let database = try schemaNinePiDatabase(
+    let database = try await makeProductionPiDatabase(
       at: root.appendingPathComponent("state.sqlite3")
     )
     let repositoryID = UUID(uuidString: "30000000-0000-0000-0000-000000000003")!

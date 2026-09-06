@@ -101,6 +101,7 @@ public enum SQLiteStoreError: Error, Equatable, Sendable {
   case invalidMigrations(String)
   case migrationTooNew(database: Int, supported: Int)
   case migrationContentMismatch(version: Int, recorded: String?, expected: String)
+  case migrationNameMismatch(version: Int, recorded: String, expected: String)
   case statementFailed(code: Int32, message: String)
   case transactionAlreadyActive
   case backupFailed(String)
@@ -447,25 +448,35 @@ public actor SQLiteStore {
   /// version by a different body would otherwise skip the differences silently and run
   /// with a schema this binary never wrote.
   ///
-  /// Only migrations that declare `verifiesContent` are checked. A database written
+  /// Every applied row must carry this binary's migration name: a shipped ledger has no
+  /// digest, so the name is the only evidence that a pre-digest version was stamped by
+  /// the body this list carries rather than by a rewrite that never shipped. Digests are
+  /// compared only for migrations that declare `verifiesContent`. A database written
   /// before the column existed has no digest at all, which is a mismatch, not a pass:
   /// the whole point is that such a database was stamped by an unshipped body.
   private static func verifyAppliedMigrationContent(
     _ migrations: [SQLiteMigration],
     connection: SQLiteConnection
   ) throws {
-    let verified = migrations.filter(\.verifiesContent).sorted { $0.version < $1.version }
-    guard !verified.isEmpty else { return }
     let columnExists = try hasStatementsDigestColumn(connection)
     let projection =
-      columnExists ? "version, statements_sha256" : "version, NULL AS statements_sha256"
-    for migration in verified {
+      columnExists
+      ? "version, name, statements_sha256" : "version, name, NULL AS statements_sha256"
+    for migration in migrations.sorted(by: { $0.version < $1.version }) {
       let applied = try query(
         "SELECT \(projection) FROM schema_migrations WHERE version = ?",
         bindings: [.integer(Int64(migration.version))],
         connection: connection
       )
       guard let row = applied.first else { continue }
+      if case .text(let recordedName)? = row["name"], recordedName != migration.name {
+        throw SQLiteStoreError.migrationNameMismatch(
+          version: migration.version,
+          recorded: recordedName,
+          expected: migration.name
+        )
+      }
+      guard migration.verifiesContent else { continue }
       let recorded: String?
       if case .text(let value)? = row["statements_sha256"] {
         recorded = value

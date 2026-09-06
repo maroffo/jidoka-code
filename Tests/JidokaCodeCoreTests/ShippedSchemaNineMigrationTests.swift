@@ -179,16 +179,17 @@ struct ShippedSchemaNineMigrationTests {
     let rowsBefore = try await rowSnapshot(in: current)
     _ = try await current.checkpoint()
     await current.close()
-    let bytesBefore = try sha256(Data(contentsOf: shipped.databaseURL))
-    let backupsBefore = try shipped.backupFileNames()
-    #expect(backupsBefore.count == 1)
+    let directoryBefore = try shipped.directoryDigests()
+    #expect(directoryBefore.keys.filter { $0.contains(".before-v10-") }.count == 1)
+    #expect(!directoryBefore.values.contains { $0.hasPrefix("wal:") })
 
     #expect(throws: SQLiteStoreError.migrationTooNew(database: 10, supported: 9)) {
       _ = try SQLiteStore(databaseURL: shipped.databaseURL, migrations: shippedMigrations)
     }
 
-    #expect(try sha256(Data(contentsOf: shipped.databaseURL)) == bytesBefore)
-    #expect(try shipped.backupFileNames() == backupsBefore)
+    // Every file in the directory, not only the main database: a refused open must
+    // leave no sidecar, journal or backup behind and change no byte of what was there.
+    #expect(try shipped.directoryDigests() == directoryBefore)
     let reopened = try SQLiteStore(databaseURL: shipped.databaseURL)
     #expect(try await schemaObjects(in: reopened) == objectsBefore)
     #expect(try await rowSnapshot(in: reopened) == rowsBefore)
@@ -247,10 +248,22 @@ private struct ShippedSchemaNineDatabase {
     return location
   }
 
-  func backupFileNames() throws -> [String] {
-    try FileManager.default.contentsOfDirectory(atPath: root.path)
-      .filter { $0.contains(".before-v") }
-      .sorted()
+  /// Every file in the directory by digest. The WAL index (`-shm`) is a memory-mapped
+  /// lock table that SQLite keeps after close and rewrites on every open, so it is
+  /// recorded by presence only; the WAL itself must stay empty for "no write" to hold.
+  func directoryDigests() throws -> [String: String] {
+    var digests: [String: String] = [:]
+    for name in try FileManager.default.contentsOfDirectory(atPath: root.path) {
+      let data = try Data(contentsOf: root.appendingPathComponent(name))
+      if name.hasSuffix("-shm") {
+        digests[name] = "wal-index"
+      } else if name.hasSuffix("-wal") {
+        digests[name] = data.isEmpty ? "empty-wal" : "wal:\(sha256(data))"
+      } else {
+        digests[name] = sha256(data)
+      }
+    }
+    return digests
   }
 
   func remove() {
@@ -272,6 +285,10 @@ private func insertSyntheticRows(into database: SQLiteStore) async throws {
     bindings: [.text(syntheticRepositoryID)]
   )
   try await insertBindingHistory(into: database, id: 1, reason: "SOCKET_CHANGED")
+  // The evidence row is already paused; resume here so the upgrade's forced pause is a
+  // real transition. The shipped schema has no resume guard (that arrives with 10).
+  _ = try await database.execute(
+    "UPDATE app_settings SET paused = 0, updated_at = 12 WHERE singleton = 1")
 }
 
 private func insertBindingHistory(
