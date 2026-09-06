@@ -1603,7 +1603,7 @@ public enum DatabaseSchema {
     ),
     SQLiteMigration(
       version: 9,
-      name: "authorized-architecture-role-host-replacement-and-generation-rollover",
+      name: "authorized-architecture-role-host-replacement",
       requiresBackup: true,
       statements: [
         "DROP TRIGGER herdr_topology_intent_identity_immutable",
@@ -1663,6 +1663,28 @@ public enum DatabaseSchema {
         herdrReplacementRoleHostStateTransitionV9,
         herdrReplacementRoleHostDeleteDeniedV9,
         herdrReplacedPredecessorImmutableV9,
+        "ALTER TABLE pi_run_launches ADD COLUMN execution_role_host_id TEXT REFERENCES herdr_replacement_role_hosts(id) ON DELETE RESTRICT",
+        """
+        CREATE UNIQUE INDEX pi_run_launches_one_active_execution_host_idx
+        ON pi_run_launches(execution_role_host_id)
+        WHERE execution_role_host_id IS NOT NULL
+          AND state IN ('prepared', 'enqueued', 'running', 'resultPrepared')
+        """,
+        piRunLaunchIdentityImmutableV9,
+        piRunLaunchInsertAuthorityV9,
+      ]
+    ),
+    SQLiteMigration(
+      version: 10,
+      name: "progressive-production-rollout-authority",
+      requiresBackup: true,
+      statements: [
+        // Generation-rollover authority and the RUNTIME_CHANGED binding-history reason were
+        // added to migration 9 in source after schema 9 had already shipped (helper built
+        // from 944f4f4). A shipped migration is immutable once a database carries its
+        // version, so those objects belong to the first migration that has never shipped.
+        // The two schema-9 rollover-resume guards are not recreated: this migration
+        // replaces them with the rollout-scope guards below (plan decision E20).
         "DROP INDEX herdr_repository_binding_history_repository_idx",
         "ALTER TABLE herdr_repository_binding_history RENAME TO herdr_repository_binding_history_v8",
         herdrRepositoryBindingHistoryTableV9,
@@ -1691,27 +1713,11 @@ public enum DatabaseSchema {
         herdrGenerationRolloverPredecessorLaunchImmutableV9,
         herdrGenerationRolloverPredecessorHostImmutableV9,
         herdrJobBindingGenerationRolloverAuthorityV9,
-        appSettingsGenerationRolloverResumeDeniedV9,
-        appSettingsGenerationRolloverInsertResumeDeniedV9,
         appSettingsGenerationRolloverDeleteDeniedV9,
-        "ALTER TABLE pi_run_launches ADD COLUMN execution_role_host_id TEXT REFERENCES herdr_replacement_role_hosts(id) ON DELETE RESTRICT",
-        """
-        CREATE UNIQUE INDEX pi_run_launches_one_active_execution_host_idx
-        ON pi_run_launches(execution_role_host_id)
-        WHERE execution_role_host_id IS NOT NULL
-          AND state IN ('prepared', 'enqueued', 'running', 'resultPrepared')
-        """,
-        piRunLaunchIdentityImmutableV9,
-        piRunLaunchInsertAuthorityV9,
-      ]
-    ),
-    SQLiteMigration(
-      version: 10,
-      name: "progressive-production-rollout-authority",
-      requiresBackup: true,
-      statements: [
-        "DROP TRIGGER app_settings_generation_rollover_resume_denied",
-        "DROP TRIGGER app_settings_generation_rollover_insert_resume_denied",
+        // The shipped schema-9 launch authority predates the rollover tables; the
+        // successor binds q4 launches to rollover lineage and to the host queue sequence.
+        "DROP TRIGGER pi_run_launch_insert_authority",
+        piRunLaunchInsertAuthorityV10,
         "DROP TRIGGER approved_command_run_state_transition",
         """
         CREATE TRIGGER approved_command_run_state_transition
@@ -5679,26 +5685,6 @@ public enum DatabaseSchema {
     END
     """
 
-  private static let appSettingsGenerationRolloverResumeDeniedV9 = """
-    CREATE TRIGGER app_settings_generation_rollover_resume_denied
-    BEFORE UPDATE OF paused ON app_settings
-    WHEN OLD.paused = 1 AND NEW.paused = 0
-      AND EXISTS (SELECT 1 FROM herdr_generation_rollover_authorizations)
-    BEGIN
-      SELECT RAISE(ABORT, 'Resume requires separate generation rollover authorization');
-    END
-    """
-
-  private static let appSettingsGenerationRolloverInsertResumeDeniedV9 = """
-    CREATE TRIGGER app_settings_generation_rollover_insert_resume_denied
-    BEFORE INSERT ON app_settings
-    WHEN NEW.paused = 0
-      AND EXISTS (SELECT 1 FROM herdr_generation_rollover_authorizations)
-    BEGIN
-      SELECT RAISE(ABORT, 'Resume requires separate generation rollover authorization');
-    END
-    """
-
   private static let appSettingsGenerationRolloverDeleteDeniedV9 = """
     CREATE TRIGGER app_settings_generation_rollover_delete_denied
     BEFORE DELETE ON app_settings
@@ -6120,6 +6106,237 @@ public enum DatabaseSchema {
     """
 
   private static let piRunLaunchInsertAuthorityV9: String = {
+    let prefix = "WHEN NOT EXISTS ("
+    let suffix = "\n)\nBEGIN"
+    guard let prefixRange = piRunLaunchInsertAuthorityV8.range(of: prefix),
+      piRunLaunchInsertAuthorityV8.range(
+        of: suffix,
+        options: .backwards
+      ) != nil
+    else { preconditionFailure("schema-8 launch authority shape changed") }
+    var value = piRunLaunchInsertAuthorityV8
+    value.replaceSubrange(
+      prefixRange,
+      with: "WHEN NOT (\n      (NEW.execution_role_host_id IS NULL AND EXISTS ("
+    )
+    guard let adjustedSuffixRange = value.range(of: suffix, options: .backwards) else {
+      preconditionFailure("schema-8 launch authority suffix changed")
+    }
+    value.replaceSubrange(
+      adjustedSuffixRange,
+      with: """
+
+            )
+          )
+          OR (
+            NEW.execution_role_host_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM pi_runs AS replacement_run
+              JOIN herdr_role_hosts AS predecessor
+                ON predecessor.id = NEW.role_host_id
+              JOIN herdr_replacement_role_hosts AS replacement
+                ON replacement.id = NEW.execution_role_host_id
+              JOIN herdr_topology_intents AS replacement_intent
+                ON replacement_intent.id = replacement.replacement_intent_id
+              JOIN herdr_role_host_replacement_authorizations AS replacement_authorization
+                ON replacement_authorization.payload_sha256
+                  = replacement_intent.payload_sha256
+                AND replacement_authorization.repository_id
+                  = replacement_intent.repository_id
+                AND replacement_authorization.job_id = replacement_intent.job_id
+                AND replacement_authorization.generation = replacement_intent.generation
+                AND replacement_authorization.run_id = replacement_run.id
+                AND replacement_authorization.predecessor_role_host_id = predecessor.id
+                AND replacement_authorization.planned_replacement_role_host_id
+                  = replacement.id
+                AND replacement_authorization.q4_descriptor_sha256
+                  = NEW.descriptor_sha256
+              WHERE replacement_run.id = NEW.run_id
+                AND replacement_run.runtime_kind = 'herdr'
+                AND replacement_run.settled = 0
+                AND replacement_run.outcome = 'running'
+                AND replacement_run.role = 'architecture'
+                AND predecessor.job_id = replacement_run.job_id
+                AND predecessor.generation = replacement_run.topology_generation
+                AND predecessor.role = replacement_run.role
+                AND predecessor.state = 'stopped'
+                AND predecessor.last_queue_sequence = 3
+                AND replacement.predecessor_role_host_id = predecessor.id
+                AND replacement.job_id = replacement_run.job_id
+                AND replacement.generation = replacement_run.topology_generation
+                AND replacement.role = replacement_run.role
+                AND replacement.state IN ('waiting', 'running')
+                AND replacement.last_queue_sequence = 4
+                AND replacement.q4_descriptor_sha256
+                  = replacement_authorization.q4_descriptor_sha256
+                AND replacement.q4_configuration_sha256
+                  = replacement_authorization.q4_configuration_sha256
+                AND replacement.q4_prompt_sha256
+                  = replacement_authorization.q4_prompt_sha256
+                AND replacement.q4_workflow_configuration_sha256
+                  = replacement_authorization.q4_workflow_configuration_sha256
+                AND replacement.q4_prior_launch_descriptor_sha256
+                  = replacement_authorization.q4_prior_launch_descriptor_sha256
+                AND replacement.q4_prior_launch_configuration_sha256
+                  = replacement_authorization.q4_prior_launch_configuration_sha256
+                AND replacement.q4_resource_tree_sha256
+                  = replacement_authorization.q4_resource_tree_sha256
+                AND replacement_intent.kind = 'replaceRoleHost'
+                AND replacement_intent.job_id = replacement_run.job_id
+                AND replacement_intent.generation = replacement_run.topology_generation
+                AND replacement_intent.state = 'attributed'
+                AND replacement_authorization.failed_launch_attempt_id = (
+                  SELECT launch_attempt_id FROM pi_run_launches
+                  WHERE run_id = replacement_run.id AND queue_sequence = 3
+                )
+                AND replacement_authorization.planned_launch_attempt_id
+                  = NEW.launch_attempt_id
+                AND replacement_authorization.planned_replacement_role_host_id
+                  = NEW.execution_role_host_id
+                AND NEW.queue_sequence = 4
+                AND NEW.launch_mode = 'fresh'
+                AND NEW.expected_session_id IS NULL
+                AND NEW.resume_boundary_sha256 IS NULL
+                AND (SELECT COUNT(*) FROM pi_run_launches
+                  WHERE run_id = replacement_run.id) = 3
+                AND EXISTS (
+                  SELECT 1 FROM pi_run_launches
+                  WHERE run_id = replacement_run.id AND queue_sequence = 1
+                    AND launch_mode = 'fresh' AND state = 'failed'
+                    AND failure_code = 'RUNTIME_TIMEOUT' AND child_pid IS NOT NULL
+                    AND execution_role_host_id IS NULL
+                )
+                AND EXISTS (
+                  SELECT 1 FROM pi_run_launches
+                  WHERE run_id = replacement_run.id AND queue_sequence = 2
+                    AND launch_mode = 'fresh' AND state = 'failed'
+                    AND failure_code = 'HERDR_TRANSACTION_FAILED' AND child_pid IS NULL
+                    AND execution_role_host_id IS NULL
+                )
+                AND EXISTS (
+                  SELECT 1 FROM pi_run_launches
+                  WHERE run_id = replacement_run.id AND queue_sequence = 3
+                    AND launch_mode = 'fresh' AND state = 'failed'
+                    AND failure_code = 'HERDR_TRANSACTION_FAILED' AND child_pid IS NULL
+                    AND execution_role_host_id IS NULL
+                )
+                AND NOT EXISTS (SELECT 1 FROM pi_run_results
+                  WHERE run_id = replacement_run.id)
+                AND NOT EXISTS (SELECT 1 FROM pi_run_session_origins
+                  WHERE run_id = replacement_run.id)
+                AND (
+                  SELECT COUNT(*) FROM job_transitions AS authorization
+                  WHERE authorization.job_id = replacement_run.job_id
+                    AND authorization.from_state = 'runningPi'
+                    AND authorization.to_state = 'runningPi'
+                    AND authorization.event_key GLOB (
+                      'canary:*:pi-fresh-retry:' || replacement_run.id || ':*'
+                    )
+                ) = 4
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.predecessorRoleHostID'
+                ) = predecessor.id
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.replacementRoleHostID'
+                ) = replacement.id
+                AND json_extract(replacement_intent.attribution_json, '$.workspaceID')
+                  = replacement.workspace_id
+                AND json_extract(replacement_intent.attribution_json, '$.tabID')
+                  = replacement.tab_id
+                AND json_extract(replacement_intent.attribution_json, '$.paneID')
+                  = replacement.pane_id
+                AND json_extract(replacement_intent.attribution_json, '$.terminalID')
+                  = replacement.terminal_id
+                AND json_extract(replacement_intent.attribution_json, '$.processID')
+                  = replacement.host_pid
+                AND json_extract(replacement_intent.attribution_json, '$.startSeconds')
+                  = replacement.host_start_seconds
+                AND json_extract(replacement_intent.attribution_json, '$.startMicroseconds')
+                  = replacement.host_start_microseconds
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.hostExecutableSHA256'
+                ) = replacement.host_executable_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.replacementAuthorizationSHA256'
+                ) = replacement_authorization.replacement_authorization_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.replacementEvidenceSHA256'
+                ) = replacement_authorization.replacement_evidence_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.incidentAuditSHA256'
+                ) = replacement_authorization.incident_audit_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.credentialEvidenceSHA256'
+                ) = replacement_authorization.credential_evidence_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.descriptorSHA256'
+                ) = replacement_authorization.q4_descriptor_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.configurationSHA256'
+                ) = replacement_authorization.q4_configuration_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.promptSHA256'
+                ) = replacement_authorization.q4_prompt_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.workflowConfigurationSHA256'
+                ) = replacement_authorization.q4_workflow_configuration_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.priorLaunchDescriptorSHA256'
+                ) = replacement_authorization.q4_prior_launch_descriptor_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.priorLaunchConfigurationSHA256'
+                ) = replacement_authorization.q4_prior_launch_configuration_sha256
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.q4Binding.resourceTreeSHA256'
+                ) = replacement_authorization.q4_resource_tree_sha256
+                AND json_extract(replacement_intent.attribution_json, '$.agent') = 'pi'
+                AND json_extract(
+                  replacement_intent.attribution_json,
+                  '$.agentSessionAbsent'
+                ) = 1
+                AND length(json_extract(
+                  replacement_intent.attribution_json,
+                  '$.tokensSHA256'
+                )) = 64
+                AND EXISTS (
+                  SELECT 1 FROM job_transitions AS replacement_event
+                  WHERE replacement_event.job_id = replacement_run.job_id
+                    AND replacement_event.from_state = 'runningPi'
+                    AND replacement_event.to_state = 'runningPi'
+                    AND replacement_event.event_key = (
+                      'canary:' || replacement_authorization.canary_authorization_sha256 ||
+                      ':m8:pi-role-host-replacement:' || replacement_run.id || ':' ||
+                      (SELECT launch_attempt_id FROM pi_run_launches
+                        WHERE run_id = replacement_run.id AND queue_sequence = 3) || ':' ||
+                      NEW.launch_attempt_id || ':' || predecessor.id || ':' || replacement.id || ':' ||
+                      replacement_intent.payload_sha256
+                    )
+                )
+            )
+          )
+        )
+        BEGIN
+        """
+    )
+    return value
+  }()
+
+  private static let piRunLaunchInsertAuthorityV10: String = {
     let prefix = "WHEN NOT EXISTS ("
     let suffix = "\n)\nBEGIN"
     let settledNeedle = "AND run.settled = 0"

@@ -74,7 +74,7 @@ Pinned now, verified by the preflight against
 | Queue snapshot | 155 queued, 87 blocked, 1 runningPi, 243 total |
 | Herdr | `/opt/homebrew/bin/herdr` resolving to `/opt/homebrew/Cellar/herdr/0.8.2/bin/herdr`, SHA-256 `3e0f0c2d5edc41f592963ef90f5d872db801cc7dbd0e01731023897ee428904a`, protocol 20 |
 | Git | `/usr/bin/git` SHA-256 `1685f2c90307faa05ef5ae8f707d3a18a519c9dad75882768f66abb475f1b3d7`; backend `/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-http-backend` SHA-256 `4026051f87a437197a913d4ca5d3196f1d749bf6060f84c74cc374263988110a` |
-| Schema 9 migration | 76 statements, digest `48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751` (pinned by `Tests/JidokaCodeCoreTests/SQLiteStoreTests.swift`) |
+| Schema 9 migration | 51 statements, the body the signed 0.1.0 helper (source `944f4f4`) shipped; the generation-rollover objects that source later added to migration 9 now live in migration 10 (pinned by `Tests/JidokaCodeCoreTests/SQLiteStoreTests.swift` and `Fixtures/Schema/shipped-schema9.sql`) |
 
 ## 3. Later inputs: provenance, not placeholders
 

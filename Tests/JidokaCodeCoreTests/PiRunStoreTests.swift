@@ -1741,10 +1741,13 @@ struct PiRunStoreTests {
 
   @Test("lost generation retry lineage advances through one q4 successor")
   func lostGenerationRetryLineageRequiresQ4Successor() async throws {
+    // Generation-rollover authority exists only from schema 10: the shipped schema 9
+    // never carried it.
     let fixture = try await ReplacementCutoverFixture.make(
       persistAuthorization: false,
       prepareIntent: false,
-      sendIntentStarted: false
+      sendIntentStarted: false,
+      migrations: DatabaseSchema.migrations
     )
     defer { try? FileManager.default.removeItem(at: fixture.root) }
 
@@ -2118,7 +2121,7 @@ struct PiRunStoreTests {
     )
 
     await fixture.database.close()
-    let reopenedDatabase = try schemaNinePiDatabase(at: fixture.databaseURL)
+    let reopenedDatabase = try SQLiteStore(databaseURL: fixture.databaseURL)
     let reopenedStore = PiRunStore(database: reopenedDatabase)
     #expect(
       try await reopenedStore.persistGenerationRolloverAuthorization(
@@ -3681,11 +3684,12 @@ private struct ReplacementCutoverFixture {
     collision: Int = 0,
     persistAuthorization: Bool = true,
     prepareIntent: Bool = true,
-    sendIntentStarted: Bool = true
+    sendIntentStarted: Bool = true,
+    migrations: [SQLiteMigration] = shippedSchemaNineMigrations
   ) async throws -> Self {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-replacement-cutover")
     let databaseURL = root.appendingPathComponent("state.sqlite3")
-    let database = try schemaNinePiDatabase(at: databaseURL)
+    let database = try SQLiteStore(databaseURL: databaseURL, migrations: migrations)
     do {
       let repositoryID = UUID(uuidString: "32000000-0000-0000-0000-000000000003")!
       let jobID = UUID(uuidString: "42000000-0000-0000-0000-000000000004")!
@@ -4788,11 +4792,12 @@ private struct ReplacementCutoverFixture {
   }
 }
 
+/// The schema the signed 0.1.0 helper shipped. Store behaviour that needs no later
+/// object is exercised here; generation-rollover authority needs schema 10.
+private let shippedSchemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
+
 private func schemaNinePiDatabase(at databaseURL: URL) throws -> SQLiteStore {
-  try SQLiteStore(
-    databaseURL: databaseURL,
-    migrations: Array(DatabaseSchema.migrations.prefix(9))
-  )
+  try SQLiteStore(databaseURL: databaseURL, migrations: shippedSchemaNineMigrations)
 }
 
 private struct StoreFixture {
