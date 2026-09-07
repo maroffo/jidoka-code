@@ -1,4 +1,4 @@
-// ABOUTME: Migration tests against the schema 9 the signed 0.1.0 helper actually shipped
+// ABOUTME: Migration tests against the schema 9 the installed 0.1.1 build 2 helper actually shipped
 // ABOUTME: Built from a static SQL fixture with provenance, never from DatabaseSchema.migrations
 import Foundation
 import SQLite3
@@ -10,10 +10,11 @@ import Testing
 /// `scripts/tests/fixtures/derive-shipped-schema9-fixture.sh` from the evidence database
 /// named in its header; a new digest here must come with a new derivation record.
 private let shippedSchemaNineFixtureSHA256 =
-  "a9992e3633e2fc91669bba7d7a96642c7fea304d5e21392f5ea847bd0559a8d1"
+  "918a57fd2bd7f8c6a1875907958b7b9d9c091e8f1512844c2c2507e061aa9663"
 private let shippedSchemaNineEvidenceSHA256 =
-  "c612a3ed9e084032595127262db6ed4dd7b245798206511c348903403e0889dd"
-private let shippedSchemaNineMigrationName = "authorized-architecture-role-host-replacement"
+  "68647463322c65da2476507fb6aae276dbc4f3c74c0b69ffdd5c421a35f587d8"
+private let shippedSchemaNineMigrationName =
+  "authorized-architecture-role-host-replacement-and-generation-rollover"
 
 /// The migration list a binary that only knows schema 9 carries. It is the current list
 /// truncated, which the fixture comparison below proves is the shipped list: migrations 1
@@ -28,7 +29,13 @@ struct ShippedSchemaNineMigrationTests {
     #expect(sha256(data) == shippedSchemaNineFixtureSHA256)
     let text = String(decoding: data, as: UTF8.self)
     #expect(text.contains("SHA-256 \(shippedSchemaNineEvidenceSHA256)"))
-    #expect(text.contains("historical source commit: 944f4f489e732f871e749cfd61c6b2d7e3324343"))
+    #expect(
+      text.contains(
+        "SHA-256 3aeb9f172d8c0dbffd0a70552008c6c2d5994b74fbc34a8258ce9b19378f7779"))
+    #expect(
+      text.contains(
+        "production DDL sha3-256:  9fe91dab565079947cdf85bb7c93571809e83475954b08cb0a5cf458c3e71ad6"
+      ))
     #expect(text.contains("scripts/tests/fixtures/derive-shipped-schema9-fixture.sh"))
     // The shipped ledger predates the digest column; a fixture whose ledger carries one
     // was regenerated from a store, not from the evidence database.
@@ -66,7 +73,7 @@ struct ShippedSchemaNineMigrationTests {
     let shippedObjects = try await schemaObjects(in: shippedStore, excluding: ["schema_migrations"])
     let freshObjects = try await schemaObjects(in: freshStore, excluding: ["schema_migrations"])
     #expect(freshObjects == shippedObjects)
-    #expect(freshObjects.count == 126)
+    #expect(freshObjects.count == 143)
     var freshColumns = try await tableColumns(in: freshStore)
     freshColumns["schema_migrations"] = nil
     var shippedColumns = try await tableColumns(in: shippedStore)
@@ -87,12 +94,13 @@ struct ShippedSchemaNineMigrationTests {
 
     let seeded = try SQLiteStore(databaseURL: shipped.databaseURL, migrations: shippedMigrations)
     try await insertSyntheticRows(into: seeded)
-    // The shipped binding-history table only knows SOCKET_CHANGED. Rejecting the reason
-    // migration 10 introduces proves this is the shipped shape, not the rewritten one.
-    await #expect(throws: SQLiteStoreError.self) {
-      try await insertBindingHistory(into: seeded, id: 2, reason: "RUNTIME_CHANGED")
-    }
+    // The shipped binding-history table already accepts RUNTIME_CHANGED (the rebuild is
+    // part of the shipped migration 9); the resume guards it carries allow this resume
+    // because no generation rollover is pending.
+    try await insertBindingHistory(into: seeded, id: 2, reason: "RUNTIME_CHANGED")
     let before = try await rowSnapshot(in: seeded)
+    let onboardingBefore = try await seeded.scalarInt(
+      "SELECT onboarding_complete FROM app_settings")
     let shippedLedgerNames = try await ledger(in: seeded).map(\.name)
     _ = try await seeded.checkpoint()
     await seeded.close()
@@ -112,15 +120,30 @@ struct ShippedSchemaNineMigrationTests {
       try await upgraded.scalarText("SELECT active_rollout_authorization_id FROM app_settings")
         == nil)
     #expect(
-      try await upgraded.scalarInt("SELECT onboarding_complete FROM app_settings") == 1)
+      try await upgraded.scalarInt("SELECT onboarding_complete FROM app_settings")
+        == onboardingBefore)
     let upgradedLedger = try await ledger(in: upgraded)
     #expect(upgradedLedger.map(\.version) == Array(1...10))
     #expect(upgradedLedger.prefix(9).allSatisfy { $0.digest == nil })
     #expect(upgradedLedger.last?.digest == migrationTen.statementsSHA256)
-    // The rebuilt history table kept its row and now accepts the reason migration 10 adds.
-    try await insertBindingHistory(into: upgraded, id: 2, reason: "RUNTIME_CHANGED")
+    // Both history rows survived; the table still accepts every reason.
+    try await insertBindingHistory(into: upgraded, id: 3, reason: "RUNTIME_CHANGED")
     #expect(
-      try await upgraded.scalarInt("SELECT COUNT(*) FROM herdr_repository_binding_history") == 2)
+      try await upgraded.scalarInt("SELECT COUNT(*) FROM herdr_repository_binding_history") == 3)
+    // Migration 10 replaced the shipped rollover resume guards with the rollout scope latch.
+    for dropped in [
+      "app_settings_generation_rollover_resume_denied",
+      "app_settings_generation_rollover_insert_resume_denied",
+    ] {
+      #expect(
+        try await upgraded.scalarInt(
+          "SELECT COUNT(*) FROM sqlite_schema WHERE name = ?", bindings: [.text(dropped)]) == 0,
+        "\(dropped)")
+    }
+    #expect(
+      try await upgraded.scalarInt(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'app_settings_rollout_scope_required'")
+        == 1)
     #expect(
       try await upgraded.scalarInt("SELECT COUNT(*) FROM herdr_generation_rollover_authorizations")
         == 0)
@@ -285,8 +308,10 @@ private func insertSyntheticRows(into database: SQLiteStore) async throws {
     bindings: [.text(syntheticRepositoryID)]
   )
   try await insertBindingHistory(into: database, id: 1, reason: "SOCKET_CHANGED")
-  // The evidence row is already paused; resume here so the upgrade's forced pause is a
-  // real transition. The shipped schema has no resume guard (that arrives with 10).
+  // The evidence row is unpaused with two lanes; pause it first so the upgrade's forced
+  // single-lane pause is proven from both directions of the shipped resume guard.
+  _ = try await database.execute(
+    "UPDATE app_settings SET paused = 1, updated_at = 11 WHERE singleton = 1")
   _ = try await database.execute(
     "UPDATE app_settings SET paused = 0, updated_at = 12 WHERE singleton = 1")
 }

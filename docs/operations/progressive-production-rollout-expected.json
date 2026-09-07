@@ -6,7 +6,7 @@
     "providerCalls": 0
   },
   "release": {
-    "bundleBuild": 5,
+    "bundleBuild": 6,
     "bundleVersion": "0.2.0",
     "databaseSchemaVersion": 10,
     "engineProtocolVersion": 12,

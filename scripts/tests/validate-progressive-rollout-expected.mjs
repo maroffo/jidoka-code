@@ -61,7 +61,7 @@ exactKeys(
 if (values.release.bundleVersion !== "0.2.0") {
   fail("release.bundleVersion must equal 0.2.0");
 }
-integer(values.release.bundleBuild, 5, "release.bundleBuild");
+integer(values.release.bundleBuild, 6, "release.bundleBuild");
 integer(values.release.databaseSchemaVersion, 10, "release.databaseSchemaVersion");
 integer(values.release.engineProtocolVersion, 12, "release.engineProtocolVersion");
 integer(values.release.maximumConcurrency, 1, "release.maximumConcurrency");

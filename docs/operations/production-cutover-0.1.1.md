@@ -74,7 +74,7 @@ Pinned now, verified by the preflight against
 | Queue snapshot | 155 queued, 87 blocked, 1 runningPi, 243 total |
 | Herdr | `/opt/homebrew/bin/herdr` resolving to `/opt/homebrew/Cellar/herdr/0.8.2/bin/herdr`, SHA-256 `3e0f0c2d5edc41f592963ef90f5d872db801cc7dbd0e01731023897ee428904a`, protocol 20 |
 | Git | `/usr/bin/git` SHA-256 `1685f2c90307faa05ef5ae8f707d3a18a519c9dad75882768f66abb475f1b3d7`; backend `/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-http-backend` SHA-256 `4026051f87a437197a913d4ca5d3196f1d749bf6060f84c74cc374263988110a` |
-| Schema 9 migration | 51 statements, the body the signed 0.1.0 helper (source `944f4f4`) shipped; the generation-rollover objects that source later added to migration 9 now live in migration 10 (pinned by `Tests/JidokaCodeCoreTests/SQLiteStoreTests.swift` and `Fixtures/Schema/shipped-schema9.sql`) |
+| Schema 9 migration | The body the installed 0.1.1 build 2 helper (SHA-256 `3aeb9f17…`) created production with: ledger name `authorized-architecture-role-host-replacement-and-generation-rollover`, generation-rollover authority and the `app_settings_generation_rollover_*` guards included (pinned by `Tests/JidokaCodeCoreTests/SQLiteStoreTests.swift` and `Fixtures/Schema/shipped-schema9.sql`, derived from that helper). The 0.1.0 schema-9 package (`71023263…`, source `944f4f4`) was never installed and is not a shipped schema. |
 
 ## 3. Later inputs: provenance, not placeholders
 
@@ -433,14 +433,15 @@ requires the W9 ExecPlan or a new decision row in the active plan.
 
 Two schema-9 facts the W9 plan must budget for (database review, 2026-08-27):
 
-- The shipped schema 9 (signed 0.1.0 helper, source `944f4f4`) has no Resume/unpause
-  denial at all: `paused = 0` is an ordinary write there. The
-  `app_settings_generation_rollover_*` guards this bullet once described belonged to a
-  migration-9 rewrite that never shipped; no database carries them. The durable latch
-  arrives with migration 10 directly, as `app_settings_rollout_scope_required` and
-  `app_settings_rollout_insert_scope_required`: `paused = 0` needs one active rollout
-  lane bound to the exact scope. Any cutover or recovery step that assumes a paused
-  schema-9 database protects itself must not rely on a trigger; it must migrate to 10 first.
+- The shipped schema 9 is the one the installed 0.1.1 build 2 helper created (evidence
+  `w7/build5/production-schema-body/`): it carries the generation-rollover authority and the
+  `app_settings_generation_rollover_resume_denied` / `_insert_resume_denied` guards, which deny
+  `paused = 0` whenever a generation-rollover authorization row exists. Migration 10 drops those two guards
+  and installs the stricter durable latch, `app_settings_rollout_scope_required` and
+  `app_settings_rollout_insert_scope_required`: `paused = 0` needs one active rollout lane bound
+  to the exact scope. Any cutover or recovery step that assumes a paused schema-9 database
+  protects itself must not rely on a trigger; it must migrate to 10 first. The 0.1.0 schema-9
+  package body (source `944f4f4`, no guards at all) never reached a production database.
 - Migration 9's role-host replacement path is single-incident by construction: its insert
   authority hard-codes the exact incident audit and stale-pane digests. A future
   legitimate replacement is planned as a new migration, never attempted as data.
