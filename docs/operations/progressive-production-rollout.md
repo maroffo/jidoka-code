@@ -1,7 +1,7 @@
 # Progressive production rollout
 
 This runbook covers source qualification and operation of schema-10 rollout authority for
-Jidoka Code `0.2.0` build `4`, engine protocol `12`, policy version `1`. It does not authorize
+Jidoka Code `0.2.0` build `5`, engine protocol `12`, policy version `1`. It does not authorize
 signing, notarization, installation, a provider session, a GitHub or Git remote operation,
 activation, promotion, merge, deployment, rollback, or deletion of historical evidence.
 

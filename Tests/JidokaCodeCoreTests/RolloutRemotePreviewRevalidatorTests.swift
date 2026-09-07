@@ -158,7 +158,7 @@ struct RolloutRemotePreviewRevalidatorTests {
     let tampered = RolloutPreview(
       payload: preview.payload,
       canonicalJSON: Data(
-        text.replacingOccurrences(of: "\"bundleBuild\":4", with: "\"bundleBuild\":5").utf8
+        text.replacingOccurrences(of: "\"bundleBuild\":5", with: "\"bundleBuild\":6").utf8
       ),
       sha256: preview.sha256
     )
@@ -861,7 +861,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
         sourceCommit: String(repeating: "b", count: 40),
         sourceTree: String(repeating: "c", count: 40),
         bundleVersion: "0.2.0",
-        bundleBuild: 4,
+        bundleBuild: 5,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,

@@ -110,7 +110,7 @@ struct ProductionRolloutReleaseIdentityRevalidator: RolloutReleaseIdentityRevali
       GitHubInputValidation.validGitSHA(declared.sourceCommit),
       GitHubInputValidation.validGitSHA(declared.sourceTree),
       declared.bundleVersion == "0.2.0",
-      declared.bundleBuild == 4,
+      declared.bundleBuild == 5,
       declared.databaseSchemaVersion == 10,
       declared.engineProtocolVersion == EngineProtocolVersion.current,
       declaredDigests.allSatisfy(GitHubInputValidation.validSHA256)
