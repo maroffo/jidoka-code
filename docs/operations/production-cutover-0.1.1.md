@@ -433,11 +433,14 @@ requires the W9 ExecPlan or a new decision row in the active plan.
 
 Two schema-9 facts the W9 plan must budget for (database review, 2026-08-27):
 
-- The Resume/unpause denial latch is durable by construction: the
-  `app_settings_generation_rollover_*` triggers deny `paused = 0` whenever any rollover
-  authorization row exists, and that table is append-only with no release predicate.
-  After the first W8 authorization lands, Resume is unreachable under schema 9; W9's
-  Resume therefore requires a schema-10 migration that retires or replaces those triggers.
+- The shipped schema 9 (signed 0.1.0 helper, source `944f4f4`) has no Resume/unpause
+  denial at all: `paused = 0` is an ordinary write there. The
+  `app_settings_generation_rollover_*` guards this bullet once described belonged to a
+  migration-9 rewrite that never shipped; no database carries them. The durable latch
+  arrives with migration 10 directly, as `app_settings_rollout_scope_required` and
+  `app_settings_rollout_insert_scope_required`: `paused = 0` needs one active rollout
+  lane bound to the exact scope. Any cutover or recovery step that assumes a paused
+  schema-9 database protects itself must not rely on a trigger; it must migrate to 10 first.
 - Migration 9's role-host replacement path is single-incident by construction: its insert
   authority hard-codes the exact incident audit and stale-pane digests. A future
   legitimate replacement is planned as a new migration, never attempted as data.
