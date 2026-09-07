@@ -182,8 +182,16 @@ readonly DATABASE_PARENT
 [[ "$($TOOL_STAT -f '%l' "$DATABASE")" == "1" && \
     "$($TOOL_STAT -f '%OLp' "$DATABASE")" == "600" ]] || \
     fail 67 "database metadata is unsafe"
-[[ ! -e "$DATABASE-wal" && ! -e "$DATABASE-shm" ]] || \
-    fail 67 "database must be quiesced and checkpointed"
+# Quiesced means no uncheckpointed frame, not the absence of the sidecar files. The engine
+# truncates the WAL at its durable quit, but SQLite removes `-wal` and `-shm` only when the last
+# connection to close is read-write, and this platform keeps them even then; a read-only reader
+# can never remove them. An empty WAL therefore proves every frame reached the main database,
+# and `-shm` is a lock table with no durable content. A non-empty WAL is still a hard failure.
+if [[ -e "$DATABASE-wal" ]]; then
+    [[ "$($TOOL_STAT -f '%z' "$DATABASE-wal")" == "0" ]] || \
+        fail 67 "database must be quiesced and checkpointed"
+fi
+[[ ! -e "$DATABASE-journal" ]] || fail 67 "database must be quiesced and checkpointed"
 
 query_integer() {
     local sql="$1"

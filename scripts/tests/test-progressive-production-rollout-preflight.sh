@@ -181,6 +181,38 @@ readonly fixture_after
 [[ ! -e "$DATABASE-wal" && ! -e "$DATABASE-shm" ]] || \
     fail "installed preflight created SQLite sidecars"
 
+# A durable quit leaves an empty WAL and a stale lock table on this platform: every frame is in
+# the main database, so the installed stage must accept that state and still reject real frames.
+: >"$DATABASE-wal"
+/bin/dd if=/dev/zero of="$DATABASE-shm" bs=32768 count=1 status=none
+/bin/chmod 0600 "$DATABASE-wal" "$DATABASE-shm"
+rc="$(run_preflight \
+    --stage installed \
+    --source-root "$ROOT" \
+    --expected "$EXPECTED" \
+    --application "$APP" \
+    --database "$DATABASE")"
+expect_rc 0 "$rc" "installed preflight with an empty WAL and a stale lock table"
+/bin/dd if=/dev/zero of="$DATABASE-wal" bs=4152 count=1 status=none
+rc="$(run_preflight \
+    --stage installed \
+    --source-root "$ROOT" \
+    --expected "$EXPECTED" \
+    --application "$APP" \
+    --database "$DATABASE")"
+expect_rc 67 "$rc" "installed preflight with an uncheckpointed WAL"
+/bin/rm -f "$DATABASE-wal" "$DATABASE-shm"
+: >"$DATABASE-journal"
+/bin/chmod 0600 "$DATABASE-journal"
+rc="$(run_preflight \
+    --stage installed \
+    --source-root "$ROOT" \
+    --expected "$EXPECTED" \
+    --application "$APP" \
+    --database "$DATABASE")"
+expect_rc 67 "$rc" "installed preflight with a rollback journal"
+/bin/rm -f "$DATABASE-journal"
+
 readonly DRIFTED_EXPECTED="$TEST_ROOT/drifted-expected.json"
 /usr/bin/sed 's/"bundleVersion": "0.2.0"/"bundleVersion": "9.9.9"/' \
     "$EXPECTED" >"$DRIFTED_EXPECTED"
