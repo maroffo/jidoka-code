@@ -1,7 +1,7 @@
 # Progressive production rollout
 
 This runbook covers source qualification and operation of schema-10 rollout authority for
-Jidoka Code `0.2.0` build `5`, engine protocol `12`, policy version `1`. It does not authorize
+Jidoka Code `0.2.0` build `6`, engine protocol `12`, policy version `1`. It does not authorize
 signing, notarization, installation, a provider session, a GitHub or Git remote operation,
 activation, promotion, merge, deployment, rollback, or deletion of historical evidence.
 
@@ -29,14 +29,16 @@ disabled with all workflow flags off. `Poll now` is valid only for an active fin
 Schema 10 treats every historical `JobCanaryScope` as retained evidence only. It cannot admit
 a fresh provider, command, Git, GitHub, lease, Pi launch, or generated-review effect.
 
-The shipped schema 9 has no resume guard: `paused = 0` is an ordinary write on every database
-the signed 0.1.0 helper created. The guards `app_settings_generation_rollover_resume_denied` and
-`app_settings_generation_rollover_insert_resume_denied` existed only in a migration-9 rewrite that
-never shipped, so migration 10 does not drop them; it introduces the rollout guards directly.
+The shipped schema 9 is the body the installed 0.1.1 build 2 helper created production with
+(ledger name `authorized-architecture-role-host-replacement-and-generation-rollover`). It already
+carries the generation-rollover authority and the guards `app_settings_generation_rollover_resume_denied`
+and `app_settings_generation_rollover_insert_resume_denied`, which deny `paused = 0` only while a
+generation rollover is pending. Migration 10 drops those two guards and introduces the rollout guards:
 `app_settings_rollout_scope_required` (and its insert twin) make `paused = 0` need one active
 rollout lane bound to the exact scope, which is stricter than "no resume while a generation
-rollover is pending". Migration 10 also creates the generation-rollover authority itself, which
-the shipped schema 9 lacks. The Q4 rollover launch authority still requires `paused = 1`, so no
+rollover is pending". The 0.1.0 schema-9 package body (source `944f4f4`, no guards, no rollover
+authority) was never installed; no production database carries it. The Q4 rollover launch
+authority still requires `paused = 1`, so no
 rollover can launch while a lane is resumed (plan decision E20).
 
 ## Schema-10 migration identity

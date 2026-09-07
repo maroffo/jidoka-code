@@ -1,9 +1,9 @@
 #!/bin/bash
-# ABOUTME: Derives Tests/JidokaCodeCoreTests/Fixtures/Schema/shipped-schema9.sql from the immutable evidence database
+# ABOUTME: Derives Tests/JidokaCodeCoreTests/Fixtures/Schema/shipped-schema9.sql from the installed-helper evidence database
 # ABOUTME: Emits the shipped DDL verbatim plus ledger and non-identifying seed rows; never reads DatabaseSchema.migrations
 set -euo pipefail
 
-readonly EXPECTED_SOURCE_SHA256=c612a3ed9e084032595127262db6ed4dd7b245798206511c348903403e0889dd
+readonly EXPECTED_SOURCE_SHA256=68647463322c65da2476507fb6aae276dbc4f3c74c0b69ffdd5c421a35f587d8
 readonly SQLITE=/usr/bin/sqlite3
 
 usage() {
@@ -44,29 +44,32 @@ readonly EXPECTED_APP_SETTINGS_COLUMNS='singleton, max_concurrency, paused, upda
 
 {
   cat <<'HEADER'
--- ABOUTME: Shipped Jidoka Code schema 9 exactly as the signed 0.1.0 helper created it (source 944f4f4)
+-- ABOUTME: Shipped Jidoka Code schema 9 exactly as the installed 0.1.1 build 2 helper creates it
 -- ABOUTME: Static fixture derived from evidence, never from DatabaseSchema.migrations; see provenance below
 --
 -- Provenance
---   historical source commit: 944f4f489e732f871e749cfd61c6b2d7e3324343
---   historical source tree:   e7369aa9eb2e5d3e92dcb49da5057f0fe894480b
---   historical package:       Jidoka Code-0.1.0-schema9.pkg
---                             SHA-256 7102326303e2fe1f1394c42b4f919351f14ec3c37f5ac26dd962ac23c83ab0cb
---                             Apple submission 9ed36ebb-a727-451c-90fe-8124041387e2
---   schema-8 input:           schema8-source.sqlite3 (synthetic)
---                             SHA-256 e2c1a073c5ae3638466fa9fe4a63bf79035e3bbe1130b46ea7ad02cf18543f41
---   evidence database:        w7/build4/schema-compatibility/final-audit/shipped-schema9-pristine.sqlite3
---                             SHA-256 c612a3ed9e084032595127262db6ed4dd7b245798206511c348903403e0889dd
---                             sqlite3 .sha3sum --schema 3b5bc9236a9bdba8667e36698b85c76b7deab3a80562717f9314e07dceddb753
---                             produced by running the signed schema-9 helper against the schema-8 input
---   derivation:               scripts/tests/fixtures/derive-shipped-schema9-fixture.sh, 2026-09-06
+--   installed application:    /Library/Application Support/JidokaCode/Applications/Jidoka Code.app, 0.1.1 build 2
+--   installed helper:         Contents/Helpers/JidokaCodeEngineProbe
+--                             SHA-256 3aeb9f172d8c0dbffd0a70552008c6c2d5994b74fbc34a8258ce9b19378f7779
+--                             CDHash 3f9eb34eaeca3b2ce82d33619c111af5cc301a72, team X3Q42VNZDC
+--   migration-9 source text:  identical in e22c32a191892425fefaae9549e4d14207ae1062 and
+--                             c67943130e535da65274b77601e36241ce781454 (the 0.1.1 worktree head)
+--   production ledger row 9:  authorized-architecture-role-host-replacement-and-generation-rollover
+--   production DDL sha3-256:  9fe91dab565079947cdf85bb7c93571809e83475954b08cb0a5cf458c3e71ad6
+--                             (sha3_query over type, name, tbl_name, sql ordered by type, name; equal to the
+--                             evidence database below, which the same helper created from nothing)
+--   evidence database:        w7/build5/production-schema-body/02-installed-helper-schema9-pristine.sqlite3
+--                             SHA-256 68647463322c65da2476507fb6aae276dbc4f3c74c0b69ffdd5c421a35f587d8
+--                             sqlite3 .sha3sum --schema 8abfd0b9620f1df741dfc26f89a3f740887f5e14d9e46c31db5592b3
+--                             produced by a ditto copy of the installed helper in a sandbox home
+--   derivation:               scripts/tests/fixtures/derive-shipped-schema9-fixture.sh, 2026-09-07
 --
 -- Content
 --   1. Every sqlite_schema.sql entry of the evidence database, verbatim, in creation (rowid) order.
 --   2. The nine schema_migrations rows verbatim (the shipped ledger has no statements_sha256 column).
 --   3. The four model_profiles seed rows verbatim.
 --   4. The app_settings singleton with every GitHub account column set to NULL.
---   No other application rows: the evidence database holds non-public repository and job data.
+--   The evidence database was created empty, so it holds no repository or job rows.
 --   Row preservation across the schema-10 migration is proven with synthetic rows in the tests.
 HEADER
   query "SELECT sql || ';' FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY rowid;"

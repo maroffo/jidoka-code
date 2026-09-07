@@ -173,12 +173,12 @@ struct SQLiteStoreTests {
         "SELECT COUNT(*) FROM herdr_topology_intents WHERE state = 'unknown'"
       ) == 2
     )
-    // The shipped binding-history table only knows SOCKET_CHANGED; RUNTIME_CHANGED
-    // arrives with migration 10, which is where runtime invalidation is exercised.
+    // The shipped migration 9 rebuilt the binding-history table to accept RUNTIME_CHANGED;
+    // runtime invalidation itself is exercised at schema 10 below.
     #expect(
       try await upgraded.scalarText(
         "SELECT sql FROM sqlite_schema WHERE name = 'herdr_repository_binding_history'"
-      )?.contains("CHECK (reason = 'SOCKET_CHANGED')") == true
+      )?.contains("'RUNTIME_CHANGED'") == true
     )
     try await assertDatabaseIntegrity(upgraded)
 
@@ -300,13 +300,13 @@ struct SQLiteStoreTests {
         "SELECT COUNT(*) FROM jobs WHERE rollout_generation != 0"
       ) == 0
     )
-    // Migration 10 adds the generation-rollover authority and, instead of the schema-9
-    // resume guards that never shipped, requires an active rollout lane for resume; the
+    // Migration 10 keeps the shipped generation-rollover authority, drops the shipped
+    // rollover resume guards and requires an active rollout lane for resume instead; the
     // Q4 rollover launch authority still requires pause, so no rollover can launch while
     // a lane runs (plan decision E20).
     let upgradedObjectNames = try await schemaObjectNames(in: upgraded)
-    #expect(upgradedObjectNames.isSuperset(of: v10AddedGenerationRolloverObjects))
-    #expect(upgradedObjectNames.isDisjoint(with: unshippedSchemaNineResumeGuards))
+    #expect(upgradedObjectNames.isSuperset(of: shippedGenerationRolloverObjects))
+    #expect(upgradedObjectNames.isDisjoint(with: shippedResumeGuardsDroppedByTen))
     for replacement in [
       "app_settings_rollout_scope_required", "app_settings_rollout_insert_scope_required",
     ] {
@@ -339,8 +339,8 @@ struct SQLiteStoreTests {
 
     let backup = try SQLiteStore(databaseURL: backupURL, migrations: schemaNineMigrations)
     #expect(try await backup.schemaVersion() == 9)
-    #expect(
-      try await schemaObjectNames(in: backup).isDisjoint(with: v10AddedGenerationRolloverObjects))
+    #expect(try await schemaObjectNames(in: backup).isSuperset(of: shippedResumeGuardsDroppedByTen))
+    #expect(try await schemaObjectNames(in: backup).isDisjoint(with: v10AddedRolloutObjects))
     #expect(
       try await historicalRows(in: backup, snapshot: fixture.snapshot) == fixture.snapshot.rows)
     try await assertDatabaseIntegrity(backup)
@@ -383,9 +383,11 @@ struct SQLiteStoreTests {
     #expect(try await upgraded.scalarInt("SELECT paused FROM app_settings") == 1)
     #expect(try await upgraded.scalarInt("SELECT max_concurrency FROM app_settings") == 1)
     let upgradedObjectNames = try await schemaObjectNames(in: upgraded)
-    #expect(upgradedObjectNames.isSuperset(of: v9AddedObjects))
-    #expect(upgradedObjectNames.isSuperset(of: v10AddedGenerationRolloverObjects))
-    #expect(upgradedObjectNames.isDisjoint(with: unshippedSchemaNineResumeGuards))
+    #expect(
+      upgradedObjectNames.isSuperset(
+        of: v9AddedObjects.subtracting(shippedResumeGuardsDroppedByTen)))
+    #expect(upgradedObjectNames.isSuperset(of: v10AddedRolloutObjects))
+    #expect(upgradedObjectNames.isDisjoint(with: shippedResumeGuardsDroppedByTen))
     try await assertDatabaseIntegrity(upgraded)
     await upgraded.close()
 
@@ -395,32 +397,33 @@ struct SQLiteStoreTests {
     )
     #expect(try await schemaNineBackup.schemaVersion() == 9)
     #expect(
+      try await schemaObjectNames(in: schemaNineBackup).isDisjoint(with: v10AddedRolloutObjects))
+    #expect(
       try await schemaObjectNames(in: schemaNineBackup)
-        .isDisjoint(with: v10AddedGenerationRolloverObjects))
+        .isSuperset(of: shippedResumeGuardsDroppedByTen))
     await schemaNineBackup.close()
   }
 
-  @Test("a schema-9 database stamped by the rewritten migration 9 fails closed by name")
-  func schemaNineStampedByRewrittenMigrationFailsClosed() async throws {
-    // Source once rewrote migration 9 after it shipped (base 6e2343e: 76 statements under
-    // a longer name). A pre-release database carrying that stamp has objects migration 10
-    // now creates, so it must be refused by name before a backup or the digest column
-    // is written, not fail mid-transaction on "table already exists".
+  @Test("a schema-9 database stamped by the never-installed 0.1.0 body fails closed by name")
+  func schemaNineStampedByPhantomMigrationFailsClosed() async throws {
+    // The notarized 0.1.0 schema-9 package (source 944f4f4) carried migration 9 under a
+    // shorter name with no generation-rollover objects. It was never installed, but a
+    // database stamped by it lacks the guards migration 10 drops, so it must be refused
+    // by name before a backup or the digest column is written, not fail mid-transaction
+    // on "no such trigger".
     let shipped = try productionSchemaNineMigration()
-    let rewrittenName = "authorized-architecture-role-host-replacement-and-generation-rollover"
-    let rewritten = SQLiteMigration(
+    let phantomName = "authorized-architecture-role-host-replacement"
+    let phantom = SQLiteMigration(
       version: 9,
-      name: rewrittenName,
+      name: phantomName,
       requiresBackup: true,
-      statements: shipped.statements + [
-        "CREATE TABLE herdr_generation_rollover_authorizations (id INTEGER PRIMARY KEY) STRICT"
-      ]
+      statements: ["CREATE TABLE phantom_schema_nine_marker (id TEXT PRIMARY KEY) STRICT"]
     )
     let fixture = try await PopulatedSchemaEightFixture.make()
     defer { fixture.remove() }
     let stamped = try SQLiteStore(
       databaseURL: fixture.databaseURL,
-      migrations: schemaEightMigrations + [rewritten]
+      migrations: schemaEightMigrations + [phantom]
     )
     #expect(try await stamped.schemaVersion() == 9)
     let rowsBefore = try await applicationRows(
@@ -429,14 +432,14 @@ struct SQLiteStoreTests {
 
     #expect(
       throws: SQLiteStoreError.migrationNameMismatch(
-        version: 9, recorded: rewrittenName, expected: shipped.name)
+        version: 9, recorded: phantomName, expected: shipped.name)
     ) {
       _ = try SQLiteStore(databaseURL: fixture.databaseURL, migrations: DatabaseSchema.migrations)
     }
     #expect(try migrationBackupURLs(in: fixture.root, beforeVersion: 10).isEmpty)
     let untouched = try SQLiteStore(
       databaseURL: fixture.databaseURL,
-      migrations: schemaEightMigrations + [rewritten]
+      migrations: schemaEightMigrations + [phantom]
     )
     #expect(try await untouched.schemaVersion() == 9)
     #expect(
@@ -838,13 +841,13 @@ struct SQLiteStoreTests {
 
 private let schemaEightMigrations = Array(DatabaseSchema.migrations.prefix(8))
 private let schemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
-private let schemaTenStatementCuts = Array(1...114)
+private let schemaTenStatementCuts = Array(1...91)
 private let schemaEightRunID = "run-schema8-architecture"
 private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
 private let expectedSchemaNineMigrationDigest =
-  "5e8b3b5d76399b933405c211a42f6ea796cea0e2f376dcfe18c9644d9c1e33f4"
+  "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
 private let expectedSchemaTenMigrationDigest =
-  "fc23d77b472b29bd4faf77a30e8b8eaf3c36a3bbc4d0b836dce4474049a6ac41"
+  "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991"
 // Widened when `schema_migrations` gained `statements_sha256`: the snapshot projects
 // every column of every table, so one added column moves the digest. The historical
 // row values themselves are unchanged and still compared row-for-row above.
@@ -872,11 +875,27 @@ private let v9AddedObjects: Set<String> = [
   "herdr_replacement_role_hosts_active_terminal_idx",
   "herdr_role_host_replacement_candidates",
   "pi_run_launches_one_active_execution_host_idx",
+  "app_settings_generation_rollover_delete_denied",
+  "app_settings_generation_rollover_insert_resume_denied",
+  "app_settings_generation_rollover_resume_denied",
+  "herdr_generation_rollover_authorization_delete_denied",
+  "herdr_generation_rollover_authorization_insert_authority",
+  "herdr_generation_rollover_authorization_update_denied",
+  "herdr_generation_rollover_authorizations",
+  "herdr_generation_rollover_predecessor_host_immutable",
+  "herdr_generation_rollover_predecessor_launch_immutable",
+  "herdr_generation_rollover_predecessor_run_immutable",
+  "herdr_job_binding_generation_rollover_authority",
+  "herdr_role_host_initial_queue_authority",
+  "herdr_pi_run_rollover_delete_denied",
+  "herdr_pi_run_rollover_insert_authority",
+  "herdr_pi_run_rollover_update_denied",
+  "herdr_pi_run_rollovers",
+  "pi_runs_generation_rollover_insert_authority",
 ]
-// Generation-rollover authority reached source after schema 9 shipped, so migration 10
-// creates it. The two schema-9 resume guards that migration 10 once dropped never
-// shipped either, and no schema carries them.
-private let v10AddedGenerationRolloverObjects: Set<String> = [
+// The generation-rollover authority is part of the shipped migration 9: the installed
+// 0.1.1 build 2 helper created production with it.
+private let shippedGenerationRolloverObjects: Set<String> = [
   "app_settings_generation_rollover_delete_denied",
   "herdr_generation_rollover_authorization_delete_denied",
   "herdr_generation_rollover_authorization_insert_authority",
@@ -893,9 +912,19 @@ private let v10AddedGenerationRolloverObjects: Set<String> = [
   "herdr_pi_run_rollovers",
   "pi_runs_generation_rollover_insert_authority",
 ]
-private let unshippedSchemaNineResumeGuards: Set<String> = [
+// Shipped with migration 9 and dropped by migration 10 in favour of the rollout scope latch.
+private let shippedResumeGuardsDroppedByTen: Set<String> = [
   "app_settings_generation_rollover_insert_resume_denied",
   "app_settings_generation_rollover_resume_denied",
+]
+// Objects only migration 10 creates.
+private let v10AddedRolloutObjects: Set<String> = [
+  "app_settings_rollout_scope_required",
+  "app_settings_rollout_insert_scope_required",
+  "rollout_authorizations",
+  "rollout_authorization_scopes",
+  "rollout_job_bindings",
+  "rollout_effect_reservations",
 ]
 
 private struct SchemaEightSnapshot: Equatable {
@@ -1356,11 +1385,12 @@ private func productionSchemaNineMigration() throws -> SQLiteMigration {
   )
   #expect(DatabaseSchema.migrations.firstIndex(of: migration) == 8)
   #expect(migration.version == 9)
-  // The body the signed 0.1.0 helper shipped (source 944f4f4). A shipped migration is
-  // immutable: the generation-rollover objects source added later belong to migration 10.
-  #expect(migration.name == "authorized-architecture-role-host-replacement")
+  // The body the installed 0.1.1 build 2 helper created production with (source text
+  // e22c32a). A shipped migration is immutable; changes belong to migration 10.
+  #expect(
+    migration.name == "authorized-architecture-role-host-replacement-and-generation-rollover")
   #expect(migration.requiresBackup)
-  #expect(migration.statements.count == 51)
+  #expect(migration.statements.count == 76)
   #expect(migrationDigest(migration) == expectedSchemaNineMigrationDigest)
   return migration
 }
