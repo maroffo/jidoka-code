@@ -436,7 +436,7 @@ Two schema-9 facts the W9 plan must budget for (database review, 2026-08-27):
 - The shipped schema 9 is the one the installed 0.1.1 build 2 helper created (evidence
   `w7/build5/production-schema-body/`): it carries the generation-rollover authority and the
   `app_settings_generation_rollover_resume_denied` / `_insert_resume_denied` guards, which deny
-  `paused = 0` only while a generation rollover is pending. Migration 10 drops those two guards
+  `paused = 0` whenever a generation-rollover authorization row exists. Migration 10 drops those two guards
   and installs the stricter durable latch, `app_settings_rollout_scope_required` and
   `app_settings_rollout_insert_scope_required`: `paused = 0` needs one active rollout lane bound
   to the exact scope. Any cutover or recovery step that assumes a paused schema-9 database

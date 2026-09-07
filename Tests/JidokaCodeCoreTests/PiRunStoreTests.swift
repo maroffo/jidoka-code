@@ -1739,6 +1739,153 @@ struct PiRunStoreTests {
     }
   }
 
+  @Test(
+    "the shipped resume guard denies resume with a pending rollover until migration 10 replaces it")
+  func shippedResumeGuardDeniesPendingRolloverAcrossUpgrade() async throws {
+    // The installed schema 9 carries `app_settings_generation_rollover_resume_denied`;
+    // migration 10 drops it in favour of the rollout scope latch. The one state where
+    // that swap changes behaviour is a pending generation rollover, so build exactly
+    // that at schema 9, prove the shipped deny branch, then upgrade and prove the latch.
+    let fixture = try await ReplacementCutoverFixture.make(
+      persistAuthorization: false,
+      prepareIntent: false,
+      sendIntentStarted: false,
+      migrations: Array(DatabaseSchema.migrations.prefix(9))
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    #expect(try await fixture.database.schemaVersion() == 9)
+    let predecessorBinding = try #require(
+      try await fixture.store.jobBinding(jobID: fixture.jobID)
+    )
+    let repositoryBinding = try #require(
+      try await fixture.store.repositoryBinding(repositoryID: predecessorBinding.repositoryID)
+    )
+    let predecessorHosts = try await fixture.store.roleHosts(jobID: fixture.jobID)
+    let predecessorLaunches = try await fixture.store.launches(runID: fixture.runID)
+    for (index, host) in predecessorHosts.enumerated() {
+      try await fixture.store.markRoleHostLost(
+        id: host.id,
+        now: Date(timeIntervalSince1970: 30 + Double(index))
+      )
+    }
+    try await fixture.store.markJobBindingLost(
+      jobID: fixture.jobID,
+      generation: 1,
+      now: Date(timeIntervalSince1970: 34)
+    )
+    // Losing the generation pauses durably; the shipped rollover authority requires it.
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    let successorDefinitions: [(PiWorkflowRole, String, Character)] = [
+      (.architecture, "rolehost-70000000-0000-4000-8000-000000000007", "7"),
+      (.security, "rolehost-80000000-0000-4000-8000-000000000008", "8"),
+      (.test, "rolehost-90000000-0000-4000-8000-000000000009", "9"),
+      (.synthesis, "rolehost-a0000000-0000-4000-8000-00000000000a", "a"),
+    ]
+    let hostPairs = try successorDefinitions.map { role, successorID, digestCharacter in
+      let predecessor = try #require(predecessorHosts.first(where: { $0.role == role }))
+      return JobCanaryGenerationRolloverHostPair(
+        role: role,
+        predecessorRoleHostID: predecessor.id,
+        predecessorBootstrapDescriptorSHA256: predecessor.bootstrapDescriptorSHA256,
+        successorRoleHostID: successorID,
+        successorBootstrapDescriptorSHA256: String(repeating: digestCharacter, count: 64),
+        predecessorHostExecutableSHA256: predecessor.hostExecutableSHA256,
+        successorHostExecutableSHA256: String(repeating: "d", count: 64),
+        successorExecutableEvidenceSHA256: String(repeating: "e", count: 64)
+      )
+    }.sorted { $0.role.rawValue < $1.role.rawValue }
+    let successorRunID = "run-generation-two-successor"
+    let rolloverAuthorization = JobCanaryGenerationRolloverAuthorization(
+      request: JobCanaryGenerationRolloverRequest(
+        retry: fixture.replacementAuthorization.request.retry,
+        successorRunID: successorRunID,
+        plannedHosts: successorDefinitions.map {
+          JobCanaryGenerationRolloverPlannedHost(role: $0.0, roleHostID: $0.1)
+        }.sorted { $0.role.rawValue < $1.role.rawValue }
+      ),
+      canaryAuthorizationSHA256:
+        fixture.replacementAuthorization.request.retry.recovery.canary.authorizationSHA256,
+      rolloverEvidenceSHA256: String(repeating: "e", count: 64),
+      isolationSHA256: try await fixture.store.generationRolloverIsolationSHA256(
+        jobID: fixture.jobID
+      ),
+      repositoryID: predecessorBinding.repositoryID,
+      jobID: fixture.jobID,
+      predecessorGeneration: 1,
+      successorGeneration: 2,
+      predecessorRunID: fixture.runID,
+      predecessorLaunches: predecessorLaunches.map {
+        JobCanaryGenerationRolloverLaunchEvidence(
+          launchAttemptID: $0.launchAttemptID,
+          queueSequence: $0.queueSequence,
+          descriptorSHA256: $0.descriptorSHA256,
+          failureCode: $0.failureCode ?? "",
+          childProcess: $0.childProcess
+        )
+      },
+      hosts: hostPairs,
+      workspaceID: predecessorBinding.workspaceID,
+      socket: JobCanaryGenerationRolloverSocketEvidence(
+        device: repositoryBinding.socketIdentity.device,
+        inode: repositoryBinding.socketIdentity.inode,
+        owner: repositoryBinding.socketIdentity.owner,
+        permissions: repositoryBinding.socketIdentity.permissions,
+        peerEvidenceSHA256: String(repeating: "f", count: 64)
+      ),
+      successorRunID: successorRunID
+    )
+    try rolloverAuthorization.validate()
+    try await fixture.store.persistGenerationRolloverAuthorization(
+      rolloverAuthorization,
+      now: Date(timeIntervalSince1970: 34.75)
+    )
+    let rolloverRow =
+      "SELECT rollover_authorization_sha256 || ':' || created_at FROM herdr_generation_rollover_authorizations"
+    let rolloverBefore = try #require(try await fixture.database.scalarText(rolloverRow))
+    let shippedGuards = [
+      "app_settings_generation_rollover_resume_denied",
+      "app_settings_generation_rollover_insert_resume_denied",
+    ]
+    for guardName in shippedGuards {
+      #expect(try await triggerCount(in: fixture.database, named: guardName) == 1, "\(guardName)")
+    }
+    // The shipped guard's deny branch: a pending rollover refuses the resume edge.
+    do {
+      _ = try await fixture.database.execute(
+        "UPDATE app_settings SET paused = 0 WHERE singleton = 1")
+      Issue.record("the shipped resume guard accepted a resume with a pending rollover")
+    } catch let SQLiteStoreError.statementFailed(_, message) {
+      #expect(message.contains("Resume requires separate generation rollover authorization"))
+    }
+    #expect(try await fixture.database.scalarInt("SELECT paused FROM app_settings") == 1)
+    _ = try await fixture.database.checkpoint()
+    await fixture.database.close()
+
+    let upgraded = try SQLiteStore(databaseURL: fixture.databaseURL)
+    #expect(try await upgraded.schemaVersion() == 10)
+    #expect(upgraded.migrationBackups.count == 1)
+    #expect(try await upgraded.scalarInt("SELECT paused FROM app_settings") == 1)
+    #expect(try await upgraded.scalarText(rolloverRow) == rolloverBefore)
+    for guardName in shippedGuards {
+      #expect(try await triggerCount(in: upgraded, named: guardName) == 0, "\(guardName)")
+    }
+    #expect(try await triggerCount(in: upgraded, named: "app_settings_rollout_scope_required") == 1)
+    // The latch that replaced the guard refuses the same resume, now regardless of the
+    // pending rollover: only an active rollout lane bound to the exact scope may resume.
+    do {
+      _ = try await upgraded.execute("UPDATE app_settings SET paused = 0 WHERE singleton = 1")
+      Issue.record("the rollout scope latch accepted a resume without a lane")
+    } catch let SQLiteStoreError.statementFailed(_, message) {
+      #expect(message.contains("Resume requires exact active rollout authority"))
+    }
+    let configuration = ConfigurationStore(database: upgraded)
+    await #expect(throws: ConfigurationStoreError.rolloutActivationRequired) {
+      try await configuration.setPaused(false, now: Date(timeIntervalSince1970: 50))
+    }
+    #expect(try await upgraded.scalarInt("SELECT paused FROM app_settings") == 1)
+    await upgraded.close()
+  }
+
   @Test("lost generation retry lineage advances through one q4 successor")
   func lostGenerationRetryLineageRequiresQ4Successor() async throws {
     let fixture = try await ReplacementCutoverFixture.make(
@@ -3681,11 +3828,12 @@ private struct ReplacementCutoverFixture {
     collision: Int = 0,
     persistAuthorization: Bool = true,
     prepareIntent: Bool = true,
-    sendIntentStarted: Bool = true
+    sendIntentStarted: Bool = true,
+    migrations: [SQLiteMigration] = DatabaseSchema.migrations
   ) async throws -> Self {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-replacement-cutover")
     let databaseURL = root.appendingPathComponent("state.sqlite3")
-    let database = try await makeProductionPiDatabase(at: databaseURL)
+    let database = try await makeProductionPiDatabase(at: databaseURL, migrations: migrations)
     do {
       let repositoryID = UUID(uuidString: "32000000-0000-0000-0000-000000000003")!
       let jobID = UUID(uuidString: "42000000-0000-0000-0000-000000000004")!
@@ -4788,16 +4936,28 @@ private struct ReplacementCutoverFixture {
   }
 }
 
-/// The production schema. The store's launch, rollover and cutover authority lives in
-/// the triggers migration 10 creates, so nothing here runs against the shipped schema 9.
-private func productionPiDatabase(at databaseURL: URL) throws -> SQLiteStore {
-  try SQLiteStore(databaseURL: databaseURL, migrations: DatabaseSchema.migrations)
+private func triggerCount(in database: SQLiteStore, named name: String) async throws -> Int64 {
+  try await database.scalarInt(
+    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+    bindings: [.text(name)]
+  ) ?? 0
+}
+
+/// The production schema by default. The store's launch, rollover and cutover authority
+/// lives in the triggers migration 10 rewrites, so store behaviour is proven there; the
+/// shipped schema 9 is passed explicitly only where a test proves the upgrade itself.
+private func productionPiDatabase(
+  at databaseURL: URL, migrations: [SQLiteMigration] = DatabaseSchema.migrations
+) throws -> SQLiteStore {
+  try SQLiteStore(databaseURL: databaseURL, migrations: migrations)
 }
 
 /// A fresh production database with the scheduler resumed, which is the state every
 /// store fixture here assumes: launch eligibility short-circuits on `paused = 0`.
-private func makeProductionPiDatabase(at databaseURL: URL) async throws -> SQLiteStore {
-  let database = try productionPiDatabase(at: databaseURL)
+private func makeProductionPiDatabase(
+  at databaseURL: URL, migrations: [SQLiteMigration] = DatabaseSchema.migrations
+) async throws -> SQLiteStore {
+  let database = try productionPiDatabase(at: databaseURL, migrations: migrations)
   try await resumeSchedulerWithoutRolloutLane(database)
   return database
 }

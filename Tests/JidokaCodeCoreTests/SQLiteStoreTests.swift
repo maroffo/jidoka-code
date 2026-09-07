@@ -409,8 +409,8 @@ struct SQLiteStoreTests {
     // The notarized 0.1.0 schema-9 package (source 944f4f4) carried migration 9 under a
     // shorter name with no generation-rollover objects. It was never installed, but a
     // database stamped by it lacks the guards migration 10 drops, so it must be refused
-    // by name before a backup or the digest column is written, not fail mid-transaction
-    // on "no such trigger".
+    // by name before a backup or any migration statement, not fail mid-transaction on
+    // "no such trigger".
     let shipped = try productionSchemaNineMigration()
     let phantomName = "authorized-architecture-role-host-replacement"
     let phantom = SQLiteMigration(
@@ -917,7 +917,7 @@ private let shippedResumeGuardsDroppedByTen: Set<String> = [
   "app_settings_generation_rollover_insert_resume_denied",
   "app_settings_generation_rollover_resume_denied",
 ]
-// Objects only migration 10 creates.
+// Sentinel objects only migration 10 creates (not the full list).
 private let v10AddedRolloutObjects: Set<String> = [
   "app_settings_rollout_scope_required",
   "app_settings_rollout_insert_scope_required",
