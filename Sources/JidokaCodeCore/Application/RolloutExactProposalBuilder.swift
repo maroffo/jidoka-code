@@ -14,18 +14,23 @@ public typealias RolloutExactJobBindingResolving =
   ) async throws -> RolloutJobBinding
 
 struct RolloutExactProposalBuilder: Sendable {
+  /// Builds the Git inspector once the job the reads will be attributed to is known. The remote
+  /// read authority binds every fetch to an exact job id, and that id comes from durable state
+  /// keyed by the pull request head, so it cannot exist before the metadata fetch.
+  typealias GitInspecting = @Sendable (UUID) throws -> any RolloutPreviewGitInspecting
+
   private let identity: any RolloutPreviewIdentityReading
   private let api: any RolloutPreviewRepositoryReading
-  private let git: any RolloutPreviewGitInspecting
+  private let makeGit: GitInspecting
 
   init(
     identity: any RolloutPreviewIdentityReading,
     api: any RolloutPreviewRepositoryReading,
-    git: any RolloutPreviewGitInspecting
+    makeGit: @escaping GitInspecting
   ) {
     self.identity = identity
     self.api = api
-    self.git = git
+    self.makeGit = makeGit
   }
 
   func observePullRequest(
@@ -69,10 +74,8 @@ struct RolloutExactProposalBuilder: Sendable {
       pullRequest.number,
       pullRequest.head.sha
     )
-    guard let jobID = UUID(uuidString: binding.jobID),
-      jobID.uuidString.lowercased() == binding.jobID,
-      binding.objectNumber == number
-    else {
+    // `RolloutJobBinding` normalises its own identifier, so only the object number can drift here.
+    guard let jobID = UUID(uuidString: binding.jobID), binding.objectNumber == number else {
       throw RolloutAuthorityError.invalidJobBinding
     }
     let restCommits = try await api.listPullRequestCommits(
@@ -80,7 +83,7 @@ struct RolloutExactProposalBuilder: Sendable {
       repository: repository.name,
       number: number
     ).map(\.sha)
-    let fetched = try await git.derivePullRequest(
+    let fetched = try await makeGit(jobID).derivePullRequest(
       repository: repository,
       number: number,
       baseSHA: pullRequest.base.sha,

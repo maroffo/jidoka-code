@@ -928,6 +928,10 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
           == .orderedSame,
         preview.payload.scope.object?.number == request.number,
         preview.payload.jobBinding?.objectNumber == request.number,
+        // The budgets are the one part of a proposal the client CAN recompute, because they are
+        // fixed policy rather than observed state. Without this, canonical round-tripping alone
+        // would admit a prReview lane carrying the schema's outer ceilings.
+        preview.payload.budgets == RolloutExactProposalPolicy.pullRequestReviewBudgets,
         preview.payload.expiresAtMilliseconds - preview.payload.createdAtMilliseconds
           == Int64(request.expiresInSeconds) * 1_000
       else {

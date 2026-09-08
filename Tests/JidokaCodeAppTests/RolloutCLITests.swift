@@ -127,6 +127,52 @@ struct RolloutCLITests {
     }
   }
 
+  @Test("propose-exact parses one owner/repository pair, one number and a bounded expiry")
+  func proposeExactParsing() throws {
+    guard
+      case .proposeExactRollout(let request) = try RolloutCLI.parse(
+        ["propose-exact", "owner/repo", "42"]
+      )
+    else {
+      Issue.record("propose-exact did not parse into a proposal command")
+      return
+    }
+    #expect(request.owner == "owner")
+    #expect(request.name == "repo")
+    #expect(request.number == 42)
+    #expect(request.expiresInSeconds == 900)
+
+    guard
+      case .proposeExactRollout(let bounded) = try RolloutCLI.parse(
+        ["propose-exact", "owner/repo", "42", "120"]
+      )
+    else {
+      Issue.record("propose-exact did not parse its optional expiry")
+      return
+    }
+    #expect(bounded.expiresInSeconds == 120)
+
+    for arguments in [
+      ["propose-exact"],
+      ["propose-exact", "owner/repo"],
+      // A bare name, an extra segment, or an empty half is never one repository.
+      ["propose-exact", "repo", "42"],
+      ["propose-exact", "owner/repo/extra", "42"],
+      ["propose-exact", "/repo", "42"],
+      ["propose-exact", "owner/", "42"],
+      ["propose-exact", "owner/repo", "forty-two"],
+      ["propose-exact", "owner/repo", "42", "seconds"],
+      ["propose-exact", "owner/repo", "42", "120", "extra"],
+      // The request's own bounds are enforced at parse time, not left to the engine.
+      ["propose-exact", "owner/repo", "0"],
+      ["propose-exact", "-owner/repo", "42"],
+      ["propose-exact", "owner/repo", "42", "59"],
+      ["propose-exact", "owner/repo", "42", "901"],
+    ] {
+      #expect(throws: (any Error).self, "\(arguments)") { try RolloutCLI.parse(arguments) }
+    }
+  }
+
   @Test("base64 decoding is canonical, nonempty and bounded before JSON parsing")
   func boundedCanonicalBytes() throws {
     let maximum = Data(repeating: 0x61, count: 1_048_576)

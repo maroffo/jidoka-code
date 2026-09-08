@@ -416,6 +416,79 @@ struct SQLiteStoreTests {
     }
   }
 
+  @Test("migration 11 refuses to repin a rollout scope table that already has rows")
+  func rolloutScopeRepinRefusesPopulatedTable() async throws {
+    let migration = try productionSchemaElevenMigration()
+    // The first three statements are the guard, and they must run before either drop.
+    let guardStatements = Array(migration.statements.prefix(3))
+    #expect(guardStatements[0].contains("CREATE TABLE rollout_scope_repin_guard"))
+    #expect(guardStatements[1].contains("SELECT COUNT(*) FROM rollout_authorization_scopes"))
+    #expect(guardStatements[2] == "DROP TABLE rollout_scope_repin_guard")
+    #expect(migration.statements[3].contains("DROP COLUMN schema_version"))
+
+    // This binary cannot mint a lane below schema 11, so no fixture it builds can carry a scope
+    // row; the databases the guard protects were written by the previous release. The guard's
+    // contract is therefore exercised against a table of that name holding a row.
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "rollout-scope-repin-guard-\(UUID().uuidString.lowercased())",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: root,
+      withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700]
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    for (rows, admits) in [(0, true), (1, false), (2, false)] {
+      let database = try SQLiteStore(
+        databaseURL: root.appendingPathComponent("guard-\(rows).sqlite3"),
+        migrations: []
+      )
+      _ = try await database.execute(
+        "CREATE TABLE rollout_authorization_scopes (id TEXT PRIMARY KEY) STRICT"
+      )
+      for row in 0..<rows {
+        _ = try await database.execute(
+          "INSERT INTO rollout_authorization_scopes (id) VALUES (?)",
+          bindings: [SQLiteValue.text("scope-\(row)")]
+        )
+      }
+      // The migrator runs the whole statement list inside one BEGIN IMMEDIATE, so the guard's
+      // abort must take the transaction with it.
+      var admitted = true
+      do {
+        try await database.transaction { database in
+          for statement in guardStatements {
+            _ = try database.execute(statement)
+          }
+        }
+      } catch {
+        admitted = false
+      }
+      #expect(admitted == admits, "rows=\(rows)")
+      // Whether it passed or rolled back, the guard leaves nothing of its own behind.
+      #expect(
+        try await database.scalarInt(
+          "SELECT COUNT(*) FROM sqlite_master WHERE name = 'rollout_scope_repin_guard'"
+        ) == 0
+      )
+      await database.close()
+    }
+  }
+
+  @Test("migration 11 pins the schema and protocol the binary actually declares")
+  func rolloutScopeRepinMatchesDeclaredIdentity() throws {
+    let migration = try productionSchemaElevenMigration()
+    let text = migration.statements.joined(separator: "\n")
+    // The pins are literals because the migration body is frozen once it ships; this is what
+    // couples them to the values the rest of the binary declares, so the next protocol bump
+    // cannot compile green with a stale repin.
+    #expect(migration.version == DatabaseSchema.migrations.last?.version)
+    #expect(text.contains("CHECK (schema_version = \(migration.version))"))
+    #expect(
+      text.contains("CHECK (engine_protocol_version = \(EngineProtocolVersion.current))"))
+  }
+
   @Test(
     "production schema 10 to 11 rolls back after every exact migration statement",
     arguments: schemaElevenStatementCuts
@@ -941,7 +1014,7 @@ struct SQLiteStoreTests {
 private let schemaEightMigrations = Array(DatabaseSchema.migrations.prefix(8))
 private let schemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
 private let schemaTenMigrations = Array(DatabaseSchema.migrations.prefix(10))
-private let schemaElevenStatementCuts = Array(1...4)
+private let schemaElevenStatementCuts = Array(1...7)
 private let schemaTenStatementCuts = Array(1...91)
 private let schemaEightRunID = "run-schema8-architecture"
 private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
@@ -950,7 +1023,7 @@ private let expectedSchemaNineMigrationDigest =
 private let expectedSchemaTenMigrationDigest =
   "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991"
 private let expectedSchemaElevenMigrationDigest =
-  "f7a677c7bf942ffdbf940fafee41d80ff31630fd1d31ac53148e554045bbc7b6"
+  "c03be96ed571456a8a0221ff3130fc878f70281e1b84fceeeb2bf6dde4b9c81d"
 // Widened when `schema_migrations` gained `statements_sha256`: the snapshot projects
 // every column of every table, so one added column moves the digest. The historical
 // row values themselves are unchanged and still compared row-for-row above.

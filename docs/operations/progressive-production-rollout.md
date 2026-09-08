@@ -113,6 +113,13 @@ reaches the same layout because every database runs the same migration chain. Th
 each re-added column exists only because `ADD COLUMN NOT NULL` requires one: the CHECK is still
 what fixes the value.
 
+`ALTER TABLE` fires no row trigger, so the append-only guards on that table cannot see the repin.
+On a populated table the drop would discard each row's recorded pins and the re-add would refill
+them from the DEFAULT, silently relabelling a lane as minted by a release that never minted it.
+Migration 11 therefore opens with a guard: it counts the rows and fails the whole migration closed
+if the table is not empty. A protocol bump over a database that already has lane history is a data
+migration and a separate decision, not this repin.
+
 Like migration 10, migration 11 declares `verifiesContent`, so a database stamped at version 11 by
 any other body fails closed.
 
@@ -313,10 +320,12 @@ fetch, then assembles scope, inventory, release identity, job binding and budget
 same preview the operator confirms.
 
 The proposal's pre-lane read authority comes from fixed source-controlled constants in
-`RolloutExactProposalPolicy`, never from operator input: one identity request, at most forty
-repository requests, and one Git remote read. Every bounded read reserves the broker's whole
-response ceiling, so the byte ceiling is the request ceiling expressed in bytes and cannot be set
-below it. A proposal opens no provider session, sends no mutation and makes no Git send, and it
+`RolloutExactProposalPolicy`, never from operator input: one identity request, the same
+repository request ceiling revalidation gets for the same budgets, and two Git remote reads,
+because the base and the pull request head are fetched as separate authorized reads. Every bounded
+read reserves the broker's whole response ceiling, so the byte ceiling is the request ceiling
+expressed in bytes and cannot be set below it. The Git authority is built only once the job
+binding is resolved, because every remote read is admitted against an exact job id. A proposal opens no provider session, sends no mutation and makes no Git send, and it
 carries no authority: the returned preview is revalidated against GitHub before it is shown, and
 again at activation, so an altered byte fails closed as `previewDrift`.
 

@@ -62,6 +62,16 @@ struct ProductionRolloutGitHubBudget: Equatable, Sendable {
   let repositoryBytes: Int64
 }
 
+struct ProductionRolloutProposalCeilings: Equatable, Sendable {
+  let identityRequests: Int
+  let identityBytes: Int64
+  let repositoryRequests: Int
+  let repositoryBytes: Int64
+  let gitCarrierRequests: Int
+  let gitCarrierBytes: Int64
+  let gitRemoteReads: Int
+}
+
 public actor ProductionEngineExternalServices: EngineExternalServicing {
   private let configuration: ConfigurationStore
   private let transport: any GitHubHTTPTransport
@@ -427,10 +437,11 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
     do {
       // The proposal runs before any lane exists, so its read authority comes from fixed policy
       // constants rather than from a preview the operator supplied.
+      let ceilings = try Self.exactProposalCeilings()
       let identityAuthority = try BoundedRolloutPreviewReadAuthority(
         repository: nil,
-        maximumRequests: RolloutExactProposalPolicy.identityRequests,
-        maximumBytes: RolloutExactProposalPolicy.identityBytes
+        maximumRequests: ceilings.identityRequests,
+        maximumBytes: ceilings.identityBytes
       )
       let identityBroker = GitHubBroker(
         tokenProvider: provider,
@@ -444,12 +455,8 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
           owner: repository.owner,
           repository: repository.name
         ),
-        maximumRequests: RolloutExactProposalPolicy.repositoryRequests,
-        maximumBytes: RolloutExactProposalPolicy.repositoryBytes,
-        repositoryID: UUID(uuidString: repository.id),
-        repositoryNodeID: repository.nodeID,
-        jobID: UUID(),
-        maximumGitRemoteReads: RolloutExactProposalPolicy.gitRemoteReads
+        maximumRequests: ceilings.repositoryRequests,
+        maximumBytes: ceilings.repositoryBytes
       )
       let repositoryBroker = GitHubBroker(
         tokenProvider: provider,
@@ -458,30 +465,46 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
         defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
         now: now
       )
-      let git = ProductionRolloutPreviewGitInspector(
-        cacheRoot: dependencies.applicationSupportRoot.appendingPathComponent(
-          "RolloutPreviewCache",
-          isDirectory: true
-        ),
-        askPassExecutable: dependencies.askPassExecutable,
-        broker: repositoryBroker,
-        readAuthority: repositoryAuthority,
-        now: now
+      let cacheRoot = dependencies.applicationSupportRoot.appendingPathComponent(
+        "RolloutPreviewCache",
+        isDirectory: true
       )
+      let askPassExecutable = dependencies.askPassExecutable
+      let instant = now
       let observation = try await RolloutExactProposalBuilder(
         identity: identityBroker,
         api: repositoryBroker,
-        git: git
+        makeGit: { jobID in
+          // Every Git remote read is admitted against an exact job id, so this authority can only
+          // be built once the binding is resolved. It grants no GitHub request of its own: the
+          // minimum of one is what the initializer requires, and nothing reserves against it.
+          let gitAuthority = try BoundedRolloutPreviewReadAuthority(
+            repository: GitHubRepositoryCoordinates(
+              owner: repository.owner,
+              repository: repository.name
+            ),
+            maximumRequests: ceilings.gitCarrierRequests,
+            maximumBytes: ceilings.gitCarrierBytes,
+            repositoryID: UUID(uuidString: repository.id),
+            repositoryNodeID: repository.nodeID,
+            jobID: jobID,
+            maximumGitRemoteReads: ceilings.gitRemoteReads
+          )
+          return ProductionRolloutPreviewGitInspector(
+            cacheRoot: cacheRoot,
+            askPassExecutable: askPassExecutable,
+            broker: repositoryBroker,
+            readAuthority: gitAuthority,
+            now: instant
+          )
+        }
       ).observePullRequest(
         repository: repository,
         number: number,
         resolveBinding: resolveBinding
       )
-      guard observation.githubAccount.caseInsensitiveCompare(account) == .orderedSame,
-        observation.githubAuthorID == authorID
-      else {
-        throw RolloutAuthorityError.invalidReleaseIdentity
-      }
+      try Self.requireProposalIdentity(
+        observation, account: account, authorID: authorID)
       await provider.clear()
       return observation
     } catch {
@@ -538,6 +561,38 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
 
   private static func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+  }
+
+  /// The GitHub token a proposal spends belongs to the configured account. An observation made
+  /// under any other identity is not this installation's proposal, whatever it contains.
+  static func requireProposalIdentity(
+    _ observation: RolloutExactObjectObservation,
+    account: String,
+    authorID: Int64
+  ) throws {
+    guard observation.githubAccount.caseInsensitiveCompare(account) == .orderedSame,
+      observation.githubAuthorID == authorID
+    else {
+      throw RolloutAuthorityError.invalidReleaseIdentity
+    }
+  }
+
+  /// Every ceiling the proposal path grants itself, in one place so the wiring is checkable
+  /// rather than restated at three call sites.
+  static func exactProposalCeilings() throws -> ProductionRolloutProposalCeilings {
+    // The producer must not out-spend the revalidation of what it produces: both take the
+    // repository ceiling from the same mapping over the same budgets.
+    let mapped = try rolloutGitHubBudget(RolloutExactProposalPolicy.pullRequestReviewBudgets)
+    return ProductionRolloutProposalCeilings(
+      identityRequests: RolloutExactProposalPolicy.identityRequests,
+      identityBytes: RolloutExactProposalPolicy.identityBytes,
+      repositoryRequests: mapped.repositoryRequests,
+      repositoryBytes: mapped.repositoryBytes,
+      // The Git authority admits no GitHub request of its own; one is the initializer's minimum.
+      gitCarrierRequests: 1,
+      gitCarrierBytes: Int64(GitHubBroker.maximumResponseBytes),
+      gitRemoteReads: RolloutExactProposalPolicy.gitRemoteReads
+    )
   }
 
   static func rolloutGitHubBudget(_ budget: RolloutBudgets) throws

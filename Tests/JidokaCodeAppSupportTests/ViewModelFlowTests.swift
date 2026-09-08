@@ -56,6 +56,42 @@ struct ViewModelFlowTests {
     await refresh.value
   }
 
+  @Test("proposing an exact review needs a paused engine and one valid owner/repository pair")
+  func rolloutProposalGate() async throws {
+    let fake = AppSupportEngineFake(onboardingComplete: true)
+    let model = SettingsViewModel(client: fake) { _ in }
+    #expect(!model.canProposeExactRollout)
+    await model.refresh()
+    let state = try #require(model.state)
+    model.rolloutProposalReference = "owner/repo"
+    model.rolloutProposalNumber = "42"
+    model.apply(pollingState(state, paused: false))
+    #expect(!model.canProposeExactRollout)
+    model.apply(pollingState(state, paused: true))
+    #expect(model.canProposeExactRollout)
+
+    for (reference, number) in [
+      ("", "42"),
+      ("repo", "42"),
+      ("owner/repo/extra", "42"),
+      ("/repo", "42"),
+      ("owner/", "42"),
+      ("-owner/repo", "42"),
+      ("owner/re po", "42"),
+      ("owner/repo", ""),
+      ("owner/repo", "forty-two"),
+      ("owner/repo", "0"),
+      ("owner/repo", "1000001"),
+    ] {
+      model.rolloutProposalReference = reference
+      model.rolloutProposalNumber = number
+      #expect(!model.canProposeExactRollout, "\(reference) #\(number)")
+    }
+    model.rolloutProposalReference = "owner/repo"
+    model.rolloutProposalNumber = "42"
+    #expect(model.canProposeExactRollout)
+  }
+
   @Test("onboarding requires every gate and clears secret input")
   func onboarding() async throws {
     let fake = AppSupportEngineFake(onboardingComplete: false)

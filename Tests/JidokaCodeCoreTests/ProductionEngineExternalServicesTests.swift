@@ -32,6 +32,76 @@ struct ProductionEngineExternalServicesTests {
     )
   }
 
+  @Test("the proposal path grants itself exactly the policy ceilings, at every authority")
+  func exactProposalCeilings() throws {
+    let responseBytes = Int64(GitHubBroker.maximumResponseBytes)
+    let ceilings = try ProductionEngineExternalServices.exactProposalCeilings()
+    #expect(
+      ceilings
+        == ProductionRolloutProposalCeilings(
+          identityRequests: 1,
+          identityBytes: responseBytes,
+          // One request of the budget pays for the identity read, which is why the producer gets
+          // 39 rather than the 40 the policy names: revalidation of the preview it writes is
+          // mapped the same way and must not be poorer than the producer.
+          repositoryRequests: 39,
+          repositoryBytes: responseBytes * 39,
+          gitCarrierRequests: 1,
+          gitCarrierBytes: responseBytes,
+          gitRemoteReads: 2
+        )
+    )
+    let revalidation = try ProductionEngineExternalServices.rolloutGitHubBudget(
+      RolloutExactProposalPolicy.pullRequestReviewBudgets
+    )
+    #expect(ceilings.repositoryRequests == revalidation.repositoryRequests)
+    #expect(ceilings.repositoryBytes == revalidation.repositoryBytes)
+  }
+
+  @Test("a proposal observed under another GitHub identity is refused")
+  func exactProposalIdentityBinding() throws {
+    let object = RolloutObjectSelector(
+      nodeID: "PR_identity",
+      number: 7,
+      revisionKey: String(repeating: "1", count: 40),
+      canonicalInputSHA256: String(repeating: "a", count: 64),
+      headSHA: String(repeating: "1", count: 40),
+      baseSHA: String(repeating: "2", count: 40),
+      narrativeSHA256: String(repeating: "b", count: 64),
+      currentStep: JobStepKind.review.rawValue
+    )
+    func observation(account: String, authorID: Int64) -> RolloutExactObjectObservation {
+      RolloutExactObjectObservation(
+        object: object,
+        jobBinding: RolloutJobBinding(
+          jobID: UUID(),
+          jobKind: .prReview,
+          objectNumber: 7,
+          contractVersion: "pr-review-v1",
+          priority: .prReview,
+          firstStep: .review,
+          currentStep: JobStepKind.review.rawValue
+        ),
+        githubAccount: account,
+        githubAuthorID: authorID
+      )
+    }
+    try ProductionEngineExternalServices.requireProposalIdentity(
+      observation(account: "hubot", authorID: 8), account: "hubot", authorID: 8)
+    // GitHub logins are case-insensitive, and the author id is what actually binds.
+    try ProductionEngineExternalServices.requireProposalIdentity(
+      observation(account: "HuBoT", authorID: 8), account: "hubot", authorID: 8)
+    for wrong in [
+      observation(account: "someone-else", authorID: 8),
+      observation(account: "hubot", authorID: 9),
+    ] {
+      #expect(throws: RolloutAuthorityError.invalidReleaseIdentity) {
+        try ProductionEngineExternalServices.requireProposalIdentity(
+          wrong, account: "hubot", authorID: 8)
+      }
+    }
+  }
+
   @Test("a Keychain success followed by an error is completed from the durable journal")
   func replacementFailureAfterWriteRecoversForward() async throws {
     let fixture = try ExternalServicesFixture()

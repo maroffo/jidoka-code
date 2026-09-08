@@ -401,11 +401,20 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     owner: String,
     name: String
   ) async throws -> RolloutRepositoryIdentity {
+    // This runs immediately before a bounded GitHub fetch that costs the operator a wait and a
+    // read budget. Refuse here for anything already knowable, so a doomed proposal spends
+    // nothing; `proposeExactRollout` checks again afterwards, because state can move meanwhile.
+    guard paused, exclusiveOperations == 0, !checkpointing else {
+      throw EngineClientError(.busy)
+    }
     let matches = try await configuration.repositories().filter {
       $0.owner.caseInsensitiveCompare(owner) == .orderedSame
         && $0.name.caseInsensitiveCompare(name) == .orderedSame
     }
     guard matches.count == 1, let repository = matches.first else {
+      throw RolloutAuthorityError.invalidRepositoryIdentity
+    }
+    guard repository.enabled, repository.reviewEnabled else {
       throw RolloutAuthorityError.invalidRepositoryIdentity
     }
     return RolloutRepositoryIdentity(
@@ -436,9 +445,10 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
       objectNodeID: objectNodeID,
       revisionKey: revisionKey
     )
-    let existing = try await jobs.jobs(nonTerminalOnly: true).filter { $0.identity == identity }
-    guard existing.count <= 1 else { throw RolloutAuthorityError.jobBindingMismatch }
-    if let job = existing.first {
+    // `jobs` is UNIQUE on (repository_id, kind, object_node_id, revision_key), so this identity
+    // names at most one row.
+    let existing = try await jobs.jobs(nonTerminalOnly: true).first { $0.identity == identity }
+    if let job = existing {
       guard let step = job.currentStepKind, job.objectNumber == objectNumber else {
         throw RolloutAuthorityError.jobBindingMismatch
       }

@@ -321,7 +321,7 @@ struct RolloutRemotePreviewRevalidatorTests {
     let builder = RolloutExactProposalBuilder(
       identity: fixture.api,
       api: fixture.api,
-      git: fixture.git
+      makeGit: { _ in fixture.git }
     )
     let binding = RolloutJobBinding(
       jobID: fixture.job.id,
@@ -368,6 +368,100 @@ struct RolloutRemotePreviewRevalidatorTests {
     await fixture.database.close()
   }
 
+  @Test(
+    "every producer guard refuses its own drift rather than minting a selector",
+    arguments: RolloutProposalDrift.allCases
+  )
+  func proposalGuardsRefuseDrift(_ drift: RolloutProposalDrift) async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    let repository = fixture.rolloutRepository
+    var binding = RolloutJobBinding(
+      jobID: fixture.job.id,
+      jobKind: .prReview,
+      objectNumber: 10,
+      contractVersion: fixture.job.contractVersionUsed,
+      priority: .prReview,
+      firstStep: .review,
+      currentStep: JobStepKind.review.rawValue
+    )
+    switch drift {
+    case .accountLogin:
+      await fixture.api.setIdentity(GitHubUser(id: 42, nodeID: "U_preview", login: "-not-valid-"))
+    case .accountID:
+      await fixture.api.setIdentity(GitHubUser(id: 0, nodeID: "U_preview", login: "owner"))
+    case .repositoryNodeID:
+      await fixture.api.replaceRepository(nodeID: "R_other")
+    case .repositoryOwner:
+      await fixture.api.replaceRepository(ownerLogin: "someone-else")
+    case .repositoryName:
+      await fixture.api.replaceRepository(name: "other-repo")
+    case .defaultBranch:
+      await fixture.api.replaceRepository(defaultBranch: "trunk")
+    case .pullRequestClosed:
+      await fixture.api.replacePullRequest(state: "closed")
+    case .pullRequestDraft:
+      await fixture.api.replacePullRequest(draft: true)
+    case .baseReference:
+      await fixture.api.replacePullRequest(baseRef: "release")
+    case .baseSHA:
+      await fixture.api.replacePullRequest(baseSHA: "not-a-sha")
+    case .headSHA:
+      await fixture.api.replacePullRequest(headSHA: "not-a-sha")
+    case .emptyRange:
+      await fixture.api.replacePullRequest(headSHA: fixture.baseSHA)
+    case .bindingObjectNumber:
+      break
+    case .restCommitOrder:
+      await fixture.api.setPullRequestCommits([
+        fixture.headSHA, String(repeating: "7", count: 40),
+      ])
+    case .fetchedBase:
+      await fixture.git.replace(
+        PullRequestCommitDerivation(
+          baseSHA: String(repeating: "8", count: 40),
+          headSHA: fixture.headSHA,
+          commitSHAs: [fixture.headSHA],
+          narrative: []
+        )
+      )
+    case .fetchedHead:
+      await fixture.git.replace(
+        PullRequestCommitDerivation(
+          baseSHA: fixture.baseSHA,
+          headSHA: String(repeating: "8", count: 40),
+          commitSHAs: [fixture.headSHA],
+          narrative: []
+        )
+      )
+    }
+    if drift == .bindingObjectNumber {
+      binding = RolloutJobBinding(
+        jobID: fixture.job.id,
+        jobKind: .prReview,
+        objectNumber: 11,
+        contractVersion: fixture.job.contractVersionUsed,
+        priority: .prReview,
+        firstStep: .review,
+        currentStep: JobStepKind.review.rawValue
+      )
+    }
+    let builder = RolloutExactProposalBuilder(
+      identity: fixture.api,
+      api: fixture.api,
+      makeGit: { _ in fixture.git }
+    )
+    let resolved = binding
+    await #expect(throws: drift.expected) {
+      _ = try await builder.observePullRequest(
+        repository: repository,
+        number: 10,
+        resolveBinding: { _, _, _ in resolved }
+      )
+    }
+    await fixture.database.close()
+  }
+
   @Test("a proposal whose bytes are altered before activation fails closed")
   func alteredProposalFailsClosed() async throws {
     let fixture = try await RolloutRemotePreviewFixture()
@@ -375,7 +469,7 @@ struct RolloutRemotePreviewRevalidatorTests {
     let builder = RolloutExactProposalBuilder(
       identity: fixture.api,
       api: fixture.api,
-      git: fixture.git
+      makeGit: { _ in fixture.git }
     )
     let observation = try await builder.observePullRequest(
       repository: fixture.rolloutRepository,
@@ -429,7 +523,7 @@ struct RolloutRemotePreviewRevalidatorTests {
     let builder = RolloutExactProposalBuilder(
       identity: fixture.api,
       api: fixture.api,
-      git: fixture.git
+      makeGit: { _ in fixture.git }
     )
     let observation = try await builder.observePullRequest(
       repository: fixture.rolloutRepository,
@@ -478,11 +572,97 @@ struct RolloutRemotePreviewRevalidatorTests {
     await fixture.database.close()
   }
 
+  @Test("the proposal's Git reads are admitted by the authority production builds for them")
+  func proposalGitReadAuthority() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    let repository = fixture.rolloutRepository
+    let binding = RolloutJobBinding(
+      jobID: fixture.job.id,
+      jobKind: .prReview,
+      objectNumber: 10,
+      contractVersion: fixture.job.contractVersionUsed,
+      priority: .prReview,
+      firstStep: .review,
+      currentStep: JobStepKind.review.rawValue
+    )
+    // Exactly how ProductionEngineExternalServices builds the Git authority: bound to the job the
+    // binding resolved to, with the policy ceiling. Two reads, because derivePullRequest fetches
+    // the base and the head separately.
+    func authority(jobID: UUID) throws -> BoundedRolloutPreviewReadAuthority {
+      try BoundedRolloutPreviewReadAuthority(
+        repository: GitHubRepositoryCoordinates(
+          owner: repository.owner,
+          repository: repository.name
+        ),
+        maximumRequests: 1,
+        maximumBytes: Int64(GitHubBroker.maximumResponseBytes),
+        repositoryID: fixture.repository.id,
+        repositoryNodeID: repository.nodeID,
+        jobID: jobID,
+        maximumGitRemoteReads: RolloutExactProposalPolicy.gitRemoteReads
+      )
+    }
+
+    let admitted = try authority(jobID: fixture.job.id)
+    let observation = try await RolloutExactProposalBuilder(
+      identity: fixture.api,
+      api: fixture.api,
+      makeGit: { jobID in
+        RolloutAuthorityBoundGitFake(
+          authority: admitted,
+          derivation: PullRequestCommitDerivation(
+            baseSHA: fixture.baseSHA,
+            headSHA: fixture.headSHA,
+            commitSHAs: [fixture.headSHA],
+            narrative: [
+              PiCommitNarrativeEntry(
+                ordinal: 0,
+                sha: fixture.headSHA,
+                parentSHAs: [fixture.baseSHA],
+                subject: "feat: bounded preview",
+                patchSHA256: fixture.patchSHA256
+              )
+            ]
+          ),
+          repositoryID: fixture.repository.id,
+          repositoryNodeID: repository.nodeID,
+          jobID: jobID
+        )
+      }
+    ).observePullRequest(
+      repository: repository,
+      number: 10,
+      resolveBinding: { _, _, _ in binding }
+    )
+    #expect(observation.jobBinding == binding)
+    #expect(await admitted.snapshot().reservedGitRemoteReads == 2)
+
+    // The defect this pins: an authority bound to any other job admits nothing, and a ceiling of
+    // one admits the base fetch and then refuses the head.
+    let foreign = try authority(jobID: UUID())
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await foreign.reserveGitRemoteRead(
+        RolloutGitRemoteReadEffect(
+          jobID: fixture.job.id,
+          repositoryID: fixture.repository.id,
+          repositoryNodeID: repository.nodeID,
+          operation: .fetchPreviewBase,
+          target: "refs/heads/main:\(fixture.baseSHA)"
+        ),
+        now: Date(timeIntervalSince1970: 1_000)
+      )
+    }
+    await fixture.database.close()
+  }
+
   @Test("the pre-lane proposal ceilings are fixed and spend no provider session or mutation")
   func proposalPolicyCeilings() throws {
     #expect(RolloutExactProposalPolicy.identityRequests == 1)
     #expect(RolloutExactProposalPolicy.repositoryRequests == 40)
-    #expect(RolloutExactProposalPolicy.gitRemoteReads == 1)
+    // Two, because derivePullRequest fetches the base and the pull request head as separate
+    // authorized reads; a ceiling of one admits the base and then refuses the head.
+    #expect(RolloutExactProposalPolicy.gitRemoteReads == 2)
     // Every bounded read reserves the broker's whole response ceiling, so the byte ceiling is
     // the request ceiling and cannot be set below it.
     #expect(
@@ -513,9 +693,77 @@ struct RolloutRemotePreviewRevalidatorTests {
   }
 }
 
+/// Reserves the two remote reads `ProductionRolloutPreviewGitInspector.derivePullRequest` makes,
+/// so the ceiling and the job binding are exercised rather than assumed.
+private struct RolloutAuthorityBoundGitFake: RolloutPreviewGitInspecting {
+  let authority: BoundedRolloutPreviewReadAuthority
+  let derivation: PullRequestCommitDerivation
+  let repositoryID: UUID
+  let repositoryNodeID: String
+  let jobID: UUID
+
+  func derivePullRequest(
+    repository _: RolloutRepositoryIdentity,
+    number: Int,
+    baseSHA: String,
+    headSHA: String,
+    jobID _: UUID
+  ) async throws -> PullRequestCommitDerivation {
+    for (operation, target) in [
+      (RolloutGitRemoteOperation.fetchPreviewBase, "refs/heads/main:\(baseSHA)"),
+      (RolloutGitRemoteOperation.fetchPullRequest, "refs/pull/\(number)/head:\(headSHA)"),
+    ] {
+      _ = try await authority.reserveGitRemoteRead(
+        RolloutGitRemoteReadEffect(
+          jobID: jobID,
+          repositoryID: repositoryID,
+          repositoryNodeID: repositoryNodeID,
+          operation: operation,
+          target: target
+        ),
+        now: Date(timeIntervalSince1970: 1_000)
+      )
+    }
+    return derivation
+  }
+}
+
 private actor RolloutProposalCallCounter {
   private(set) var count = 0
   func record() { count += 1 }
+}
+
+/// One case per guard in `RolloutExactProposalBuilder.observePullRequest`, so deleting any of
+/// them turns a test red instead of minting a selector from drifted remote state.
+enum RolloutProposalDrift: CaseIterable {
+  case accountLogin
+  case accountID
+  case repositoryNodeID
+  case repositoryOwner
+  case repositoryName
+  case defaultBranch
+  case pullRequestClosed
+  case pullRequestDraft
+  case baseReference
+  case baseSHA
+  case headSHA
+  case emptyRange
+  case bindingObjectNumber
+  case restCommitOrder
+  case fetchedBase
+  case fetchedHead
+
+  var expected: RolloutAuthorityError {
+    switch self {
+    case .accountLogin, .accountID: .invalidReleaseIdentity
+    case .repositoryNodeID, .repositoryOwner, .repositoryName, .defaultBranch:
+      .invalidRepositoryIdentity
+    case .pullRequestClosed, .pullRequestDraft, .baseReference, .baseSHA, .headSHA, .emptyRange:
+      .invalidObjectSelector
+    case .bindingObjectNumber: .invalidJobBinding
+    case .restCommitOrder, .fetchedBase, .fetchedHead: .previewDrift
+    }
+  }
 }
 
 private enum RepositoryLabelInventoryDrift: CaseIterable {

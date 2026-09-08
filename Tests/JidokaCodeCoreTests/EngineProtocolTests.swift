@@ -18,6 +18,115 @@ struct EngineProtocolTests {
     )
   }
 
+  @Test("a proposal request is refused before it leaves the client")
+  func proposalRequestValidation() throws {
+    let valid = RolloutExactProposalRequest(owner: "owner", name: "repo", number: 7)
+    try valid.validate()
+    #expect(valid.expiresInSeconds == 900)
+    try EngineCommand.proposeExactRollout(valid).validate()
+
+    for invalid in [
+      RolloutExactProposalRequest(owner: "-owner", name: "repo", number: 7),
+      RolloutExactProposalRequest(owner: "", name: "repo", number: 7),
+      RolloutExactProposalRequest(owner: String(repeating: "o", count: 40), name: "r", number: 7),
+      RolloutExactProposalRequest(owner: "owner", name: "..", number: 7),
+      RolloutExactProposalRequest(owner: "owner", name: "re po", number: 7),
+      RolloutExactProposalRequest(owner: "owner", name: "repo", number: 0),
+      RolloutExactProposalRequest(owner: "owner", name: "repo", number: 1_000_001),
+      RolloutExactProposalRequest(owner: "owner", name: "repo", number: 7, expiresInSeconds: 59),
+      // 900 seconds is the exact-preview lifetime; anything longer could never be built.
+      RolloutExactProposalRequest(owner: "owner", name: "repo", number: 7, expiresInSeconds: 901),
+    ] {
+      #expect(throws: RolloutAuthorityError.invalidObjectSelector) { try invalid.validate() }
+      #expect(throws: EngineClientError(.invalidCommand)) {
+        try EngineCommand.proposeExactRollout(invalid).validate()
+      }
+    }
+  }
+
+  @Test("a proposal response is bound to the coordinates and the policy the client asked for")
+  func proposalResponseBinding() throws {
+    let base = try rolloutOperatorFixture().exactInput
+    let object = try #require(base.scope.object)
+    func preview(
+      budgets: RolloutBudgets = RolloutExactProposalPolicy.pullRequestReviewBudgets,
+      lifetimeMilliseconds: Int64 = 900_000
+    ) throws -> RolloutPreview {
+      try RolloutPreviewBuilder.make(
+        RolloutPreviewInput(
+          releaseIdentity: base.releaseIdentity,
+          scope: base.scope,
+          budgets: budgets,
+          inventory: base.inventory,
+          missingLabels: base.missingLabels,
+          commands: base.commands,
+          jobBinding: base.jobBinding,
+          createdAtMilliseconds: base.createdAtMilliseconds,
+          expiresAtMilliseconds: base.createdAtMilliseconds + lifetimeMilliseconds
+        )
+      )
+    }
+    let request = RolloutExactProposalRequest(
+      owner: base.scope.repository.owner,
+      name: base.scope.repository.name,
+      number: object.number
+    )
+    func response(
+      preview: RolloutPreview?,
+      paused: Bool = true,
+      recovery: RolloutRecoveryPreview? = nil
+    ) throws -> EngineXPCResponse {
+      let envelope = EngineXPCRequest(
+        requestID: "11111111-1111-1111-1111-111111111111",
+        command: .proposeExactRollout(request)
+      )
+      return EngineXPCResponse(
+        requestID: envelope.requestID,
+        result: EngineCommandResponse(
+          command: .proposeExactRollout,
+          state: engineProtocolState(paused: paused),
+          rolloutPreview: preview,
+          rolloutRecoveryPreview: recovery
+        )
+      )
+    }
+    let envelope = EngineXPCRequest(
+      requestID: "11111111-1111-1111-1111-111111111111",
+      command: .proposeExactRollout(request)
+    )
+    #expect(try response(preview: try preview()).validate(for: envelope).rolloutPreview != nil)
+
+    // The client cannot recompute a proposal, so each of these is a way for a helper to hand back
+    // something other than what was asked for.
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try response(preview: nil).validate(for: envelope)
+    }
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try response(preview: try preview(), paused: false).validate(for: envelope)
+    }
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      // Budgets are fixed policy: a preview the schema accepts but policy did not choose is not
+      // a proposal. These are the operator-supplied budgets of a hand-built exact preview.
+      try response(preview: try preview(budgets: base.budgets)).validate(for: envelope)
+    }
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try response(preview: try preview(lifetimeMilliseconds: 600_000)).validate(for: envelope)
+    }
+    let other = EngineXPCRequest(
+      requestID: "11111111-1111-1111-1111-111111111111",
+      command: .proposeExactRollout(
+        RolloutExactProposalRequest(
+          owner: base.scope.repository.owner,
+          name: base.scope.repository.name,
+          number: object.number + 1
+        )
+      )
+    )
+    #expect(throws: EngineClientError(.invalidResponse)) {
+      try response(preview: try preview()).validate(for: other)
+    }
+  }
+
   @Test("request and response bind version, identity, and operation")
   func exactEnvelope() throws {
     let request = EngineXPCRequest(

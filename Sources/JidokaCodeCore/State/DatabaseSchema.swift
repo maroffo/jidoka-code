@@ -3635,10 +3635,11 @@ public enum DatabaseSchema {
         END
         """,
       ],
-      // Schema 10 has never shipped, and its body was edited more than once while
-      // this branch was in review. Any database recording a different body, or no
-      // body at all, was written by a pre-release build and must fail closed rather
-      // than silently skip the difference.
+      // Schema 10's body was edited more than once while this branch was in review, so any
+      // database recording a different body, or no body at all, was written by a pre-release
+      // build and must fail closed rather than silently skip the difference. It has since
+      // shipped and created a production database: this body is frozen, and editing it would
+      // fail every existing schema-10 database closed on its next open.
       verifiesContent: true
     ),
     SQLiteMigration(
@@ -3654,6 +3655,22 @@ public enum DatabaseSchema {
       // every database runs this same chain. The columns carry a DEFAULT only because
       // `ADD COLUMN NOT NULL` requires one; the CHECK is still what fixes the value.
       statements: [
+        // `ALTER TABLE` fires no row trigger, so the append-only guards on this table cannot see
+        // the repin: on a populated table the drop discards each row's recorded pins and the
+        // re-add refills them from the DEFAULT, silently relabelling a lane as minted by a
+        // release that never minted it. The pins exist to prevent exactly that lie, so a
+        // populated table must stop the migration instead. A future protocol bump over a table
+        // that has lane history is a data migration and a new decision, not this repin.
+        """
+        CREATE TABLE rollout_scope_repin_guard (
+          existing_scopes INTEGER NOT NULL CHECK (existing_scopes = 0)
+        ) STRICT
+        """,
+        """
+        INSERT INTO rollout_scope_repin_guard (existing_scopes)
+        SELECT COUNT(*) FROM rollout_authorization_scopes
+        """,
+        "DROP TABLE rollout_scope_repin_guard",
         "ALTER TABLE rollout_authorization_scopes DROP COLUMN schema_version",
         """
         ALTER TABLE rollout_authorization_scopes

@@ -1534,7 +1534,9 @@ public enum RolloutExactProposalPolicy {
   /// multiple is unreachable: requests are the real limit and the byte ceiling follows from them.
   public static let identityRequests = 1
   public static let repositoryRequests = 40
-  public static let gitRemoteReads = 1
+  /// `derivePullRequest` fetches the base and the pull request head as two separate authorized
+  /// remote reads, so a ceiling of one refuses the head fetch after admitting the base.
+  public static let gitRemoteReads = 2
   public static var identityBytes: Int64 { Int64(GitHubBroker.maximumResponseBytes) }
   public static var repositoryBytes: Int64 {
     Int64(repositoryRequests) * Int64(GitHubBroker.maximumResponseBytes)
