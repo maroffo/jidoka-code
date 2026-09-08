@@ -172,6 +172,29 @@ repository read) rather than a quiet weakening. That reasoning is right about se
 change what the test owed: a call site the suite cannot see is a call site. It is now killed by both end-to-end tests,
 which is the first mutation row of "Closing the class" above.
 
+## Score derivation
+
+One finding stays open and attributable to this change: the identity-leg call site, whose width no
+test observes. It is graded Major under "missing test coverage for new code" rather than Minor,
+because the code is new and the call site genuinely has none, and accepting it is a judgement about
+blast radius, not evidence that it is covered.
+
+```
+100 - 10 (identity call site, open and accepted) = 90
+```
+
+The flaky process suites (`GitProcessTests.swift:325`, `PiRPCProcessTests.swift:130`) are a real
+Major and are not scored here: they pre-date this change, no line of this diff touches them, and
+they are tracked from round 1. Scoring them against this PR would make every future PR in this
+repository carry the same ten points until someone fixes them, which is a worse accounting than
+naming them separately.
+
+Finding D and the authority swap are two different mutations and were briefly conflated in a message
+to the reviewer, not in this artifact. The swap makes the repository allowance *smaller*, so the
+proposal dies on its second read and every assertion fires: loud. D makes it *larger*, so everything
+behaves identically until something spends the difference: silent. The reviewer's Major grade for D
+was right on exactly that distinction.
+
 ## Verification
 
 `make check` exit 0 on a quiet machine, 803 tests / 89 suites, strict lint clean over Sources and
