@@ -131,6 +131,17 @@ no repository data, no Git read and no mutation. `exactProposalAuthorityWiring` 
 factory returns; nothing pins that the call site used it. Adding another factory level would move
 the seam rather than remove it, which is the mutation-chasing this section exists to avoid.
 
+The reviewer measured the symmetric mutation independently (inline identity authority, 20 requests,
+`repository: nil`, bytes scaled: 790/790 green) and agreed it should be stated, with two arguments
+better than the one above. The containment is itself under test, not merely asserted:
+`exactProposalAuthorityWiring` already pins that the identity authority refuses a repository read,
+so the property that makes a widening harmless is verified even though the width is not. And the
+hole is unobservable in principle, not merely untested: closing it would mean either making the
+production path paginate `/user`, which does not exist, or asserting on the authority object instead
+of on behaviour, which is exactly the shape that failed three times in this review. A test writable
+only by abandoning the discipline that found these defects is not worth having. The reason to state
+this one is the containment, not the difficulty.
+
 Two corrections the reviewer volunteered against itself, both worth keeping. First, the ask-pass
 refusal does mask the Git-side admission: with the real factory's `gitRemoteReads` widened from 2 to
 9 the two end-to-end tests stay green, because `derivePullRequest` builds the credential provider
@@ -196,6 +207,12 @@ behaves identically until something spends the difference: silent. The reviewer'
 was right on exactly that distinction.
 
 ## Verification
+
+Read the test count with the flake in mind. `make check` runs everything, including the two suites
+that fail under load; the reviewer's 790/87 figures come from runs with `GitProcessTests` and
+`PiRPCProcessTests` skipped, so its mutation verdicts do not depend on that suite's mood. Both are
+green. If `make check` goes red on another machine, check those two suites before re-opening this
+change.
 
 `make check` exit 0 on a quiet machine, 803 tests / 89 suites, strict lint clean over Sources and
 Tests. The first attempt failed: `GitProcessTests` timed out at 80 s while the reviewer was running
