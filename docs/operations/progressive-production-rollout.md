@@ -240,9 +240,12 @@ artifact. W7 must regenerate the package from the clean, separately accepted mer
 ## Installed but stopped qualification
 
 This step is for a separately authorized future installation gate. It is documented here but
-must not be run against production during source delivery. The application must be quiesced,
-the database checkpointed with no `-wal` or `-shm` sidecar, schema 10, paused, and have no open
-rollout lane.
+must not be run against production during source delivery. The application must be quiesced, the database checkpointed (an empty `-wal` is fine, a rollback
+journal or a WAL holding frames is not), schema 10, paused, and have no open rollout lane.
+A durable quit truncates the WAL but leaves `-wal` and `-shm` in place: SQLite deletes them only
+when the last connection to close is read-write, and this platform keeps them even then, while a
+read-only reader can never remove them. An empty WAL proves every frame reached the main database
+and `-shm` is a lock table with no durable content, so neither file blocks qualification.
 
 ```sh
 JIDOKA_RELEASE_RUNTIME_ROOT=/absolute/path/to/qualified-runtime \
