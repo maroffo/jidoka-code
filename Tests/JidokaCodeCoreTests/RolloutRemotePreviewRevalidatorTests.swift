@@ -158,7 +158,7 @@ struct RolloutRemotePreviewRevalidatorTests {
     let tampered = RolloutPreview(
       payload: preview.payload,
       canonicalJSON: Data(
-        text.replacingOccurrences(of: "\"bundleBuild\":6", with: "\"bundleBuild\":7").utf8
+        text.replacingOccurrences(of: "\"bundleBuild\":7", with: "\"bundleBuild\":8").utf8
       ),
       sha256: preview.sha256
     )
@@ -309,6 +309,213 @@ struct RolloutRemotePreviewRevalidatorTests {
     }
     await fixture.database.close()
   }
+
+  // The producer exists because two selector digests cannot be built outside the engine. These
+  // tests hold it to the only standard that matters: what it produces is exactly what the
+  // validator activation runs later re-derives and accepts.
+
+  @Test("an exact proposal produces the selector its own revalidation accepts")
+  func exactProposalRoundTrips() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    let builder = RolloutExactProposalBuilder(
+      identity: fixture.api,
+      api: fixture.api,
+      git: fixture.git
+    )
+    let binding = RolloutJobBinding(
+      jobID: fixture.job.id,
+      jobKind: .prReview,
+      objectNumber: 10,
+      contractVersion: fixture.job.contractVersionUsed,
+      priority: .prReview,
+      firstStep: .review,
+      currentStep: JobStepKind.review.rawValue
+    )
+    let resolverCalls = RolloutProposalCallCounter()
+    let observation = try await builder.observePullRequest(
+      repository: fixture.rolloutRepository,
+      number: 10,
+      resolveBinding: { nodeID, number, revisionKey in
+        await resolverCalls.record()
+        #expect(nodeID == "PR_preview")
+        #expect(number == 10)
+        #expect(revisionKey == fixture.headSHA)
+        return binding
+      }
+    )
+    #expect(await resolverCalls.count == 1)
+    #expect(observation.githubAccount == "owner")
+    #expect(observation.githubAuthorID == 42)
+    #expect(observation.jobBinding == binding)
+    // Byte-for-byte the hand-built selector the revalidator tests above already pin.
+    #expect(observation.object == (try fixture.exactPreview()).payload.scope.object)
+
+    let proposed = try RolloutPreviewBuilder.make(
+      fixture.previewInput(
+        scope: RolloutScope(
+          mode: .exactObject,
+          stage: .prReview,
+          repository: fixture.rolloutRepository,
+          object: observation.object,
+          finiteWindow: nil
+        ),
+        jobs: 1,
+        jobBinding: observation.jobBinding
+      )
+    )
+    try await fixture.revalidator.revalidate(proposed)
+    await fixture.database.close()
+  }
+
+  @Test("a proposal whose bytes are altered before activation fails closed")
+  func alteredProposalFailsClosed() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    let builder = RolloutExactProposalBuilder(
+      identity: fixture.api,
+      api: fixture.api,
+      git: fixture.git
+    )
+    let observation = try await builder.observePullRequest(
+      repository: fixture.rolloutRepository,
+      number: 10,
+      resolveBinding: { _, number, _ in
+        RolloutJobBinding(
+          jobID: fixture.job.id,
+          jobKind: .prReview,
+          objectNumber: number,
+          contractVersion: fixture.job.contractVersionUsed,
+          priority: .prReview,
+          firstStep: .review,
+          currentStep: JobStepKind.review.rawValue
+        )
+      }
+    )
+    let object = observation.object
+    let tampered = RolloutObjectSelector(
+      nodeID: object.nodeID,
+      number: object.number,
+      revisionKey: object.revisionKey,
+      canonicalInputSHA256: String(repeating: "e", count: 64),
+      headSHA: object.headSHA,
+      baseSHA: object.baseSHA,
+      narrativeSHA256: object.narrativeSHA256,
+      currentStep: object.currentStep
+    )
+    let forged = try RolloutPreviewBuilder.make(
+      fixture.previewInput(
+        scope: RolloutScope(
+          mode: .exactObject,
+          stage: .prReview,
+          repository: fixture.rolloutRepository,
+          object: tampered,
+          finiteWindow: nil
+        ),
+        jobs: 1,
+        jobBinding: observation.jobBinding
+      )
+    )
+    await #expect(throws: RolloutAuthorityError.previewDrift) {
+      try await fixture.revalidator.revalidate(forged)
+    }
+    await fixture.database.close()
+  }
+
+  @Test("a proposal for a closed or non-review repository never reaches a preview")
+  func closedRepositoryProposalRefused() async throws {
+    let fixture = try await RolloutRemotePreviewFixture()
+    defer { fixture.remove() }
+    let builder = RolloutExactProposalBuilder(
+      identity: fixture.api,
+      api: fixture.api,
+      git: fixture.git
+    )
+    let observation = try await builder.observePullRequest(
+      repository: fixture.rolloutRepository,
+      number: 10,
+      resolveBinding: { _, number, _ in
+        RolloutJobBinding(
+          jobID: fixture.job.id,
+          jobKind: .prReview,
+          objectNumber: number,
+          contractVersion: fixture.job.contractVersionUsed,
+          priority: .prReview,
+          firstStep: .review,
+          currentStep: JobStepKind.review.rawValue
+        )
+      }
+    )
+    let base = fixture.rolloutRepository
+    for (enabled, reviewEnabled) in [(false, true), (true, false)] {
+      let closed = RolloutRepositoryIdentity(
+        id: fixture.repository.id,
+        nodeID: base.nodeID,
+        owner: base.owner,
+        name: base.name,
+        defaultBranch: base.defaultBranch,
+        enabled: enabled,
+        reviewEnabled: reviewEnabled,
+        triageEnabled: base.triageEnabled,
+        implementationEnabled: base.implementationEnabled
+      )
+      #expect(throws: RolloutAuthorityError.invalidRepositoryIdentity) {
+        _ = try RolloutPreviewBuilder.make(
+          fixture.previewInput(
+            scope: RolloutScope(
+              mode: .exactObject,
+              stage: .prReview,
+              repository: closed,
+              object: observation.object,
+              finiteWindow: nil
+            ),
+            jobs: 1,
+            jobBinding: observation.jobBinding
+          )
+        )
+      }
+    }
+    await fixture.database.close()
+  }
+
+  @Test("the pre-lane proposal ceilings are fixed and spend no provider session or mutation")
+  func proposalPolicyCeilings() throws {
+    #expect(RolloutExactProposalPolicy.identityRequests == 1)
+    #expect(RolloutExactProposalPolicy.repositoryRequests == 40)
+    #expect(RolloutExactProposalPolicy.gitRemoteReads == 1)
+    // Every bounded read reserves the broker's whole response ceiling, so the byte ceiling is
+    // the request ceiling and cannot be set below it.
+    #expect(
+      RolloutExactProposalPolicy.repositoryBytes
+        == Int64(RolloutExactProposalPolicy.repositoryRequests)
+        * Int64(GitHubBroker.maximumResponseBytes))
+    #expect(
+      RolloutExactProposalPolicy.identityBytes == Int64(GitHubBroker.maximumResponseBytes))
+
+    let budgets = RolloutExactProposalPolicy.pullRequestReviewBudgets
+    #expect(budgets.jobs == 1)
+    #expect(budgets.providerSessions == 4)
+    #expect(budgets.markerParts == 2)
+    #expect(budgets.githubSends == 2)
+    for zero in [
+      budgets.approvedCommands, budgets.labelWrites, budgets.branchCreates,
+      budgets.pullRequestCreates, budgets.gitSends,
+    ] {
+      #expect(zero == 0)
+    }
+    // A proposal that cannot be revalidated is not a proposal: the budgets it writes must
+    // still admit the identity read plus the repository reads activation re-derives.
+    let mapped = try ProductionEngineExternalServices.rolloutGitHubBudget(budgets)
+    #expect(mapped.repositoryRequests == 39)
+    #expect(
+      mapped.repositoryBytes
+        == RolloutExactProposalPolicy.repositoryBytes - Int64(GitHubBroker.maximumResponseBytes))
+  }
+}
+
+private actor RolloutProposalCallCounter {
+  private(set) var count = 0
+  func record() { count += 1 }
 }
 
 private enum RepositoryLabelInventoryDrift: CaseIterable {
@@ -813,7 +1020,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     try? FileManager.default.removeItem(at: root)
   }
 
-  private var rolloutRepository: RolloutRepositoryIdentity {
+  var rolloutRepository: RolloutRepositoryIdentity {
     RolloutRepositoryIdentity(
       id: repository.id,
       nodeID: repository.nodeID,
@@ -849,7 +1056,7 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
     )
   }
 
-  private func previewInput(
+  func previewInput(
     scope: RolloutScope,
     jobs: Int,
     jobBinding: RolloutJobBinding?,
@@ -861,14 +1068,14 @@ private final class RolloutRemotePreviewFixture: @unchecked Sendable {
         sourceCommit: String(repeating: "b", count: 40),
         sourceTree: String(repeating: "c", count: 40),
         bundleVersion: "0.2.0",
-        bundleBuild: 6,
+        bundleBuild: 7,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,
         pushGuardSHA256: digest,
         herdrHostSHA256: digest,
-        schemaVersion: 10,
-        engineProtocolVersion: 12,
+        schemaVersion: 11,
+        engineProtocolVersion: 13,
         runtimeManifestSHA256: digest,
         runtimeTreeSHA256: digest,
         modelProfilesSHA256: digest,

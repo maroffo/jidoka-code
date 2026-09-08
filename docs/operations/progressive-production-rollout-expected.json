@@ -6,10 +6,10 @@
     "providerCalls": 0
   },
   "release": {
-    "bundleBuild": 6,
+    "bundleBuild": 7,
     "bundleVersion": "0.2.0",
-    "databaseSchemaVersion": 10,
-    "engineProtocolVersion": 12,
+    "databaseSchemaVersion": 11,
+    "engineProtocolVersion": 13,
     "maximumConcurrency": 1,
     "rolloutPolicyVersion": 1
   },
@@ -18,6 +18,7 @@
     "Packaging/app-inventory.txt",
     "Sources/JidokaCodeApp/PiProbeCLI.swift",
     "Sources/JidokaCodeCore/Application/EngineProtocol.swift",
+    "Sources/JidokaCodeCore/Application/RolloutExactProposalBuilder.swift",
     "Sources/JidokaCodeCore/Application/RolloutReleaseIdentityAttestor.swift",
     "Sources/JidokaCodeCore/Pi/ReleaseOwnedPiRuntime.swift",
     "Sources/JidokaCodeCore/State/DatabaseSchema.swift",

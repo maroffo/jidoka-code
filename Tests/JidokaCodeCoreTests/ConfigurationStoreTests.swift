@@ -128,14 +128,15 @@ struct ConfigurationStoreTests {
     await legacy.close()
 
     let upgraded = try SQLiteStore(databaseURL: fixture.databaseURL)
-    #expect(upgraded.migrationBackups.count == 9)
+    #expect(upgraded.migrationBackups.count == 10)
     let settingsBackupURL = try #require(upgraded.migrationBackups.first)
     let herdrBackupURL = try #require(upgraded.migrationBackups.dropFirst().first)
     let commandBackupURL = upgraded.migrationBackups[2]
     let primeBackupURL = upgraded.migrationBackups[5]
     let resetBackupURL = upgraded.migrationBackups[6]
     let replacementBackupURL = upgraded.migrationBackups[7]
-    let rolloutBackupURL = try #require(upgraded.migrationBackups.last)
+    let rolloutBackupURL = upgraded.migrationBackups[8]
+    let scopeProtocolBackupURL = try #require(upgraded.migrationBackups.last)
     let settingsBackup = try SQLiteStore(
       databaseURL: settingsBackupURL,
       migrations: [firstMigration]
@@ -197,6 +198,13 @@ struct ConfigurationStoreTests {
     #expect(try await rolloutBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
     #expect(try await rolloutBackup.scalarInt("SELECT max_concurrency FROM app_settings") == 4)
     await rolloutBackup.close()
+    let scopeProtocolBackup = try SQLiteStore(
+      databaseURL: scopeProtocolBackupURL,
+      migrations: Array(DatabaseSchema.migrations.prefix(10))
+    )
+    #expect(try await scopeProtocolBackup.schemaVersion() == 10)
+    #expect(try await scopeProtocolBackup.scalarInt("SELECT COUNT(*) FROM jobs") == 0)
+    await scopeProtocolBackup.close()
 
     let store = ConfigurationStore(database: upgraded)
     var snapshot = try await store.snapshot()

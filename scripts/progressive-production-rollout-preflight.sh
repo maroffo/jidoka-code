@@ -136,6 +136,9 @@ readonly SOURCE_INFO="$SOURCE_ROOT/Packaging/Info.plist"
 "$TOOL_GREP" -Fq "case v$EXPECTED_POLICY_VERSION = $EXPECTED_POLICY_VERSION" \
     "$SOURCE_ROOT/Sources/JidokaCodeCore/State/RolloutAuthority.swift" || \
     fail 66 "rollout policy differs"
+"$TOOL_GREP" -Fq "public static let repositoryRequests = 40" \
+    "$SOURCE_ROOT/Sources/JidokaCodeCore/State/RolloutAuthority.swift" || \
+    fail 66 "exact proposal read ceiling differs"
 "$TOOL_GREP" -Fq "public var newRepositoryReviewEnabled = false" \
     "$SOURCE_ROOT/Sources/JidokaCodeAppSupport/SettingsViewModel.swift" || \
     fail 66 "new repository review default is not closed"

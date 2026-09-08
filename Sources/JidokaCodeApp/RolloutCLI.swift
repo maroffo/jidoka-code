@@ -55,6 +55,21 @@ enum RolloutCLI {
         throw EngineClientError(.invalidCommand)
       }
       return .previewRollout(input)
+    case "propose-exact" where arguments.count == 3 || arguments.count == 4:
+      let coordinates = arguments[1].split(separator: "/", omittingEmptySubsequences: false)
+      guard coordinates.count == 2, let number = Int(arguments[2]) else {
+        throw EngineClientError(.invalidCommand)
+      }
+      let expiresInSeconds = arguments.count == 4 ? Int(arguments[3]) : 900
+      guard let expiresInSeconds else { throw EngineClientError(.invalidCommand) }
+      let request = RolloutExactProposalRequest(
+        owner: String(coordinates[0]),
+        name: String(coordinates[1]),
+        number: number,
+        expiresInSeconds: expiresInSeconds
+      )
+      try request.validate()
+      return .proposeExactRollout(request)
     case "preview-finite" where arguments.count == 2:
       let input: RolloutPreviewInput = try canonicalArgument(arguments[1])
       guard input.scope.mode == .finiteWindow else {
@@ -187,7 +202,7 @@ enum RolloutCLI {
 
   static func responseTimeoutSeconds(for kind: EngineCommandKind) -> Int {
     switch kind {
-    case .stopAndDrainRollout, .executeRolloutRecovery: 700
+    case .stopAndDrainRollout, .executeRolloutRecovery, .proposeExactRollout: 700
     default: 30
     }
   }

@@ -268,7 +268,7 @@ struct SQLiteStoreTests {
 
     let upgraded = try SQLiteStore(
       databaseURL: fixture.databaseURL,
-      migrations: DatabaseSchema.migrations
+      migrations: schemaTenMigrations
     )
     #expect(try await upgraded.schemaVersion() == 10)
     #expect(upgraded.migrationBackups.count == 1)
@@ -348,7 +348,7 @@ struct SQLiteStoreTests {
 
     let reopened = try SQLiteStore(
       databaseURL: fixture.databaseURL,
-      migrations: DatabaseSchema.migrations
+      migrations: schemaTenMigrations
     )
     #expect(try await reopened.schemaVersion() == 10)
     #expect(reopened.migrationBackups.isEmpty)
@@ -360,6 +360,105 @@ struct SQLiteStoreTests {
     }
   }
 
+  @Test("production schema 10 repins the rollout scope to schema 11 and engine protocol 13")
+  func productionRolloutScopeProtocolMigration() async throws {
+    let migration = try productionSchemaElevenMigration()
+    let fixture = try await PopulatedSchemaNineFixture.make()
+    defer { fixture.remove() }
+
+    let atTen = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaTenMigrations
+    )
+    #expect(try await atTen.schemaVersion() == 10)
+    let beforeTriggers = try await scopeTriggerNames(in: atTen)
+    #expect(beforeTriggers.count == 10)
+    #expect(try await scopeTableDDL(in: atTen).contains("engine_protocol_version = 12"))
+    await atTen.close()
+
+    let upgraded = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: DatabaseSchema.migrations
+    )
+    #expect(try await upgraded.schemaVersion() == 11)
+    #expect(upgraded.migrationBackups.count == 1)
+    let backupURL = try #require(upgraded.migrationBackups.first)
+    #expect(backupURL.lastPathComponent.contains(".before-v11-"))
+    #expect(try fileMode(backupURL) == 0o600)
+    let ddl = try await scopeTableDDL(in: upgraded)
+    #expect(ddl.contains("schema_version = 11"))
+    #expect(ddl.contains("engine_protocol_version = 13"))
+    #expect(!ddl.contains("schema_version = 10"))
+    #expect(!ddl.contains("engine_protocol_version = 12"))
+    // The rewrite drops and re-adds two columns: every guard that reads the table by name must
+    // survive it, and no row may be manufactured on the way through.
+    #expect(try await scopeTriggerNames(in: upgraded) == beforeTriggers)
+    #expect(
+      try await upgraded.scalarInt("SELECT COUNT(*) FROM rollout_authorization_scopes") == 0)
+    #expect(
+      try await upgraded.query(
+        "SELECT statements_sha256 FROM schema_migrations WHERE version = 11"
+      ).first?["statements_sha256"] == .text(migration.statementsSHA256)
+    )
+    try await assertDatabaseIntegrity(upgraded)
+    await upgraded.close()
+
+    let reopened = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: DatabaseSchema.migrations
+    )
+    #expect(try await reopened.schemaVersion() == 11)
+    #expect(reopened.migrationBackups.isEmpty)
+    await reopened.close()
+
+    #expect(throws: SQLiteStoreError.migrationTooNew(database: 11, supported: 10)) {
+      _ = try SQLiteStore(databaseURL: fixture.databaseURL, migrations: schemaTenMigrations)
+    }
+  }
+
+  @Test(
+    "production schema 10 to 11 rolls back after every exact migration statement",
+    arguments: schemaElevenStatementCuts
+  )
+  func productionRolloutScopeProtocolMigrationRollsBack(
+    afterStatement completedStatementCount: Int
+  ) async throws {
+    let migration = try productionSchemaElevenMigration()
+    let fixture = try await PopulatedSchemaNineFixture.make()
+    defer { fixture.remove() }
+    let atTen = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaTenMigrations
+    )
+    await atTen.close()
+    let failingMigration = SQLiteMigration(
+      version: migration.version,
+      name: migration.name,
+      requiresBackup: migration.requiresBackup,
+      statements: Array(migration.statements.prefix(completedStatementCount)) + [
+        "THIS IS THE TEST-ONLY SCHEMA 10 TO 11 FAILURE"
+      ]
+    )
+
+    do {
+      _ = try SQLiteStore(
+        databaseURL: fixture.databaseURL,
+        migrations: schemaTenMigrations + [failingMigration]
+      )
+      Issue.record("migration unexpectedly passed after statement \(completedStatementCount)")
+    } catch {}
+
+    let untouched = try SQLiteStore(
+      databaseURL: fixture.databaseURL,
+      migrations: schemaTenMigrations
+    )
+    #expect(try await untouched.schemaVersion() == 10)
+    #expect(try await scopeTableDDL(in: untouched).contains("engine_protocol_version = 12"))
+    #expect(try await scopeTriggerNames(in: untouched).count == 10)
+    try await assertDatabaseIntegrity(untouched)
+    await untouched.close()
+  }
+
   @Test("production schema 8 upgrades to schema 10 in one open with a backup per step")
   func productionSchemaEightUpgradesToTen() async throws {
     let fixture = try await PopulatedSchemaEightFixture.make()
@@ -367,7 +466,7 @@ struct SQLiteStoreTests {
 
     let upgraded = try SQLiteStore(
       databaseURL: fixture.databaseURL,
-      migrations: DatabaseSchema.migrations
+      migrations: schemaTenMigrations
     )
     #expect(try await upgraded.schemaVersion() == 10)
     #expect(upgraded.migrationBackups.count == 2)
@@ -605,7 +704,7 @@ struct SQLiteStoreTests {
 
     let upgraded = try SQLiteStore(
       databaseURL: fixture.databaseURL,
-      migrations: DatabaseSchema.migrations
+      migrations: schemaTenMigrations
     )
     let recorded = try await upgraded.query(
       "SELECT statements_sha256 FROM schema_migrations WHERE version = 10"
@@ -616,7 +715,7 @@ struct SQLiteStoreTests {
 
     let reopened = try SQLiteStore(
       databaseURL: fixture.databaseURL,
-      migrations: DatabaseSchema.migrations
+      migrations: schemaTenMigrations
     )
     #expect(try await reopened.schemaVersion() == 10)
     #expect(reopened.migrationBackups.isEmpty)
@@ -841,6 +940,8 @@ struct SQLiteStoreTests {
 
 private let schemaEightMigrations = Array(DatabaseSchema.migrations.prefix(8))
 private let schemaNineMigrations = Array(DatabaseSchema.migrations.prefix(9))
+private let schemaTenMigrations = Array(DatabaseSchema.migrations.prefix(10))
+private let schemaElevenStatementCuts = Array(1...4)
 private let schemaTenStatementCuts = Array(1...91)
 private let schemaEightRunID = "run-schema8-architecture"
 private let schemaEightArchitectureHostID = "rolehost-schema8-architecture"
@@ -848,6 +949,8 @@ private let expectedSchemaNineMigrationDigest =
   "48201824a919a208a72eccea6a626b2a560e2cd93b0686e390e949045bbb7751"
 private let expectedSchemaTenMigrationDigest =
   "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991"
+private let expectedSchemaElevenMigrationDigest =
+  "f7a677c7bf942ffdbf940fafee41d80ff31630fd1d31ac53148e554045bbc7b6"
 // Widened when `schema_migrations` gained `statements_sha256`: the snapshot projects
 // every column of every table, so one added column moves the digest. The historical
 // row values themselves are unchanged and still compared row-for-row above.
@@ -1395,6 +1498,19 @@ private func productionSchemaNineMigration() throws -> SQLiteMigration {
   return migration
 }
 
+private func productionSchemaElevenMigration() throws -> SQLiteMigration {
+  #expect(DatabaseSchema.migrations.count >= 11)
+  let migration = try #require(
+    DatabaseSchema.migrations.first(where: { $0.version == 11 })
+  )
+  #expect(DatabaseSchema.migrations.firstIndex(of: migration) == 10)
+  #expect(migration.name == "rollout-scope-engine-protocol-13")
+  #expect(migration.requiresBackup)
+  #expect(migration.statements.count == schemaElevenStatementCuts.count)
+  #expect(migrationDigest(migration) == expectedSchemaElevenMigrationDigest)
+  return migration
+}
+
 private func productionSchemaTenMigration() throws -> SQLiteMigration {
   #expect(DatabaseSchema.migrations.count >= 10)
   let migration = try #require(
@@ -1443,6 +1559,27 @@ private func clearRecordedMigrationDigest(
     END
     """
   )
+}
+
+private func scopeTableDDL(in database: SQLiteStore) async throws -> String {
+  let rows = try await database.query(
+    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'rollout_authorization_scopes'"
+  )
+  guard case .text(let sql)? = rows.first?["sql"] else { return "" }
+  return sql
+}
+
+private func scopeTriggerNames(in database: SQLiteStore) async throws -> [String] {
+  try await database.query(
+    """
+    SELECT name FROM sqlite_schema
+    WHERE type = 'trigger' AND sql LIKE '%rollout_authorization_scopes%'
+    ORDER BY name
+    """
+  ).compactMap { row in
+    guard case .text(let name)? = row["name"] else { return nil }
+    return name
+  }
 }
 
 private func migrationDigest(_ migration: SQLiteMigration) -> String {

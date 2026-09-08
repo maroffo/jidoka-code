@@ -142,11 +142,13 @@ struct RolloutCLITests {
     }
   }
 
-  @Test("stop and recovery allow the bounded engine drain budget")
+  @Test("draining, recovery and one bounded proposal fetch allow the long engine budget")
   func responseBudgets() {
+    let long: Set<EngineCommandKind> = [
+      .stopAndDrainRollout, .executeRolloutRecovery, .proposeExactRollout,
+    ]
     for kind in EngineCommandKind.allCases {
-      let expected = kind == .stopAndDrainRollout || kind == .executeRolloutRecovery ? 700 : 30
-      #expect(RolloutCLI.responseTimeoutSeconds(for: kind) == expected)
+      #expect(RolloutCLI.responseTimeoutSeconds(for: kind) == (long.contains(kind) ? 700 : 30))
     }
   }
 }

@@ -691,7 +691,7 @@ private actor AppSupportEngineFake: EngineClient {
       else { throw EngineClientError(.invalidCommand) }
       rolloutState = .revoked
       paused = true
-    case .previewRollout, .activateRollout,
+    case .previewRollout, .proposeExactRollout, .activateRollout,
       .previewRolloutRecovery, .executeRolloutRecovery,
       .previewFiniteWindow, .activateFiniteWindow:
       throw EngineClientError(.invalidCommand)
@@ -811,8 +811,8 @@ private actor AppSupportEngineFake: EngineClient {
       askPassSHA256: String(repeating: "b", count: 64),
       pushGuardSHA256: String(repeating: "b", count: 64),
       herdrHostSHA256: String(repeating: "c", count: 64),
-      schemaVersion: 10,
-      engineProtocolVersion: 12,
+      schemaVersion: 11,
+      engineProtocolVersion: 13,
       runtimeManifestSHA256: String(repeating: "d", count: 64),
       runtimeTreeSHA256: String(repeating: "e", count: 64),
       modelProfilesSHA256: String(repeating: "f", count: 64),

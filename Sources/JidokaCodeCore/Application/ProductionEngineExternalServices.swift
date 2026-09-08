@@ -409,6 +409,87 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
     }
   }
 
+  public func observeExactPullRequestReview(
+    repository: RolloutRepositoryIdentity,
+    number: Int,
+    resolveBinding: RolloutExactJobBindingResolving
+  ) async throws -> RolloutExactObjectObservation {
+    guard let dependencies = rolloutPreviewDependencies else {
+      throw RolloutAuthorityError.previewDrift
+    }
+    let app = try await configuration.appConfiguration()
+    guard let account = app.githubAccount, let authorID = app.githubAuthorID else {
+      throw RolloutAuthorityError.invalidReleaseIdentity
+    }
+    var token = try await credentialVault.token(account: account)
+    defer { token.resetBytes(in: 0..<token.count) }
+    let provider = EphemeralGitHubTokenProvider(value: token)
+    do {
+      // The proposal runs before any lane exists, so its read authority comes from fixed policy
+      // constants rather than from a preview the operator supplied.
+      let identityAuthority = try BoundedRolloutPreviewReadAuthority(
+        repository: nil,
+        maximumRequests: RolloutExactProposalPolicy.identityRequests,
+        maximumBytes: RolloutExactProposalPolicy.identityBytes
+      )
+      let identityBroker = GitHubBroker(
+        tokenProvider: provider,
+        transport: transport,
+        readAuthority: identityAuthority,
+        defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
+        now: now
+      )
+      let repositoryAuthority = try BoundedRolloutPreviewReadAuthority(
+        repository: GitHubRepositoryCoordinates(
+          owner: repository.owner,
+          repository: repository.name
+        ),
+        maximumRequests: RolloutExactProposalPolicy.repositoryRequests,
+        maximumBytes: RolloutExactProposalPolicy.repositoryBytes,
+        repositoryID: UUID(uuidString: repository.id),
+        repositoryNodeID: repository.nodeID,
+        jobID: UUID(),
+        maximumGitRemoteReads: RolloutExactProposalPolicy.gitRemoteReads
+      )
+      let repositoryBroker = GitHubBroker(
+        tokenProvider: provider,
+        transport: transport,
+        readAuthority: repositoryAuthority,
+        defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
+        now: now
+      )
+      let git = ProductionRolloutPreviewGitInspector(
+        cacheRoot: dependencies.applicationSupportRoot.appendingPathComponent(
+          "RolloutPreviewCache",
+          isDirectory: true
+        ),
+        askPassExecutable: dependencies.askPassExecutable,
+        broker: repositoryBroker,
+        readAuthority: repositoryAuthority,
+        now: now
+      )
+      let observation = try await RolloutExactProposalBuilder(
+        identity: identityBroker,
+        api: repositoryBroker,
+        git: git
+      ).observePullRequest(
+        repository: repository,
+        number: number,
+        resolveBinding: resolveBinding
+      )
+      guard observation.githubAccount.caseInsensitiveCompare(account) == .orderedSame,
+        observation.githubAuthorID == authorID
+      else {
+        throw RolloutAuthorityError.invalidReleaseIdentity
+      }
+      await provider.clear()
+      return observation
+    } catch {
+      await provider.clear()
+      throw error
+    }
+  }
+
   private func recoverCredentialDeletion() async throws {
     let app = try await configuration.appConfiguration()
     guard app.credentialDeletionPending else { return }

@@ -15,10 +15,23 @@ public protocol EngineExternalServicing: Sendable {
   func preflightHerdr() async -> EngineHerdrStatus
   func discoverModelCatalog() async throws -> PiModelCatalog
   func revalidateRollout(_ preview: RolloutPreview) async throws
+  func observeExactPullRequestReview(
+    repository: RolloutRepositoryIdentity,
+    number: Int,
+    resolveBinding: RolloutExactJobBindingResolving
+  ) async throws -> RolloutExactObjectObservation
 }
 
 extension EngineExternalServicing {
   public func revalidateRollout(_ preview: RolloutPreview) async throws {
+    throw EngineClientError(.unavailable)
+  }
+
+  public func observeExactPullRequestReview(
+    repository _: RolloutRepositoryIdentity,
+    number _: Int,
+    resolveBinding _: RolloutExactJobBindingResolving
+  ) async throws -> RolloutExactObjectObservation {
     throw EngineClientError(.unavailable)
   }
 }
@@ -31,6 +44,21 @@ public protocol EngineJobRuntime: Sendable {
   func setPaused(_ paused: Bool) async
   func pollNow() async
   func previewRollout(_ input: RolloutPreviewInput) async throws -> RolloutPreview
+  func rolloutRepositoryIdentity(
+    owner: String,
+    name: String
+  ) async throws -> RolloutRepositoryIdentity
+  func rolloutExactJobBinding(
+    repository: RolloutRepositoryIdentity,
+    objectNodeID: String,
+    objectNumber: Int,
+    revisionKey: String
+  ) async throws -> RolloutJobBinding
+  func proposeExactRollout(
+    repository: RolloutRepositoryIdentity,
+    observation: RolloutExactObjectObservation,
+    expiresInSeconds: Int
+  ) async throws -> RolloutPreview
   func activateRollout(_ request: RolloutActivationRequest) async throws -> RolloutStatusReport
   func rolloutStatus() async throws -> RolloutStatusReport?
   func stopAndDrainRollout(_ request: RolloutStopRequest) async throws -> RolloutStatusReport
@@ -88,6 +116,27 @@ extension EngineJobRuntime {
   public func prepareForPause() async {}
   public func waitForPauseDrain() async {}
   public func previewRollout(_ input: RolloutPreviewInput) async throws -> RolloutPreview {
+    throw EngineClientError(.unavailable)
+  }
+  public func rolloutRepositoryIdentity(
+    owner _: String,
+    name _: String
+  ) async throws -> RolloutRepositoryIdentity {
+    throw EngineClientError(.unavailable)
+  }
+  public func rolloutExactJobBinding(
+    repository _: RolloutRepositoryIdentity,
+    objectNodeID _: String,
+    objectNumber _: Int,
+    revisionKey _: String
+  ) async throws -> RolloutJobBinding {
+    throw EngineClientError(.unavailable)
+  }
+  public func proposeExactRollout(
+    repository _: RolloutRepositoryIdentity,
+    observation _: RolloutExactObjectObservation,
+    expiresInSeconds _: Int
+  ) async throws -> RolloutPreview {
     throw EngineClientError(.unavailable)
   }
   public func activateRollout(
@@ -616,6 +665,36 @@ public actor EngineService: EngineClient {
         throw EngineClientError(.busy)
       }
       let preview = try await runtime.previewRollout(input)
+      try await external.revalidateRollout(preview)
+      rolloutPreview = preview
+      checkpoint = nil
+    case .proposeExactRollout(let request):
+      guard try await configuration.appConfiguration().paused else {
+        throw EngineClientError(.busy)
+      }
+      let repository = try await runtime.rolloutRepositoryIdentity(
+        owner: request.owner,
+        name: request.name
+      )
+      let observation = try await external.observeExactPullRequestReview(
+        repository: repository,
+        number: request.number,
+        resolveBinding: { [runtime] nodeID, number, revisionKey in
+          try await runtime.rolloutExactJobBinding(
+            repository: repository,
+            objectNodeID: nodeID,
+            objectNumber: number,
+            revisionKey: revisionKey
+          )
+        }
+      )
+      let preview = try await runtime.proposeExactRollout(
+        repository: repository,
+        observation: observation,
+        expiresInSeconds: request.expiresInSeconds
+      )
+      // A proposal is not an authority: it must survive the same revalidation activation runs, so
+      // the operator confirms bytes that have already been re-derived from GitHub once.
       try await external.revalidateRollout(preview)
       rolloutPreview = preview
       checkpoint = nil
@@ -1280,9 +1359,9 @@ public actor EngineService: EngineClient {
       .previewJobCanaryGenerationRollover, .executeJobCanaryGenerationRollover,
       .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
       .staleEvidence
-    case .previewRollout, .activateRollout, .rolloutStatus, .stopAndDrainRollout,
-      .previewRolloutRecovery, .executeRolloutRecovery, .previewFiniteWindow,
-      .activateFiniteWindow:
+    case .previewRollout, .proposeExactRollout, .activateRollout, .rolloutStatus,
+      .stopAndDrainRollout, .previewRolloutRecovery, .executeRolloutRecovery,
+      .previewFiniteWindow, .activateFiniteWindow:
       .staleEvidence
     case .completeOnboarding: .onboardingIncomplete
     case .prepareForHandoff, .prepareForQuit: .checkpointFailed

@@ -102,6 +102,8 @@ public final class SettingsViewModel {
   public var maxConcurrency = 1
   public var profileDrafts: [ModelProfileRole: ModelProfileDraft] = [:]
   public var rolloutInputBase64 = ""
+  public var rolloutProposalReference = ""
+  public var rolloutProposalNumber = ""
   public var rolloutConfirmationSHA256 = ""
   public private(set) var pendingRolloutInput: RolloutPreviewInput?
   public private(set) var pendingRolloutPreview: RolloutPreview?
@@ -154,6 +156,10 @@ public final class SettingsViewModel {
 
   public var canPreviewRollout: Bool {
     !isWorking && state?.paused == true && decodedRolloutInput() != nil
+  }
+
+  public var canProposeExactRollout: Bool {
+    !isWorking && state?.paused == true && proposalRequest() != nil
   }
 
   public var canActivateRollout: Bool {
@@ -336,6 +342,18 @@ public final class SettingsViewModel {
     rolloutConfirmationSHA256 = ""
   }
 
+  /// The engine derives every field of the preview from one bounded read. The operator supplies
+  /// only the coordinates, because the artifact digests cannot be produced outside the engine.
+  public func proposeExactRollout() async {
+    guard let request = proposalRequest() else { return }
+    guard let preview = await execute(.proposeExactRollout(request))?.rolloutPreview else {
+      return
+    }
+    pendingRolloutInput = RolloutPreviewBuilder.input(from: preview.payload)
+    pendingRolloutPreview = preview
+    rolloutConfirmationSHA256 = ""
+  }
+
   public func activateRollout() async {
     guard canActivateRollout, let input = pendingRolloutInput,
       let preview = pendingRolloutPreview
@@ -501,6 +519,21 @@ public final class SettingsViewModel {
   public func deleteCredential() async {
     replacementToken = ""
     _ = await execute(.deleteCredential)
+  }
+
+  private func proposalRequest() -> RolloutExactProposalRequest? {
+    let coordinates = rolloutProposalReference.split(
+      separator: "/",
+      omittingEmptySubsequences: false
+    )
+    guard coordinates.count == 2, let number = Int(rolloutProposalNumber) else { return nil }
+    let request = RolloutExactProposalRequest(
+      owner: String(coordinates[0]),
+      name: String(coordinates[1]),
+      number: number
+    )
+    guard (try? request.validate()) != nil else { return nil }
+    return request
   }
 
   private func decodedRolloutInput() -> RolloutPreviewInput? {

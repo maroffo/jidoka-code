@@ -99,6 +99,23 @@ and every check that creates one (`swift test`, `scripts/tests/test-progressive-
 `scripts/tests/test-production-readiness-preflight.sh`) builds it under a fresh `mktemp -d`
 removed by an `EXIT` trap.
 
+## Schema-11 rollout scope repin
+
+`rollout_authorization_scopes` records the release that minted a lane, and pins both
+`schema_version` and `engine_protocol_version` as column CHECK constraints. Adding an engine
+command therefore moves the schema too: migration 11 repins them to 11 and 13.
+
+SQLite cannot alter a CHECK, and the twelve-step table rewrite is unavailable inside the migration
+transaction, because `PRAGMA foreign_keys` is a no-op there and ten triggers name this table.
+Migration 11 instead drops and re-adds the two pinned columns, which is legal because no trigger,
+index or foreign key reads either one. The columns move to the end of the table; every database
+reaches the same layout because every database runs the same migration chain. The `DEFAULT` on
+each re-added column exists only because `ADD COLUMN NOT NULL` requires one: the CHECK is still
+what fixes the value.
+
+Like migration 10, migration 11 declares `verifiesContent`, so a database stamped at version 11 by
+any other body fails closed.
+
 ## Preserved state
 
 Migration and rollout operation preserve every historical job, run, result, mutation intent,
@@ -241,7 +258,8 @@ artifact. W7 must regenerate the package from the clean, separately accepted mer
 
 This step is for a separately authorized future installation gate. It is documented here but
 must not be run against production during source delivery. The application must be quiesced, the database checkpointed (an empty `-wal` is fine, a rollback
-journal or a WAL holding frames is not), schema 10, paused, and have no open rollout lane.
+journal or a WAL holding frames is not), at the current schema, paused, and have no open
+rollout lane.
 A durable quit truncates the WAL but leaves `-wal` and `-shm` in place: SQLite deletes them only
 when the last connection to close is read-write, and this platform keeps them even then, while a
 read-only reader can never remove them. An empty WAL proves every frame reached the main database
@@ -287,10 +305,28 @@ candidate order. PR validation also compares the complete REST commit order with
 Git fetches: the exact default-branch base and `refs/pull/N/head`. A redirect, truncation,
 identity mismatch, conflicting label, changed candidate, or changed byte invalidates preview.
 
+Two of those fields, the canonical input digest and the narrative digest, are digests of the
+canonical artifact built from an authenticated, fully paginated GitHub fetch. Nothing outside the
+engine can reproduce them, so an exact preview input cannot be written by hand. `propose-exact`
+is the producer: the operator names a pull request and the engine performs one bounded read-only
+fetch, then assembles scope, inventory, release identity, job binding and budgets and returns the
+same preview the operator confirms.
+
+The proposal's pre-lane read authority comes from fixed source-controlled constants in
+`RolloutExactProposalPolicy`, never from operator input: one identity request, at most forty
+repository requests, and one Git remote read. Every bounded read reserves the broker's whole
+response ceiling, so the byte ceiling is the request ceiling expressed in bytes and cannot be set
+below it. A proposal opens no provider session, sends no mutation and makes no Git send, and it
+carries no authority: the returned preview is revalidated against GitHub before it is shown, and
+again at activation, so an altered byte fails closed as `previewDrift`.
+
 The CLI transports canonical JSON as strict base64. The UI is preferred because it renders the
 target and predicted effects. Equivalent CLI shapes are:
 
 ```sh
+"/path/to/Jidoka Code.app/Contents/MacOS/Jidoka Code" \
+  --rollout propose-exact owner/repository 42 [expires-in-seconds]
+
 "/path/to/Jidoka Code.app/Contents/MacOS/Jidoka Code" \
   --rollout preview-exact BASE64_CANONICAL_INPUT
 
@@ -374,7 +410,7 @@ bytes:
 ```
 
 Never resolve recovery by deleting evidence, replenishing a budget, changing a binding, or
-running the old binary against schema 10.
+running an older binary against a newer schema.
 
 ## Finite promotion
 

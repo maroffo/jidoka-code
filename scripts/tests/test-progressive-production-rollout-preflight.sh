@@ -110,18 +110,18 @@ manifest="$("$NODE" "$RELEASE_MANIFEST_GENERATOR" \
     "$(printf '1%.0s' {1..40})" \
     "$(printf '2%.0s' {1..40})" \
     "0.2.0" \
-    "6" \
+    "7" \
     "$(printf 'b%.0s' {1..64})" \
     "$(printf 'c%.0s' {1..64})" \
     "$(printf 'd%.0s' {1..64})" \
     "$(printf 'e%.0s' {1..64})" \
-    "10" \
-    "12" \
+    "11" \
+    "13" \
     "$(printf 'f%.0s' {1..64})" \
     "$(printf '6%.0s' {1..64})" \
     "$(printf '7%.0s' {1..64})")"
 readonly manifest
-expected_manifest="{\"askPassSHA256\":\"$(printf 'c%.0s' {1..64})\",\"bundleBuild\":6,\"bundleVersion\":\"0.2.0\",\"databaseSchemaVersion\":10,\"engineProtocolVersion\":12,\"helperSHA256\":\"$(printf 'b%.0s' {1..64})\",\"herdrHostSHA256\":\"$(printf 'e%.0s' {1..64})\",\"manifestSchemaVersion\":2,\"pushGuardSHA256\":\"$(printf 'd%.0s' {1..64})\",\"runtimeManifestSHA256\":\"$(printf 'f%.0s' {1..64})\",\"runtimeTreeSHA256\":\"$(printf '6%.0s' {1..64})\",\"sourceCommit\":\"$(printf '1%.0s' {1..40})\",\"sourceTree\":\"$(printf '2%.0s' {1..40})\",\"workflowResourcesSHA256\":\"$(printf '7%.0s' {1..64})\"}"
+expected_manifest="{\"askPassSHA256\":\"$(printf 'c%.0s' {1..64})\",\"bundleBuild\":7,\"bundleVersion\":\"0.2.0\",\"databaseSchemaVersion\":11,\"engineProtocolVersion\":13,\"helperSHA256\":\"$(printf 'b%.0s' {1..64})\",\"herdrHostSHA256\":\"$(printf 'e%.0s' {1..64})\",\"manifestSchemaVersion\":2,\"pushGuardSHA256\":\"$(printf 'd%.0s' {1..64})\",\"runtimeManifestSHA256\":\"$(printf 'f%.0s' {1..64})\",\"runtimeTreeSHA256\":\"$(printf '6%.0s' {1..64})\",\"sourceCommit\":\"$(printf '1%.0s' {1..40})\",\"sourceTree\":\"$(printf '2%.0s' {1..40})\",\"workflowResourcesSHA256\":\"$(printf '7%.0s' {1..64})\"}"
 readonly expected_manifest
 [[ "$manifest" == "$expected_manifest" ]] || fail "release manifest is not canonical"
 if "$NODE" "$RELEASE_MANIFEST_GENERATOR" \
@@ -136,7 +136,7 @@ readonly DATABASE="$TEST_ROOT/jidoka-code.sqlite3"
 /bin/cp "$ROOT/Packaging/Info.plist" "$APP/Contents/Info.plist"
 /usr/bin/sqlite3 "$DATABASE" <<'SQL'
 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
-INSERT INTO schema_migrations(version) VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10);
+INSERT INTO schema_migrations(version) VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11);
 CREATE TABLE app_settings(
   singleton INTEGER PRIMARY KEY,
   paused INTEGER NOT NULL,

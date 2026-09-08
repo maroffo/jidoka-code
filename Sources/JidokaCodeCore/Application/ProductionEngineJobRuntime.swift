@@ -397,6 +397,130 @@ public actor ProductionEngineJobRuntime: EngineJobRuntime {
     return try await rolloutAuthority.preview(input: input)
   }
 
+  public func rolloutRepositoryIdentity(
+    owner: String,
+    name: String
+  ) async throws -> RolloutRepositoryIdentity {
+    let matches = try await configuration.repositories().filter {
+      $0.owner.caseInsensitiveCompare(owner) == .orderedSame
+        && $0.name.caseInsensitiveCompare(name) == .orderedSame
+    }
+    guard matches.count == 1, let repository = matches.first else {
+      throw RolloutAuthorityError.invalidRepositoryIdentity
+    }
+    return RolloutRepositoryIdentity(
+      id: repository.id,
+      nodeID: repository.nodeID,
+      owner: repository.owner,
+      name: repository.name,
+      defaultBranch: repository.defaultBranch,
+      enabled: repository.enabled,
+      reviewEnabled: repository.reviewEnabled,
+      triageEnabled: repository.triageEnabled,
+      implementationEnabled: repository.implementationEnabled
+    )
+  }
+
+  public func rolloutExactJobBinding(
+    repository: RolloutRepositoryIdentity,
+    objectNodeID: String,
+    objectNumber: Int,
+    revisionKey: String
+  ) async throws -> RolloutJobBinding {
+    guard let repositoryID = UUID(uuidString: repository.id) else {
+      throw RolloutAuthorityError.invalidRepositoryIdentity
+    }
+    let identity = LogicalJobIdentity(
+      repositoryID: repositoryID,
+      kind: .prReview,
+      objectNodeID: objectNodeID,
+      revisionKey: revisionKey
+    )
+    let existing = try await jobs.jobs(nonTerminalOnly: true).filter { $0.identity == identity }
+    guard existing.count <= 1 else { throw RolloutAuthorityError.jobBindingMismatch }
+    if let job = existing.first {
+      guard let step = job.currentStepKind, job.objectNumber == objectNumber else {
+        throw RolloutAuthorityError.jobBindingMismatch
+      }
+      return RolloutJobBinding(
+        jobID: job.id,
+        jobKind: job.identity.kind,
+        objectNumber: objectNumber,
+        contractVersion: job.contractVersionUsed,
+        priority: job.priority,
+        firstStep: .review,
+        currentStep: step.rawValue
+      )
+    }
+    return RolloutJobBinding(
+      jobID: UUID(),
+      jobKind: .prReview,
+      objectNumber: objectNumber,
+      contractVersion: runtimeConfiguration.contractVersion,
+      priority: .prReview,
+      firstStep: .review,
+      currentStep: JobStepKind.review.rawValue
+    )
+  }
+
+  public func proposeExactRollout(
+    repository: RolloutRepositoryIdentity,
+    observation: RolloutExactObjectObservation,
+    expiresInSeconds: Int
+  ) async throws -> RolloutPreview {
+    guard paused, exclusiveOperations == 0, !checkpointing else {
+      throw EngineClientError(.busy)
+    }
+    guard UUID(uuidString: repository.id) != nil else {
+      throw RolloutAuthorityError.invalidRepositoryIdentity
+    }
+    let scope = RolloutScope(
+      mode: .exactObject,
+      stage: .prReview,
+      repository: repository,
+      object: observation.object,
+      finiteWindow: nil
+    )
+    let observed = try await rolloutReleaseIdentity.observedIdentity()
+    let evidence = try await rolloutAuthority.localEvidence(
+      scope: scope,
+      jobBinding: observation.jobBinding
+    )
+    let created = RolloutAuthorityStore.milliseconds(now())
+    let input = RolloutPreviewInput(
+      releaseIdentity: RolloutReleaseIdentity(
+        sourceCommit: observed.packaged.sourceCommit,
+        sourceTree: observed.packaged.sourceTree,
+        bundleVersion: observed.packaged.bundleVersion,
+        bundleBuild: observed.packaged.bundleBuild,
+        applicationSHA256: observed.applicationSHA256,
+        helperSHA256: observed.packaged.helperSHA256,
+        askPassSHA256: observed.packaged.askPassSHA256,
+        pushGuardSHA256: observed.packaged.pushGuardSHA256,
+        herdrHostSHA256: observed.packaged.herdrHostSHA256,
+        schemaVersion: observed.packaged.databaseSchemaVersion,
+        engineProtocolVersion: observed.packaged.engineProtocolVersion,
+        runtimeManifestSHA256: observed.packaged.runtimeManifestSHA256,
+        runtimeTreeSHA256: observed.packaged.runtimeTreeSHA256,
+        modelProfilesSHA256: evidence.modelProfilesSHA256,
+        workflowResourcesSHA256: observed.packaged.workflowResourcesSHA256,
+        githubAccount: observation.githubAccount,
+        githubAuthorID: observation.githubAuthorID,
+        repositoryConfigurationSHA256: evidence.repositoryConfigurationSHA256,
+        maxConcurrency: 1
+      ),
+      scope: scope,
+      budgets: RolloutExactProposalPolicy.pullRequestReviewBudgets,
+      inventory: evidence.inventory,
+      missingLabels: [],
+      commands: [],
+      jobBinding: observation.jobBinding,
+      createdAtMilliseconds: created,
+      expiresAtMilliseconds: created + Int64(expiresInSeconds) * 1_000
+    )
+    return try await previewRollout(input)
+  }
+
   public func activateRollout(
     _ request: RolloutActivationRequest
   ) async throws -> RolloutStatusReport {

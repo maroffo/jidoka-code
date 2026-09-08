@@ -24,8 +24,8 @@
       "properties": {
         "bundleBuild": { "const": 6, "type": "integer" },
         "bundleVersion": { "const": "0.2.0", "type": "string" },
-        "databaseSchemaVersion": { "const": 10, "type": "integer" },
-        "engineProtocolVersion": { "const": 12, "type": "integer" },
+        "databaseSchemaVersion": { "const": 11, "type": "integer" },
+        "engineProtocolVersion": { "const": 13, "type": "integer" },
         "maximumConcurrency": { "const": 1, "type": "integer" },
         "rolloutPolicyVersion": { "const": 1, "type": "integer" }
       },

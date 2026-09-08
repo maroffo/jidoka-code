@@ -2660,14 +2660,14 @@ private struct RolloutAuthorityFixture {
         sourceCommit: String(repeating: "1", count: 40),
         sourceTree: String(repeating: "2", count: 40),
         bundleVersion: "0.2.0",
-        bundleBuild: 6,
+        bundleBuild: 7,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,
         pushGuardSHA256: digest,
         herdrHostSHA256: digest,
-        schemaVersion: 10,
-        engineProtocolVersion: 12,
+        schemaVersion: 11,
+        engineProtocolVersion: 13,
         runtimeManifestSHA256: digest,
         runtimeTreeSHA256: digest,
         modelProfilesSHA256: baseEvidence.modelProfilesSHA256,
@@ -2778,14 +2778,14 @@ private struct RolloutAuthorityFixture {
         sourceCommit: String(repeating: "1", count: 40),
         sourceTree: String(repeating: "2", count: 40),
         bundleVersion: "0.2.0",
-        bundleBuild: 6,
+        bundleBuild: 7,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,
         pushGuardSHA256: digest,
         herdrHostSHA256: digest,
-        schemaVersion: 10,
-        engineProtocolVersion: 12,
+        schemaVersion: 11,
+        engineProtocolVersion: 13,
         runtimeManifestSHA256: digest,
         runtimeTreeSHA256: digest,
         modelProfilesSHA256: evidence.modelProfilesSHA256,
@@ -2915,14 +2915,14 @@ private struct RolloutAuthorityFixture {
         sourceCommit: String(repeating: "1", count: 40),
         sourceTree: String(repeating: "2", count: 40),
         bundleVersion: "0.2.0",
-        bundleBuild: 6,
+        bundleBuild: 7,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,
         pushGuardSHA256: digest,
         herdrHostSHA256: digest,
-        schemaVersion: 10,
-        engineProtocolVersion: 12,
+        schemaVersion: 11,
+        engineProtocolVersion: 13,
         runtimeManifestSHA256: digest,
         runtimeTreeSHA256: digest,
         modelProfilesSHA256: baseEvidence.modelProfilesSHA256,
@@ -3663,8 +3663,13 @@ private struct RolloutOperatorReadyHerdr: HerdrRuntimeReadinessChecking {
 
 private struct RolloutOperatorReleaseIdentity: RolloutReleaseIdentityRevalidating {
   let expected: RolloutReleaseIdentity?
+  var observed: RolloutObservedReleaseIdentity?
   func requireCurrent(_ actual: RolloutReleaseIdentity) async throws {
     guard actual == expected else { throw RolloutAuthorityError.previewDrift }
+  }
+  func observedIdentity() async throws -> RolloutObservedReleaseIdentity {
+    guard let observed else { throw RolloutAuthorityError.invalidReleaseIdentity }
+    return observed
   }
 }
 

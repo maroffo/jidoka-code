@@ -1481,7 +1481,7 @@ extension RolloutAuthorityStore {
   ) throws {
     guard let repositoryID = UUID(uuidString: expected.id),
       try loadRepository(repositoryID: repositoryID, database: database) == expected,
-      try database.schemaVersion() == 10,
+      try database.schemaVersion() == 11,
       let settings = try database.query(
         "SELECT * FROM app_settings WHERE singleton = 1"
       ).first,

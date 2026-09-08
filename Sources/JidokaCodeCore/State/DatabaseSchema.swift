@@ -3641,6 +3641,35 @@ public enum DatabaseSchema {
       // than silently skip the difference.
       verifiesContent: true
     ),
+    SQLiteMigration(
+      version: 11,
+      name: "rollout-scope-engine-protocol-13",
+      requiresBackup: true,
+      // `rollout_authorization_scopes` pins the release that minted a lane, so adding an engine
+      // command moves both pins. SQLite cannot alter a CHECK, and the twelve-step table rewrite is
+      // unavailable here: `PRAGMA foreign_keys` is a no-op inside a transaction and ten triggers
+      // name this table. Dropping and re-adding the two pinned columns is legal inside the
+      // migration transaction because no trigger, index or foreign key reads either column; it
+      // moves them to the end of the table, which every database reaches the same way because
+      // every database runs this same chain. The columns carry a DEFAULT only because
+      // `ADD COLUMN NOT NULL` requires one; the CHECK is still what fixes the value.
+      statements: [
+        "ALTER TABLE rollout_authorization_scopes DROP COLUMN schema_version",
+        """
+        ALTER TABLE rollout_authorization_scopes
+        ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 11 CHECK (schema_version = 11)
+        """,
+        "ALTER TABLE rollout_authorization_scopes DROP COLUMN engine_protocol_version",
+        """
+        ALTER TABLE rollout_authorization_scopes
+        ADD COLUMN engine_protocol_version INTEGER NOT NULL DEFAULT 13
+        CHECK (engine_protocol_version = 13)
+        """,
+      ],
+      // Schema 11 has not shipped. A database recording a different body for it was written by a
+      // pre-release build and must fail closed rather than silently skip the difference.
+      verifiesContent: true
+    ),
   ]
 
   private static let herdrTopologyIntentsTableV7 = """
