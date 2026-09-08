@@ -58,60 +58,129 @@ struct ProductionEngineExternalServicesTests {
     #expect(ceilings.repositoryBytes == revalidation.repositoryBytes)
   }
 
-  @Test("a proposal holds one Git inspector, so its remote-read allowance is not renewable")
-  func exactProposalGitInspectorIsPerProposal() throws {
-    let box = ProposalGitInspectorBox()
-    let jobID = UUID()
-    #expect(try box.existing(for: jobID) == nil)
-    let inspector = UnusedRolloutPreviewGitInspector()
-    box.store(jobID: jobID, inspector: inspector)
-    // A second request for the same proposal reuses the allowance already granted.
-    #expect(try box.existing(for: jobID) is UnusedRolloutPreviewGitInspector)
-    // A request for another job is a programming error, not a second allowance.
-    #expect(throws: RolloutAuthorityError.invalidJobBinding) { _ = try box.existing(for: UUID()) }
-  }
-
-  @Test("a proposal observed under another GitHub identity is refused")
-  func exactProposalIdentityBinding() throws {
-    let object = RolloutObjectSelector(
-      nodeID: "PR_identity",
-      number: 7,
-      revisionKey: String(repeating: "1", count: 40),
-      canonicalInputSHA256: String(repeating: "a", count: 64),
-      headSHA: String(repeating: "1", count: 40),
-      baseSHA: String(repeating: "2", count: 40),
-      narrativeSHA256: String(repeating: "b", count: 64),
-      currentStep: JobStepKind.review.rawValue
+  @Test("the proposal's authorities and job binding are built where a test can see them")
+  func exactProposalAuthorityWiring() async throws {
+    let repositoryID = UUID()
+    let repository = RolloutRepositoryIdentity(
+      id: repositoryID,
+      nodeID: "R_wiring",
+      owner: "owner",
+      name: "repo",
+      defaultBranch: "main",
+      enabled: true,
+      reviewEnabled: true,
+      triageEnabled: false,
+      implementationEnabled: false
     )
-    func observation(account: String, authorID: Int64) -> RolloutExactObjectObservation {
-      RolloutExactObjectObservation(
-        object: object,
-        jobBinding: RolloutJobBinding(
-          jobID: UUID(),
-          jobKind: .prReview,
-          objectNumber: 7,
-          contractVersion: "pr-review-v1",
-          priority: .prReview,
-          firstStep: .review,
-          currentStep: JobStepKind.review.rawValue
-        ),
-        githubAccount: account,
-        githubAuthorID: authorID
+    let instant = Date(timeIntervalSince1970: 700_000)
+    let ceilings = try ProductionEngineExternalServices.exactProposalCeilings()
+    let authorities = try ProductionEngineExternalServices.exactProposalAuthorities(
+      repository: repository)
+
+    // The ceilings are exercised, not restated: each authority admits exactly its allowance and
+    // then refuses, so widening a call site is visible here.
+    func identityRead() -> RolloutGitHubReadEffect {
+      RolloutGitHubReadEffect(
+        operation: .authenticatedIdentity,
+        maximumResponseBytes: Int64(GitHubBroker.maximumResponseBytes),
+        context: RolloutEffectExecutionContext(mode: .discovery)
       )
     }
-    try ProductionEngineExternalServices.requireProposalIdentity(
-      observation(account: "hubot", authorID: 8), account: "hubot", authorID: 8)
-    // GitHub logins are case-insensitive, and the author id is what actually binds.
-    try ProductionEngineExternalServices.requireProposalIdentity(
-      observation(account: "HuBoT", authorID: 8), account: "hubot", authorID: 8)
-    for wrong in [
-      observation(account: "someone-else", authorID: 8),
-      observation(account: "hubot", authorID: 9),
-    ] {
-      #expect(throws: RolloutAuthorityError.invalidReleaseIdentity) {
-        try ProductionEngineExternalServices.requireProposalIdentity(
-          wrong, account: "hubot", authorID: 8)
-      }
+    for _ in 0..<ceilings.identityRequests {
+      _ = try await authorities.identity.reserveGitHubRead(identityRead(), now: instant)
+    }
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await authorities.identity.reserveGitHubRead(identityRead(), now: instant)
+    }
+    #expect(await authorities.identity.snapshot().reservedRequests == ceilings.identityRequests)
+
+    func repositoryRead(_ number: Int) -> RolloutGitHubReadEffect {
+      RolloutGitHubReadEffect(
+        operation: .pullRequest(owner: "owner", repository: "repo", number: number),
+        maximumResponseBytes: Int64(GitHubBroker.maximumResponseBytes),
+        context: RolloutEffectExecutionContext(mode: .discovery)
+      )
+    }
+    for number in 1...ceilings.repositoryRequests {
+      _ = try await authorities.repository.reserveGitHubRead(repositoryRead(number), now: instant)
+    }
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await authorities.repository.reserveGitHubRead(
+        repositoryRead(ceilings.repositoryRequests + 1), now: instant)
+    }
+    // The identity authority admits only the identity read, and the repository authority only
+    // coordinate-matching ones, so the two allowances cannot be spent as one.
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await authorities.identity.reserveGitHubRead(repositoryRead(1), now: instant)
+    }
+
+    // The job id the closure binds is recorded, which is the only way to observe from outside
+    // that the resolved binding reached the authority rather than a fresh identifier.
+    let box = ProposalGitInspectorBox()
+    let makeGit = try ProductionEngineExternalServices.exactProposalGitInspecting(
+      repository: repository,
+      broker: GitHubBroker(
+        tokenProvider: ProposalWiringTokenProvider(),
+        transport: IdentityGitHubTransport(account: "owner", authorID: 42),
+        readAuthority: authorities.repository,
+        defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
+        now: { instant }
+      ),
+      cacheRoot: FileManager.default.temporaryDirectory.appendingPathComponent(
+        "unused-\(UUID().uuidString)", isDirectory: true),
+      askPassExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+      now: { instant },
+      box: box
+    )
+    let jobID = UUID()
+    #expect(box.boundJobID == nil)
+    let inspector = try makeGit(jobID)
+    #expect(box.boundJobID == jobID)
+    // A second request for the same proposal reuses the allowance already granted.
+    #expect(try makeGit(jobID) is ProductionRolloutPreviewGitInspector)
+    _ = inspector
+    // A request for another job is a programming error, not a second allowance.
+    #expect(throws: RolloutAuthorityError.invalidJobBinding) { _ = try makeGit(UUID()) }
+
+    let gitAuthority = try #require(box.boundAuthority)
+    func remoteRead(_ target: String, jobID: UUID) -> RolloutGitRemoteReadEffect {
+      RolloutGitRemoteReadEffect(
+        jobID: jobID,
+        repositoryID: repositoryID,
+        repositoryNodeID: repository.nodeID,
+        operation: .fetchPreviewBase,
+        target: target
+      )
+    }
+    for ordinal in 0..<ceilings.gitRemoteReads {
+      _ = try await gitAuthority.reserveGitRemoteRead(
+        remoteRead("refs/\(ordinal)", jobID: jobID), now: instant)
+    }
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await gitAuthority.reserveGitRemoteRead(
+        remoteRead("refs/overflow", jobID: jobID), now: instant)
+    }
+    let other = try ProductionEngineExternalServices.exactProposalGitInspecting(
+      repository: repository,
+      broker: GitHubBroker(
+        tokenProvider: ProposalWiringTokenProvider(),
+        transport: IdentityGitHubTransport(account: "owner", authorID: 42),
+        readAuthority: authorities.repository,
+        defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
+        now: { instant }
+      ),
+      cacheRoot: FileManager.default.temporaryDirectory.appendingPathComponent(
+        "unused-\(UUID().uuidString)", isDirectory: true),
+      askPassExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+      now: { instant },
+      box: ProposalGitInspectorBox()
+    )
+    let otherJob = UUID()
+    _ = try other(otherJob)
+    // An authority bound to one job admits nothing for another.
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await gitAuthority.reserveGitRemoteRead(
+        remoteRead("refs/base", jobID: otherJob), now: instant)
     }
   }
 
@@ -521,14 +590,6 @@ private func rolloutBudgets(
   )
 }
 
-private struct UnusedRolloutPreviewGitInspector: RolloutPreviewGitInspecting {
-  func derivePullRequest(
-    repository _: RolloutRepositoryIdentity,
-    number _: Int,
-    baseSHA _: String,
-    headSHA _: String,
-    jobID _: UUID
-  ) async throws -> PullRequestCommitDerivation {
-    throw RolloutAuthorityError.previewDrift
-  }
+private struct ProposalWiringTokenProvider: GitHubTokenProviding {
+  func token() async throws -> Data { Data(repeating: 0x74, count: 40) }
 }

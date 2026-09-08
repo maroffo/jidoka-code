@@ -67,22 +67,42 @@ struct ProductionRolloutGitHubBudget: Equatable, Sendable {
 /// a programming error, not a second allowance.
 final class ProposalGitInspectorBox: @unchecked Sendable {
   private let lock = NSLock()
-  private var boundJobID: UUID?
+  private var jobID: UUID?
   private var value: (any RolloutPreviewGitInspecting)?
+  private var readAuthority: BoundedRolloutPreviewReadAuthority?
+
+  /// What the factory actually bound, which is the only way to observe from outside that the
+  /// resolved job id reached the authority instead of a fresh one.
+  var boundJobID: UUID? {
+    lock.lock()
+    defer { lock.unlock() }
+    return jobID
+  }
+
+  var boundAuthority: BoundedRolloutPreviewReadAuthority? {
+    lock.lock()
+    defer { lock.unlock() }
+    return readAuthority
+  }
 
   func existing(for jobID: UUID) throws -> (any RolloutPreviewGitInspecting)? {
     lock.lock()
     defer { lock.unlock() }
     guard let value else { return nil }
-    guard boundJobID == jobID else { throw RolloutAuthorityError.invalidJobBinding }
+    guard self.jobID == jobID else { throw RolloutAuthorityError.invalidJobBinding }
     return value
   }
 
-  func store(jobID: UUID, inspector: any RolloutPreviewGitInspecting) {
+  func store(
+    jobID: UUID,
+    inspector: any RolloutPreviewGitInspecting,
+    authority: BoundedRolloutPreviewReadAuthority
+  ) {
     lock.lock()
     defer { lock.unlock() }
-    boundJobID = jobID
+    self.jobID = jobID
     value = inspector
+    readAuthority = authority
   }
 }
 
@@ -461,12 +481,8 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
     do {
       // The proposal runs before any lane exists, so its read authority comes from fixed policy
       // constants rather than from a preview the operator supplied.
-      let ceilings = try Self.exactProposalCeilings()
-      let identityAuthority = try BoundedRolloutPreviewReadAuthority(
-        repository: nil,
-        maximumRequests: ceilings.identityRequests,
-        maximumBytes: ceilings.identityBytes
-      )
+      let authorities = try Self.exactProposalAuthorities(repository: repository)
+      let identityAuthority = authorities.identity
       let identityBroker = GitHubBroker(
         tokenProvider: provider,
         transport: transport,
@@ -474,14 +490,7 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
         defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
         now: now
       )
-      let repositoryAuthority = try BoundedRolloutPreviewReadAuthority(
-        repository: GitHubRepositoryCoordinates(
-          owner: repository.owner,
-          repository: repository.name
-        ),
-        maximumRequests: ceilings.repositoryRequests,
-        maximumBytes: ceilings.repositoryBytes
-      )
+      let repositoryAuthority = authorities.repository
       let repositoryBroker = GitHubBroker(
         tokenProvider: provider,
         transport: transport,
@@ -499,42 +508,21 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
       let observation = try await RolloutExactProposalBuilder(
         identity: identityBroker,
         api: repositoryBroker,
-        makeGit: { jobID in
-          // Every Git remote read is admitted against an exact job id, so this authority can only
-          // be built once the binding is resolved. It grants no GitHub request of its own: the
-          // minimum of one is what the initializer requires, and nothing reserves against it.
-          // One authority per proposal, not per call: a second inspector must draw on the same
-          // remaining allowance rather than a fresh one.
-          if let existing = try gitAuthorityBox.existing(for: jobID) { return existing }
-          let gitAuthority = try BoundedRolloutPreviewReadAuthority(
-            repository: GitHubRepositoryCoordinates(
-              owner: repository.owner,
-              repository: repository.name
-            ),
-            maximumRequests: ceilings.gitCarrierRequests,
-            maximumBytes: ceilings.gitCarrierBytes,
-            repositoryID: UUID(uuidString: repository.id),
-            repositoryNodeID: repository.nodeID,
-            jobID: jobID,
-            maximumGitRemoteReads: ceilings.gitRemoteReads
-          )
-          let inspector = ProductionRolloutPreviewGitInspector(
-            cacheRoot: cacheRoot,
-            askPassExecutable: askPassExecutable,
-            broker: repositoryBroker,
-            readAuthority: gitAuthority,
-            now: instant
-          )
-          gitAuthorityBox.store(jobID: jobID, inspector: inspector)
-          return inspector
-        }
+        makeGit: try Self.exactProposalGitInspecting(
+          repository: repository,
+          broker: repositoryBroker,
+          cacheRoot: cacheRoot,
+          askPassExecutable: askPassExecutable,
+          now: instant,
+          box: gitAuthorityBox
+        )
       ).observePullRequest(
         repository: repository,
         number: number,
+        expectedAccount: account,
+        expectedAuthorID: authorID,
         resolveBinding: resolveBinding
       )
-      try Self.requireProposalIdentity(
-        observation, account: account, authorID: authorID)
       await provider.clear()
       return observation
     } catch {
@@ -593,17 +581,77 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }
 
-  /// The GitHub token a proposal spends belongs to the configured account. An observation made
-  /// under any other identity is not this installation's proposal, whatever it contains.
-  static func requireProposalIdentity(
-    _ observation: RolloutExactObjectObservation,
-    account: String,
-    authorID: Int64
-  ) throws {
-    guard observation.githubAccount.caseInsensitiveCompare(account) == .orderedSame,
-      observation.githubAuthorID == authorID
-    else {
-      throw RolloutAuthorityError.invalidReleaseIdentity
+  /// The two GitHub read authorities a proposal runs under. Constructed here rather than at the
+  /// call site so that the ceilings a test pins are the ceilings production actually applies.
+  static func exactProposalAuthorities(
+    repository: RolloutRepositoryIdentity
+  ) throws -> (
+    identity: BoundedRolloutPreviewReadAuthority,
+    repository: BoundedRolloutPreviewReadAuthority
+  ) {
+    let ceilings = try exactProposalCeilings()
+    return (
+      identity: try BoundedRolloutPreviewReadAuthority(
+        repository: nil,
+        maximumRequests: ceilings.identityRequests,
+        maximumBytes: ceilings.identityBytes
+      ),
+      repository: try BoundedRolloutPreviewReadAuthority(
+        repository: GitHubRepositoryCoordinates(
+          owner: repository.owner,
+          repository: repository.name
+        ),
+        maximumRequests: ceilings.repositoryRequests,
+        maximumBytes: ceilings.repositoryBytes
+      )
+    )
+  }
+
+  /// Builds the Git inspector for whichever job the binding resolves to. The job id is bound
+  /// inside this function rather than at the call site, so the binding cannot be broken by an
+  /// edit that no test observes: `box` records what the closure actually bound.
+  static func exactProposalGitInspecting(
+    repository: RolloutRepositoryIdentity,
+    broker: GitHubBroker,
+    cacheRoot: URL,
+    askPassExecutable: URL,
+    now: @escaping @Sendable () -> Date,
+    box: ProposalGitInspectorBox
+  ) throws -> RolloutExactProposalBuilder.GitInspecting {
+    let ceilings = try exactProposalCeilings()
+    guard let repositoryID = UUID(uuidString: repository.id) else {
+      throw RolloutAuthorityError.invalidRepositoryIdentity
+    }
+    let coordinates = GitHubRepositoryCoordinates(
+      owner: repository.owner,
+      repository: repository.name
+    )
+    let nodeID = repository.nodeID
+    return { jobID in
+      // One authority per proposal, not per call: a second inspector must draw on the same
+      // remaining allowance rather than a fresh one.
+      if let existing = try box.existing(for: jobID) { return existing }
+      // Every Git remote read is admitted against an exact job id, so this authority can only be
+      // built once the binding is resolved. It grants no GitHub request of its own: the minimum
+      // of one is what the initializer requires, and nothing reserves against it.
+      let authority = try BoundedRolloutPreviewReadAuthority(
+        repository: coordinates,
+        maximumRequests: ceilings.gitCarrierRequests,
+        maximumBytes: ceilings.gitCarrierBytes,
+        repositoryID: repositoryID,
+        repositoryNodeID: nodeID,
+        jobID: jobID,
+        maximumGitRemoteReads: ceilings.gitRemoteReads
+      )
+      let inspector = ProductionRolloutPreviewGitInspector(
+        cacheRoot: cacheRoot,
+        askPassExecutable: askPassExecutable,
+        broker: broker,
+        readAuthority: authority,
+        now: now
+      )
+      box.store(jobID: jobID, inspector: inspector, authority: authority)
+      return inspector
     }
   }
 

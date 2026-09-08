@@ -336,6 +336,8 @@ struct RolloutRemotePreviewRevalidatorTests {
     let observation = try await builder.observePullRequest(
       repository: fixture.rolloutRepository,
       number: 10,
+      expectedAccount: "owner",
+      expectedAuthorID: 42,
       resolveBinding: { nodeID, number, revisionKey in
         await resolverCalls.record()
         #expect(nodeID == "PR_preview")
@@ -390,6 +392,12 @@ struct RolloutRemotePreviewRevalidatorTests {
       await fixture.api.setIdentity(GitHubUser(id: 42, nodeID: "U_preview", login: "-not-valid-"))
     case .accountID:
       await fixture.api.setIdentity(GitHubUser(id: 0, nodeID: "U_preview", login: "owner"))
+    case .foreignAccount:
+      // A valid login, but not the configured one: the token spent is someone else's.
+      await fixture.api.setIdentity(
+        GitHubUser(id: 42, nodeID: "U_preview", login: "another-owner"))
+    case .foreignAuthorID:
+      await fixture.api.setIdentity(GitHubUser(id: 99, nodeID: "U_preview", login: "owner"))
     case .repositoryNodeID:
       await fixture.api.replaceRepository(nodeID: "R_other")
     case .repositoryOwner:
@@ -398,6 +406,8 @@ struct RolloutRemotePreviewRevalidatorTests {
       await fixture.api.replaceRepository(name: "other-repo")
     case .defaultBranch:
       await fixture.api.replaceRepository(defaultBranch: "trunk")
+    case .pullRequestNumber:
+      await fixture.api.serveMismatchedPullRequestNumber()
     case .pullRequestClosed:
       await fixture.api.replacePullRequest(state: "closed")
     case .pullRequestDraft:
@@ -456,6 +466,8 @@ struct RolloutRemotePreviewRevalidatorTests {
       _ = try await builder.observePullRequest(
         repository: repository,
         number: 10,
+        expectedAccount: "owner",
+        expectedAuthorID: 42,
         resolveBinding: { _, _, _ in resolved }
       )
     }
@@ -474,6 +486,8 @@ struct RolloutRemotePreviewRevalidatorTests {
     let observation = try await builder.observePullRequest(
       repository: fixture.rolloutRepository,
       number: 10,
+      expectedAccount: "owner",
+      expectedAuthorID: 42,
       resolveBinding: { _, number, _ in
         RolloutJobBinding(
           jobID: fixture.job.id,
@@ -528,6 +542,8 @@ struct RolloutRemotePreviewRevalidatorTests {
     let observation = try await builder.observePullRequest(
       repository: fixture.rolloutRepository,
       number: 10,
+      expectedAccount: "owner",
+      expectedAuthorID: 42,
       resolveBinding: { _, number, _ in
         RolloutJobBinding(
           jobID: fixture.job.id,
@@ -633,6 +649,8 @@ struct RolloutRemotePreviewRevalidatorTests {
     ).observePullRequest(
       repository: repository,
       number: 10,
+      expectedAccount: "owner",
+      expectedAuthorID: 42,
       resolveBinding: { _, _, _ in binding }
     )
     #expect(observation.jobBinding == binding)
@@ -738,10 +756,13 @@ private actor RolloutProposalCallCounter {
 enum RolloutProposalDrift: CaseIterable {
   case accountLogin
   case accountID
+  case foreignAccount
+  case foreignAuthorID
   case repositoryNodeID
   case repositoryOwner
   case repositoryName
   case defaultBranch
+  case pullRequestNumber
   case pullRequestClosed
   case pullRequestDraft
   case baseReference
@@ -755,10 +776,11 @@ enum RolloutProposalDrift: CaseIterable {
 
   var expected: RolloutAuthorityError {
     switch self {
-    case .accountLogin, .accountID: .invalidReleaseIdentity
+    case .accountLogin, .accountID, .foreignAccount, .foreignAuthorID: .invalidReleaseIdentity
     case .repositoryNodeID, .repositoryOwner, .repositoryName, .defaultBranch:
       .invalidRepositoryIdentity
-    case .pullRequestClosed, .pullRequestDraft, .baseReference, .baseSHA, .headSHA, .emptyRange:
+    case .pullRequestNumber, .pullRequestClosed, .pullRequestDraft, .baseReference, .baseSHA,
+      .headSHA, .emptyRange:
       .invalidObjectSelector
     case .bindingObjectNumber: .invalidJobBinding
     case .restCommitOrder, .fetchedBase, .fetchedHead: .previewDrift
@@ -1422,6 +1444,7 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
   private var branchSHA: String
   private var branchReferenceAvailable = true
   private var repositoryReadFails = false
+  private var mismatchedPullRequestNumber = false
 
   init(
     identity: GitHubUser,
@@ -1462,10 +1485,29 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
     repository _: String,
     number: Int
   ) throws -> GitHubPullRequest {
+    if mismatchedPullRequestNumber, let first = pullRequestsValue.first {
+      return Self.renumbered(first, to: number + 1)
+    }
     guard let value = pullRequestsValue.first(where: { $0.number == number }) else {
       throw RolloutRemotePreviewTestError.fixture
     }
     return value
+  }
+
+  private static func renumbered(_ value: GitHubPullRequest, to number: Int) -> GitHubPullRequest {
+    GitHubPullRequest(
+      id: value.id,
+      nodeID: value.nodeID,
+      number: number,
+      state: value.state,
+      draft: value.draft,
+      title: value.title,
+      body: value.body,
+      htmlURL: value.htmlURL,
+      user: value.user,
+      head: value.head,
+      base: value.base
+    )
   }
 
   func listPullRequestCommits(
@@ -1579,6 +1621,12 @@ private actor RolloutRemotePreviewAPIFake: RolloutPreviewIdentityReading,
         repository: current.base.repository
       )
     )
+  }
+
+  /// GitHub answering a request for one number with a different pull request is drift the
+  /// producer must refuse; the fake looks up by number, so the mismatch has to be forced.
+  func serveMismatchedPullRequestNumber() {
+    mismatchedPullRequestNumber = true
   }
 
   func setPullRequestCommits(_ shas: [String]) {

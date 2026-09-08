@@ -36,10 +36,18 @@ struct RolloutExactProposalBuilder: Sendable {
   func observePullRequest(
     repository: RolloutRepositoryIdentity,
     number: Int,
+    expectedAccount: String,
+    expectedAuthorID: Int64,
     resolveBinding: RolloutExactJobBindingResolving
   ) async throws -> RolloutExactObjectObservation {
+    // The token this fetch spends belongs to the configured account. An observation made under
+    // any other identity is not this installation's proposal, whatever it contains, so the
+    // comparison belongs here rather than in a caller that could forget to make it.
     let account = try await identity.authenticatedIdentity()
-    guard GitHubInputValidation.validOwner(account.login), account.id > 0 else {
+    guard GitHubInputValidation.validOwner(account.login), account.id > 0,
+      account.login.caseInsensitiveCompare(expectedAccount) == .orderedSame,
+      account.id == expectedAuthorID
+    else {
       throw RolloutAuthorityError.invalidReleaseIdentity
     }
     let observed = try await api.repository(

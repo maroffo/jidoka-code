@@ -12,7 +12,7 @@ returned, each in its own worktree, none touching the main tree.
 | C2 | `gitRemoteReads = 1` against the two authorized reads `derivePullRequest` performs, so the head fetch was refused; the same constant went into the lane budget, making every produced preview unactivatable | architecture (CRITICAL), security (MAJOR) | Fixed: 2, with the reason in the source. Pinned by `proposalGitReadAuthority` and `proposalPolicyCeilings` |
 | C3 | All 17 producer guards untested: replacing five of them with `guard true` left the suite green | test | Fixed. `proposalGuardsRefuseDrift` is one case per reachable guard (16); two guards were unreachable by construction and removed rather than tested vacuously |
 | C4 | The read ceilings were pinned as constants but the wiring that applies them was unenforced: setting the call sites to 9_000 left the suite green | test | Fixed. `ProductionEngineExternalServices.exactProposalCeilings()` is the single source the three authorities use, pinned by `exactProposalCeilings` |
-| C5 | The proposal's paused/exclusive/checkpointing refusal was untested | test | Fixed at the runtime by `proposalRefusesBeforeFetching`. The service-level re-check is unreachable in tests because the schema latch forbids an unpaused engine without an active lane; the dispatch ordering is pinned instead |
+| C5 | The proposal's paused/exclusive/checkpointing refusal was untested | test | Fixed at the runtime by `proposalRefusesBeforeFetching`. The service-level re-check is expensive to reach rather than unreachable: a raw `UPDATE app_settings SET paused = 0` is refused by the schema latch, so a test would have to activate a real lane first. The dispatch ordering is pinned instead |
 
 ## Major
 
@@ -44,8 +44,13 @@ Recorded as debt, not introduced by this change:
   could land outside the backup and inside the migration (database MINOR). Pre-existing in the
   generic migrator; the schema-11 guard closes the case that matters here because it counts
   inside the transaction.
-- One unreproduced 7-issue suite failure (test MINOR): eight further runs of the same source were
-  green, including two immediate re-runs. Not reproduced, not diagnosed.
+- `GitProcessTests` "timeout removes an observed session escape by PID and microsecond start time"
+  is load-sensitive: it fails with `.recordingTimedOut` when another full suite runs concurrently
+  on the same machine, and passes in isolation. Observed at 80 s under concurrent load against
+  4.1 s idle, reproduced by running the suite while a reviewer ran its own full suite in a separate
+  clone; three isolated re-runs green. Round 1 recorded this as an unreproduced failure; the cause
+  is now known and the test is non-deterministic under load, which is a test-design defect rather
+  than noise. Pre-existing.
 
 Left as is: `closedRepositoryProposalRefused` builds a producer it does not need, but it does kill
 the `reviewEnabled` mutant, so it is not a vacuous test.
