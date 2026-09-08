@@ -107,6 +107,44 @@ per reachable producer guard (19).
 Corrected rather than fixed: round 1 described the service-level `paused` guard as unreachable in
 tests. It is expensive to reach, not unreachable, and CONSOLIDATED.md now says so.
 
+## The residue the end-to-end test left, and the one it cannot close
+
+Re-probed against `8a1a116`, the reviewer ran eight mutations; seven died. The survivor was the
+residue of the ceiling finding one level up: `exactProposalAuthorities` is well tested, but nothing
+obliged the call site to *use* what it returned. Replacing `authorities.repository` with an inline
+authority of 60 requests (budget-legal, so it does not die on `invalidBudget`) left the whole suite
+green, because a well-formed proposal makes three repository reads and no test that counts URLs can
+tell 39 from 60.
+
+Closed by `exactProposalRepositoryAllowanceStopsAtTheCeiling`, which spends the allowance instead of
+describing it: the transport serves a pull request whose commit pages never stop being full, so the
+fetch keeps paginating until the authority refuses. The assertion is
+`identityRequests + repositoryRequests` recorded URLs and the last one being commit page 37. Under
+the reviewer's mutation it records 61 and stops at page 58.
+
+The symmetric residue on the identity leg stays open and is stated rather than closed: a call site
+that discards `authorities.identity` for a wider one is invisible to any end-to-end test, because
+this path calls `authenticatedIdentity()` exactly once and an unspent allowance has no observable
+width. Its blast radius is smaller in kind, not only in degree: that authority is built with
+`repository: nil` and admits only the identity operation, so a widening buys extra `/user` reads and
+no repository data, no Git read and no mutation. `exactProposalAuthorityWiring` pins the value the
+factory returns; nothing pins that the call site used it. Adding another factory level would move
+the seam rather than remove it, which is the mutation-chasing this section exists to avoid.
+
+Two corrections the reviewer volunteered against itself, both worth keeping. First, the ask-pass
+refusal does mask the Git-side admission: with the real factory's `gitRemoteReads` widened from 2 to
+9 the two end-to-end tests stay green, because `derivePullRequest` builds the credential provider
+before the only `reserveGitRemoteRead` downstream of it. That leg is covered by
+`exactProposalAuthorityWiring` (the widening kills it), and the end-to-end test now says in a
+comment where it actually stops. Second, the transport's 404 default is not what catches an extra
+read: the recorder appends the URL before the response is served, so a fifth read is caught by the
+order assertion. The 404 is belt-and-braces.
+
+The reviewer also withdrew its own second prediction: the caller passing the *observed* account as
+the expected one is not constructible here, because the builder fetches the identity itself and
+returns only after the comparison. Moving the check inside closed the hatch rather than relocating
+it.
+
 ## Reviewer re-measurement of the round-2 fixes
 
 The test reviewer re-probed `ab5c0d5` (787 tests / 87 suites green, with the two load-flaky process

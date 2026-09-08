@@ -190,7 +190,7 @@ struct ProductionEngineExternalServicesTests {
   }
 
   @Test("an exact proposal spends one identity read and three repository reads, in order")
-  func exactProposalObservationSpendsBothAuthorities() async throws {
+  func exactProposalSpendsTheIdentityAndRepositoryReadsInOrder() async throws {
     let baseSHA = String(repeating: "a", count: 40)
     let headSHA = String(repeating: "b", count: 40)
     let recorder = ProposalTransportRecorder()
@@ -217,6 +217,10 @@ struct ProductionEngineExternalServicesTests {
     let calls = ProposalBindingRecorder()
     // The ask-pass helper is a regular non-executable file, so the run is refused at the Git step
     // rather than reaching the network: everything the proposal owes GitHub has happened by then.
+    // It stops one call short of the Git remote-read authority, which `derivePullRequest` consults
+    // only after the credential provider it never builds here. The job id that authority is bound
+    // to, and its two-read ceiling, are covered by `exactProposalAuthorityWiring`; this test claims
+    // nothing about them.
     await #expect(throws: GitAskPassError.credentialRejected) {
       _ = try await fixture.external.observeExactPullRequestReview(
         repository: proposalRepository(),
@@ -238,9 +242,10 @@ struct ProductionEngineExternalServicesTests {
       )
     }
 
-    // Two authorities, spent apart: one request on identity and three on the repository. Backing
-    // both brokers with the same authority, or swapping them, stops this sequence short because
-    // the identity allowance is one request and admits only the identity operation.
+    // The two GitHub authorities, spent apart: one request on identity and three on the
+    // repository. Backing both brokers with the same authority, or swapping them, stops this
+    // sequence short because the identity allowance is one request and admits only the identity
+    // operation.
     #expect(
       await recorder.requests == [
         "https://api.github.com/user",
@@ -254,6 +259,65 @@ struct ProductionEngineExternalServicesTests {
       await calls.observed == [
         ProposalBindingCall(nodeID: "PR_proposal", number: 7, revisionKey: headSHA)
       ])
+  }
+
+  @Test("the repository allowance a proposal actually spends stops at the policy ceiling")
+  func exactProposalRepositoryAllowanceStopsAtTheCeiling() async throws {
+    // Three reads is all a well-formed proposal needs, so counting URLs cannot tell a 39-request
+    // allowance from a wider one. A pull request whose commits never stop paginating spends the
+    // allowance instead of describing it, which is what makes the number at this call site
+    // observable: the authority the factory built has to be the one the broker was handed.
+    let recorder = ProposalTransportRecorder()
+    let fixture = try ExternalServicesFixture(
+      transport: ProposalRecordingTransport(
+        recorder: recorder,
+        account: "hubot",
+        authorID: 8,
+        owner: "octo-org",
+        name: "repo",
+        number: 7,
+        repositoryNodeID: "R_proposal",
+        pullRequestNodeID: "PR_proposal",
+        baseSHA: String(repeating: "a", count: 40),
+        headSHA: String(repeating: "b", count: 40),
+        commitSHAs: [String(repeating: "b", count: 40)],
+        paginatesCommits: true
+      ),
+      enableRolloutPreview: true
+    )
+    defer { fixture.remove() }
+    try await fixture.configureIdentity(account: "hubot", authorID: 8)
+    await fixture.vault.seed(account: "hubot", token: fixture.oldToken)
+
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await fixture.external.observeExactPullRequestReview(
+        repository: proposalRepository(),
+        number: 7,
+        resolveBinding: { _, objectNumber, _ in
+          RolloutJobBinding(
+            jobID: UUID(),
+            jobKind: .prReview,
+            objectNumber: objectNumber,
+            contractVersion: "2026-05-01",
+            priority: .prReview,
+            firstStep: .review,
+            currentStep: JobStepKind.review.rawValue
+          )
+        }
+      )
+    }
+
+    let ceilings = try ProductionEngineExternalServices.exactProposalCeilings()
+    let spent = await recorder.requests
+    // One identity request on its own authority, then the repository authority spent to the last
+    // request it has and refused on the next. A wider authority built at the call site, or the
+    // factory's return value discarded, moves this count.
+    #expect(spent.count == ceilings.identityRequests + ceilings.repositoryRequests)
+    #expect(spent.first == "https://api.github.com/user")
+    #expect(
+      spent.last
+        == "https://api.github.com/repos/octo-org/repo/pulls/7/commits?per_page=100&page="
+        + String(ceilings.repositoryRequests - 2))
   }
 
   @Test("an exact proposal under an account other than the configured one is refused first")
@@ -791,6 +855,9 @@ private struct ProposalRecordingTransport: GitHubHTTPTransport {
   let baseSHA: String
   let headSHA: String
   let commitSHAs: [String]
+  /// When set, every commit page is full, so the fetch keeps asking for the next one until the
+  /// read authority refuses. Distinct SHAs per page, because the broker rejects duplicates.
+  var paginatesCommits = false
 
   func send(_ request: URLRequest) async throws -> GitHubHTTPResponse {
     let url = try #require(request.url)
@@ -828,7 +895,8 @@ private struct ProposalRecordingTransport: GitHubHTTPTransport {
       )
     case "/repos/\(owner)/\(name)/pulls/\(number)/commits":
       body = try JSONSerialization.data(
-        withJSONObject: commitSHAs.map { ["sha": $0] }
+        withJSONObject: paginatesCommits
+          ? fullCommitPage(url: url) : commitSHAs.map { ["sha": $0] as [String: Any] }
       )
     default:
       body = nil
@@ -841,5 +909,15 @@ private struct ProposalRecordingTransport: GitHubHTTPTransport {
 
   private func user(login: String, id: Int64) -> [String: Any] {
     ["id": id, "node_id": "U_\(id)", "login": login]
+  }
+
+  private func fullCommitPage(url: URL) -> [[String: Any]] {
+    let page =
+      URLComponents(url: url, resolvingAgainstBaseURL: false)?
+      .queryItems?
+      .first { $0.name == "page" }
+      .flatMap { $0.value }
+      .flatMap(Int.init) ?? 1
+    return (0..<100).map { ["sha": String(format: "%040x", page * 100 + $0)] }
   }
 }
