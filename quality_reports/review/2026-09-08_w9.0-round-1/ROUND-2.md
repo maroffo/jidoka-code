@@ -41,22 +41,60 @@ a fresh job id, widening the identity ceiling, and widening the repository ceili
 four failures in `exactProposalAuthorityWiring`; neutralising the identity comparison turns
 `foreignAccount` and `foreignAuthorID` red.
 
-## Major: the migration guard test does not use the real table
+## Closing the class rather than the mutations: the end-to-end test
 
-`rolloutScopeRepinRefusesPopulatedTable` proves a CHECK aborts a transaction against a stand-in
-table, not that migration 11 fails a real populated schema-10 database closed. This is accurate and
-is NOT claimed as closed.
+Extraction made the proposal's *values* testable and left its *call sites* unenforced, and the
+reviewer named the two mutations that class still admitted. Chasing them one at a time would have
+produced two more value assertions and left the third one open, so the fix is a test that drives
+`ProductionEngineExternalServices.observeExactPullRequestReview` end to end against a recording
+transport: `exactProposalObservationSpendsBothAuthorities` and `exactProposalRefusesAnotherAccount`
+in `ProductionEngineExternalServicesTests.swift`. They assert what a call site can actually get
+wrong: which four URLs are fetched and in what order, that the binding is keyed by the head the
+metadata fetch returned, and that a foreign identity is refused after exactly one request. The run
+never reaches the network because the ask-pass helper is a regular non-executable file, so the Git
+step refuses with `GitAskPassError.credentialRejected` once every GitHub read the proposal owes has
+happened.
 
-What is verified, and how: the guard statement names `main.rollout_authorization_scopes`, asserted
-structurally; the abort-and-rollback behaviour was probed twice on copies of the real production
-database carrying a seeded scope row, once by the database reviewer in round 1 and once by the
-security reviewer in round 2, both reporting `CHECK constraint failed: existing_scopes = 0` with the
-row still reading `10|12` and the guard table absent afterwards.
+Measured against three call-site mutations, with the pre-existing tests as the control:
 
-What is missing is automation, not evidence. A repo test cannot build the row: the table has 58
-NOT NULL columns under tight CHECKs including a canonical `preview_json`, and no code path in this
-binary can mint a scope row below schema 11, which is precisely why the guard protects databases
-written by the previous release rather than by this one. Recorded as debt.
+| Mutation | Pre-existing tests | New end-to-end tests |
+|----------|--------------------|----------------------|
+| Swap the two authorities, so the identity authority backs the repository broker | all green | both red: `effectAdmissionClosed` after 1 request |
+| Neutralise the identity comparison in the builder | `foreignAccount`, `foreignAuthorID` red | also red: the foreign account reaches the Git step |
+| Pass `repository.owner` as the expected account | all green | red: `invalidReleaseIdentity` after 1 request |
+
+Two of the three survive every unit test in the suite, including `exactProposalCeilings` and
+`exactProposalAuthorityWiring`, which is the measurement that says the class was open. The
+reviewer's second prediction (the caller passing the *observed* account as the expected one) is not
+constructible at this call site: the builder fetches the identity itself and the caller never holds
+it, so the nearest reachable form is the third row above.
+
+## Withdrawn: the migration guard test does not use the real table
+
+Raised as Major, then retracted by the same reviewer with evidence, and NOT carried as debt.
+Booking work against a defect its author no longer claims would be worse than the defect.
+
+The retraction decomposes the guard's contract into four parts, each covered: the CHECK aborts on a
+non-zero count (behavioural on the stand-in with the real statements); `COUNT(*)` is non-zero on a
+populated real table (the guard's SQL is column-agnostic, which is why the stand-in's different
+shape does not matter); an abort at statement 2 leaves a real schema-10 database at 10 with its DDL,
+ten triggers and integrity intact (`productionRolloutScopeProtocolMigrationRollsBack(afterStatement:
+2)` injects a failing statement at exactly that point on a real fixture, and the migrator cannot
+tell that abort from the CHECK's); and the temp-shadow hazard is closed by the `main.` qualification
+and its own case. The only join the composition leaves open is name resolution, which is the very
+thing the qualification fixes. A 58-column fixture would re-prove parts 1 and 3 together and buy
+nothing else.
+
+## Test-design defect found while probing: the digest pin masks behaviour
+
+Every migration-11 test calls `productionSchemaElevenMigration()`, which pins the body digest. Any
+mutation of the migration body therefore fails the digest assertion first, so an unrepinned probe
+measures the change-detector rather than the behaviour. The reviewer re-probed with the digest
+neutralised each time and confirmed the behavioural assertions do fire: reordering the guard trio
+after both drop/re-add pairs fails four structural assertions plus the admission assertion,
+weakening `CHECK (existing_scopes = 0)` to `>= 0` fails admission twice, and un-qualifying the table
+name fails the temp-shadow case twice. Worth remembering for any future migration: a digest pin and
+a behavioural test in the same suite hide each other unless the probe repins.
 
 ## Minor
 
