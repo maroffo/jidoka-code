@@ -3662,15 +3662,18 @@ public enum DatabaseSchema {
         // populated table must stop the migration instead. A future protocol bump over a table
         // that has lane history is a data migration and a new decision, not this repin.
         """
-        CREATE TABLE rollout_scope_repin_guard (
+        CREATE TABLE main.rollout_scope_repin_guard (
           existing_scopes INTEGER NOT NULL CHECK (existing_scopes = 0)
         ) STRICT
         """,
+        // Schema-qualified on both sides: SQLite resolves an unqualified name against `temp`
+        // before `main`, so a temporary table of this name would make the guard count zero while
+        // the durable table still holds rows.
         """
-        INSERT INTO rollout_scope_repin_guard (existing_scopes)
-        SELECT COUNT(*) FROM rollout_authorization_scopes
+        INSERT INTO main.rollout_scope_repin_guard (existing_scopes)
+        SELECT COUNT(*) FROM main.rollout_authorization_scopes
         """,
-        "DROP TABLE rollout_scope_repin_guard",
+        "DROP TABLE main.rollout_scope_repin_guard",
         "ALTER TABLE rollout_authorization_scopes DROP COLUMN schema_version",
         """
         ALTER TABLE rollout_authorization_scopes

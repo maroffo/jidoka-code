@@ -421,9 +421,11 @@ struct SQLiteStoreTests {
     let migration = try productionSchemaElevenMigration()
     // The first three statements are the guard, and they must run before either drop.
     let guardStatements = Array(migration.statements.prefix(3))
-    #expect(guardStatements[0].contains("CREATE TABLE rollout_scope_repin_guard"))
-    #expect(guardStatements[1].contains("SELECT COUNT(*) FROM rollout_authorization_scopes"))
-    #expect(guardStatements[2] == "DROP TABLE rollout_scope_repin_guard")
+    #expect(guardStatements[0].contains("CREATE TABLE main.rollout_scope_repin_guard"))
+    // Both names are schema-qualified: an unqualified name resolves against `temp` first.
+    #expect(
+      guardStatements[1].contains("SELECT COUNT(*) FROM main.rollout_authorization_scopes"))
+    #expect(guardStatements[2] == "DROP TABLE main.rollout_scope_repin_guard")
     #expect(migration.statements[3].contains("DROP COLUMN schema_version"))
 
     // This binary cannot mint a lane below schema 11, so no fixture it builds can carry a scope
@@ -466,6 +468,25 @@ struct SQLiteStoreTests {
         admitted = false
       }
       #expect(admitted == admits, "rows=\(rows)")
+      if rows > 0 {
+        // An empty temporary table of the same name must not be able to answer for the durable
+        // one: unqualified names resolve against `temp` first.
+        _ = try await database.execute(
+          "CREATE TEMP TABLE rollout_authorization_scopes (id TEXT PRIMARY KEY) STRICT"
+        )
+        var shadowed = true
+        do {
+          try await database.transaction { database in
+            for statement in guardStatements {
+              _ = try database.execute(statement)
+            }
+          }
+        } catch {
+          shadowed = false
+        }
+        #expect(!shadowed, "a temp table shadowed the guard at rows=\(rows)")
+        _ = try await database.execute("DROP TABLE temp.rollout_authorization_scopes")
+      }
       // Whether it passed or rolled back, the guard leaves nothing of its own behind.
       #expect(
         try await database.scalarInt(
@@ -1023,7 +1044,7 @@ private let expectedSchemaNineMigrationDigest =
 private let expectedSchemaTenMigrationDigest =
   "04a5fdb3b2e6935a13a7418419a2aed3a3f0708e317fedf44ed34eebee659991"
 private let expectedSchemaElevenMigrationDigest =
-  "c03be96ed571456a8a0221ff3130fc878f70281e1b84fceeeb2bf6dde4b9c81d"
+  "1396df566db8c18b7907295ad2f14c2d0453a2104302caad9b032825de8f82f3"
 // Widened when `schema_migrations` gained `statements_sha256`: the snapshot projects
 // every column of every table, so one added column moves the digest. The historical
 // row values themselves are unchanged and still compared row-for-row above.

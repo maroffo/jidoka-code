@@ -58,6 +58,19 @@ struct ProductionEngineExternalServicesTests {
     #expect(ceilings.repositoryBytes == revalidation.repositoryBytes)
   }
 
+  @Test("a proposal holds one Git inspector, so its remote-read allowance is not renewable")
+  func exactProposalGitInspectorIsPerProposal() throws {
+    let box = ProposalGitInspectorBox()
+    let jobID = UUID()
+    #expect(try box.existing(for: jobID) == nil)
+    let inspector = UnusedRolloutPreviewGitInspector()
+    box.store(jobID: jobID, inspector: inspector)
+    // A second request for the same proposal reuses the allowance already granted.
+    #expect(try box.existing(for: jobID) is UnusedRolloutPreviewGitInspector)
+    // A request for another job is a programming error, not a second allowance.
+    #expect(throws: RolloutAuthorityError.invalidJobBinding) { _ = try box.existing(for: UUID()) }
+  }
+
   @Test("a proposal observed under another GitHub identity is refused")
   func exactProposalIdentityBinding() throws {
     let object = RolloutObjectSelector(
@@ -506,4 +519,16 @@ private func rolloutBudgets(
     githubSends: 0,
     gitSends: 0
   )
+}
+
+private struct UnusedRolloutPreviewGitInspector: RolloutPreviewGitInspecting {
+  func derivePullRequest(
+    repository _: RolloutRepositoryIdentity,
+    number _: Int,
+    baseSHA _: String,
+    headSHA _: String,
+    jobID _: UUID
+  ) async throws -> PullRequestCommitDerivation {
+    throw RolloutAuthorityError.previewDrift
+  }
 }

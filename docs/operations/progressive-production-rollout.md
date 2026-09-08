@@ -117,7 +117,9 @@ what fixes the value.
 On a populated table the drop would discard each row's recorded pins and the re-add would refill
 them from the DEFAULT, silently relabelling a lane as minted by a release that never minted it.
 Migration 11 therefore opens with a guard: it counts the rows and fails the whole migration closed
-if the table is not empty. A protocol bump over a database that already has lane history is a data
+if the table is not empty. Both names in that guard are schema-qualified, because SQLite resolves
+an unqualified name against `temp` before `main`, and a temporary table of the same name would
+otherwise answer for the durable one. A protocol bump over a database that already has lane history is a data
 migration and a separate decision, not this repin.
 
 Like migration 10, migration 11 declares `verifiesContent`, so a database stamped at version 11 by

@@ -62,6 +62,30 @@ struct ProductionRolloutGitHubBudget: Equatable, Sendable {
   let repositoryBytes: Int64
 }
 
+/// Holds the single Git inspector a proposal is allowed, so its remote-read ceiling is spent per
+/// proposal rather than renewed on every request for one. A second request for a different job is
+/// a programming error, not a second allowance.
+final class ProposalGitInspectorBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var boundJobID: UUID?
+  private var value: (any RolloutPreviewGitInspecting)?
+
+  func existing(for jobID: UUID) throws -> (any RolloutPreviewGitInspecting)? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let value else { return nil }
+    guard boundJobID == jobID else { throw RolloutAuthorityError.invalidJobBinding }
+    return value
+  }
+
+  func store(jobID: UUID, inspector: any RolloutPreviewGitInspecting) {
+    lock.lock()
+    defer { lock.unlock() }
+    boundJobID = jobID
+    value = inspector
+  }
+}
+
 struct ProductionRolloutProposalCeilings: Equatable, Sendable {
   let identityRequests: Int
   let identityBytes: Int64
@@ -471,6 +495,7 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
       )
       let askPassExecutable = dependencies.askPassExecutable
       let instant = now
+      let gitAuthorityBox = ProposalGitInspectorBox()
       let observation = try await RolloutExactProposalBuilder(
         identity: identityBroker,
         api: repositoryBroker,
@@ -478,6 +503,9 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
           // Every Git remote read is admitted against an exact job id, so this authority can only
           // be built once the binding is resolved. It grants no GitHub request of its own: the
           // minimum of one is what the initializer requires, and nothing reserves against it.
+          // One authority per proposal, not per call: a second inspector must draw on the same
+          // remaining allowance rather than a fresh one.
+          if let existing = try gitAuthorityBox.existing(for: jobID) { return existing }
           let gitAuthority = try BoundedRolloutPreviewReadAuthority(
             repository: GitHubRepositoryCoordinates(
               owner: repository.owner,
@@ -490,13 +518,15 @@ public actor ProductionEngineExternalServices: EngineExternalServicing {
             jobID: jobID,
             maximumGitRemoteReads: ceilings.gitRemoteReads
           )
-          return ProductionRolloutPreviewGitInspector(
+          let inspector = ProductionRolloutPreviewGitInspector(
             cacheRoot: cacheRoot,
             askPassExecutable: askPassExecutable,
             broker: repositoryBroker,
             readAuthority: gitAuthority,
             now: instant
           )
+          gitAuthorityBox.store(jobID: jobID, inspector: inspector)
+          return inspector
         }
       ).observePullRequest(
         repository: repository,
