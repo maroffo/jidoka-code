@@ -102,10 +102,37 @@ Fixed: the repin guard's names are schema-qualified, because SQLite resolves an 
 against `temp` first, and the test now creates an empty temporary table of that name and asserts
 the guard still refuses. The Git allowance is spent per proposal rather than renewed per call.
 `pullRequest.number == number` gained the drift case it was missing, so the matrix is now one case
-per reachable producer guard (18).
+per reachable producer guard (19).
 
 Corrected rather than fixed: round 1 described the service-level `paused` guard as unreachable in
 tests. It is expensive to reach, not unreachable, and CONSOLIDATED.md now says so.
+
+## Reviewer re-measurement of the round-2 fixes
+
+The test reviewer re-probed `ab5c0d5` (787 tests / 87 suites green, with the two load-flaky process
+suites skipped so its verdicts do not depend on that suite's mood) and reported four call-site
+findings closed on behaviour, not on added assertions:
+
+| What was mutated | Result |
+|------------------|--------|
+| `jobID: jobID` -> `jobID: UUID()` in `exactProposalGitInspecting` | `exactProposalAuthorityWiring` red, `effectAdmissionClosed` |
+| identity ceiling 1 -> 5, bytes scaled to match | red on the admission assertion and on `reservedRequests` |
+| repository ceiling 39 -> 60, bytes scaled | red on the admission assertion |
+| both new identity conditions -> `true, true` | `proposalGuardsRefuseDrift` red on `foreignAccount` and `foreignAuthorID` |
+| memoization consultation deleted from the box | red in two places |
+
+It also corrected its own method, which is the more useful half of the report: its first attempt at
+the two ceiling widenings used 9,000 requests and 9 GB, and both died on the authority's
+`invalidBudget` constructor check rather than on any admission assertion. That would have reported
+the ceilings closed on evidence proving nothing about them. Only budget-legal widenings probe a
+ceiling.
+
+The one finding it left open was the authority swap at the two `GitHubBroker` constructions, which
+left its whole suite green. It graded it Minor rather than Major on the argument that the failure is
+loud (the repository broker inherits a one-request allowance and the proposal dies on its second
+repository read) rather than a quiet weakening. That reasoning is right about severity and does not
+change what the test owed: a call site the suite cannot see is a call site. It is now killed by both end-to-end tests,
+which is the first mutation row of "Closing the class" above.
 
 ## Verification
 
