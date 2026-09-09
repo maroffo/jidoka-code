@@ -573,7 +573,8 @@ Closed 2026-09-09, **abandoned by Max** at W9.0. Not a technical block: the work
 gate. He stopped it because the line was no longer going anywhere, and the record should say so
 plainly rather than dress an abandonment as a milestone. On the same day he asked for the branch to
 be pushed and a pull request opened, so the work is preserved for review rather than left on one
-machine: the PR is the resting place of an abandoned line, not a plan to merge and continue it.
+machine: the PR is the resting place of an abandoned line, not a plan to merge and continue it. It is
+https://github.com/maroffo/jidoka-code/pull/24, opened 2026-09-09 against main and left open.
 
 **What shipped and is real.** W0-W8 are done and installed: schema 10, the rollout authority with
 canonical evidence, scoped admission, gated disclosure and remote effects, phase-aware workflows,
