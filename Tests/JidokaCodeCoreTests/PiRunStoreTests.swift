@@ -5,7 +5,7 @@ import Testing
 
 @Suite("Durable Pi and Herdr ownership store")
 struct PiRunStoreTests {
-  @Test("schema v10 preserves legacy RPC runs and creates each migration backup")
+  @Test("the current schema preserves legacy RPC runs and creates each migration backup")
   func migrationPreservesLegacyRun() async throws {
     let root = try makePrivateTemporaryDirectory(prefix: "pi-run-migration")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -39,8 +39,8 @@ struct PiRunStoreTests {
     await legacy.close()
 
     let migrated = try SQLiteStore(databaseURL: databaseURL)
-    #expect(try await migrated.schemaVersion() == 10)
-    #expect(migrated.migrationBackups.count == 8)
+    #expect(try await migrated.schemaVersion() == 11)
+    #expect(migrated.migrationBackups.count == 9)
     let v3Backup = try SQLiteStore(
       databaseURL: try #require(migrated.migrationBackups.first),
       migrations: Array(DatabaseSchema.migrations.prefix(2))
@@ -87,7 +87,7 @@ struct PiRunStoreTests {
     )
     await v8Backup.close()
     let v9Backup = try SQLiteStore(
-      databaseURL: try #require(migrated.migrationBackups.last),
+      databaseURL: migrated.migrationBackups[7],
       migrations: Array(DatabaseSchema.migrations.prefix(9))
     )
     #expect(try await v9Backup.schemaVersion() == 9)
@@ -95,6 +95,15 @@ struct PiRunStoreTests {
       try await v9Backup.scalarInt("SELECT COUNT(*) FROM pi_runs WHERE id = 'legacy-run'") == 1
     )
     await v9Backup.close()
+    let v10Backup = try SQLiteStore(
+      databaseURL: try #require(migrated.migrationBackups.last),
+      migrations: Array(DatabaseSchema.migrations.prefix(10))
+    )
+    #expect(try await v10Backup.schemaVersion() == 10)
+    #expect(
+      try await v10Backup.scalarInt("SELECT COUNT(*) FROM pi_runs WHERE id = 'legacy-run'") == 1
+    )
+    await v10Backup.close()
     let rows = try await migrated.query("SELECT * FROM pi_runs WHERE id = 'legacy-run'")
     #expect(rows.count == 1)
     #expect(rows[0]["runtime_kind"] == .text("rpcLegacy"))
@@ -1862,8 +1871,8 @@ struct PiRunStoreTests {
     await fixture.database.close()
 
     let upgraded = try SQLiteStore(databaseURL: fixture.databaseURL)
-    #expect(try await upgraded.schemaVersion() == 10)
-    #expect(upgraded.migrationBackups.count == 1)
+    #expect(try await upgraded.schemaVersion() == 11)
+    #expect(upgraded.migrationBackups.count == 2)
     #expect(try await upgraded.scalarInt("SELECT paused FROM app_settings") == 1)
     #expect(try await upgraded.scalarText(rolloverRow) == rolloverBefore)
     for guardName in shippedGuards {

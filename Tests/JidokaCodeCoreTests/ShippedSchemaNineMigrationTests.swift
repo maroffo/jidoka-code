@@ -86,9 +86,10 @@ struct ShippedSchemaNineMigrationTests {
     await freshStore.close()
   }
 
-  @Test("the shipped schema 9 upgrades to schema 10 and converges with the fresh path")
+  @Test("the shipped schema 9 upgrades to the current schema and converges with the fresh path")
   func shippedSchemaUpgradesAndConverges() async throws {
     let migrationTen = try #require(DatabaseSchema.migrations.first { $0.version == 10 })
+    let migrationEleven = try #require(DatabaseSchema.migrations.first { $0.version == 11 })
     let shipped = try ShippedSchemaNineDatabase.make()
     defer { shipped.remove() }
 
@@ -106,10 +107,11 @@ struct ShippedSchemaNineMigrationTests {
     await seeded.close()
 
     let upgraded = try SQLiteStore(databaseURL: shipped.databaseURL)
-    #expect(try await upgraded.schemaVersion() == 10)
-    #expect(upgraded.migrationBackups.count == 1)
+    #expect(try await upgraded.schemaVersion() == 11)
+    #expect(upgraded.migrationBackups.count == 2)
     let backupURL = try #require(upgraded.migrationBackups.first)
     #expect(backupURL.lastPathComponent.contains(".before-v10-"))
+    #expect(upgraded.migrationBackups[1].lastPathComponent.contains(".before-v11-"))
     let after = try await rowSnapshot(in: upgraded)
     for (table, rows) in before where !["app_settings", "schema_migrations"].contains(table) {
       #expect(after[table] == rows, "\(table)")
@@ -123,9 +125,10 @@ struct ShippedSchemaNineMigrationTests {
       try await upgraded.scalarInt("SELECT onboarding_complete FROM app_settings")
         == onboardingBefore)
     let upgradedLedger = try await ledger(in: upgraded)
-    #expect(upgradedLedger.map(\.version) == Array(1...10))
+    #expect(upgradedLedger.map(\.version) == Array(1...11))
     #expect(upgradedLedger.prefix(9).allSatisfy { $0.digest == nil })
-    #expect(upgradedLedger.last?.digest == migrationTen.statementsSHA256)
+    #expect(upgradedLedger[9].digest == migrationTen.statementsSHA256)
+    #expect(upgradedLedger.last?.digest == migrationEleven.statementsSHA256)
     // Both history rows survived; the table still accepts every reason.
     try await insertBindingHistory(into: upgraded, id: 3, reason: "RUNTIME_CHANGED")
     #expect(
@@ -165,14 +168,14 @@ struct ShippedSchemaNineMigrationTests {
     let fresh = try ShippedSchemaNineDatabase.emptyLocation()
     defer { fresh.remove() }
     let freshStore = try SQLiteStore(databaseURL: fresh.databaseURL)
-    #expect(try await freshStore.schemaVersion() == 10)
+    #expect(try await freshStore.schemaVersion() == 11)
     #expect(try await schemaObjects(in: freshStore) == schemaObjects(in: upgraded))
     #expect(try await tableColumns(in: freshStore) == tableColumns(in: upgraded))
     let freshLedger = try await ledger(in: freshStore)
     #expect(freshLedger.map(\.version) == upgradedLedger.map(\.version))
     #expect(freshLedger.map(\.name) == upgradedLedger.map(\.name))
     #expect(freshLedger.allSatisfy { $0.digest != nil })
-    #expect(freshLedger.last?.digest == migrationTen.statementsSHA256)
+    #expect(freshLedger.last?.digest == migrationEleven.statementsSHA256)
     #expect(try await freshStore.scalarInt("SELECT paused FROM app_settings") == 1)
     #expect(try await freshStore.scalarInt("SELECT max_concurrency FROM app_settings") == 1)
     try await assertIntegrity(freshStore)
@@ -180,12 +183,12 @@ struct ShippedSchemaNineMigrationTests {
     await upgraded.close()
 
     let reopened = try SQLiteStore(databaseURL: shipped.databaseURL)
-    #expect(try await reopened.schemaVersion() == 10)
+    #expect(try await reopened.schemaVersion() == 11)
     #expect(reopened.migrationBackups.isEmpty)
     await reopened.close()
   }
 
-  @Test("a binary that only knows the shipped schema 9 refuses schema 10 without writing")
+  @Test("a binary that only knows the shipped schema 9 refuses a newer schema without writing")
   func shippedBinaryRefusesSchemaTen() async throws {
     let shipped = try ShippedSchemaNineDatabase.make()
     defer { shipped.remove() }
@@ -193,7 +196,7 @@ struct ShippedSchemaNineMigrationTests {
     try await insertSyntheticRows(into: seeded)
     await seeded.close()
     let upgraded = try SQLiteStore(databaseURL: shipped.databaseURL)
-    #expect(try await upgraded.schemaVersion() == 10)
+    #expect(try await upgraded.schemaVersion() == 11)
     _ = try await upgraded.checkpoint()
     await upgraded.close()
 
@@ -206,7 +209,7 @@ struct ShippedSchemaNineMigrationTests {
     #expect(directoryBefore.keys.filter { $0.contains(".before-v10-") }.count == 1)
     #expect(!directoryBefore.values.contains { $0.hasPrefix("wal:") })
 
-    #expect(throws: SQLiteStoreError.migrationTooNew(database: 10, supported: 9)) {
+    #expect(throws: SQLiteStoreError.migrationTooNew(database: 11, supported: 9)) {
       _ = try SQLiteStore(databaseURL: shipped.databaseURL, migrations: shippedMigrations)
     }
 

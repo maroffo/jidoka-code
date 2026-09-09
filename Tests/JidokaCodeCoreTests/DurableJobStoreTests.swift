@@ -1207,7 +1207,7 @@ struct DurableJobStoreTests {
     #expect(replay.report.status == .settled)
     #expect(replay.report.replayed)
     #expect(try await fixture.jobs.job(id: untouched.id)?.state == .queued)
-    #expect(DatabaseSchema.migrations.count == 10)
+    #expect(DatabaseSchema.migrations.count == 11)
   }
 
   @Test("a closed no-effect canary retry requires a new preview and admission")

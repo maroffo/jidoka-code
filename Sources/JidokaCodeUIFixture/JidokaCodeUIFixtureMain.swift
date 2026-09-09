@@ -279,9 +279,9 @@ private actor UIFixtureEngine: EngineClient {
       paused = value
     case .pollNow:
       break
-    case .previewRollout, .activateRollout, .rolloutStatus, .stopAndDrainRollout,
-      .previewRolloutRecovery, .executeRolloutRecovery, .previewFiniteWindow,
-      .activateFiniteWindow:
+    case .previewRollout, .proposeExactRollout, .activateRollout, .rolloutStatus,
+      .stopAndDrainRollout, .previewRolloutRecovery, .executeRolloutRecovery,
+      .previewFiniteWindow, .activateFiniteWindow:
       throw EngineClientError(.invalidCommand)
     case .recheckAmbiguousMutation:
       lateRecheckCount += 1

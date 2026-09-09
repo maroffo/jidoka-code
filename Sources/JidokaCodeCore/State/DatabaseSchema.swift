@@ -3635,10 +3635,59 @@ public enum DatabaseSchema {
         END
         """,
       ],
-      // Schema 10 has never shipped, and its body was edited more than once while
-      // this branch was in review. Any database recording a different body, or no
-      // body at all, was written by a pre-release build and must fail closed rather
-      // than silently skip the difference.
+      // Schema 10's body was edited more than once while this branch was in review, so any
+      // database recording a different body, or no body at all, was written by a pre-release
+      // build and must fail closed rather than silently skip the difference. It has since
+      // shipped and created a production database: this body is frozen, and editing it would
+      // fail every existing schema-10 database closed on its next open.
+      verifiesContent: true
+    ),
+    SQLiteMigration(
+      version: 11,
+      name: "rollout-scope-engine-protocol-13",
+      requiresBackup: true,
+      // `rollout_authorization_scopes` pins the release that minted a lane, so adding an engine
+      // command moves both pins. SQLite cannot alter a CHECK, and the twelve-step table rewrite is
+      // unavailable here: `PRAGMA foreign_keys` is a no-op inside a transaction and ten triggers
+      // name this table. Dropping and re-adding the two pinned columns is legal inside the
+      // migration transaction because no trigger, index or foreign key reads either column; it
+      // moves them to the end of the table, which every database reaches the same way because
+      // every database runs this same chain. The columns carry a DEFAULT only because
+      // `ADD COLUMN NOT NULL` requires one; the CHECK is still what fixes the value.
+      statements: [
+        // `ALTER TABLE` fires no row trigger, so the append-only guards on this table cannot see
+        // the repin: on a populated table the drop discards each row's recorded pins and the
+        // re-add refills them from the DEFAULT, silently relabelling a lane as minted by a
+        // release that never minted it. The pins exist to prevent exactly that lie, so a
+        // populated table must stop the migration instead. A future protocol bump over a table
+        // that has lane history is a data migration and a new decision, not this repin.
+        """
+        CREATE TABLE main.rollout_scope_repin_guard (
+          existing_scopes INTEGER NOT NULL CHECK (existing_scopes = 0)
+        ) STRICT
+        """,
+        // Schema-qualified on both sides: SQLite resolves an unqualified name against `temp`
+        // before `main`, so a temporary table of this name would make the guard count zero while
+        // the durable table still holds rows.
+        """
+        INSERT INTO main.rollout_scope_repin_guard (existing_scopes)
+        SELECT COUNT(*) FROM main.rollout_authorization_scopes
+        """,
+        "DROP TABLE main.rollout_scope_repin_guard",
+        "ALTER TABLE rollout_authorization_scopes DROP COLUMN schema_version",
+        """
+        ALTER TABLE rollout_authorization_scopes
+        ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 11 CHECK (schema_version = 11)
+        """,
+        "ALTER TABLE rollout_authorization_scopes DROP COLUMN engine_protocol_version",
+        """
+        ALTER TABLE rollout_authorization_scopes
+        ADD COLUMN engine_protocol_version INTEGER NOT NULL DEFAULT 13
+        CHECK (engine_protocol_version = 13)
+        """,
+      ],
+      // Schema 11 has not shipped. A database recording a different body for it was written by a
+      // pre-release build and must fail closed rather than silently skip the difference.
       verifiesContent: true
     ),
   ]

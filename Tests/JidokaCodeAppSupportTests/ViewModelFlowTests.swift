@@ -56,6 +56,42 @@ struct ViewModelFlowTests {
     await refresh.value
   }
 
+  @Test("proposing an exact review needs a paused engine and one valid owner/repository pair")
+  func rolloutProposalGate() async throws {
+    let fake = AppSupportEngineFake(onboardingComplete: true)
+    let model = SettingsViewModel(client: fake) { _ in }
+    #expect(!model.canProposeExactRollout)
+    await model.refresh()
+    let state = try #require(model.state)
+    model.rolloutProposalReference = "owner/repo"
+    model.rolloutProposalNumber = "42"
+    model.apply(pollingState(state, paused: false))
+    #expect(!model.canProposeExactRollout)
+    model.apply(pollingState(state, paused: true))
+    #expect(model.canProposeExactRollout)
+
+    for (reference, number) in [
+      ("", "42"),
+      ("repo", "42"),
+      ("owner/repo/extra", "42"),
+      ("/repo", "42"),
+      ("owner/", "42"),
+      ("-owner/repo", "42"),
+      ("owner/re po", "42"),
+      ("owner/repo", ""),
+      ("owner/repo", "forty-two"),
+      ("owner/repo", "0"),
+      ("owner/repo", "1000001"),
+    ] {
+      model.rolloutProposalReference = reference
+      model.rolloutProposalNumber = number
+      #expect(!model.canProposeExactRollout, "\(reference) #\(number)")
+    }
+    model.rolloutProposalReference = "owner/repo"
+    model.rolloutProposalNumber = "42"
+    #expect(model.canProposeExactRollout)
+  }
+
   @Test("onboarding requires every gate and clears secret input")
   func onboarding() async throws {
     let fake = AppSupportEngineFake(onboardingComplete: false)
@@ -691,7 +727,7 @@ private actor AppSupportEngineFake: EngineClient {
       else { throw EngineClientError(.invalidCommand) }
       rolloutState = .revoked
       paused = true
-    case .previewRollout, .activateRollout,
+    case .previewRollout, .proposeExactRollout, .activateRollout,
       .previewRolloutRecovery, .executeRolloutRecovery,
       .previewFiniteWindow, .activateFiniteWindow:
       throw EngineClientError(.invalidCommand)
@@ -811,8 +847,8 @@ private actor AppSupportEngineFake: EngineClient {
       askPassSHA256: String(repeating: "b", count: 64),
       pushGuardSHA256: String(repeating: "b", count: 64),
       herdrHostSHA256: String(repeating: "c", count: 64),
-      schemaVersion: 10,
-      engineProtocolVersion: 12,
+      schemaVersion: 11,
+      engineProtocolVersion: 13,
       runtimeManifestSHA256: String(repeating: "d", count: 64),
       runtimeTreeSHA256: String(repeating: "e", count: 64),
       modelProfilesSHA256: String(repeating: "f", count: 64),

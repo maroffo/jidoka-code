@@ -4,6 +4,9 @@ import Foundation
 
 protocol RolloutReleaseIdentityRevalidating: Sendable {
   func requireCurrent(_ expected: RolloutReleaseIdentity) async throws
+  /// The identity a proposal must declare. `requireCurrent` compares an operator-supplied identity
+  /// against this same observation, so producing it here keeps one reader for both directions.
+  func observedIdentity() async throws -> RolloutObservedReleaseIdentity
 }
 
 struct RolloutPackagedReleaseIdentity: Codable, Equatable, Sendable {
@@ -70,6 +73,16 @@ struct ProductionRolloutReleaseIdentityRevalidator: RolloutReleaseIdentityRevali
     }
   #endif
 
+  func observedIdentity() async throws -> RolloutObservedReleaseIdentity {
+    do {
+      return try inspect()
+    } catch let error as RolloutAuthorityError {
+      throw error
+    } catch {
+      throw RolloutAuthorityError.invalidReleaseIdentity
+    }
+  }
+
   func requireCurrent(_ expected: RolloutReleaseIdentity) async throws {
     do {
       let observed = try inspect()
@@ -110,8 +123,8 @@ struct ProductionRolloutReleaseIdentityRevalidator: RolloutReleaseIdentityRevali
       GitHubInputValidation.validGitSHA(declared.sourceCommit),
       GitHubInputValidation.validGitSHA(declared.sourceTree),
       declared.bundleVersion == "0.2.0",
-      declared.bundleBuild == 6,
-      declared.databaseSchemaVersion == 10,
+      declared.bundleBuild == 7,
+      declared.databaseSchemaVersion == 11,
       declared.engineProtocolVersion == EngineProtocolVersion.current,
       declaredDigests.allSatisfy(GitHubInputValidation.validSHA256)
     else {

@@ -708,7 +708,7 @@ struct RolloutRemotePreviewRevalidator: Sendable {
 }
 
 extension RolloutRepositoryIdentity {
-  fileprivate var configuration: RepositoryConfiguration {
+  var configuration: RepositoryConfiguration {
     get throws {
       guard let id = UUID(uuidString: id), id.uuidString.lowercased() == self.id else {
         throw RolloutAuthorityError.invalidRepositoryIdentity

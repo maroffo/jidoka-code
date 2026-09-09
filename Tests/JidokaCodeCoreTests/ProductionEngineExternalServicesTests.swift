@@ -32,6 +32,345 @@ struct ProductionEngineExternalServicesTests {
     )
   }
 
+  @Test("the proposal path grants itself exactly the policy ceilings, at every authority")
+  func exactProposalCeilings() throws {
+    let responseBytes = Int64(GitHubBroker.maximumResponseBytes)
+    let ceilings = try ProductionEngineExternalServices.exactProposalCeilings()
+    #expect(
+      ceilings
+        == ProductionRolloutProposalCeilings(
+          identityRequests: 1,
+          identityBytes: responseBytes,
+          // One request of the budget pays for the identity read, which is why the producer gets
+          // 39 rather than the 40 the policy names: revalidation of the preview it writes is
+          // mapped the same way and must not be poorer than the producer.
+          repositoryRequests: 39,
+          repositoryBytes: responseBytes * 39,
+          gitCarrierRequests: 1,
+          gitCarrierBytes: responseBytes,
+          gitRemoteReads: 2
+        )
+    )
+    let revalidation = try ProductionEngineExternalServices.rolloutGitHubBudget(
+      RolloutExactProposalPolicy.pullRequestReviewBudgets
+    )
+    #expect(ceilings.repositoryRequests == revalidation.repositoryRequests)
+    #expect(ceilings.repositoryBytes == revalidation.repositoryBytes)
+  }
+
+  @Test("the proposal's authorities and job binding are built where a test can see them")
+  func exactProposalAuthorityWiring() async throws {
+    let repositoryID = UUID()
+    let repository = RolloutRepositoryIdentity(
+      id: repositoryID,
+      nodeID: "R_wiring",
+      owner: "owner",
+      name: "repo",
+      defaultBranch: "main",
+      enabled: true,
+      reviewEnabled: true,
+      triageEnabled: false,
+      implementationEnabled: false
+    )
+    let instant = Date(timeIntervalSince1970: 700_000)
+    let ceilings = try ProductionEngineExternalServices.exactProposalCeilings()
+    let authorities = try ProductionEngineExternalServices.exactProposalAuthorities(
+      repository: repository)
+
+    // The ceilings are exercised, not restated: each authority admits exactly its allowance and
+    // then refuses, so widening a call site is visible here.
+    func identityRead() -> RolloutGitHubReadEffect {
+      RolloutGitHubReadEffect(
+        operation: .authenticatedIdentity,
+        maximumResponseBytes: Int64(GitHubBroker.maximumResponseBytes),
+        context: RolloutEffectExecutionContext(mode: .discovery)
+      )
+    }
+    for _ in 0..<ceilings.identityRequests {
+      _ = try await authorities.identity.reserveGitHubRead(identityRead(), now: instant)
+    }
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await authorities.identity.reserveGitHubRead(identityRead(), now: instant)
+    }
+    #expect(await authorities.identity.snapshot().reservedRequests == ceilings.identityRequests)
+
+    func repositoryRead(_ number: Int) -> RolloutGitHubReadEffect {
+      RolloutGitHubReadEffect(
+        operation: .pullRequest(owner: "owner", repository: "repo", number: number),
+        maximumResponseBytes: Int64(GitHubBroker.maximumResponseBytes),
+        context: RolloutEffectExecutionContext(mode: .discovery)
+      )
+    }
+    for number in 1...ceilings.repositoryRequests {
+      _ = try await authorities.repository.reserveGitHubRead(repositoryRead(number), now: instant)
+    }
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await authorities.repository.reserveGitHubRead(
+        repositoryRead(ceilings.repositoryRequests + 1), now: instant)
+    }
+    // The identity authority admits only the identity read, and the repository authority only
+    // coordinate-matching ones, so the two allowances cannot be spent as one.
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await authorities.identity.reserveGitHubRead(repositoryRead(1), now: instant)
+    }
+
+    // The job id the closure binds is recorded, which is the only way to observe from outside
+    // that the resolved binding reached the authority rather than a fresh identifier.
+    let box = ProposalGitInspectorBox()
+    let makeGit = try ProductionEngineExternalServices.exactProposalGitInspecting(
+      repository: repository,
+      broker: GitHubBroker(
+        tokenProvider: ProposalWiringTokenProvider(),
+        transport: IdentityGitHubTransport(account: "owner", authorID: 42),
+        readAuthority: authorities.repository,
+        defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
+        now: { instant }
+      ),
+      cacheRoot: FileManager.default.temporaryDirectory.appendingPathComponent(
+        "unused-\(UUID().uuidString)", isDirectory: true),
+      askPassExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+      now: { instant },
+      box: box
+    )
+    let jobID = UUID()
+    #expect(box.boundJobID == nil)
+    let inspector = try makeGit(jobID)
+    #expect(box.boundJobID == jobID)
+    // A second request for the same proposal reuses the allowance already granted. The inspector
+    // is a value type, so the authority it carries is where identity must be read: a fresh one
+    // would silently renew the two remote reads.
+    let firstAuthority = try #require(box.boundAuthority)
+    _ = try makeGit(jobID)
+    let secondAuthority = try #require(box.boundAuthority)
+    #expect(secondAuthority === firstAuthority)
+    _ = inspector
+    // A request for another job is a programming error, not a second allowance.
+    #expect(throws: RolloutAuthorityError.invalidJobBinding) { _ = try makeGit(UUID()) }
+
+    let gitAuthority = try #require(box.boundAuthority)
+    func remoteRead(_ target: String, jobID: UUID) -> RolloutGitRemoteReadEffect {
+      RolloutGitRemoteReadEffect(
+        jobID: jobID,
+        repositoryID: repositoryID,
+        repositoryNodeID: repository.nodeID,
+        operation: .fetchPreviewBase,
+        target: target
+      )
+    }
+    for ordinal in 0..<ceilings.gitRemoteReads {
+      _ = try await gitAuthority.reserveGitRemoteRead(
+        remoteRead("refs/\(ordinal)", jobID: jobID), now: instant)
+    }
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await gitAuthority.reserveGitRemoteRead(
+        remoteRead("refs/overflow", jobID: jobID), now: instant)
+    }
+    let other = try ProductionEngineExternalServices.exactProposalGitInspecting(
+      repository: repository,
+      broker: GitHubBroker(
+        tokenProvider: ProposalWiringTokenProvider(),
+        transport: IdentityGitHubTransport(account: "owner", authorID: 42),
+        readAuthority: authorities.repository,
+        defaultReadContext: RolloutEffectExecutionContext(mode: .discovery),
+        now: { instant }
+      ),
+      cacheRoot: FileManager.default.temporaryDirectory.appendingPathComponent(
+        "unused-\(UUID().uuidString)", isDirectory: true),
+      askPassExecutable: URL(fileURLWithPath: "/usr/bin/true"),
+      now: { instant },
+      box: ProposalGitInspectorBox()
+    )
+    let otherJob = UUID()
+    _ = try other(otherJob)
+    // An authority bound to one job admits nothing for another.
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await gitAuthority.reserveGitRemoteRead(
+        remoteRead("refs/base", jobID: otherJob), now: instant)
+    }
+  }
+
+  @Test("an exact proposal spends one identity read and three repository reads, in order")
+  func exactProposalSpendsTheIdentityAndRepositoryReadsInOrder() async throws {
+    let baseSHA = String(repeating: "a", count: 40)
+    let headSHA = String(repeating: "b", count: 40)
+    let recorder = ProposalTransportRecorder()
+    let fixture = try ExternalServicesFixture(
+      transport: ProposalRecordingTransport(
+        recorder: recorder,
+        account: "hubot",
+        authorID: 8,
+        owner: "octo-org",
+        name: "repo",
+        number: 7,
+        repositoryNodeID: "R_proposal",
+        pullRequestNodeID: "PR_proposal",
+        baseSHA: baseSHA,
+        headSHA: headSHA,
+        commitSHAs: [headSHA]
+      ),
+      enableRolloutPreview: true
+    )
+    defer { fixture.remove() }
+    try await fixture.configureIdentity(account: "hubot", authorID: 8)
+    await fixture.vault.seed(account: "hubot", token: fixture.oldToken)
+
+    let calls = ProposalBindingRecorder()
+    // The ask-pass helper is a regular non-executable file, so the run is refused at the Git step
+    // rather than reaching the network: everything the proposal owes GitHub has happened by then.
+    // It stops one call short of the Git remote-read authority, which `derivePullRequest` consults
+    // only after the credential provider it never builds here. The job id that authority is bound
+    // to, and its two-read ceiling, are covered by `exactProposalAuthorityWiring`; this test claims
+    // nothing about them.
+    await #expect(throws: GitAskPassError.credentialRejected) {
+      _ = try await fixture.external.observeExactPullRequestReview(
+        repository: proposalRepository(),
+        number: 7,
+        resolveBinding: { nodeID, objectNumber, revisionKey in
+          await calls.record(
+            ProposalBindingCall(
+              nodeID: nodeID, number: objectNumber, revisionKey: revisionKey))
+          return RolloutJobBinding(
+            jobID: UUID(),
+            jobKind: .prReview,
+            objectNumber: objectNumber,
+            contractVersion: "2026-05-01",
+            priority: .prReview,
+            firstStep: .review,
+            currentStep: JobStepKind.review.rawValue
+          )
+        }
+      )
+    }
+
+    // The two GitHub authorities, spent apart: one request on identity and three on the
+    // repository. Backing both brokers with the same authority, or swapping them, stops this
+    // sequence short because the identity allowance is one request and admits only the identity
+    // operation.
+    #expect(
+      await recorder.requests == [
+        "https://api.github.com/user",
+        "https://api.github.com/repos/octo-org/repo",
+        "https://api.github.com/repos/octo-org/repo/pulls/7",
+        "https://api.github.com/repos/octo-org/repo/pulls/7/commits?per_page=100&page=1",
+      ])
+    // The job is resolved from the head the metadata fetch returned, so a caller cannot choose the
+    // revision the binding is keyed by.
+    #expect(
+      await calls.observed == [
+        ProposalBindingCall(nodeID: "PR_proposal", number: 7, revisionKey: headSHA)
+      ])
+  }
+
+  @Test("the repository allowance a proposal actually spends stops at the policy ceiling")
+  func exactProposalRepositoryAllowanceStopsAtTheCeiling() async throws {
+    // Three reads is all a well-formed proposal needs, so counting URLs cannot tell a 39-request
+    // allowance from a wider one. A pull request whose commits never stop paginating spends the
+    // allowance instead of describing it, which is what makes the number at this call site
+    // observable: the authority the factory built has to be the one the broker was handed.
+    let recorder = ProposalTransportRecorder()
+    let fixture = try ExternalServicesFixture(
+      transport: ProposalRecordingTransport(
+        recorder: recorder,
+        account: "hubot",
+        authorID: 8,
+        owner: "octo-org",
+        name: "repo",
+        number: 7,
+        repositoryNodeID: "R_proposal",
+        pullRequestNodeID: "PR_proposal",
+        baseSHA: String(repeating: "a", count: 40),
+        headSHA: String(repeating: "b", count: 40),
+        commitSHAs: [String(repeating: "b", count: 40)],
+        paginatesCommits: true
+      ),
+      enableRolloutPreview: true
+    )
+    defer { fixture.remove() }
+    try await fixture.configureIdentity(account: "hubot", authorID: 8)
+    await fixture.vault.seed(account: "hubot", token: fixture.oldToken)
+
+    await #expect(throws: RolloutAuthorityError.effectAdmissionClosed) {
+      _ = try await fixture.external.observeExactPullRequestReview(
+        repository: proposalRepository(),
+        number: 7,
+        resolveBinding: { _, objectNumber, _ in
+          RolloutJobBinding(
+            jobID: UUID(),
+            jobKind: .prReview,
+            objectNumber: objectNumber,
+            contractVersion: "2026-05-01",
+            priority: .prReview,
+            firstStep: .review,
+            currentStep: JobStepKind.review.rawValue
+          )
+        }
+      )
+    }
+
+    let ceilings = try ProductionEngineExternalServices.exactProposalCeilings()
+    let spent = await recorder.requests
+    // One identity request on its own authority, then the repository authority spent to the last
+    // request it has and refused on the next. A wider authority built at the call site, or the
+    // factory's return value discarded, moves this count.
+    #expect(spent.count == ceilings.identityRequests + ceilings.repositoryRequests)
+    #expect(spent.first == "https://api.github.com/user")
+    #expect(
+      spent.last
+        == "https://api.github.com/repos/octo-org/repo/pulls/7/commits?per_page=100&page="
+        + String(ceilings.repositoryRequests - 2))
+  }
+
+  @Test("an exact proposal under an account other than the configured one is refused first")
+  func exactProposalRefusesAnotherAccount() async throws {
+    let recorder = ProposalTransportRecorder()
+    let fixture = try ExternalServicesFixture(
+      transport: ProposalRecordingTransport(
+        recorder: recorder,
+        account: "mallory",
+        authorID: 9,
+        owner: "octo-org",
+        name: "repo",
+        number: 7,
+        repositoryNodeID: "R_proposal",
+        pullRequestNodeID: "PR_proposal",
+        baseSHA: String(repeating: "a", count: 40),
+        headSHA: String(repeating: "b", count: 40),
+        commitSHAs: [String(repeating: "b", count: 40)]
+      ),
+      enableRolloutPreview: true
+    )
+    defer { fixture.remove() }
+    try await fixture.configureIdentity(account: "hubot", authorID: 8)
+    await fixture.vault.seed(account: "hubot", token: fixture.oldToken)
+
+    let calls = ProposalBindingRecorder()
+    // The account the observation is compared against comes from durable configuration. Comparing
+    // the fetched identity against itself would let this proposal through, which is why the check
+    // cannot live in a caller that only has the observation.
+    await #expect(throws: RolloutAuthorityError.invalidReleaseIdentity) {
+      _ = try await fixture.external.observeExactPullRequestReview(
+        repository: proposalRepository(),
+        number: 7,
+        resolveBinding: { nodeID, objectNumber, revisionKey in
+          await calls.record(
+            ProposalBindingCall(
+              nodeID: nodeID, number: objectNumber, revisionKey: revisionKey))
+          return RolloutJobBinding(
+            jobID: UUID(),
+            jobKind: .prReview,
+            objectNumber: objectNumber,
+            contractVersion: "2026-05-01",
+            priority: .prReview,
+            firstStep: .review,
+            currentStep: JobStepKind.review.rawValue
+          )
+        }
+      )
+    }
+    #expect(await recorder.requests == ["https://api.github.com/user"])
+    #expect(await calls.observed.isEmpty)
+  }
+
   @Test("a Keychain success followed by an error is completed from the durable journal")
   func replacementFailureAfterWriteRecoversForward() async throws {
     let fixture = try ExternalServicesFixture()
@@ -269,11 +608,17 @@ private struct ExternalServicesFixture {
   let configuration: ConfigurationStore
   let vault: EngineCredentialVaultFake
   let external: ProductionEngineExternalServices
+  let askPassExecutable: URL
   let now = Date(timeIntervalSince1970: 700_000)
   let oldToken = Data(repeating: 0x6F, count: 32)
   let newToken = Data(repeating: 0x6E, count: 32)
 
-  init(identityAccount: String = "hubot", identityAuthorID: Int64 = 8) throws {
+  init(
+    identityAccount: String = "hubot",
+    identityAuthorID: Int64 = 8,
+    transport: (any GitHubHTTPTransport)? = nil,
+    enableRolloutPreview: Bool = false
+  ) throws {
     root = URL(fileURLWithPath: NSTemporaryDirectory())
       .appendingPathComponent("jidoka-external-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -282,15 +627,33 @@ private struct ExternalServicesFixture {
     )
     configuration = ConfigurationStore(database: database)
     vault = EngineCredentialVaultFake()
+    askPassExecutable = root.appendingPathComponent("askpass", isDirectory: false)
+    if enableRolloutPreview {
+      // Present and owned by this process, so the credential provider gets past its path checks
+      // and refuses on the executable bit alone. That refusal is the boundary the proposal tests
+      // stop at, and it costs no network.
+      try Data().write(to: askPassExecutable)
+      try FileManager.default.setAttributes(
+        [.posixPermissions: 0o600],
+        ofItemAtPath: askPassExecutable.path
+      )
+    }
     external = ProductionEngineExternalServices(
       configuration: configuration,
-      transport: IdentityGitHubTransport(
-        account: identityAccount,
-        authorID: identityAuthorID
-      ),
+      transport: transport
+        ?? IdentityGitHubTransport(
+          account: identityAccount,
+          authorID: identityAuthorID
+        ),
       credentialVault: vault,
       runtimeResolver: UnusedPiRuntimeResolver(),
       herdrReadiness: ReadyHerdrReadiness(),
+      rolloutDatabase: enableRolloutPreview ? database : nil,
+      rolloutJobs: enableRolloutPreview
+        ? DurableJobStore(database: database, enforceRolloutAuthority: false) : nil,
+      rolloutIntents: enableRolloutPreview ? MutationIntentStore(database: database) : nil,
+      rolloutApplicationSupportRoot: enableRolloutPreview ? root : nil,
+      rolloutAskPassExecutable: enableRolloutPreview ? askPassExecutable : nil,
       now: { Date(timeIntervalSince1970: 700_000) }
     )
   }
@@ -436,4 +799,125 @@ private func rolloutBudgets(
     githubSends: 0,
     gitSends: 0
   )
+}
+
+private struct ProposalWiringTokenProvider: GitHubTokenProviding {
+  func token() async throws -> Data { Data(repeating: 0x74, count: 40) }
+}
+
+private func proposalRepository() -> RolloutRepositoryIdentity {
+  RolloutRepositoryIdentity(
+    id: UUID(),
+    nodeID: "R_proposal",
+    owner: "octo-org",
+    name: "repo",
+    defaultBranch: "main",
+    enabled: true,
+    reviewEnabled: true,
+    triageEnabled: false,
+    implementationEnabled: false
+  )
+}
+
+private struct ProposalBindingCall: Equatable, Sendable {
+  let nodeID: String
+  let number: Int
+  let revisionKey: String
+}
+
+private actor ProposalBindingRecorder {
+  private(set) var observed: [ProposalBindingCall] = []
+
+  func record(_ call: ProposalBindingCall) {
+    observed.append(call)
+  }
+}
+
+private actor ProposalTransportRecorder {
+  private(set) var requests: [String] = []
+
+  func record(_ request: String) {
+    requests.append(request)
+  }
+}
+
+/// Serves the four reads a proposal is allowed and records the order they arrive in. Anything else
+/// answers 404, so a fifth read shows up as a failure rather than as a silent success.
+private struct ProposalRecordingTransport: GitHubHTTPTransport {
+  let recorder: ProposalTransportRecorder
+  let account: String
+  let authorID: Int64
+  let owner: String
+  let name: String
+  let number: Int
+  let repositoryNodeID: String
+  let pullRequestNodeID: String
+  let baseSHA: String
+  let headSHA: String
+  let commitSHAs: [String]
+  /// When set, every commit page is full, so the fetch keeps asking for the next one until the
+  /// read authority refuses. Distinct SHAs per page, because the broker rejects duplicates.
+  var paginatesCommits = false
+
+  func send(_ request: URLRequest) async throws -> GitHubHTTPResponse {
+    let url = try #require(request.url)
+    await recorder.record(url.absoluteString)
+    let body: Data?
+    switch url.path {
+    case "/user":
+      body = try JSONSerialization.data(withJSONObject: user(login: account, id: authorID))
+    case "/repos/\(owner)/\(name)":
+      body = try JSONSerialization.data(
+        withJSONObject: [
+          "id": 4_242,
+          "node_id": repositoryNodeID,
+          "name": name,
+          "full_name": "\(owner)/\(name)",
+          "default_branch": "main",
+          "owner": user(login: owner, id: 4_243),
+        ] as [String: Any]
+      )
+    case "/repos/\(owner)/\(name)/pulls/\(number)":
+      body = try JSONSerialization.data(
+        withJSONObject: [
+          "id": 5_151,
+          "node_id": pullRequestNodeID,
+          "number": number,
+          "state": "open",
+          "draft": false,
+          "title": "Proposal",
+          "body": "Proposal body",
+          "html_url": "https://github.com/\(owner)/\(name)/pull/\(number)",
+          "user": user(login: account, id: authorID),
+          "head": ["ref": "feature", "sha": headSHA],
+          "base": ["ref": "main", "sha": baseSHA],
+        ] as [String: Any]
+      )
+    case "/repos/\(owner)/\(name)/pulls/\(number)/commits":
+      body = try JSONSerialization.data(
+        withJSONObject: paginatesCommits
+          ? fullCommitPage(url: url) : commitSHAs.map { ["sha": $0] as [String: Any] }
+      )
+    default:
+      body = nil
+    }
+    guard let body else {
+      return GitHubHTTPResponse(statusCode: 404, url: url, headers: [:], body: Data())
+    }
+    return GitHubHTTPResponse(statusCode: 200, url: url, headers: [:], body: body)
+  }
+
+  private func user(login: String, id: Int64) -> [String: Any] {
+    ["id": id, "node_id": "U_\(id)", "login": login]
+  }
+
+  private func fullCommitPage(url: URL) -> [[String: Any]] {
+    let page =
+      URLComponents(url: url, resolvingAgainstBaseURL: false)?
+      .queryItems?
+      .first { $0.name == "page" }
+      .flatMap { $0.value }
+      .flatMap(Int.init) ?? 1
+    return (0..<100).map { ["sha": String(format: "%040x", page * 100 + $0)] }
+  }
 }

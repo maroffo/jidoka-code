@@ -1,7 +1,7 @@
 import Foundation
 
 public enum EngineProtocolVersion {
-  public static let current = 12
+  public static let current = 13
 }
 
 public enum LifecycleProbeProtocolVersion {
@@ -388,6 +388,7 @@ public enum EngineCommandKind: String, CaseIterable, Codable, Hashable, Sendable
   case setPaused
   case pollNow
   case previewRollout
+  case proposeExactRollout
   case activateRollout
   case rolloutStatus
   case stopAndDrainRollout
@@ -438,6 +439,7 @@ extension EngineCommandKind {
     .setPaused,
     .pollNow,
     .previewRollout,
+    .proposeExactRollout,
     .activateRollout,
     .rolloutStatus,
     .stopAndDrainRollout,
@@ -486,6 +488,7 @@ public enum EngineCommand: Codable, Equatable, Sendable {
   case setPaused(Bool)
   case pollNow
   case previewRollout(RolloutPreviewInput)
+  case proposeExactRollout(RolloutExactProposalRequest)
   case activateRollout(RolloutActivationRequest)
   case rolloutStatus
   case stopAndDrainRollout(RolloutStopRequest)
@@ -537,6 +540,7 @@ public enum EngineCommand: Codable, Equatable, Sendable {
     case .setPaused: .setPaused
     case .pollNow: .pollNow
     case .previewRollout: .previewRollout
+    case .proposeExactRollout: .proposeExactRollout
     case .activateRollout: .activateRollout
     case .rolloutStatus: .rolloutStatus
     case .stopAndDrainRollout: .stopAndDrainRollout
@@ -606,6 +610,12 @@ public enum EngineCommand: Codable, Equatable, Sendable {
         guard try RolloutPreviewBuilder.make(input).payload.scope.mode == .exactObject else {
           throw EngineClientError(.invalidCommand)
         }
+      } catch {
+        throw EngineClientError(.invalidCommand)
+      }
+    case .proposeExactRollout(let request):
+      do {
+        try request.validate()
       } catch {
         throw EngineClientError(.invalidCommand)
       }
@@ -900,6 +910,30 @@ public struct EngineXPCResponse: Codable, Equatable, Sendable {
       guard result.state.paused,
         result.rolloutPreview == expected,
         result.rolloutRecoveryPreview == nil
+      else {
+        throw EngineClientError(.invalidResponse)
+      }
+    case .proposeExactRollout(let request):
+      // The client cannot recompute a proposal it did not build: it binds the returned preview
+      // to the exact coordinates it asked for, and to the shape activation will later demand.
+      guard result.state.paused,
+        result.rolloutRecoveryPreview == nil,
+        let preview = result.rolloutPreview,
+        try RolloutPreviewBuilder.parseCanonical(preview.canonicalJSON) == preview,
+        preview.payload.scope.mode == .exactObject,
+        preview.payload.scope.stage == .prReview,
+        preview.payload.scope.repository.owner.caseInsensitiveCompare(request.owner)
+          == .orderedSame,
+        preview.payload.scope.repository.name.caseInsensitiveCompare(request.name)
+          == .orderedSame,
+        preview.payload.scope.object?.number == request.number,
+        preview.payload.jobBinding?.objectNumber == request.number,
+        // The budgets are the one part of a proposal the client CAN recompute, because they are
+        // fixed policy rather than observed state. Without this, canonical round-tripping alone
+        // would admit a prReview lane carrying the schema's outer ceilings.
+        preview.payload.budgets == RolloutExactProposalPolicy.pullRequestReviewBudgets,
+        preview.payload.expiresAtMilliseconds - preview.payload.createdAtMilliseconds
+          == Int64(request.expiresInSeconds) * 1_000
       else {
         throw EngineClientError(.invalidResponse)
       }

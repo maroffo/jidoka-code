@@ -1,10 +1,75 @@
 import Foundation
+import JidokaCodeTestSupport
 import Testing
 
 @testable import JidokaCodeCore
 
 @Suite("Application engine service")
 struct EngineServiceTests {
+  @Test("a proposal is refused while running and revalidates the preview it just produced")
+  func proposeExactRolloutDispatch() async throws {
+    let fixture = try await EngineServiceFixture()
+    defer { fixture.remove() }
+    try await fixture.completeOnboarding()
+    let base = try rolloutOperatorFixture().exactInput
+    let object = try #require(base.scope.object)
+    let binding = try #require(base.jobBinding)
+    let preview = try RolloutPreviewBuilder.make(
+      RolloutPreviewInput(
+        releaseIdentity: base.releaseIdentity,
+        scope: base.scope,
+        budgets: RolloutExactProposalPolicy.pullRequestReviewBudgets,
+        inventory: base.inventory,
+        missingLabels: base.missingLabels,
+        commands: base.commands,
+        jobBinding: binding,
+        createdAtMilliseconds: base.createdAtMilliseconds,
+        expiresAtMilliseconds: base.createdAtMilliseconds + 900_000
+      )
+    )
+    await fixture.runtime.stageProposal(
+      repository: base.scope.repository,
+      binding: binding,
+      preview: preview
+    )
+    await fixture.external.stageProposal(
+      RolloutExactObjectObservation(
+        object: object,
+        jobBinding: binding,
+        githubAccount: base.releaseIdentity.githubAccount,
+        githubAuthorID: base.releaseIdentity.githubAuthorID
+      )
+    )
+    let request = RolloutExactProposalRequest(
+      owner: base.scope.repository.owner,
+      name: base.scope.repository.name,
+      number: object.number,
+      expiresInSeconds: 600
+    )
+
+    // The runtime decides whether a proposal may start, and it does so before any read: when it
+    // refuses, no bounded fetch is attempted. (The service also re-checks `paused`, which no test
+    // can reach here because the schema latch forbids an unpaused engine without an active lane.)
+    await fixture.runtime.refuseNextProposalIdentity()
+    await #expect(throws: EngineClientError(.busy)) {
+      _ = try await fixture.service.send(.proposeExactRollout(request))
+    }
+    #expect(await fixture.external.observedProposals.isEmpty)
+    #expect(await fixture.runtime.proposalIdentityLookups == ["owner/repo"])
+
+    let response = try await fixture.service.send(.proposeExactRollout(request))
+    #expect(response.rolloutPreview == preview)
+    #expect(response.rolloutRecoveryPreview == nil)
+    #expect(await fixture.runtime.proposalIdentityLookups == ["owner/repo", "owner/repo"])
+    #expect(
+      await fixture.runtime.proposalBindingLookups == ["\(object.nodeID)@\(object.revisionKey)"])
+    #expect(await fixture.runtime.proposedExpiries == [600])
+    #expect(await fixture.external.observedProposals.count == 1)
+    // The central claim of the command: what it hands the operator has already been re-derived
+    // from GitHub once, so a proposal is never its own authority.
+    #expect(await fixture.external.revalidatedPreviews == [preview])
+  }
+
   @Test("typed startup failure preserves its phase and non-fallback error code")
   func typedStartupFailureIsRedacted() async throws {
     let logger = EngineServiceLogFake()
@@ -1001,6 +1066,35 @@ private func engineServiceReplacementReport(
 }
 
 private actor EngineServiceExternalFake: EngineExternalServicing {
+  private(set) var observedProposals: [(RolloutRepositoryIdentity, Int)] = []
+  private(set) var revalidatedPreviews: [RolloutPreview] = []
+  private var proposalObservation: RolloutExactObjectObservation?
+
+  func stageProposal(_ observation: RolloutExactObjectObservation) {
+    proposalObservation = observation
+  }
+
+  func observeExactPullRequestReview(
+    repository: RolloutRepositoryIdentity,
+    number: Int,
+    resolveBinding: RolloutExactJobBindingResolving
+  ) async throws -> RolloutExactObjectObservation {
+    guard let proposalObservation else { throw EngineClientError(.unavailable) }
+    observedProposals.append((repository, number))
+    // Production resolves the binding between the metadata fetch and the Git fetch; a fake that
+    // skipped it would let a broken resolver pass.
+    _ = try await resolveBinding(
+      proposalObservation.object.nodeID,
+      number,
+      proposalObservation.object.revisionKey
+    )
+    return proposalObservation
+  }
+
+  func revalidateRollout(_ preview: RolloutPreview) async throws {
+    revalidatedPreviews.append(preview)
+  }
+
   private(set) var sawCredential = false
   private var status = EngineCredentialStatus.missing
   private var herdr = readyHerdr()
@@ -1114,6 +1208,62 @@ private actor EngineServiceLogFake: EngineEventLogging {
 }
 
 private actor EngineServiceRuntimeFake: EngineJobRuntime {
+  private(set) var proposalIdentityLookups: [String] = []
+  private var proposalIdentityRefusals = 0
+  private(set) var proposalBindingLookups: [String] = []
+  private(set) var proposedExpiries: [Int] = []
+  private var proposalRepository: RolloutRepositoryIdentity?
+  private var proposalBinding: RolloutJobBinding?
+  private var proposalPreview: RolloutPreview?
+
+  func stageProposal(
+    repository: RolloutRepositoryIdentity,
+    binding: RolloutJobBinding,
+    preview: RolloutPreview
+  ) {
+    proposalRepository = repository
+    proposalBinding = binding
+    proposalPreview = preview
+  }
+
+  func refuseNextProposalIdentity() {
+    proposalIdentityRefusals += 1
+  }
+
+  func rolloutRepositoryIdentity(
+    owner: String,
+    name: String
+  ) async throws -> RolloutRepositoryIdentity {
+    proposalIdentityLookups.append("\(owner)/\(name)")
+    if proposalIdentityRefusals > 0 {
+      proposalIdentityRefusals -= 1
+      throw EngineClientError(.busy)
+    }
+    guard let proposalRepository else { throw RolloutAuthorityError.invalidRepositoryIdentity }
+    return proposalRepository
+  }
+
+  func rolloutExactJobBinding(
+    repository _: RolloutRepositoryIdentity,
+    objectNodeID: String,
+    objectNumber _: Int,
+    revisionKey: String
+  ) async throws -> RolloutJobBinding {
+    proposalBindingLookups.append("\(objectNodeID)@\(revisionKey)")
+    guard let proposalBinding else { throw RolloutAuthorityError.invalidJobBinding }
+    return proposalBinding
+  }
+
+  func proposeExactRollout(
+    repository _: RolloutRepositoryIdentity,
+    observation _: RolloutExactObjectObservation,
+    expiresInSeconds: Int
+  ) async throws -> RolloutPreview {
+    proposedExpiries.append(expiresInSeconds)
+    guard let proposalPreview else { throw EngineClientError(.unavailable) }
+    return proposalPreview
+  }
+
   private(set) var dispatchValues: [Bool] = []
   private(set) var reloadValues: [Bool] = []
   private(set) var pauseValues: [Bool] = []

@@ -3965,8 +3965,8 @@ private struct HerdrPiRuntimeFixture: Sendable {
 
   static func make(
     // Historical JobCanaryScope incidents are generation-0 preserved evidence. They run
-    // on full schema 10, but deliberately without an open rollout lane, because no
-    // schema-10 authorization ever bound them.
+    // on the full schema, but deliberately without an open rollout lane, because no
+    // rollout authorization ever bound them.
     activateRollout: Bool = true,
     kind: JobKind = .issueTriage,
     timeoutSeconds: TimeInterval = 30,
@@ -3995,7 +3995,7 @@ private struct HerdrPiRuntimeFixture: Sendable {
       kind: kind
     )
     let configuration = ConfigurationStore(database: database)
-    if activateRollout, try await database.schemaVersion() == 10 {
+    if activateRollout, try await database.schemaVersion() >= 10 {
       try await activateSchema10RuntimeAdmission(
         database: database,
         configuration: configuration,
@@ -5950,14 +5950,14 @@ private struct HerdrPiRuntimeFixture: Sendable {
         sourceCommit: gitSHA,
         sourceTree: gitSHA,
         bundleVersion: "0.2.0",
-        bundleBuild: 6,
+        bundleBuild: 7,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,
         pushGuardSHA256: digest,
         herdrHostSHA256: digest,
-        schemaVersion: 10,
-        engineProtocolVersion: 12,
+        schemaVersion: 11,
+        engineProtocolVersion: 13,
         runtimeManifestSHA256: digest,
         runtimeTreeSHA256: digest,
         modelProfilesSHA256: baseEvidence.modelProfilesSHA256,

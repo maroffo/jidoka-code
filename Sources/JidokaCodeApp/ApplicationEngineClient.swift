@@ -85,7 +85,8 @@ private struct XPCApplicationEngineClient: EngineClient {
       .previewJobCanaryGenerationRolloverQ4, .executeJobCanaryGenerationRolloverQ4:
       3_500
     case .setProfile, .recheckAmbiguousMutation, .authorizeRetry, .runHerdrPreflight,
-      .stopAndDrainRollout, .executeRolloutRecovery, .prepareForHandoff, .prepareForQuit:
+      .stopAndDrainRollout, .executeRolloutRecovery, .prepareForHandoff, .prepareForQuit,
+      .proposeExactRollout:
       700
     case .snapshot, .acknowledgeExternalAutomation, .acknowledgeProviderDisclosure,
       .deleteCredential, .updateRepository, .removeRepository, .setMaxConcurrency,

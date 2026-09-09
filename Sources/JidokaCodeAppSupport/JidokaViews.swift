@@ -609,8 +609,30 @@ public struct SettingsView: View {
     settingsCard(title: "Progressive Rollout", systemImage: "checkmark.shield") {
       VStack(alignment: .leading, spacing: 12) {
         Text(
-          "Paste canonical base64 rollout input produced by the source-controlled CLI. "
-            + "Previewing is read-only. Activation requires the exact displayed digest."
+          "Name a pull request and the engine builds the preview from one bounded read. "
+            + "Proposing is read-only. Activation requires the exact displayed digest."
+        )
+        .foregroundStyle(.secondary)
+
+        HStack(spacing: 8) {
+          TextField("owner/repository", text: $model.rolloutProposalReference)
+            .textFieldStyle(.roundedBorder)
+            .accessibilityIdentifier(JidokaAccessibilityID.rolloutProposalReference)
+          TextField("PR number", text: $model.rolloutProposalNumber)
+            .textFieldStyle(.roundedBorder)
+            .frame(maxWidth: 120)
+            .accessibilityIdentifier(JidokaAccessibilityID.rolloutProposalNumber)
+        }
+        Button("Propose Exact Review", systemImage: "text.magnifyingglass") {
+          Task { await model.proposeExactRollout() }
+        }
+        .disabled(!model.canProposeExactRollout)
+        .accessibilityIdentifier(JidokaAccessibilityID.rolloutPropose)
+
+        Divider()
+        Text(
+          "Offline alternative: paste canonical base64 rollout input produced by the "
+            + "source-controlled CLI."
         )
         .foregroundStyle(.secondary)
 

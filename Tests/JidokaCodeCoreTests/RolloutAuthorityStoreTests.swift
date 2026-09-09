@@ -2660,14 +2660,14 @@ private struct RolloutAuthorityFixture {
         sourceCommit: String(repeating: "1", count: 40),
         sourceTree: String(repeating: "2", count: 40),
         bundleVersion: "0.2.0",
-        bundleBuild: 6,
+        bundleBuild: 7,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,
         pushGuardSHA256: digest,
         herdrHostSHA256: digest,
-        schemaVersion: 10,
-        engineProtocolVersion: 12,
+        schemaVersion: 11,
+        engineProtocolVersion: 13,
         runtimeManifestSHA256: digest,
         runtimeTreeSHA256: digest,
         modelProfilesSHA256: baseEvidence.modelProfilesSHA256,
@@ -2778,14 +2778,14 @@ private struct RolloutAuthorityFixture {
         sourceCommit: String(repeating: "1", count: 40),
         sourceTree: String(repeating: "2", count: 40),
         bundleVersion: "0.2.0",
-        bundleBuild: 6,
+        bundleBuild: 7,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,
         pushGuardSHA256: digest,
         herdrHostSHA256: digest,
-        schemaVersion: 10,
-        engineProtocolVersion: 12,
+        schemaVersion: 11,
+        engineProtocolVersion: 13,
         runtimeManifestSHA256: digest,
         runtimeTreeSHA256: digest,
         modelProfilesSHA256: evidence.modelProfilesSHA256,
@@ -2915,14 +2915,14 @@ private struct RolloutAuthorityFixture {
         sourceCommit: String(repeating: "1", count: 40),
         sourceTree: String(repeating: "2", count: 40),
         bundleVersion: "0.2.0",
-        bundleBuild: 6,
+        bundleBuild: 7,
         applicationSHA256: digest,
         helperSHA256: digest,
         askPassSHA256: digest,
         pushGuardSHA256: digest,
         herdrHostSHA256: digest,
-        schemaVersion: 10,
-        engineProtocolVersion: 12,
+        schemaVersion: 11,
+        engineProtocolVersion: 13,
         runtimeManifestSHA256: digest,
         runtimeTreeSHA256: digest,
         modelProfilesSHA256: baseEvidence.modelProfilesSHA256,
@@ -3386,6 +3386,124 @@ private struct RolloutNoReadAPI: GitHubReadAPI {
 
 @Suite("Production rollout operator commands")
 struct ProductionRolloutOperatorTests {
+  @Test("a proposal refuses before it spends a fetch on a busy engine or a closed repository")
+  func proposalRefusesBeforeFetching() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let harness = try RolloutOperatorHarness(
+      fixture: fixture, expectedRelease: input.releaseIdentity)
+    let runtime = harness.runtime
+    let repository = input.scope.repository
+
+    // Everything below runs before any GitHub read, which is the point: a proposal that cannot
+    // succeed must cost nothing.
+    await #expect(throws: EngineClientError(.busy)) {
+      _ = try await runtime.rolloutRepositoryIdentity(
+        owner: repository.owner, name: repository.name)
+    }
+    await runtime.setPaused(true)
+    let resolved = try await runtime.rolloutRepositoryIdentity(
+      owner: repository.owner, name: repository.name)
+    #expect(resolved == repository)
+    // Case-insensitive, because GitHub coordinates are.
+    #expect(
+      try await runtime.rolloutRepositoryIdentity(
+        owner: repository.owner.uppercased(), name: repository.name.uppercased()) == repository)
+    await #expect(throws: RolloutAuthorityError.invalidRepositoryIdentity) {
+      _ = try await runtime.rolloutRepositoryIdentity(owner: "someone-else", name: "absent")
+    }
+    try await runtime.beginExclusiveOperation()
+    await #expect(throws: EngineClientError(.busy)) {
+      _ = try await runtime.rolloutRepositoryIdentity(
+        owner: repository.owner, name: repository.name)
+    }
+    await runtime.endExclusiveOperation()
+
+    // A repository with review closed is refused here rather than after the fetch.
+    try await ConfigurationStore(database: fixture.database).upsertRepository(
+      RepositoryConfiguration(
+        id: fixture.repositoryID, nodeID: repository.nodeID, owner: repository.owner,
+        name: repository.name, defaultBranch: repository.defaultBranch,
+        reviewEnabled: false, triageEnabled: false, implementationEnabled: false, enabled: true
+      ),
+      now: fixture.now
+    )
+    await #expect(throws: RolloutAuthorityError.invalidRepositoryIdentity) {
+      _ = try await runtime.rolloutRepositoryIdentity(
+        owner: repository.owner, name: repository.name)
+    }
+  }
+
+  @Test("an exact job binding reuses a live job and mints one only for an unseen revision")
+  func proposalJobBinding() async throws {
+    let fixture = try await RolloutAuthorityFixture.make()
+    defer { fixture.remove() }
+    let input = try await fixture.previewInput()
+    let harness = try RolloutOperatorHarness(
+      fixture: fixture, expectedRelease: input.releaseIdentity)
+    let runtime = harness.runtime
+    await runtime.setPaused(true)
+    let repository = input.scope.repository
+    let object = try #require(input.scope.object)
+    let existing = try #require(input.jobBinding)
+    let seed = DurableJobStore(database: fixture.database, enforceRolloutAuthority: false)
+    guard
+      case .created = try await seed.createJob(
+        id: fixture.jobID,
+        identity: LogicalJobIdentity(
+          repositoryID: fixture.repositoryID,
+          kind: .prReview,
+          objectNodeID: object.nodeID,
+          revisionKey: object.revisionKey
+        ),
+        objectNumber: object.number,
+        contractVersionUsed: existing.contractVersion,
+        priority: .prReview,
+        firstStep: .review,
+        now: fixture.now
+      )
+    else {
+      Issue.record("the live review job was unexpectedly suppressed")
+      return
+    }
+
+    let reused = try await runtime.rolloutExactJobBinding(
+      repository: repository,
+      objectNodeID: object.nodeID,
+      objectNumber: object.number,
+      revisionKey: object.revisionKey
+    )
+    #expect(reused.jobID == existing.jobID)
+    #expect(reused.contractVersion == existing.contractVersion)
+    #expect(reused.jobKind == .prReview)
+
+    // A revision the durable store has never seen mints a fresh binding at the first step, and
+    // never silently adopts the job bound to a different revision.
+    let fresh = try await runtime.rolloutExactJobBinding(
+      repository: repository,
+      objectNodeID: object.nodeID,
+      objectNumber: object.number,
+      revisionKey: String(repeating: "d", count: 40)
+    )
+    #expect(fresh.jobID != existing.jobID)
+    #expect(fresh.firstStep == .review)
+    #expect(fresh.currentStep == JobStepKind.review.rawValue)
+    #expect(fresh.priority == .prReview)
+    #expect(fresh.contractVersion == "fixture-v1")
+
+    // A live job for this revision that belongs to a different object number is a mismatch, not
+    // something to bind silently.
+    await #expect(throws: RolloutAuthorityError.jobBindingMismatch) {
+      _ = try await runtime.rolloutExactJobBinding(
+        repository: repository,
+        objectNodeID: object.nodeID,
+        objectNumber: object.number + 1,
+        revisionKey: object.revisionKey
+      )
+    }
+  }
+
   @Test("preview and activation enforce paused, exclusive and checkpoint boundaries")
   func previewAndActivationBoundaries() async throws {
     let fixture = try await RolloutAuthorityFixture.make()
@@ -3663,8 +3781,13 @@ private struct RolloutOperatorReadyHerdr: HerdrRuntimeReadinessChecking {
 
 private struct RolloutOperatorReleaseIdentity: RolloutReleaseIdentityRevalidating {
   let expected: RolloutReleaseIdentity?
+  var observed: RolloutObservedReleaseIdentity?
   func requireCurrent(_ actual: RolloutReleaseIdentity) async throws {
     guard actual == expected else { throw RolloutAuthorityError.previewDrift }
+  }
+  func observedIdentity() async throws -> RolloutObservedReleaseIdentity {
+    guard let observed else { throw RolloutAuthorityError.invalidReleaseIdentity }
+    return observed
   }
 }
 

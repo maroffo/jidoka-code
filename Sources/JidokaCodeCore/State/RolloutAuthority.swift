@@ -826,8 +826,8 @@ public enum RolloutPreviewBuilder {
       digests.allSatisfy(GitHubInputValidation.validSHA256),
       validText(release.bundleVersion, maximum: 32),
       release.bundleBuild > 0,
-      release.schemaVersion == 10,
-      release.engineProtocolVersion == 12,
+      release.schemaVersion == 11,
+      release.engineProtocolVersion == 13,
       GitHubInputValidation.validOwner(release.githubAccount),
       release.githubAuthorID > 0,
       release.maxConcurrency == 1
@@ -1492,6 +1492,96 @@ public struct RolloutLocalStateEvidence: Codable, Equatable, Sendable {
     self.inventory = inventory
     self.repositoryConfigurationSHA256 = repositoryConfigurationSHA256
     self.modelProfilesSHA256 = modelProfilesSHA256
+  }
+}
+
+/// An operator's request to propose an exact-object preview.
+///
+/// The operator names a target and nothing else. Every field of the resulting preview input is
+/// derived by the engine, because two of them (`canonicalInputSHA256`, `narrativeSHA256`) are
+/// digests of the canonical artifact built from an authenticated GitHub fetch, and no caller
+/// outside the engine can reproduce them. The proposal carries no authority: activation still
+/// revalidates the exact bytes and fails closed on any drift.
+public struct RolloutExactProposalRequest: Codable, Equatable, Sendable {
+  public let owner: String
+  public let name: String
+  public let number: Int
+  public let expiresInSeconds: Int
+
+  public init(owner: String, name: String, number: Int, expiresInSeconds: Int = 900) {
+    self.owner = owner
+    self.name = name
+    self.number = number
+    self.expiresInSeconds = expiresInSeconds
+  }
+
+  public func validate() throws {
+    guard GitHubInputValidation.validOwner(owner),
+      GitHubInputValidation.validRepository(name),
+      number > 0, number <= 1_000_000,
+      (60...900).contains(expiresInSeconds)
+    else {
+      throw RolloutAuthorityError.invalidObjectSelector
+    }
+  }
+}
+
+/// Fixed, source-controlled ceilings for the pre-lane reads a proposal is allowed to make, and for
+/// the budgets it writes into the preview it produces. They are constants rather than parameters so
+/// that no operator input can widen the read authority the engine grants itself before activation.
+public enum RolloutExactProposalPolicy {
+  /// Every bounded read reserves `GitHubBroker.maximumResponseBytes`, so a byte ceiling below that
+  /// multiple is unreachable: requests are the real limit and the byte ceiling follows from them.
+  public static let identityRequests = 1
+  public static let repositoryRequests = 40
+  /// `derivePullRequest` fetches the base and the pull request head as two separate authorized
+  /// remote reads, so a ceiling of one refuses the head fetch after admitting the base.
+  public static let gitRemoteReads = 2
+  public static var identityBytes: Int64 { Int64(GitHubBroker.maximumResponseBytes) }
+  public static var repositoryBytes: Int64 {
+    Int64(repositoryRequests) * Int64(GitHubBroker.maximumResponseBytes)
+  }
+
+  /// What the activated lane may spend on one exact pull request review. `providerSessions` is the
+  /// stage ceiling (four roles), and every mutation allowance outside the single marker batch is
+  /// zero.
+  public static var pullRequestReviewBudgets: RolloutBudgets {
+    RolloutBudgets(
+      jobs: 1,
+      githubReadRequests: repositoryRequests,
+      githubReadPages: repositoryRequests,
+      githubReadBytes: repositoryBytes,
+      gitRemoteReads: gitRemoteReads,
+      providerSessions: RolloutWorkflowStage.prReview.providerSessionLimit,
+      approvedCommands: 0,
+      markerParts: 2,
+      labelWrites: 0,
+      branchCreates: 0,
+      pullRequestCreates: 0,
+      githubSends: 2,
+      gitSends: 0
+    )
+  }
+}
+
+/// What an exact pull request proposal observed on GitHub, once. The selector's two digests are the
+/// reason this type exists: they can only be produced by canonicalising a fetched artifact.
+public struct RolloutExactObjectObservation: Equatable, Sendable {
+  public let object: RolloutObjectSelector
+  public let jobBinding: RolloutJobBinding
+  public let githubAccount: String
+  public let githubAuthorID: Int64
+
+  public init(
+    object: RolloutObjectSelector,
+    jobBinding: RolloutJobBinding,
+    githubAccount: String,
+    githubAuthorID: Int64
+  ) {
+    self.object = object
+    self.jobBinding = jobBinding
+    self.githubAccount = githubAccount
+    self.githubAuthorID = githubAuthorID
   }
 }
 
