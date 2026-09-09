@@ -566,3 +566,35 @@ Four fresh harness reviewers examined `d123a41` in isolated worktrees and indepe
 ### W7 build-3 candidate rejected; build-4 correction authorized (2026-09-06)
 
 The original draft's non-authorization boundary was superseded only as recorded in E22. Build `3` remains preserved evidence and must not be installed. The portable-binding source correction is reviewed and locally verified; E22 authorizes its narrow commit/push/PR/merge and one build-4 Developer ID/notarization attempt from the exact remote-main merge. Installation, production database access/migration, rollout activation, provider/GitHub workflow effects, tags, release publication, W8, rollback, and cleanup remain unauthorized.
+
+## Outcomes & Retrospective
+
+Closed 2026-09-09, **abandoned by Max** at W9.0, before the push and PR. Not a technical block: the
+work was green at the gate. He stopped it because the line was no longer going anywhere, and the
+record should say so plainly rather than dress an abandonment as a milestone.
+
+**What shipped and is real.** W0-W8 are done and installed: schema 10, the rollout authority with
+canonical evidence, scoped admission, gated disclosure and remote effects, phase-aware workflows,
+protocol-12 operator controls, the merged-tree package, and build 6 running in production, paused.
+W9.0 exists in source on the branch below but was never pushed, never built, never installed.
+Production is untouched by anything in this session and stays at schema 10, paused, build 6, with
+three blocked jobs and one succeeded.
+
+**Where the work is.** Branch `feat/jidoka-code-w9-rollout-input-builder` in
+`/Users/maroffo/jidoka-code-w9`, 57 commits ahead of main, tree clean, nothing pushed. The last six
+are W9.0: `ab5c0d5`, `8a1a116`, `ca8ca2f`, `8d73e2d`, `92a1de9`, `6856eae`. Nothing is lost by
+leaving it there, and nothing happens if it is never picked up.
+
+**What W9.0 would still need if it is ever resumed.** Max pushes and opens the PR; build 7 migrates
+production from schema 10 to 11, so W8's quiesce/backup/install/launch cycle repeats; then
+`propose-exact maroffo/jidoka-code-canary-sandbox 2` against the sandbox PR verified read-only on
+2026-09-08. The two debt items in `tech-debt.md` (the identity-leg residue, the flaky process
+suites) travel with it.
+
+**The lesson, and it is mine.** The last stretch produced six commits, of which one changed
+behaviour-relevant code and five were tests and documents about the review of those tests. Each
+round was individually defensible: the reviewer kept finding real, silent defects at the call sites,
+and the end-to-end test that closed finding D was the right instrument. But the ratio of
+verification to progress inverted somewhere around round 2, and I did not name it. The signal to
+watch for next time is not "are the findings real" (they were) but "is the artifact still moving".
+When a review round's output is another review round, the loop has become the work.
