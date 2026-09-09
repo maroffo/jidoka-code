@@ -569,9 +569,11 @@ The original draft's non-authorization boundary was superseded only as recorded 
 
 ## Outcomes & Retrospective
 
-Closed 2026-09-09, **abandoned by Max** at W9.0, before the push and PR. Not a technical block: the
-work was green at the gate. He stopped it because the line was no longer going anywhere, and the
-record should say so plainly rather than dress an abandonment as a milestone.
+Closed 2026-09-09, **abandoned by Max** at W9.0. Not a technical block: the work was green at the
+gate. He stopped it because the line was no longer going anywhere, and the record should say so
+plainly rather than dress an abandonment as a milestone. On the same day he asked for the branch to
+be pushed and a pull request opened, so the work is preserved for review rather than left on one
+machine: the PR is the resting place of an abandoned line, not a plan to merge and continue it.
 
 **What shipped and is real.** W0-W8 are done and installed: schema 10, the rollout authority with
 canonical evidence, scoped admission, gated disclosure and remote effects, phase-aware workflows,
@@ -580,10 +582,10 @@ W9.0 exists in source on the branch below but was never pushed, never built, nev
 Production is untouched by anything in this session and stays at schema 10, paused, build 6, with
 three blocked jobs and one succeeded.
 
-**Where the work is.** Branch `feat/jidoka-code-w9-rollout-input-builder` in
-`/Users/maroffo/jidoka-code-w9`, 57 commits ahead of main, tree clean, nothing pushed. The last six
-are W9.0: `ab5c0d5`, `8a1a116`, `ca8ca2f`, `8d73e2d`, `92a1de9`, `6856eae`. Nothing is lost by
-leaving it there, and nothing happens if it is never picked up.
+**Where the work is.** Branch `feat/jidoka-code-w9-rollout-input-builder`, eleven commits ahead of
+`origin/main` (`88f8658` through `3064317`), tree clean. An earlier note in this file said 57
+commits: that was measured against a stale local `main` at `282e849` while `origin/main` had already
+moved to `a7f89e6`, and the real distance is eleven. All eleven are W9.0 and nothing else.
 
 **What W9.0 would still need if it is ever resumed.** Max pushes and opens the PR; build 7 migrates
 production from schema 10 to 11, so W8's quiesce/backup/install/launch cycle repeats; then
