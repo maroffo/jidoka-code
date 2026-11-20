@@ -39,10 +39,10 @@ fn main() -> Result<()> {
     let port = env::var("JIDOKA_PORT")
         .unwrap_or_else(|_| "8080".into())
         .parse::<u16>()?;
-    let app = web::router(&db, provider.label(), &repositories)?;
     tokio::runtime::Runtime::new()?.block_on(async move {
         let listener = TcpListener::bind((address.as_str(), port)).await?;
         web::recover(&db, provider.label())?;
+        let app = web::router(&db, provider.label(), &repositories)?;
         let mut term = signal(SignalKind::terminate())?;
         let mut interrupt = signal(SignalKind::interrupt())?;
         supervise(
@@ -100,9 +100,16 @@ async fn supervise(
 }
 
 fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mpsc::Receiver<()>) {
+    let mut next_poll = Instant::now();
     while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
-        let result = web::run_one(db, |url| {
-            let snapshot = source::collect(url, repositories)?;
+        if Instant::now() >= next_poll {
+            if jidoka_code::automation::tick(db, provider.label(), repositories).is_err() {
+                eprintln!("Could not complete repository polling");
+            }
+            next_poll = Instant::now() + Duration::from_secs(60);
+        }
+        let result = web::run_one_pinned(db, |url, expected_head| {
+            let snapshot = source::collect_at(url, repositories, expected_head)?;
             let prior = web::previous_findings(db, provider.label(), &snapshot)?;
             let patches = snapshot
                 .files
@@ -149,8 +156,15 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
                 &prior,
             )
         });
-        if result.is_err() {
-            eprintln!("Could not update the review queue");
+        match result {
+            Ok(true)
+                if jidoka_code::automation::publish_ready(db, provider.label(), repositories)
+                    .is_err() =>
+            {
+                eprintln!("Could not publish completed automatic reviews");
+            }
+            Err(_) => eprintln!("Could not update the review queue"),
+            _ => {}
         }
         if stop.recv_timeout(Duration::from_millis(500)) != Err(mpsc::RecvTimeoutError::Timeout) {
             break;

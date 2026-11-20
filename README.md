@@ -30,6 +30,14 @@ Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the 
 
 Running `docker compose stop` stops the service from accepting HTTP requests and lets the active review finish. Queued reviews resume on the next startup. Each model call can take up to five minutes. The engine can request one targeted recheck for an unresolved assessment. Compose allows up to seventeen minutes for shutdown so the worker can finish the active review.
 
+## Reviewing and publishing
+
+Open **View diff** on a report to browse the stored changes at the reviewed revisions. Select a line reference in the manual guide to jump into the patch. For older reports, **Load reviewed diff from GitHub** retrieves the patch when both revisions still match.
+
+For a single-user installation, set `JIDOKA_REVIEWER_TOKEN` to your own GitHub token with **Pull requests: write** for the repositories you review. Open **Submit review**, select findings and a decision, then preview the summary and inline comments. The final button submits one GitHub review. Findings outside the patch appear in the summary. Jidoka checks the current PR revision before submission.
+
+Under **Repositories**, choose **Manual**, **Automatic summary**, or **Automatic summary and inline comments** per repository. Manual is the default. Set `JIDOKA_BOT_TOKEN` to a personal access token for a dedicated bot account with **Pull requests: write** on the selected repositories. Keep the read token configured for private source. Jidoka polls GitHub from the container and sends eligible changes to the configured provider. The bot posts comments. Approvals and change requests come from the operator.
+
 ## Development
 
 Use English for documentation, code comments, interface text, and review guidance. Keep quoted source code and file paths exactly as they appear in the repository under review.

@@ -10,6 +10,8 @@ services:
       JIDOKA_PROVIDER_URL: ${JIDOKA_PROVIDER_URL:?set the full provider URL}
       JIDOKA_MODEL: ${JIDOKA_MODEL:?set the model name}
       JIDOKA_GITHUB_TOKEN: ${JIDOKA_GITHUB_TOKEN:-}
+      JIDOKA_REVIEWER_TOKEN: ${JIDOKA_REVIEWER_TOKEN:-}
+      JIDOKA_BOT_TOKEN: ${JIDOKA_BOT_TOKEN:-}
       JIDOKA_API_KEY: ${JIDOKA_API_KEY:-}
     volumes:
       - reviews:/data

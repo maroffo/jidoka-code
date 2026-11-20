@@ -96,3 +96,19 @@ button span { float: right }button:hover { background: #285458 }.error { padding
   .action,.warning { background:#3c332e }.history-row:hover,figure { background:#2b4044 }
 }
 .destination { margin: -7px 0 12px }.destination summary { color: var(--sub); font-size: .78rem }.destination code { display: block; margin-bottom: 10px; font-size: .75rem }
+.nav-settings { color: #dbe3df; font-size: .88rem }
+.review-tools { display: flex; justify-content: flex-end; align-items: center; gap: 22px; margin: -5px 0 24px }
+.primary-link { text-decoration: none; background: #193e42; color: white; padding: 7px 14px; border-radius: 4px }
+.primary-link:hover { background: #285458; color: white }
+.workflow,.settings-intro { max-width: 760px; margin-bottom: 20px }.workflow { padding: clamp(16px,3vw,30px) }
+.workflow fieldset { padding: 0; border: 0; margin: 0 0 20px; min-width: 0 }
+.workflow legend,.workflow h2 { font-weight: 680; font-size: 1.15rem; margin-bottom: 12px }
+.workflow .pick { display: flex; align-items: baseline; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line) }
+.pick small { display: block; color: var(--sub); font-family: var(--mono) }
+.workflow .choice { display: inline-block; margin-right: 14px }.workflow input { accent-color: #245555 }
+.workflow button { width: auto; margin: 12px 0 }.workflow select { padding: 6px; margin: 0 10px; font: inherit; max-width: 100% }
+.workflow pre { background: var(--canvas); padding: 14px; margin-bottom: 15px }.preview-comment { margin: 10px 0 }
+@media (max-width: 550px) { .nav { flex-wrap: wrap; gap: 8px 14px; padding-block: 8px }.nav-settings { font-size: .78rem }.workflow select { display:block; margin: 5px 0 } }
+.markdown-preview { margin: 10px 0 18px; padding: 14px 18px; border-left: 3px solid var(--line); background: var(--canvas) }
+.markdown-preview h2 { font-size: 1rem }.markdown-preview ul { padding-left: 20px }.markdown-preview p + p { margin-top: 8px }
+.markdown-preview pre { background: var(--surface); margin-bottom: 0 }

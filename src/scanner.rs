@@ -482,6 +482,7 @@ mod tests {
             limits: Vec::new(),
             files,
             head_context: Vec::new(),
+            diff: None,
         }
     }
 

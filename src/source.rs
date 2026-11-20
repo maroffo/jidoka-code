@@ -6,7 +6,9 @@ mod reads;
 
 pub use reads::read_context;
 
-use crate::contracts::{GitHubRateLimit, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow};
+use crate::contracts::{
+    DiffFile, GitHubRateLimit, PinnedDiff, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow,
+};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use icu_properties::{
@@ -52,7 +54,7 @@ const WINDOWS_PER_FILE: usize = 3;
 const WINDOW_RADIUS: usize = 8;
 const WINDOW_BYTES: usize = 2_000;
 
-fn valid_repo(repo: &str) -> bool {
+pub(crate) fn valid_repo(repo: &str) -> bool {
     let Some((owner, name)) = repo.split_once('/') else {
         return false;
     };
@@ -117,6 +119,10 @@ pub(crate) fn safe_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|part| !matches!(part, "" | "." | "..") && !part.eq_ignore_ascii_case(".git"))
+}
+
+pub(crate) fn safe_previous_path<'a>(path: &str, previous: Option<&'a str>) -> Option<&'a str> {
+    previous.filter(|previous| *previous != path && safe_path(previous))
 }
 
 fn sha(sha: &str) -> Result<&str> {
@@ -313,6 +319,21 @@ struct Repo {
     private: bool,
 }
 
+impl Repo {
+    fn validate(&mut self, allowed: &HashSet<String>) -> Result<()> {
+        ensure!(valid_repo(&self.full_name), "Invalid repository name.");
+        ensure!(
+            !self.private
+                || allowed
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&self.full_name)),
+            "Private repository is not on the allowlist."
+        );
+        self.full_name.make_ascii_lowercase();
+        Ok(())
+    }
+}
+
 #[derive(Deserialize, PartialEq, Eq)]
 struct Revision {
     sha: String,
@@ -322,16 +343,7 @@ struct Revision {
 impl Revision {
     fn validate(&mut self, allowed: &HashSet<String>) -> Result<()> {
         sha(&self.sha)?;
-        ensure!(valid_repo(&self.repo.full_name), "Invalid repository name.");
-        ensure!(
-            !self.repo.private
-                || allowed
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(&self.repo.full_name)),
-            "Private repository is not on the allowlist."
-        );
-        self.repo.full_name.make_ascii_lowercase();
-        Ok(())
+        self.repo.validate(allowed)
     }
 }
 
@@ -590,6 +602,11 @@ impl Change {
         let mut additions = 0;
         let mut deletions = 0;
         for (base, head, _) in crate::hunks::lines(patch)? {
+            if (self.status == "added" && base.is_some())
+                || (self.status == "removed" && head.is_some())
+            {
+                return None;
+            }
             additions += usize::from(base.is_none() && head.is_some());
             deletions += usize::from(base.is_some() && head.is_none());
         }
@@ -1494,15 +1511,103 @@ fn collect_context<T: Transport>(
     files
 }
 
+fn diff_manifest(
+    changes: &[Change],
+    total_files: u64,
+    mut patch_for: impl FnMut(&Change) -> Option<String>,
+) -> PinnedDiff {
+    let mut changed = HashSet::new();
+    let duplicates: HashSet<_> = changes
+        .iter()
+        .map(|change| change.filename.as_str())
+        .filter(|path| !changed.insert(*path))
+        .collect();
+    let mut seen = HashSet::new();
+    let diff_files = changes
+        .iter()
+        .take(CHANGED_FILES)
+        .filter_map(|change| {
+            let path = change.filename.as_str();
+            if !safe_path(path) || !seen.insert(path) {
+                return None;
+            }
+            let mut previous_path = None;
+            let status = match change.status.as_str() {
+                status @ ("renamed" | "copied") => {
+                    previous_path = safe_previous_path(path, change.previous_filename.as_deref());
+                    if previous_path.is_some() {
+                        status
+                    } else {
+                        "unsupported"
+                    }
+                }
+                status @ ("added" | "removed" | "modified" | "changed") => status,
+                _ => "unsupported",
+            };
+            let patch = (status != "unsupported" && !duplicates.contains(path))
+                .then(|| patch_for(change))
+                .flatten();
+            Some(DiffFile {
+                path: path.to_owned(),
+                status: status.to_owned(),
+                previous_path: previous_path.map(str::to_owned),
+                patch,
+            })
+        })
+        .collect();
+    PinnedDiff {
+        total_files,
+        files: diff_files,
+        supporting_paths: Vec::new(),
+    }
+}
+
+fn stored_diff(
+    changes: &[Change],
+    files: &[SourceFile],
+    head_context: &[SourceWindow],
+    total_files: u64,
+) -> PinnedDiff {
+    let patches: HashMap<_, _> = files
+        .iter()
+        .filter(|file| !file.patch.is_empty())
+        .map(|file| (file.path.as_str(), file.patch.as_str()))
+        .collect();
+    let mut diff = diff_manifest(changes, total_files, |change| {
+        patches
+            .get(change.filename.as_str())
+            .map(|text| (*text).to_owned())
+    });
+    let changed: HashSet<_> = changes
+        .iter()
+        .flat_map(|change| [Some(change.filename.as_str()), change.previous()])
+        .flatten()
+        .collect();
+    let mut seen = HashSet::new();
+    diff.supporting_paths = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(head_context.iter().map(|window| window.path.as_str()))
+        .filter(|path| safe_path(path) && !changed.contains(path) && seen.insert(*path))
+        .map(str::to_owned)
+        .collect();
+    diff
+}
+
 fn pinned<T: Transport>(
     hub: &mut GitHub<T>,
     repo: String,
     number: u64,
     allowed: &HashSet<String>,
+    expected_head: Option<&str>,
 ) -> Result<Snapshot> {
     let pull_route = format!("{repo}/pulls/{number}");
     let mut pull: Pull = hub.get(&pull_route, PULL_BYTES, false)?;
     pull.validate(&repo, number, allowed)?;
+    ensure!(
+        expected_head.is_none_or(|head| head.eq_ignore_ascii_case(&pull.head.sha)),
+        "The pull request changed before review."
+    );
     let head_ref = if pull.head.repo.full_name == repo {
         pull.head.sha.clone()
     } else {
@@ -1672,6 +1777,7 @@ fn pinned<T: Transport>(
     }
     let mut unique = HashSet::new();
     limits.retain(|limit| unique.insert(limit.clone()));
+    let diff = stored_diff(changes, &files, &head_context, pull.changed_files);
     Ok(Snapshot {
         url: format!("https://github.com/{repo}/pull/{number}"),
         repo,
@@ -1682,12 +1788,115 @@ fn pinned<T: Transport>(
         files,
         head_context,
         limits,
+        diff: Some(diff),
     })
 }
 
 pub fn collect(url: &str, allowed: &HashSet<String>) -> Result<Snapshot> {
+    collect_at(url, allowed, None)
+}
+
+pub fn collect_at(
+    url: &str,
+    allowed: &HashSet<String>,
+    expected_head: Option<&str>,
+) -> Result<Snapshot> {
     let (repo, number) = pull_url(url, allowed)?;
-    pinned(&mut github()?, repo, number, allowed)
+    pinned(&mut github()?, repo, number, allowed, expected_head)
+}
+
+#[derive(Deserialize)]
+struct DiffPull {
+    number: u64,
+    base: Revision,
+    head: DiffHead,
+    changed_files: u64,
+    #[serde(default)]
+    merged: bool,
+}
+
+#[derive(Deserialize)]
+struct DiffHead {
+    sha: String,
+    repo: Option<Repo>,
+}
+
+#[derive(Deserialize)]
+struct DiffComparison {
+    base_commit: GitId,
+    merge_base_commit: GitId,
+    files: Option<Vec<Change>>,
+}
+
+fn pinned_diff<T: Transport>(
+    hub: &mut GitHub<T>,
+    repo: &str,
+    number: u64,
+    base: &str,
+    head: &str,
+    allowed: &HashSet<String>,
+) -> Result<Option<PinnedDiff>> {
+    let mut pull: DiffPull = hub.get(&format!("{repo}/pulls/{number}"), PULL_BYTES, false)?;
+    pull.base.validate(allowed)?;
+    ensure!(
+        pull.number == number && pull.base.repo.full_name == repo,
+        "Unexpected pull request."
+    );
+    if sha(&pull.head.sha)? != head {
+        return Ok(None);
+    }
+    if let Some(fork) = &mut pull.head.repo {
+        fork.validate(allowed)?;
+    } else if !pull.merged {
+        return Ok(None);
+    }
+
+    // A merged PR's current base tip may already contain the head. An unmerged
+    // PR uses its current base tip to detect changes to the reviewed merge base.
+    let compare_base = if pull.merged { base } else { &pull.base.sha };
+    let first: DiffComparison = hub.get(
+        &format!("{repo}/compare/{compare_base}...{head}?per_page=1&page=1"),
+        RESPONSE,
+        false,
+    )?;
+    ensure!(
+        sha(&first.base_commit.sha)? == compare_base,
+        "Unexpected base commit in the Git comparison."
+    );
+    if sha(&first.merge_base_commit.sha)? != base {
+        return Ok(None);
+    }
+    let changes = first
+        .files
+        .as_deref()
+        .context("GitHub's list of changed files is missing.")?;
+    let total_files = pull.changed_files.max(changes.len() as u64);
+    let mut remaining = SNAPSHOT_TEXT_BYTES;
+    Ok(Some(diff_manifest(changes, total_files, |change| {
+        if change.patch.as_deref()?.len() > remaining {
+            return None;
+        }
+        let patch = change.complete_patch()?;
+        // Historical display does not look up tree modes.
+        if has_gitlink_pointer(patch) || may_be_symlink(change, patch) {
+            return None;
+        }
+        remaining -= patch.len();
+        Some(patch.to_owned())
+    })))
+}
+
+/// Reload a saved pull request diff with two bounded GitHub requests at most.
+pub fn collect_pinned_diff(
+    url: &str,
+    base: &str,
+    head: &str,
+    allowed: &HashSet<String>,
+) -> Result<Option<PinnedDiff>> {
+    let (repo, number) = pull_url(url, allowed)?;
+    sha(base)?;
+    sha(head)?;
+    pinned_diff(&mut github()?, &repo, number, base, head, allowed)
 }
 
 fn github() -> Result<GitHub<Http>> {
@@ -1892,7 +2101,233 @@ mod tests {
     }
 
     fn snapshot(hub: &mut GitHub<Fixture>) -> Result<Snapshot> {
-        pinned(hub, REPO.into(), 3, &HashSet::from([REPO.to_owned()]))
+        pinned(hub, REPO.into(), 3, &HashSet::from([REPO.to_owned()]), None)
+    }
+
+    #[test]
+    fn stale_automatic_head_stops_after_reading_pr_metadata() {
+        let mut hub = GitHub::new(Fixture::new(vec![change("main.rs")]));
+        let error = pinned(
+            &mut hub,
+            REPO.to_owned(),
+            3,
+            &HashSet::from([REPO.to_owned()]),
+            Some(BASE),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed before review"));
+        assert_eq!(hub.transport.requests, [PULL]);
+    }
+
+    fn diff_comparison(base: &str) -> String {
+        format!("{REPO}/compare/{base}...{HEAD}?per_page=1&page=1")
+    }
+
+    fn load_diff(hub: &mut GitHub<Fixture>, allowed: &[&str]) -> Result<Option<PinnedDiff>> {
+        pinned_diff(
+            hub,
+            REPO,
+            3,
+            BASE,
+            HEAD,
+            &allowed.iter().map(|repo| (*repo).to_owned()).collect(),
+        )
+    }
+
+    #[test]
+    fn legacy_diff_stops_after_a_stale_head_or_a_changed_merge_base() {
+        let mut fixture = Fixture::default();
+        fixture.pulls.extend([pull(MOVED, 1), pull(HEAD, 1)]);
+        let route = diff_comparison(TIP);
+        fixture.responses.insert(
+            route.clone(),
+            json!({"base_commit": {"sha": TIP}, "merge_base_commit": {"sha": MOVED}}),
+        );
+        let mut hub = GitHub::new(fixture);
+        assert!(load_diff(&mut hub, &[REPO]).unwrap().is_none());
+        assert_eq!(hub.transport.requests, [PULL]);
+        hub.transport.requests.clear();
+        assert!(load_diff(&mut hub, &[REPO]).unwrap().is_none());
+        assert_eq!(hub.transport.requests, [PULL, &route]);
+    }
+
+    #[test]
+    fn legacy_diff_uses_saved_base_for_a_merged_pr_with_a_deleted_fork() {
+        let mut pr = pull(HEAD, 1);
+        pr["head"]["repo"] = Value::Null;
+        pr["merged"] = json!(true);
+        pr["base"]["sha"] = json!(MOVED);
+        let route = diff_comparison(BASE);
+        let response = json!({
+            "base_commit": {"sha": BASE}, "merge_base_commit": {"sha": BASE},
+            "files": [change("main.rs")],
+        });
+        let mut hub = GitHub::new(Fixture {
+            pulls: [pr].into(),
+            responses: HashMap::from([(route.clone(), response)]),
+            ..Fixture::default()
+        });
+        let diff = load_diff(&mut hub, &[REPO]).unwrap().unwrap();
+        assert_eq!(diff.total_files, 1);
+        assert!(diff.files[0].patch.is_some());
+        assert!(diff.supporting_paths.is_empty());
+        assert_eq!(hub.transport.requests, [PULL, &route]);
+    }
+
+    #[test]
+    fn legacy_diff_requires_private_fork_access_and_preserves_rate_limits() {
+        let mut pr = pull(HEAD, 1);
+        pr["head"]["repo"]["private"] = json!(true);
+        let route = diff_comparison(TIP);
+        let mut hub = GitHub::new(Fixture {
+            pulls: [pr.clone(), pr].into(),
+            quota_on: Some(route.clone()),
+            ..Fixture::default()
+        });
+        let error = load_diff(&mut hub, &[REPO]).unwrap_err();
+        assert!(error.to_string().contains("Private repository"));
+        assert_eq!(hub.transport.requests, [PULL]);
+        hub.transport.requests.clear();
+        let error = load_diff(&mut hub, &[REPO, FORK]).unwrap_err();
+        assert!(error.is::<GitHubRateLimit>());
+        assert_eq!(hub.transport.requests, [PULL, &route]);
+    }
+
+    #[test]
+    fn legacy_diff_keeps_only_safe_complete_patches_within_the_text_budget() {
+        let large = |path: &str| {
+            let mut file = change(path);
+            file["patch"] = json!(format!("@@ -1 +1 @@\n-old\n+{}", "x".repeat(60_000)));
+            file
+        };
+        let mut rename = change("renamed.rs");
+        rename["status"] = json!("renamed");
+        rename["previous_filename"] = json!("../unsafe.rs");
+        let mut partial = change("partial.rs");
+        partial["additions"] = json!(2);
+        let mut gitlink = change("submodule");
+        gitlink["patch"] = json!(format!(
+            "@@ -1 +1 @@\n-Subproject commit {BASE}\n+Subproject commit {HEAD}"
+        ));
+        let mut symlink = change("link");
+        symlink["patch"] = json!(
+            "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file"
+        );
+        let files = [
+            large("fits.rs"),
+            large("too-large.rs"),
+            rename,
+            partial,
+            gitlink,
+            symlink,
+            change("../unsafe.rs"),
+            change("duplicate.rs"),
+            change("duplicate.rs"),
+            change("last.rs"),
+        ];
+        let route = diff_comparison(TIP);
+        let mut hub = GitHub::new(Fixture {
+            pulls: [pull(HEAD, files.len() as u64)].into(),
+            responses: HashMap::from([(
+                route.clone(),
+                json!({
+                    "base_commit": {"sha": TIP}, "merge_base_commit": {"sha": BASE},
+                    "files": files,
+                }),
+            )]),
+            ..Fixture::default()
+        });
+        let diff = load_diff(&mut hub, &[REPO]).unwrap().unwrap();
+        assert_eq!(diff.total_files, 10);
+        assert_eq!(diff.files.len(), 8);
+        let patched: Vec<_> = diff
+            .files
+            .iter()
+            .filter(|file| file.patch.is_some())
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(patched, ["fits.rs", "last.rs"]);
+        assert_eq!(diff.files[2].path, "renamed.rs");
+        assert_eq!(diff.files[2].status, "unsupported");
+        assert!(diff.files[2].previous_path.is_none());
+        assert_eq!(hub.transport.requests, [PULL, &route]);
+    }
+
+    #[test]
+    fn stored_diff_includes_supporting_paths_from_head_windows_once() {
+        let mut renamed = change("new.rs");
+        renamed["status"] = json!("renamed");
+        renamed["previous_filename"] = json!("old.rs");
+        let changes = [serde_json::from_value(renamed).unwrap()];
+        let files = [SourceFile {
+            path: "README.md".into(),
+            patch: String::new(),
+            before: String::new(),
+            after: "Notes.".into(),
+        }];
+        let windows = [
+            "new.rs",
+            "old.rs",
+            "README.md",
+            "src/caller.rs",
+            "../unsafe.rs",
+            "src/caller.rs",
+        ]
+        .map(|path| SourceWindow {
+            path: path.into(),
+            start: 1,
+            text: "Context.".into(),
+        });
+        let diff = stored_diff(&changes, &files, &windows, 1);
+        assert_eq!(diff.supporting_paths, ["README.md", "src/caller.rs"]);
+    }
+
+    #[test]
+    fn persists_pinned_changes_separately_from_supporting_source() {
+        let mut fixture = Fixture::new(vec![
+            change("src/task.rs"),
+            json!({"filename": "assets/sample.bin", "status": "added", "changes": 0}),
+            change("../outside.rs"),
+        ]);
+        fixture.revision(REPO, BASE, &[("src/task.rs", File::Text("old\n"))]);
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                ("src/task.rs", File::Text("new\n")),
+                ("assets/sample.bin", File::Bytes(&[0])),
+                ("README.md", File::Text("The repository contract.\n")),
+            ],
+        );
+        let mut hub = GitHub::new(fixture);
+        let snapshot = snapshot(&mut hub).unwrap();
+        let diff = snapshot.diff.as_ref().unwrap();
+        assert_eq!(diff.total_files, 3);
+        assert_eq!(diff.files.len(), 2);
+        assert_eq!(diff.files[0].path, "src/task.rs");
+        assert_eq!(
+            diff.files[0].patch.as_deref(),
+            Some("@@ -1 +1 @@\n-old\n+new")
+        );
+        assert_eq!(diff.files[1].path, "assets/sample.bin");
+        assert!(diff.files[1].patch.is_none());
+        assert_eq!(diff.supporting_paths, ["README.md"]);
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+
+        let report = crate::review_snapshot(snapshot, |_, data| {
+            assert!(data["snapshot"].get("diff").is_none());
+            if data.get("hypotheses").is_some() {
+                Ok(json!({"complete": true, "assessments": []}))
+            } else {
+                Ok(json!({"complete": true, "hypotheses": []}))
+            }
+        })
+        .unwrap();
+        let saved: crate::contracts::PublishedReport =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert!(saved.report.findings.is_empty());
+        assert!(crate::diff::anchor(&saved, "src/task.rs", 1).is_some());
+        assert!(crate::diff::render(&saved).contains("assets/sample.bin"));
     }
 
     fn context_snapshot(changed: &str) -> Snapshot {
@@ -1911,6 +2346,7 @@ mod tests {
             }],
             head_context: Vec::new(),
             limits: Vec::new(),
+            diff: None,
         }
     }
 
