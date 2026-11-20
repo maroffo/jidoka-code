@@ -12,7 +12,7 @@ def citation(path, line, quote):
 
 CAPACITY = citation("cache.py", 2, "    return slots - 1")
 CONTRACT = citation(
-    "requirements.md", 1, "Capacity must equal the configured slot count."
+    "requirements.md", 1, 'Capacity must equal the configured "slots" count.'
 )
 REFRESH = citation("cache.py", 5, "    rebuild_index()")
 PUBLISH = citation("cache.py", 6, "    publish_index()")
@@ -23,9 +23,9 @@ LINEAR_METRIC = citation("cache.py", 9, "    return sum(1 for key in keys)")
 def hypothesis(anchor=CAPACITY, **changes):
     return {
         "anchor": anchor,
-        "expected": "Preserve the configured capacity.",
-        "scenario": "A caller configures one slot.",
-        "consequence": "The cache reports zero available slots.",
+        "expected": "Mantenere la capacità configurata.",
+        "scenario": "Il chiamante configura un solo slot.",
+        "consequence": "La cache indica zero slot disponibili.",
         **changes,
     }
 
@@ -34,15 +34,15 @@ def confirmed(label=1, severity="high", **changes):
     return {
         "id": label,
         "outcome": "confirmed",
-        "countercheck": "Check if this function clamps the count before returning it.",
+        "countercheck": "La funzione non applica un minimo prima di restituire il conteggio.",
         "kind": "contract",
         "basis": CONTRACT,
         "support": [],
         "severity": severity,
-        "title": "Capacity drops a configured slot",
-        "impact": "A one-slot cache reports zero capacity.",
-        "reason": "The return expression subtracts one from the configured count.",
-        "action": "Check whether a one-slot cache can accept an entry before merging.",
+        "title": "La capacità perde uno slot configurato",
+        "impact": "Una cache con un solo slot indica capacità zero.",
+        "reason": "Il valore restituito è inferiore di uno al conteggio configurato.",
+        "action": "Verifica se una cache con un solo slot può accettare una voce prima del merge.",
         "comparison": {
             "behavior": citation("cache.py", 2, "    return slots"),
             "basis": CONTRACT,
@@ -56,14 +56,14 @@ def human(label=2, severity="medium", **changes):
     return {
         "id": label,
         "outcome": "human",
-        "countercheck": "Check the requirements and the publication order for a freshness guarantee.",
+        "countercheck": "I requisiti non specificano quando pubblicare l’indice aggiornato.",
         "basis": PUBLISH,
         "severity": severity,
-        "reason": "The refresh rebuilds the index before publishing it.",
-        "question": "Must readers see new entries while an index refresh is in progress?",
+        "reason": "L’indice viene ricostruito prima della pubblicazione.",
+        "question": "I lettori devono vedere le nuove voci mentre l’indice viene ricostruito?",
         "alternatives": [
-            "Allow the old index until publication",
-            "Make new entries visible during refresh",
+            "Usare l’indice precedente fino alla pubblicazione",
+            "Mostrare le nuove voci durante la ricostruzione",
         ],
         **changes,
     }
@@ -125,9 +125,9 @@ class EngineTests(unittest.TestCase):
     def test_two_passes_accept_documented_defect_and_specific_human_question(self):
         refresh = hypothesis(
             REFRESH,
-            expected="Index freshness during a rebuild depends on the product requirement.",
-            scenario="A reader polls the index before the refresh publishes it.",
-            consequence="The reader may briefly see the old index.",
+            expected="La visibilità delle nuove voci dipende dai requisiti di prodotto.",
+            scenario="Un lettore interroga l’indice prima della pubblicazione.",
+            consequence="Il lettore può vedere ancora l’indice precedente.",
         )
         report = self.run_review([hypothesis(), refresh], [human(), confirmed()])
 
@@ -136,6 +136,12 @@ class EngineTests(unittest.TestCase):
         self.assertIn("untrusted review material", first.args[0])
         self.assertNotIn(self.snapshot["intent"][0], first.args[0])
         self.assertIn("Challenge every hypothesis", second.args[0])
+        for call in (first, second):
+            self.assertIn("Write all operator-facing prose in Italian", call.args[0])
+            self.assertIn(
+                "Keep JSON keys and enum values exactly as specified", call.args[0]
+            )
+            self.assertIn("Copy source quotes and paths verbatim", call.args[0])
         self.assertEqual(second.args[1]["hypotheses"][0], {"id": 1, **hypothesis()})
         self.assertEqual(second.args[1]["snapshot"]["head"], self.snapshot["head"])
         self.assertEqual(report["limits"], [])
@@ -144,30 +150,49 @@ class EngineTests(unittest.TestCase):
             (finding["path"], finding["line"], finding["attribution"]),
             ("cache.py", 2, "introduced"),
         )
-        self.assertIn('head cache.py:2 "    return slots - 1"', finding["evidence"])
-        self.assertIn('base cache.py:2 "    return slots"', finding["evidence"])
+        self.assertIn("Analisi statica del codice.", finding["evidence"])
         self.assertIn(
-            'head requirements.md:1 "Capacity must equal', finding["evidence"]
+            f"Verifica mirata. {confirmed()['countercheck']}", finding["evidence"]
+        )
+        self.assertIn(
+            "Revisione proposta cache.py:2 «    return slots - 1»", finding["evidence"]
+        )
+        self.assertIn(
+            "Revisione base cache.py:2 «    return slots»", finding["evidence"]
+        )
+        self.assertIn(
+            f"Revisione proposta requirements.md:1 «{CONTRACT['quote']}»",
+            finding["evidence"],
         )
         technical, product = report["focus"]
         self.assertEqual(technical["line"], 2)
+        self.assertEqual(
+            technical["checked"],
+            f"Comportamento documentato in requirements.md:1. {confirmed()['countercheck']}",
+        )
         self.assertEqual(technical["action"], confirmed()["action"])
         self.assertEqual(product["line"], 5)
-        self.assertIn(human()["question"], product["action"])
-        self.assertIn("head cache.py:6", product["checked"])
+        first_option, second_option = human()["alternatives"]
+        self.assertEqual(
+            product["action"],
+            f"{human()['question']} Le opzioni sono «{first_option}» e «{second_option}».",
+        )
+        self.assertIn(
+            "Revisione proposta cache.py:6 «    publish_index()»", product["checked"]
+        )
 
     def test_valid_refutation_removes_the_hypothesis(self):
         proposal = hypothesis(
             METRIC,
-            expected="The metric counts all entries, including repeated keys.",
-            scenario="A caller passes a list with repeated keys.",
-            consequence="The metric might undercount entries.",
+            expected="La metrica conta tutte le voci, incluse le chiavi ripetute.",
+            scenario="Il chiamante passa una lista con chiavi ripetute.",
+            consequence="La metrica potrebbe contare meno voci del previsto.",
         )
         refuted = {
             "id": 1,
             "outcome": "refuted",
             "basis": METRIC,
-            "countercheck": "The list length counts repeated keys as entries.",
+            "countercheck": "La lunghezza della lista comprende anche le chiavi ripetute.",
         }
         self.assertEqual(
             self.run_review([proposal], [refuted]),
@@ -228,12 +253,15 @@ class EngineTests(unittest.TestCase):
         assessment = {
             "id": 1,
             "outcome": "indeterminate",
-            "countercheck": "A test would need to observe concurrent readers.",
+            "countercheck": "Servirebbe osservare i lettori in un test di concorrenza.",
         }
         report = self.run_review([hypothesis(REFRESH)], [assessment])
         self.assertEqual(report["findings"], [])
         self.assertEqual(report["focus"], [])
-        self.assertIn("indeterminate", " ".join(report["limits"]))
+        self.assertEqual(
+            report["limits"],
+            ["Le prove disponibili non permettono di chiarire alcune ipotesi."],
+        )
 
     def test_vague_or_unverified_human_questions_are_rejected(self):
         for item in (
@@ -289,35 +317,50 @@ class EngineTests(unittest.TestCase):
                     kind="performance",
                     basis=LINEAR_METRIC,
                     comparison=None,
-                    title="Metric traverses the keys",
-                    impact="Large caches take longer to report the metric.",
-                    reason="Summing one per key visits N keys for N entries.",
-                    action="Check whether callers query this metric on every read.",
+                    title="La metrica scorre tutte le chiavi",
+                    impact="Calcolare la metrica richiede più tempo nelle cache grandi.",
+                    reason="La somma visita una chiave per ogni voce.",
+                    countercheck="Il conteggio viene ricalcolato a ogni chiamata.",
+                    action="Verifica se la metrica viene richiesta a ogni lettura.",
                 ),
             ],
         )
         self.assertEqual([item["line"] for item in report["findings"]], [2, 9])
         self.assertEqual([item["line"] for item in report["focus"]], [2, 9, 5])
+        self.assertIn(
+            "Il conteggio viene ricalcolato a ogni chiamata.",
+            report["focus"][1]["checked"],
+        )
+        self.assertEqual(
+            report["focus"][1]["action"],
+            "Verifica se la metrica viene richiesta a ogni lettura.",
+        )
 
     def test_malformed_responses_are_distinct_from_an_empty_review(self):
         empty = {"findings": [], "focus": [], "limits": []}
         self.assertEqual(self.run_review([], []), empty)
         self.assertEqual(self.ask.call_count, 2)
-        for key, responses in (
-            ("hypotheses", [{}]),
-            ("hypotheses", [{"complete": 1, "hypotheses": []}]),
-            ("assessments", [{"complete": True, "hypotheses": []}, {"complete": True}]),
+        for stage, responses in (
+            ("formulazione delle ipotesi", [{}]),
+            ("formulazione delle ipotesi", [{"complete": 1, "hypotheses": []}]),
+            (
+                "verifica delle ipotesi",
+                [{"complete": True, "hypotheses": []}, {"complete": True}],
+            ),
         ):
             with (
                 self.subTest(responses=responses),
-                self.assertRaisesRegex(RuntimeError, f"malformed {key}"),
+                self.assertRaisesRegex(
+                    RuntimeError, f"Risposta malformata del provider durante la {stage}"
+                ),
             ):
                 review(self.snapshot, self.scan, Mock(side_effect=responses))
 
     def test_provider_failure_does_not_expose_provider_text(self):
         ask = Mock(side_effect=RuntimeError("private provider response"))
         with self.assertRaisesRegex(
-            RuntimeError, r"^Review provider failed during hypotheses\.$"
+            RuntimeError,
+            r"^Errore del provider durante la formulazione delle ipotesi\.$",
         ):
             review(self.snapshot, self.scan, ask)
         ask.assert_called_once()
@@ -327,7 +370,9 @@ class EngineTests(unittest.TestCase):
             with self.subTest(items=items):
                 report = self.run_review([hypothesis()], items)
                 self.assertEqual(report["findings"], [])
-                self.assertIn("lacked a valid assessment", " ".join(report["limits"]))
+                self.assertIn(
+                    "Per alcune ipotesi manca una verifica valida.", report["limits"]
+                )
 
     def test_incomplete_passes_preserve_upstream_limits_and_valid_items(self):
         self.snapshot["limits"] = ["Context missing."]
@@ -347,26 +392,37 @@ class EngineTests(unittest.TestCase):
         ask = Mock()
         report = review(self.snapshot, self.scan, ask)
         ask.assert_not_called()
-        self.assertIn("size limit", " ".join(report["limits"]))
+        self.assertIn(
+            "Il materiale supera il limite di dimensione per la formulazione delle ipotesi.",
+            report["limits"],
+        )
 
     def test_excess_hypotheses_are_bounded_and_marked_partial(self):
         report = self.run_review([hypothesis() for _ in range(20)], [])
         self.assertEqual(self.ask.call_args.args[1]["hypotheses"], [])
-        self.assertIn("incomplete hypotheses", " ".join(report["limits"]))
+        self.assertIn(
+            "Risposta incompleta del provider durante la formulazione delle ipotesi.",
+            report["limits"],
+        )
 
     def test_excess_assessments_cannot_hide_conflicting_results(self):
         report = self.run_review(
             [hypothesis()], [confirmed()] + [None] * 12 + [confirmed()]
         )
         self.assertEqual(report["findings"], [])
-        self.assertIn("incomplete assessments", " ".join(report["limits"]))
+        self.assertIn(
+            "Risposta incompleta del provider durante la verifica delle ipotesi.",
+            report["limits"],
+        )
 
     def test_ambiguous_snapshot_paths_cannot_support_citations(self):
         self.snapshot["files"].append(deepcopy(self.snapshot["files"][0]))
         report = self.run_review([hypothesis()], [])
         self.assertEqual(report["findings"], [])
         self.assertEqual(self.ask.call_args.args[1]["hypotheses"], [])
-        self.assertIn("ambiguous source paths", " ".join(report["limits"]))
+        self.assertIn(
+            "Il materiale acquisito contiene percorsi ambigui.", report["limits"]
+        )
 
     def test_traversal_paths_in_the_snapshot_cannot_become_report_links(self):
         path = "../cache.py"
@@ -374,4 +430,6 @@ class EngineTests(unittest.TestCase):
         report = self.run_review([hypothesis({**CAPACITY, "path": path})], [])
         self.assertEqual(report["findings"], [])
         self.assertEqual(self.ask.call_args.args[1]["hypotheses"], [])
-        self.assertIn("invalid source paths", " ".join(report["limits"]))
+        self.assertIn(
+            "Il materiale acquisito contiene percorsi non validi.", report["limits"]
+        )

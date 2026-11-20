@@ -16,9 +16,13 @@ _MAX_QUOTE = 1_000
 _MAX_INPUT_BYTES = 900_000
 _SEVERITY = {"high": 0, "medium": 1, "low": 2}
 _BASIS_LABEL = {
-    "contract": "Documented behavior",
-    "convention": "Project rule",
-    "performance": "Static performance derivation",
+    "contract": "Comportamento documentato",
+    "convention": "Regola di progetto",
+    "performance": "Analisi statica delle prestazioni",
+}
+_PASS_LABEL = {
+    "hypotheses": "formulazione delle ipotesi",
+    "assessments": "verifica delle ipotesi",
 }
 
 _GROUNDING = """
@@ -30,7 +34,11 @@ source code. A proposed test and a runtime-only claim are not evidence.
 Return one JSON object. A citation is {"path": str, "line": int, "quote": str}
 with the full exact text of one nonblank line, including indentation, numbered
 from 1 in the named snapshot file. Use after (head) except where before (base) is
-explicitly specified. Use single-line descriptions of at most 400 characters and
+explicitly specified. Write all operator-facing prose in Italian, including
+expected, scenario, consequence, countercheck, title, impact, reason, action,
+question and alternatives. Keep JSON keys and enum values exactly as specified.
+Copy source quotes and paths verbatim, without translating them.
+Use single-line descriptions of at most 400 characters and
 quotes of at most 1000 characters. Set complete to false if a bound or missing
 material prevented coverage; an empty list with complete true is a valid result.
 """
@@ -54,8 +62,8 @@ Challenge every hypothesis against the final revision. Look for callers, guards,
 tests and existing behavior that would defeat it. Return
 {{"complete": bool, "assessments": [...]}} with exactly one assessment per input
 id. Every assessment starts with {{"id": int, "outcome": str, "countercheck": str}}.
-Describe the actual disconfirming check in countercheck. Add only the fields for
-the selected outcome:
+Use countercheck to describe the concrete condition you checked and what you
+found. Add only the fields for the selected outcome:
 - refuted: "basis" (head citation showing the counterevidence).
 - indeterminate: no additional fields. Use this for missing evidence, runtime-only
   questions and anything requiring an unavailable source or result.
@@ -80,19 +88,20 @@ Assess impact for users of the software. Report only the scoped behavior you che
 )
 
 
+_Revision = Literal["base", "head"]
+_Attribution = Literal["introduced", "preexisting", "unknown"]
+_Source = dict[str, dict[_Revision, list[str]]]
+
+
 @dataclass(frozen=True)
 class _Citation:
     path: str
     line: int
     quote: str
 
-    def render(self, revision: str) -> str:
-        return f"{revision} {self.path}:{self.line} {json.dumps(self.quote, ensure_ascii=False)}"
-
-
-_Revision = Literal["base", "head"]
-_Attribution = Literal["introduced", "preexisting", "unknown"]
-_Source = dict[str, dict[_Revision, list[str]]]
+    def render(self, revision: _Revision) -> str:
+        label = "Revisione base" if revision == "base" else "Revisione proposta"
+        return f"{label} {self.path}:{self.line} «{self.quote}»"
 
 
 def _lines(source: str) -> list[str]:
@@ -142,24 +151,25 @@ def _call(
     key: str,
     limits: list[str],
 ) -> list | None:
+    stage = _PASS_LABEL[key]
     # Account for the nested JSON string in the provider's actual request encoding.
     if len(json.dumps(json.dumps(data, ensure_ascii=False))) > _MAX_INPUT_BYTES:
-        limits.append(f"Review input exceeded the size limit for {key}.")
+        limits.append(f"Il materiale supera il limite di dimensione per la {stage}.")
         return None
     try:
         response = ask(system, data)
     except (OSError, RuntimeError, ValueError):
-        raise RuntimeError(f"Review provider failed during {key}.") from None
+        raise RuntimeError(f"Errore del provider durante la {stage}.") from None
     if (
         not isinstance(response, dict)
         or response.keys() != {"complete", key}
         or type(response["complete"]) is not bool
         or not isinstance(response[key], list)
     ):
-        raise RuntimeError(f"Review provider returned malformed {key}.")
+        raise RuntimeError(f"Risposta malformata del provider durante la {stage}.")
     items = response[key]
     if not response["complete"] or len(items) > _MAX_HYPOTHESES:
-        limits.append(f"Review provider returned incomplete {key}.")
+        limits.append(f"Risposta incompleta del provider durante la {stage}.")
     if len(items) > _MAX_HYPOTHESES:
         return []
     return items
@@ -225,8 +235,8 @@ def _confirmed(
     reason = _text(item["reason"])
     impact = _text(item["impact"])
     evidence = [
-        f"Static source assessment. {reason}",
-        f"Countercheck considered in source review. {countercheck}",
+        f"Analisi statica del codice. {reason}",
+        f"Verifica mirata. {countercheck}",
     ]
     evidence.extend(
         cite.render("head") for cite in dict.fromkeys([anchor, basis, *support])
@@ -243,7 +253,7 @@ def _confirmed(
     focus = Focus(
         path=anchor.path,
         line=anchor.line,
-        checked=f"{_BASIS_LABEL[kind]} at {basis.path}:{basis.line}.",
+        checked=f"{_BASIS_LABEL[kind]} in {basis.path}:{basis.line}. {countercheck}",
         outcome=impact,
         action=_text(item["action"]),
     )
@@ -265,9 +275,9 @@ def _human(item: dict, anchor: _Citation, basis: _Citation) -> Focus:
     return Focus(
         path=anchor.path,
         line=anchor.line,
-        checked=f"Static source review. {anchor.render('head')}\n{basis.render('head')}",
+        checked=f"Analisi statica del codice. {anchor.render('head')}\n{basis.render('head')}",
         outcome=_text(item["reason"]),
-        action=f"{question} The options are “{first}” and “{second}”.",
+        action=f"{question} Le opzioni sono «{first}» e «{second}».",
     )
 
 
@@ -295,9 +305,9 @@ def review(snapshot: Snapshot, scan: Scan, ask: Callable[[str, dict], dict]) -> 
     report = Report(focus=[], findings=[], limits=limits)
     paths = Counter(file["path"] for file in snapshot["files"])
     if any(count > 1 for count in paths.values()):
-        limits.append("The snapshot contained ambiguous source paths.")
+        limits.append("Il materiale acquisito contiene percorsi ambigui.")
     if not all(map(_valid_path, paths)):
-        limits.append("The snapshot contained invalid source paths.")
+        limits.append("Il materiale acquisito contiene percorsi non validi.")
     source: _Source = {
         file["path"]: {"base": _lines(file["before"]), "head": _lines(file["after"])}
         for file in snapshot["files"]
@@ -329,7 +339,7 @@ def review(snapshot: Snapshot, scan: Scan, ask: Callable[[str, dict], dict]) -> 
         anchors[label] = anchor
         hypotheses.append({"id": label, "anchor": item["anchor"], **details})
     if len(hypotheses) != len(proposed):
-        limits.append("Some review hypotheses had invalid details or source citations.")
+        limits.append("Alcune ipotesi contengono dettagli o citazioni non validi.")
 
     assessed = _call(
         ask, _CHALLENGE, {**data, "hypotheses": hypotheses}, "assessments", limits
@@ -383,15 +393,11 @@ def review(snapshot: Snapshot, scan: Scan, ask: Callable[[str, dict], dict]) -> 
             invalid = True
 
     if invalid:
-        limits.append(
-            "Some review assessments had invalid details or source citations."
-        )
+        limits.append("Alcune verifiche contengono dettagli o citazioni non validi.")
     if anchors.keys() - checked:
-        limits.append("Some review hypotheses lacked a valid assessment.")
+        limits.append("Per alcune ipotesi manca una verifica valida.")
     if indeterminate:
-        limits.append(
-            "Some review hypotheses remained indeterminate on the available evidence."
-        )
+        limits.append("Le prove disponibili non permettono di chiarire alcune ipotesi.")
 
     seen = set()
     for _, identity, finding in sorted(findings, key=lambda item: item[0]):
