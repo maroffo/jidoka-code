@@ -35,7 +35,8 @@ const BOT_TOKEN_REQUIRED: &str = "Set JIDOKA_BOT_TOKEN to enable automatic revie
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS automation_provider (
+        "CREATE TABLE IF NOT EXISTS authorized_repositories (repo TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS automation_provider (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             label TEXT NOT NULL
         );
@@ -217,6 +218,40 @@ pub fn last_error(conn: &Connection, repo: &str) -> rusqlite::Result<Option<Stri
         .flatten())
 }
 
+pub(crate) fn repositories(
+    conn: &Connection,
+    configured: &HashSet<String>,
+) -> rusqlite::Result<HashSet<String>> {
+    let mut repos = configured.clone();
+    let mut stmt = conn.prepare("SELECT repo FROM authorized_repositories")?;
+    for repo in stmt.query_map([], |row| row.get::<_, String>(0))? {
+        repos.insert(repo?);
+    }
+    Ok(repos)
+}
+
+pub fn repositories_at(db: &Path, configured: &HashSet<String>) -> Result<HashSet<String>> {
+    Ok(repositories(&open(db)?, configured)?)
+}
+
+pub(crate) fn authorize(
+    conn: &Connection,
+    repo: &str,
+    preconfigured: bool,
+) -> rusqlite::Result<()> {
+    let tx = immediate(conn)?;
+    if tx.execute(
+        "INSERT INTO authorized_repositories(repo) VALUES (?1) ON CONFLICT DO NOTHING",
+        [repo],
+    )? != 0
+        && !preconfigured
+    {
+        // An old environment configuration may have left an automatic mode behind.
+        update_mode(&tx, repo, "manual")?;
+    }
+    tx.commit()
+}
+
 pub fn set_mode(conn: &Connection, repo: &str, mode: &str) -> Result<()> {
     save_mode(conn, repo, mode, bot_token().as_deref())
 }
@@ -241,7 +276,13 @@ fn save_mode(conn: &Connection, repo: &str, mode: &str, token: Option<&str>) -> 
             "The review provider must be configured before enabling automation."
         );
     }
-    let changed = tx.execute(
+    update_mode(&tx, &repo, mode)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn update_mode(conn: &Connection, repo: &str, mode: &str) -> rusqlite::Result<()> {
+    let changed = conn.execute(
         "INSERT INTO automation_settings (repo, mode) VALUES (?1, ?2)
          ON CONFLICT (repo) DO UPDATE SET mode = excluded.mode,
             generation = generation + 1,
@@ -251,10 +292,9 @@ fn save_mode(conn: &Connection, repo: &str, mode: &str, token: Option<&str>) -> 
         params![repo, mode],
     )?;
     if changed != 0 && mode == "manual" {
-        tx.execute("DELETE FROM automation_seen WHERE repo = ?1", [&repo])?;
-        cancel_jobs(&tx, Some(&repo), DISABLED)?;
+        conn.execute("DELETE FROM automation_seen WHERE repo = ?1", [repo])?;
+        cancel_jobs(conn, Some(repo), DISABLED)?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -879,7 +919,9 @@ fn publish_ready_with(
 
 /// Publish finished jobs using the last poll. The publisher rechecks the live PR before posting.
 pub fn publish_ready(db: &Path, provider: &str, repos: &HashSet<String>) -> Result<()> {
-    publish_ready_with(&open(db)?, provider, repos, |report, number, inline| {
+    let conn = open(db)?;
+    let allowed = repositories(&conn, repos)?;
+    publish_ready_with(&conn, provider, &allowed, |report, number, inline| {
         publish_report(db, report, number, inline)
     })
 }
@@ -887,11 +929,12 @@ pub fn publish_ready(db: &Path, provider: &str, repos: &HashSet<String>) -> Resu
 /// Poll once. The worker calls this periodically between reviews.
 pub fn tick(db: &Path, provider: &str, repos: &HashSet<String>) -> Result<()> {
     let conn = open(db)?;
+    let allowed = repositories(&conn, repos)?;
     let mut client = None;
     tick_with(
         &conn,
         provider,
-        repos,
+        &allowed,
         |repo| {
             if client.is_none() {
                 client = Some(github_client()?);

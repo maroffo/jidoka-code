@@ -10,10 +10,9 @@ When you repeat a review with the same provider and both Git revisions still mat
 
 ## Getting started
 
-Create a local `.env` file listing the repositories to review and the provider authorized to receive their code. Use the full URL of a Chat Completions endpoint that supports JSON output. Jidoka connects directly to that endpoint even when a proxy is configured in the shell.
+Create a local `.env` file with the provider authorized to receive their code. Use the full URL of a Chat Completions endpoint that supports JSON output. Jidoka connects directly to that endpoint even when a proxy is configured in the shell.
 
 ```dotenv
-JIDOKA_REPOS=organization/project
 JIDOKA_PROVIDER_URL=https://provider.example/v1/chat/completions
 JIDOKA_MODEL=your-model
 JIDOKA_API_KEY=
@@ -24,7 +23,9 @@ JIDOKA_GITHUB_TOKEN=
 docker compose up --build
 ```
 
-For private repositories, set `JIDOKA_GITHUB_TOKEN` to a GitHub token with read access to contents and pull requests. If the PR comes from a private fork, include that fork in `JIDOKA_REPOS` too. Public repositories can be reviewed without a token.
+Open [Repositories](http://localhost:8080/repositories), enter `owner/repository` or its GitHub URL, and choose **Authorize repository**. The repository is available immediately in manual mode. Jidoka saves the authorization in the `reviews` volume. You can also preconfigure repositories with the optional comma-separated `JIDOKA_REPOS` variable.
+
+For private repositories, set `JIDOKA_GITHUB_TOKEN` to a GitHub token with read access to contents and pull requests. If the PR comes from a private fork, authorize that fork under **Repositories** too. Public repositories can be reviewed without a token.
 
 Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the provider before submitting. The service listens on the loopback interface for one trusted user. The `reviews` volume stores the SQLite history and supports reports from the Python pilot. Existing reports retain their original text.
 
