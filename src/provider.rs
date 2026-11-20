@@ -20,7 +20,7 @@ pub struct Provider {
 
 impl Provider {
     pub fn new(address: &str, model: &str, key: String) -> Result<Self> {
-        let endpoint = Url::parse(address).context("URL del provider non valido")?;
+        let endpoint = Url::parse(address).context("Invalid provider URL")?;
         let host = endpoint.host_str().unwrap_or("");
         ensure!(
             !host.is_empty()
@@ -28,21 +28,21 @@ impl Provider {
                 && endpoint.password().is_none()
                 && endpoint.query().is_none()
                 && endpoint.fragment().is_none(),
-            "URL del provider non valido"
+            "Invalid provider URL"
         );
         ensure!(
             endpoint.scheme() == "https"
                 || (endpoint.scheme() == "http"
                     && matches!(host, "localhost" | "127.0.0.1" | "[::1]")),
-            "Il provider remoto richiede HTTPS"
+            "Remote providers require HTTPS"
         );
         let model = model.trim();
-        ensure!(!model.is_empty(), "Specificare il modello");
+        ensure!(!model.is_empty(), "Specify a model");
         let authorization = if key.is_empty() {
             None
         } else {
             let mut value = HeaderValue::from_str(&format!("Bearer {key}"))
-                .context("Chiave API del provider non valida")?;
+                .context("Invalid provider API key")?;
             value.set_sensitive(true);
             Some(value)
         };
@@ -71,7 +71,10 @@ impl Provider {
                 {"role":"user","content":serde_json::to_string(data)?}],
             "response_format":{"type":"json_object"}
         }))?;
-        ensure!(body.len() <= MAX_BYTES, "Richiesta troppo grande");
+        ensure!(
+            body.len() <= MAX_BYTES,
+            "Provider request exceeds the size limit"
+        );
         let mut request = self
             .client
             .post(self.endpoint.clone())
@@ -80,16 +83,19 @@ impl Provider {
         if let Some(authorization) = &self.authorization {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
-        let response = request.send().context("Provider non disponibile")?;
+        let response = request.send().context("Provider is unavailable")?;
         ensure!(
             response.status().is_success(),
-            "Richiesta al provider rifiutata"
+            "The provider rejected the request"
         );
         let mut bytes = Vec::new();
         response
             .take(MAX_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= MAX_BYTES, "Risposta troppo grande");
+        ensure!(
+            bytes.len() <= MAX_BYTES,
+            "Provider response exceeds the size limit"
+        );
         decode_reply(&bytes)
     }
 }
@@ -97,13 +103,16 @@ impl Provider {
 fn decode_reply(bytes: &[u8]) -> Result<Value> {
     let reply: Value = serde_json::from_slice(bytes)?;
     let first = &reply["choices"][0];
-    ensure!(first["finish_reason"] == "stop", "Risposta incompleta");
+    ensure!(
+        first["finish_reason"] == "stop",
+        "Incomplete provider response"
+    );
     let value: Value = serde_json::from_str(
         first["message"]["content"]
             .as_str()
-            .context("Testo assente")?,
+            .context("Provider response is missing text")?,
     )?;
-    ensure!(value.is_object(), "Oggetto JSON atteso");
+    ensure!(value.is_object(), "Expected a JSON object");
     Ok(value)
 }
 
@@ -139,7 +148,7 @@ mod tests {
                 format!("synthetic-secret{suffix}"),
             );
             let error = result.err().expect("Expected an invalid API key");
-            assert!(error.to_string().contains("Chiave API"));
+            assert!(error.to_string().contains("API key"));
             assert!(!format!("{error:#}").contains("synthetic-secret"));
         }
     }
@@ -263,7 +272,7 @@ mod tests {
             p.ask("", &json!("x".repeat(MAX_BYTES)))
                 .unwrap_err()
                 .to_string(),
-            "Richiesta troppo grande"
+            "Provider request exceeds the size limit"
         );
     }
 }

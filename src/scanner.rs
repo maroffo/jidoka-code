@@ -53,12 +53,12 @@ fn targets<'a>(snapshot: &'a Snapshot, limits: &mut Vec<String>) -> Vec<(&'a str
             continue;
         }
         if !safe_path(path) || counts[path] != 1 {
-            limits.push("File escluso dalla scansione per percorso non valido o duplicato.".into());
+            limits.push("Skipped files with invalid or duplicate paths.".into());
         } else if targets.len() >= TARGETS
             || text.len() > remaining.min(TARGET_BYTES)
             || text.contains('\0')
         {
-            limits.push(format!("File fuori dai limiti di scansione: {path}."));
+            limits.push(format!("File {path} exceeds scan limits."));
         } else {
             remaining -= text.len();
             targets.push((path, text));
@@ -109,7 +109,7 @@ impl<'a> Prepared<'a> {
             if result.is_ok() {
                 files.push((path, text.lines().count()));
             } else {
-                limits.push(format!("Copia temporanea non disponibile per {path}."));
+                limits.push(format!("Could not create a temporary copy of {path}."));
             }
         }
         Ok(Self {
@@ -167,9 +167,9 @@ enum RunError {
 impl RunError {
     fn description(&self) -> &'static str {
         match self {
-            Self::Deadline => "Semgrep ha superato il tempo massimo di scansione.",
-            Self::Size => "L'output di Semgrep supera il limite di dimensione.",
-            Self::Io => "Impossibile eseguire Semgrep in locale.",
+            Self::Deadline => "Semgrep exceeded the scan time limit.",
+            Self::Size => "Semgrep output exceeded the size limit.",
+            Self::Io => "Could not run Semgrep locally.",
         }
     }
 }
@@ -281,7 +281,7 @@ fn result(output: &[u8], targets: &[(&str, usize)], report: &mut Scan) {
     let Ok(output) = serde_json::from_slice::<SemgrepOutput>(output) else {
         report
             .limits
-            .push("Semgrep ha restituito un risultato non valido.".into());
+            .push("Semgrep returned an invalid result.".into());
         return;
     };
     if let Some(version) = output.version.filter(|version| {
@@ -295,7 +295,7 @@ fn result(output: &[u8], targets: &[(&str, usize)], report: &mut Scan) {
     } else {
         report
             .limits
-            .push("Semgrep non ha indicato una versione valida.".into());
+            .push("Semgrep version is missing or invalid.".into());
     }
 
     let scanned: HashSet<_> = output
@@ -311,14 +311,12 @@ fn result(output: &[u8], targets: &[(&str, usize)], report: &mut Scan) {
         .filter_map(|error| error["path"].as_str().map(normalize))
         .collect();
     if !output.errors.is_empty() {
-        report
-            .limits
-            .push("Semgrep ha segnalato errori durante la scansione.".into());
+        report.limits.push("Semgrep reported scan errors.".into());
     }
     if scanned.iter().any(|path| !target_lines.contains_key(path)) {
         report
             .limits
-            .push("Semgrep ha indicato percorsi estranei alla scansione.".into());
+            .push("Semgrep reported paths outside the scan.".into());
     }
 
     let mut covered = HashSet::new();
@@ -326,7 +324,7 @@ fn result(output: &[u8], targets: &[(&str, usize)], report: &mut Scan) {
         if error_paths.contains(path) {
             report
                 .limits
-                .push(format!("Semgrep non ha completato la scansione di {path}."));
+                .push(format!("Semgrep failed to finish scanning {path}."));
         } else if scanned.contains(path) {
             covered.insert(path);
             report.covered.push(path.to_owned());
@@ -335,7 +333,7 @@ fn result(output: &[u8], targets: &[(&str, usize)], report: &mut Scan) {
     if targets.len() != covered.len() {
         report
             .limits
-            .push("Semgrep non ha coperto tutti i file preparati.".into());
+            .push("Semgrep coverage is incomplete for the prepared files.".into());
     }
 
     let mut misplaced = false;
@@ -359,7 +357,7 @@ fn result(output: &[u8], targets: &[(&str, usize)], report: &mut Scan) {
         if report.signals.len() == SIGNALS {
             report
                 .limits
-                .push("Segnalazioni Semgrep oltre il limite di pubblicazione.".into());
+                .push("Semgrep findings exceeded the reporting limit.".into());
             break;
         }
         report.signals.push(Signal {
@@ -372,7 +370,7 @@ fn result(output: &[u8], targets: &[(&str, usize)], report: &mut Scan) {
     if misplaced {
         report
             .limits
-            .push("Semgrep ha restituito segnalazioni con dati o posizioni non validi.".into());
+            .push("Semgrep returned findings with invalid data or locations.".into());
     }
 }
 
@@ -408,19 +406,17 @@ fn scan_using(snapshot: &Snapshot, configured_path: impl FnOnce() -> Option<OsSt
     let Some(executable) = executable(&directories) else {
         report
             .limits
-            .push("Semgrep CE non è disponibile per i file con regole applicabili.".into());
+            .push("Semgrep CE is unavailable for files with applicable rules.".into());
         return report;
     };
     let Ok(search_path) = env::join_paths(directories) else {
-        report
-            .limits
-            .push("Percorso di ricerca di Semgrep non valido.".into());
+        report.limits.push("Invalid Semgrep search path.".into());
         return report;
     };
     let Ok(prepared) = Prepared::new(targets, &mut report.limits) else {
         report
             .limits
-            .push("Impossibile preparare la scansione Semgrep.".into());
+            .push("Could not prepare the Semgrep scan.".into());
         return report;
     };
     if prepared.files.is_empty() {
@@ -433,9 +429,7 @@ fn scan_using(snapshot: &Snapshot, configured_path: impl FnOnce() -> Option<OsSt
     ) {
         Ok((status, output)) => {
             if !status.success() {
-                report
-                    .limits
-                    .push("Semgrep si è interrotto con un errore.".into());
+                report.limits.push("Semgrep exited with an error.".into());
             }
             result(&output, &prepared.files, &mut report);
         }
@@ -513,7 +507,7 @@ mod tests {
         assert!(
             scan.limits
                 .iter()
-                .any(|limit| limit.contains("non è disponibile"))
+                .any(|limit| limit.contains("is unavailable"))
         );
     }
 
@@ -531,7 +525,7 @@ mod tests {
         let mut limits = Vec::new();
         let targets = targets(&input, &mut limits);
         assert_eq!(targets, [(path, "ready: bool\r\n")]);
-        assert!(limits.iter().any(|limit| limit.contains("duplicato")));
+        assert!(limits.iter().any(|limit| limit.contains("duplicate paths")));
         assert!(limits.iter().any(|limit| limit.contains("oversized.py")));
         let work = {
             let prepared = Prepared::new(targets, &mut limits).unwrap();
@@ -624,8 +618,8 @@ printf '%s\n' '{"version":"1.146.0","paths":{"scanned":["app.py"]},"errors":[],"
         assert_eq!(
             report.limits,
             [
-                "File escluso dalla scansione per percorso non valido o duplicato.",
-                "File fuori dai limiti di scansione: oversized.py.",
+                "Skipped files with invalid or duplicate paths.",
+                "File oversized.py exceeds scan limits.",
             ]
         );
     }
@@ -657,9 +651,9 @@ printf '%s\n' '{"version":"1.146.0","paths":{"scanned":["app.py"]},"errors":[],"
         );
         for message in [
             "broken.py",
-            "posizioni non validi",
-            "non ha coperto",
-            "percorsi estranei",
+            "invalid data or locations",
+            "coverage is incomplete",
+            "paths outside the scan",
         ] {
             assert!(
                 scan.limits.iter().any(|limit| limit.contains(message)),

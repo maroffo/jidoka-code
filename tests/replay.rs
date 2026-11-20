@@ -1,4 +1,5 @@
-// Expected reports come from jidoka.engine.review at Python pilot commit 75700b6.
+// The cases and expected outcomes come from the Python pilot at commit 75700b6.
+// Human-facing fixture text is translated to English. Source quotes and protocol values are verbatim.
 use jidoka_code::{
     contracts::{Scan, Snapshot},
     engine,

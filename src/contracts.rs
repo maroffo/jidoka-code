@@ -78,7 +78,7 @@ pub struct GitHubRateLimit;
 
 impl std::fmt::Display for GitHubRateLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Quota GitHub esaurita. Riprova dopo il rinnovo della quota.")
+        f.write_str("GitHub API rate limit reached. Try again after the limit resets.")
     }
 }
 impl std::error::Error for GitHubRateLimit {}

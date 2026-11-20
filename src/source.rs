@@ -75,10 +75,10 @@ fn pull_url(url: &str, allowed: &HashSet<String>) -> Result<(String, u64)> {
         }
         Some((repo.to_ascii_lowercase(), tail.parse().ok()?))
     }
-    let (repo, number) = parse(url).context("Serve un URL HTTPS di una pull request GitHub.")?;
+    let (repo, number) = parse(url).context("Enter an HTTPS URL for a GitHub pull request.")?;
     ensure!(
         allowed.iter().any(|name| name.eq_ignore_ascii_case(&repo)),
-        "Il repository non è nell'elenco autorizzato."
+        "This repository is not on the allowlist."
     );
     Ok((repo, number))
 }
@@ -107,7 +107,7 @@ fn sha(sha: &str) -> Result<&str> {
             && sha
                 .bytes()
                 .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
-        "Identificativo Git non valido."
+        "Invalid Git object ID."
     );
     Ok(sha)
 }
@@ -127,7 +127,7 @@ fn validate_status(status: StatusCode, remaining: Option<&HeaderValue>) -> Resul
     }
     ensure!(
         status.is_success(),
-        "GitHub non ha restituito i dati richiesti."
+        "GitHub failed to return the requested data."
     );
     Ok(())
 }
@@ -141,7 +141,7 @@ impl Transport for Http {
             .header("X-GitHub-Api-Version", "2022-11-28")
             .timeout(timeout)
             .send()
-            .map_err(|_| anyhow!("Richiesta a GitHub non riuscita."))?;
+            .map_err(|_| anyhow!("GitHub request failed."))?;
         validate_status(
             response.status(),
             response.headers().get("x-ratelimit-remaining"),
@@ -194,7 +194,7 @@ impl<T: Transport> GitHub<T> {
             .min(REQUEST_TIME);
         ensure!(
             self.requests > reserve && budget > 0 && !timeout.is_zero(),
-            "Limite GitHub raggiunto."
+            "GitHub collection budget exhausted."
         );
         self.requests -= 1;
         let mut response = self
@@ -209,28 +209,28 @@ impl<T: Transport> GitHub<T> {
         self.remaining = self.remaining.saturating_sub(bytes.len());
         ensure!(
             read.is_ok() && bytes.len() <= budget,
-            "Risposta GitHub incompleta o troppo grande."
+            "GitHub response was incomplete or too large."
         );
-        serde_json::from_slice(&bytes).map_err(|_| anyhow!("Dati GitHub non validi."))
+        serde_json::from_slice(&bytes).map_err(|_| anyhow!("Invalid GitHub response data."))
     }
 
     fn blob(&mut self, repo: &str, id: &str, size: usize) -> Result<Option<String>> {
         sha(id)?;
-        ensure!(size <= BLOB_BYTES, "File troppo grande.");
+        ensure!(size <= BLOB_BYTES, "File exceeds the size limit.");
         if let Some((known_size, text)) = self.blobs.get(id) {
-            ensure!(*known_size == size, "Dimensione Git incoerente.");
+            ensure!(*known_size == size, "Git blob size mismatch.");
             return Ok(text.clone());
         }
         let blob: GitBlob = self.get(&format!("{repo}/git/blobs/{id}"), 40_000, false)?;
-        ensure!(blob.encoding == "base64", "Codifica Git non supportata.");
+        ensure!(blob.encoding == "base64", "Unsupported Git blob encoding.");
         let bytes = STANDARD.decode(blob.content.replace(['\n', '\r'], ""))?;
-        ensure!(bytes.len() == size, "Dimensione Git incoerente.");
+        ensure!(bytes.len() == size, "Git blob size mismatch.");
         let mut hash = Sha1::new();
         hash.update(format!("blob {size}\0"));
         hash.update(&bytes);
         ensure!(
             hex::encode(hash.finalize()) == id,
-            "Contenuto Git incoerente."
+            "Git blob content mismatch."
         );
         let text = if bytes.contains(&0) {
             None
@@ -270,7 +270,7 @@ impl Revision {
         sha(&self.sha)?;
         ensure!(
             !self.repo.private && valid_repo(&self.repo.full_name),
-            "Il repository deve essere pubblico."
+            "The repository must be public."
         );
         self.repo.full_name.make_ascii_lowercase();
         Ok(())
@@ -293,7 +293,7 @@ impl Pull {
         self.head.validate()?;
         ensure!(
             self.number == number && self.base.repo.full_name == repo,
-            "Pull request inattesa."
+            "Unexpected pull request."
         );
         Ok(())
     }
@@ -362,11 +362,11 @@ impl<'a> Tree<'a> {
                 64_000,
                 false,
             )?;
-            ensure!(commit.sha == self.commit, "Commit Git inatteso.");
+            ensure!(commit.sha == self.commit, "Unexpected Git commit.");
             sha(&commit.tree.sha)?;
             self.root = Some(commit.tree.sha);
         }
-        self.root.as_deref().context("Albero Git assente.")
+        self.root.as_deref().context("Git tree is missing.")
     }
 
     fn directory<T: Transport>(&mut self, hub: &mut GitHub<T>, path: &str) -> Result<&Directory> {
@@ -378,7 +378,7 @@ impl<'a> Tree<'a> {
         self.directories
             .get(path)
             .and_then(Option::as_ref)
-            .context("Directory Git non disponibile.")
+            .context("Git directory is unavailable.")
     }
 
     fn load_directory<T: Transport>(
@@ -402,7 +402,7 @@ impl<'a> Tree<'a> {
         let data: TreeData = hub.get(&format!("{}/git/trees/{id}", self.repo), RESPONSE, false)?;
         ensure!(
             data.sha == id && !data.truncated,
-            "Albero Git inatteso o troncato."
+            "Unexpected or truncated Git tree."
         );
         let mut entries = Directory::new();
         for entry in data.tree {
@@ -410,7 +410,7 @@ impl<'a> Tree<'a> {
                 !entry.path.is_empty()
                     && !entry.path.contains('/')
                     && !entries.contains_key(&entry.path),
-                "Percorso ambiguo nell'albero Git."
+                "Ambiguous path in the Git tree."
             );
             entries.insert(entry.path.clone(), entry);
         }
@@ -425,10 +425,10 @@ impl<'a> Tree<'a> {
         };
         let size = entry
             .file_size()
-            .context("La voce Git non è un file regolare.")?;
+            .context("Git entry must be a regular file.")?;
         hub.blob(repo, &entry.sha, size)?
             .map(Some)
-            .context("Il file non è testo UTF-8.")
+            .context("File must contain UTF-8 text.")
     }
 
     fn inventory<T: Transport>(
@@ -444,19 +444,18 @@ impl<'a> Tree<'a> {
                 INVENTORY_BYTES,
                 false,
             )?;
-            ensure!(data.sha == root, "Inventario Git inatteso.");
+            ensure!(data.sha == root, "Unexpected Git tree listing.");
             Ok(data)
         });
         if let Ok(data) = recursive {
             if data.truncated {
-                limits.push("L'inventario Git del contesto è troncato.".into());
+                limits.push("The Git tree listing for context is truncated.".into());
             }
             return data.tree;
         }
         // Large repositories can exceed the inventory cap. Keep the directly relevant directories.
         limits.push(
-            "Inventario Git non disponibile. La ricerca di contesto usa le directory vicine."
-                .into(),
+            "Git tree listing is unavailable. Context discovery uses nearby directories.".into(),
         );
         let mut dirs: BTreeSet<&str> = changed.iter().map(|file| parent(&file.path).0).collect();
         dirs.extend(["", "docs", "test", "tests", "spec"]);
@@ -529,7 +528,7 @@ impl Change {
         }
         if self.changes != Some(0) || self.patch.is_some() {
             limits.push(format!(
-                "Patch mancante, incompleta o troppo grande per {}.",
+                "Patch is missing, incomplete, or too large for {}.",
                 self.filename
             ));
         }
@@ -578,7 +577,7 @@ fn intent<T: Transport>(
     }
     if messages.len() as u64 != total {
         limits.push(format!(
-            "Messaggi dei commit parziali ({} su {total}).",
+            "Commit messages are incomplete ({} of {total}).",
             (messages.len() as u64).min(total)
         ));
     }
@@ -603,7 +602,7 @@ fn intent<T: Transport>(
         }
     }
     if truncated {
-        limits.push("Titolo, descrizione e messaggi superano il limite di testo.".into());
+        limits.push("The title, description, and commit messages exceed the text limit.".into());
     }
     output
 }
@@ -621,7 +620,7 @@ fn read_source<T: Transport>(
         _ => {}
     }
     limits.push(format!(
-        "Testo non disponibile o fuori limite per {path} a {}.",
+        "Text for {path} at {} is unavailable or exceeds the limit.",
         &tree.commit[..12]
     ));
     String::new()
@@ -638,7 +637,7 @@ fn add_file(
         *remaining -= size;
         files.push(file);
     } else {
-        limits.push(format!("Il limite di testo esclude {}.", file.path));
+        limits.push(format!("Excluded {} due to the text limit.", file.path));
     }
 }
 
@@ -728,7 +727,7 @@ fn contract(path: &str) -> bool {
             | "contracts"
             | "specification"
             | "specifications"
-            | "specifiche"
+            | "specifiche" // Recognize repositories that use the Italian name for specifications.
             | "design"
             | "architecture"
             | "openapi"
@@ -885,7 +884,7 @@ fn append_context<T: Transport>(
         .any(|(index, candidate)| candidate.plausible && !picked.contains(&index))
     {
         limits.push(format!(
-            "La ricerca ha letto al massimo {CONTEXT_PROBES} file di contesto candidati."
+            "Context discovery examined at most {CONTEXT_PROBES} candidate files."
         ));
     }
     let mut ranked = Vec::new();
@@ -909,12 +908,12 @@ fn append_context<T: Transport>(
                 }
             }
             Ok(None) => {}
-            Err(_) => limits.push("Alcuni file di contesto non sono disponibili.".into()),
+            Err(_) => limits.push("Some context files are unavailable.".into()),
         }
     }
     ranked.sort_by(|(x, a, _), (y, b, _)| y.cmp(x).then(a.cmp(b)));
     if ranked.len() > CONTEXT_FILES {
-        limits.push(format!("Contesto limitato a {CONTEXT_FILES} file."));
+        limits.push(format!("Context is limited to {CONTEXT_FILES} files."));
     }
     for (_, path, after) in ranked.into_iter().take(CONTEXT_FILES) {
         let before = read_source(hub, base, path, false, limits);
@@ -944,7 +943,7 @@ fn pinned<T: Transport>(hub: &mut GitHub<T>, repo: String, number: u64) -> Resul
             .repo
             .full_name
             .split_once('/')
-            .context("Fork GitHub non valido.")?;
+            .context("Invalid GitHub fork.")?;
         format!("{owner}:{}", pull.head.sha)
     };
     let route = format!("{repo}/compare/{}...{head_ref}", pull.base.sha);
@@ -955,17 +954,17 @@ fn pinned<T: Transport>(hub: &mut GitHub<T>, repo: String, number: u64) -> Resul
     )?;
     ensure!(
         first.base_commit.sha == pull.base.sha,
-        "Base del confronto Git inattesa."
+        "Unexpected base commit in the Git comparison."
     );
     let base = sha(&first.merge_base_commit.sha)?;
     let changes = first
         .files
         .as_deref()
-        .context("Elenco modifiche GitHub assente.")?;
+        .context("GitHub's list of changed files is missing.")?;
     let mut limits = Vec::new();
     if changes.len() as u64 != pull.changed_files || changes.len() > CHANGED_FILES {
         limits.push(format!(
-            "Elenco modifiche parziale ({} su {}).",
+            "Changed file list is incomplete ({} of {}).",
             changes.len().min(CHANGED_FILES),
             pull.changed_files
         ));
@@ -984,18 +983,18 @@ fn pinned<T: Transport>(hub: &mut GitHub<T>, repo: String, number: u64) -> Resul
     for change in changes.iter().take(CHANGED_FILES) {
         let path = &change.filename;
         let Some(previous) = change.previous().filter(|previous| safe_path(previous)) else {
-            limits.push("Alcune modifiche hanno percorsi non validi o duplicati.".into());
+            limits.push("Some changes have invalid or duplicate paths.".into());
             continue;
         };
         if !safe_path(path) || !seen.insert(path) {
-            limits.push("Alcune modifiche hanno percorsi non validi o duplicati.".into());
+            limits.push("Some changes have invalid or duplicate paths.".into());
             continue;
         }
         if !matches!(
             change.status.as_str(),
             "added" | "removed" | "modified" | "renamed" | "changed"
         ) {
-            limits.push(format!("Tipo di modifica non supportato per {path}."));
+            limits.push(format!("Unsupported change type for {path}."));
             continue;
         }
         let patch = change.patch(&mut limits);
@@ -1034,7 +1033,7 @@ fn pinned<T: Transport>(hub: &mut GitHub<T>, repo: String, number: u64) -> Resul
     let mut final_pull: Pull = hub.get(&pull_route, PULL_BYTES, true)?;
     final_pull.validate(&repo, number)?;
     if !pull.same_revisions(&final_pull) {
-        bail!("La pull request è cambiata durante l'acquisizione. Invia di nuovo la richiesta.");
+        bail!("The pull request changed during collection. Submit it again.");
     }
     let mut unique = HashSet::new();
     limits.retain(|limit| unique.insert(limit.clone()));
@@ -1268,7 +1267,7 @@ mod tests {
             "src/कि.py",
             "src/a\u{20dd}.py",
             "src/✈\u{fe0f}.py",
-            "src/prova #.py",
+            "src/sample #.py",
         ] {
             assert!(safe_path(path), "rejected {path:?}");
         }
@@ -1294,8 +1293,8 @@ mod tests {
         ] {
             assert!(!safe_path(path), "accepted {path:?}");
         }
-        assert!(safe_path(&"è".repeat(120)));
-        assert!(!safe_path(&"è".repeat(121)));
+        assert!(safe_path(&"\u{00e9}".repeat(120)));
+        assert!(!safe_path(&"\u{00e9}".repeat(121)));
         assert!(safe_path(&format!("{}file.py", "dir/".repeat(15))));
         assert!(!safe_path(&format!("{}file.py", "dir/".repeat(16))));
     }
@@ -1437,7 +1436,11 @@ mod tests {
         assert_eq!(view.files[2].before, "");
         assert_eq!(view.files[2].after, "new\n");
         assert_eq!(view.files[3].after, "");
-        assert!(view.limits.iter().any(|limit| limit.contains("duplicati")));
+        assert!(
+            view.limits
+                .iter()
+                .any(|limit| limit.contains("duplicate paths"))
+        );
         assert!(view.limits.iter().any(|limit| limit.contains("link.py")));
         assert!(
             hub.transport
@@ -1458,7 +1461,7 @@ mod tests {
             snapshot(&mut hub)
                 .unwrap_err()
                 .to_string()
-                .contains("cambiata")
+                .contains("changed during collection")
         );
         assert!(
             hub.transport
@@ -1492,8 +1495,8 @@ mod tests {
         let mut hub = GitHub::new(fixture);
         let view = snapshot(&mut hub).unwrap();
         assert!(view.intent.iter().any(|message| message == "third"));
-        assert!(view.limits.iter().any(|limit| limit.contains("60 su 65")));
-        assert!(view.limits.iter().any(|limit| limit.contains("1 su 301")));
+        assert!(view.limits.iter().any(|limit| limit.contains("60 of 65")));
+        assert!(view.limits.iter().any(|limit| limit.contains("1 of 301")));
         assert!(hub.transport.requests.contains(&comparison(3)));
         assert!(!hub.transport.requests.contains(&comparison(4)));
     }
@@ -1520,7 +1523,7 @@ mod tests {
         assert!(
             view.limits
                 .iter()
-                .any(|limit| limit.contains("Testo non disponibile"))
+                .any(|limit| limit.contains("is unavailable or exceeds the limit"))
         );
 
         let mut hub = GitHub::new(Fixture::new(vec![change("source.rs")]));
@@ -1552,7 +1555,7 @@ mod tests {
         assert!(
             view.limits
                 .iter()
-                .any(|limit| limit.contains("inventario Git"))
+                .any(|limit| limit.contains("Git tree listing"))
         );
         assert!(view.files.iter().any(|file| file.path == "README.md"));
         let remaining = hub.remaining;

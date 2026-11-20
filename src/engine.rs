@@ -23,10 +23,11 @@ source code. A proposed test and a runtime-only claim are not evidence.
 Return one JSON object. A citation is {"path": str, "line": int, "quote": str}
 with the full exact text of one nonblank line, including indentation, numbered
 from 1 in the named snapshot file. Use after (head) except where before (base) is
-explicitly specified. Write all operator-facing prose in Italian, including
+explicitly specified. Write all human-facing prose in English, including
 expected, scenario, consequence, countercheck, title, impact, reason, action,
 question and alternatives. Keep JSON keys and enum values exactly as specified.
-Copy source quotes and paths verbatim, without translating them.
+Copy source quotes and paths verbatim. Preserve spelling, punctuation,
+whitespace and Unicode exactly, even when the source is in another language.
 Use single-line descriptions of at most 400 characters and
 quotes of at most 1000 characters. Set complete to false if a bound or missing
 material prevented coverage; an empty list with complete true is a valid result.
@@ -91,10 +92,10 @@ struct Citation<'a> {
 impl Citation<'_> {
     fn render(self, revision: Revision) -> String {
         let label = match revision {
-            Revision::Base => "Revisione base",
-            Revision::Head => "Revisione proposta",
+            Revision::Base => "Base revision",
+            Revision::Head => "Proposed revision",
         };
-        format!("{label} {}:{} «{}»", self.path, self.line, self.quote)
+        format!("{label} {}:{} “{}”", self.path, self.line, self.quote)
     }
 }
 
@@ -111,7 +112,7 @@ fn source_index<'a>(snapshot: &'a Snapshot, limits: &mut Vec<String>) -> Source<
         *counts.entry(file.path.as_str()).or_insert(0) += 1;
     }
     if counts.values().any(|&count| count > 1) {
-        limits.push("Il materiale acquisito contiene percorsi ambigui.".into());
+        limits.push("The snapshot contains duplicate file paths.".into());
     }
     let mut invalid = false;
     let mut source = HashMap::new();
@@ -130,7 +131,7 @@ fn source_index<'a>(snapshot: &'a Snapshot, limits: &mut Vec<String>) -> Source<
         }
     }
     if invalid {
-        limits.push("Il materiale acquisito contiene percorsi non validi.".into());
+        limits.push("The snapshot contains invalid file paths.".into());
     }
     source
 }
@@ -175,24 +176,22 @@ fn request(
     limits: &mut Vec<String>,
 ) -> Result<Option<Vec<Value>>> {
     let (key, stage, instructions) = match pass {
-        Pass::Proposal => ("hypotheses", "formulazione delle ipotesi", PROPOSE),
-        Pass::Challenge => ("assessments", "verifica delle ipotesi", CHALLENGE),
+        Pass::Proposal => ("hypotheses", "proposing hypotheses", PROPOSE),
+        Pass::Challenge => ("assessments", "checking hypotheses", CHALLENGE),
     };
     // Provider::ask sends serialized review data as the user message's JSON string.
     let input_bytes = serde_json::to_vec(&serde_json::to_string(data)?)?.len();
     if input_bytes > MAX_INPUT_BYTES {
-        limits.push(format!(
-            "Il materiale supera il limite di dimensione per la {stage}."
-        ));
+        limits.push(format!("Review input exceeds the size limit for {stage}."));
         return Ok(None);
     }
     let response = ask(&format!("{GROUNDING}{instructions}"), data)
-        .map_err(|_| anyhow!("Errore del provider durante la {stage}."))?;
+        .map_err(|_| anyhow!("The provider failed while {stage}."))?;
     let (complete, mut items) = response_items(response, key)
-        .ok_or_else(|| anyhow!("Risposta malformata del provider durante la {stage}."))?;
+        .ok_or_else(|| anyhow!("The provider returned an invalid response while {stage}."))?;
     if !complete || items.len() > MAX_HYPOTHESES {
         limits.push(format!(
-            "Risposta incompleta del provider durante la {stage}."
+            "The provider returned an incomplete response while {stage}."
         ));
     }
     if items.len() > MAX_HYPOTHESES {
@@ -319,9 +318,9 @@ fn confirmed<'a>(
     severity: u8,
 ) -> Option<Assessment<'a>> {
     let (kind, label) = match text(&item["kind"])? {
-        "contract" if basis != anchor => ("contract", "Comportamento documentato"),
-        "convention" if basis != anchor => ("convention", "Regola di progetto"),
-        "performance" => ("performance", "Analisi statica delle prestazioni"),
+        "contract" if basis != anchor => ("contract", "Documented behavior"),
+        "convention" if basis != anchor => ("convention", "Project rule"),
+        "performance" => ("performance", "Static performance analysis"),
         _ => return None,
     };
     let support = item["support"].as_array()?;
@@ -336,8 +335,8 @@ fn confirmed<'a>(
     let reason = text(&item["reason"])?;
     let impact = text(&item["impact"])?;
     let mut evidence = vec![
-        format!("Analisi statica del codice. {reason}"),
-        format!("Verifica mirata. {countercheck}"),
+        format!("Static analysis. {reason}"),
+        format!("Targeted check. {countercheck}"),
     ];
     add_citations(
         &mut evidence,
@@ -399,12 +398,12 @@ fn human(item: &Value, anchor: Citation<'_>, basis: Citation<'_>) -> Option<Focu
         path: anchor.path.into(),
         line: anchor.line,
         checked: format!(
-            "Analisi statica del codice. {}\n{}",
+            "Static analysis. {}\n{}",
             anchor.render(Revision::Head),
             basis.render(Revision::Head),
         ),
         outcome: text(&item["reason"])?.into(),
-        action: format!("{question} Le opzioni sono «{first}» e «{second}»."),
+        action: format!("{question} The options are “{first}” and “{second}”."),
     })
 }
 
@@ -491,7 +490,7 @@ where
     if hypotheses.len() != proposed.len() {
         report
             .limits
-            .push("Alcune ipotesi contengono dettagli o citazioni non validi.".into());
+            .push("Some hypotheses contain invalid details or citations.".into());
     }
 
     data["hypotheses"] = Value::Array(hypotheses);
@@ -522,17 +521,17 @@ where
     if checked < assessed.len() {
         report
             .limits
-            .push("Alcune verifiche contengono dettagli o citazioni non validi.".into());
+            .push("Some assessments contain invalid details or citations.".into());
     }
     if checked < anchors.len() {
         report
             .limits
-            .push("Per alcune ipotesi manca una verifica valida.".into());
+            .push("Some hypotheses have no valid assessment.".into());
     }
     if indeterminate {
         report
             .limits
-            .push("Le prove disponibili non permettono di chiarire alcune ipotesi.".into());
+            .push("The available evidence could not resolve some hypotheses.".into());
     }
 
     findings.sort_by_key(|item| item.severity);
@@ -559,7 +558,7 @@ where
 mod tests {
     use super::*;
 
-    // This JSON can be fed unchanged into either engine. The scanner has no signals or coverage.
+    // Both engines accept these replies. The expected report uses the Rust engine's English labels.
     const CROSS_LANGUAGE_REPLAY: &str = r#"
 {
   "snapshot": {
@@ -585,30 +584,30 @@ mod tests {
   "replies":[
     {"complete":true, "hypotheses":[
       {"anchor":{"path":"cache.go", "line":2, "quote":"\treturn slots - 1"},
-       "expected":"  Mantenere la capacità configurata.  ",
-       "scenario":"Il chiamante configura un solo slot.", "consequence":"La cache ha capacità zero."},
+       "expected":"  Preserve the configured capacity.  ",
+       "scenario":"The caller configures a single slot.", "consequence":"The cache has zero capacity."},
       {"anchor":{"path":"orders.sql", "line":1, "quote":"SELECT SUM(total_cents) AS total_cents"},
-       "expected":"Restituire sempre un numero.", "scenario":"La tabella degli ordini è vuota.",
-       "consequence":"L'interfaccia riceve NULL al posto di zero."},
+       "expected":"Always return a number.", "scenario":"The orders table is empty.",
+       "consequence":"The UI receives NULL instead of zero."},
       {"anchor":{"path":"feed.ts", "line":2, "quote":"const visible = entries.filter(entry => entry.published);"},
-       "expected":"La visibilità delle bozze dipende dai requisiti di prodotto.",
-       "scenario":"Un moderatore apre il feed prima della pubblicazione.",
-       "consequence":"Il filtro nasconde le bozze anche ai moderatori."}
+       "expected":"Whether drafts are visible depends on product requirements.",
+       "scenario":"A moderator opens the feed before publication.",
+       "consequence":"The filter hides drafts even from moderators."}
     ]},
     {"complete":true, "assessments":[
       {"id":3, "outcome":"human", "severity":"medium",
        "basis":{"path":"feed.ts", "line":3, "quote":"render(\"feed\", visible);"},
-       "countercheck":"Il rendering usa soltanto le voci già filtrate.",
-       "reason":"Il filtro scarta le bozze prima di mostrare il feed.",
-       "question":"I moderatori devono vedere le bozze nel feed?",
-       "alternatives":["Mostrare le bozze ai moderatori", "Mostrare solo le voci pubblicate"]},
+       "countercheck":"The renderer only uses entries that passed the filter.",
+       "reason":"The filter removes drafts before displaying the feed.",
+       "question":"Should moderators see drafts in the feed?",
+       "alternatives":["Show drafts to moderators", "Show published entries only"]},
       {"id":2, "outcome":"confirmed", "kind":"contract", "severity":"medium",
        "basis":{"path":"feed.ts", "line":1, "quote":"// total_cents is always a number, even for zero orders."},
        "support":[{"path":"orders.sql", "line":2, "quote":"FROM orders;"}],
-       "title":"Il totale è nullo senza ordini", "impact":"L'interfaccia riceve NULL al posto di zero.",
-       "countercheck":"La query non applica COALESCE al risultato di SUM.",
-       "reason":"SUM restituisce NULL quando la tabella degli ordini è vuota.",
-       "action":"Verifica il totale con una tabella senza ordini.",
+       "title":"The total is NULL when there are no orders", "impact":"The UI receives NULL instead of zero.",
+       "countercheck":"The query does not apply COALESCE to the SUM result.",
+       "reason":"SUM returns NULL when the orders table is empty.",
+       "action":"Check the total when the orders table is empty.",
        "comparison":{
          "behavior":{"path":"orders.sql", "line":1, "quote":"SELECT SUM(total_cents) AS total_cents"},
          "basis":{"path":"feed.ts", "line":1, "quote":"// total_cents is always a number, even for zero orders."},
@@ -616,11 +615,11 @@ mod tests {
        }},
       {"id":1, "outcome":"confirmed", "kind":"contract", "severity":"high",
        "basis":{"path":"requirements.md", "line":1, "quote":"Capacity must equal the configured \"slots\" count."},
-       "support":[], "title":"La capacità perde uno slot configurato",
-       "impact":"Una cache con un solo slot indica capacità zero.",
-       "countercheck":"La funzione non applica un minimo al conteggio.",
-       "reason":"Il valore restituito è inferiore di uno al conteggio configurato.",
-       "action":"Verifica se una cache con un solo slot può accettare una voce.",
+       "support":[], "title":"Capacity is reduced by one slot",
+       "impact":"A one-slot cache reports zero capacity.",
+       "countercheck":"The function does not enforce a minimum count.",
+       "reason":"The return value is one less than the configured count.",
+       "action":"Check whether a one-slot cache can accept an entry.",
        "comparison":{
          "behavior":{"path":"cache.go", "line":2, "quote":"\treturn slots"},
          "basis":{"path":"requirements.md", "line":1, "quote":"Capacity must equal the configured \"slots\" count."},
@@ -631,26 +630,26 @@ mod tests {
   "report":{
     "limits":[],
     "findings":[
-      {"path":"cache.go", "line":2, "title":"La capacità perde uno slot configurato",
-       "impact":"Una cache con un solo slot indica capacità zero.", "attribution":"introduced",
-       "evidence":"Analisi statica del codice. Il valore restituito è inferiore di uno al conteggio configurato.\nVerifica mirata. La funzione non applica un minimo al conteggio.\nRevisione proposta cache.go:2 «\treturn slots - 1»\nRevisione proposta requirements.md:1 «Capacity must equal the configured \"slots\" count.»\nRevisione base cache.go:2 «\treturn slots»\nRevisione base requirements.md:1 «Capacity must equal the configured \"slots\" count.»"},
-      {"path":"orders.sql", "line":1, "title":"Il totale è nullo senza ordini",
-       "impact":"L'interfaccia riceve NULL al posto di zero.", "attribution":"preexisting",
-       "evidence":"Analisi statica del codice. SUM restituisce NULL quando la tabella degli ordini è vuota.\nVerifica mirata. La query non applica COALESCE al risultato di SUM.\nRevisione proposta orders.sql:1 «SELECT SUM(total_cents) AS total_cents»\nRevisione proposta feed.ts:1 «// total_cents is always a number, even for zero orders.»\nRevisione proposta orders.sql:2 «FROM orders;»\nRevisione base orders.sql:1 «SELECT SUM(total_cents) AS total_cents»\nRevisione base feed.ts:1 «// total_cents is always a number, even for zero orders.»"}
+      {"path":"cache.go", "line":2, "title":"Capacity is reduced by one slot",
+       "impact":"A one-slot cache reports zero capacity.", "attribution":"introduced",
+       "evidence":"Static analysis. The return value is one less than the configured count.\nTargeted check. The function does not enforce a minimum count.\nProposed revision cache.go:2 “\treturn slots - 1”\nProposed revision requirements.md:1 “Capacity must equal the configured \"slots\" count.”\nBase revision cache.go:2 “\treturn slots”\nBase revision requirements.md:1 “Capacity must equal the configured \"slots\" count.”"},
+      {"path":"orders.sql", "line":1, "title":"The total is NULL when there are no orders",
+       "impact":"The UI receives NULL instead of zero.", "attribution":"preexisting",
+       "evidence":"Static analysis. SUM returns NULL when the orders table is empty.\nTargeted check. The query does not apply COALESCE to the SUM result.\nProposed revision orders.sql:1 “SELECT SUM(total_cents) AS total_cents”\nProposed revision feed.ts:1 “// total_cents is always a number, even for zero orders.”\nProposed revision orders.sql:2 “FROM orders;”\nBase revision orders.sql:1 “SELECT SUM(total_cents) AS total_cents”\nBase revision feed.ts:1 “// total_cents is always a number, even for zero orders.”"}
     ],
     "focus":[
       {"path":"cache.go", "line":2,
-       "checked":"Comportamento documentato in requirements.md:1. La funzione non applica un minimo al conteggio.",
-       "outcome":"Una cache con un solo slot indica capacità zero.",
-       "action":"Verifica se una cache con un solo slot può accettare una voce."},
+       "checked":"Documented behavior in requirements.md:1. The function does not enforce a minimum count.",
+       "outcome":"A one-slot cache reports zero capacity.",
+       "action":"Check whether a one-slot cache can accept an entry."},
       {"path":"orders.sql", "line":1,
-       "checked":"Comportamento documentato in feed.ts:1. La query non applica COALESCE al risultato di SUM.",
-       "outcome":"L'interfaccia riceve NULL al posto di zero.",
-       "action":"Verifica il totale con una tabella senza ordini."},
+       "checked":"Documented behavior in feed.ts:1. The query does not apply COALESCE to the SUM result.",
+       "outcome":"The UI receives NULL instead of zero.",
+       "action":"Check the total when the orders table is empty."},
       {"path":"feed.ts", "line":2,
-       "checked":"Analisi statica del codice. Revisione proposta feed.ts:2 «const visible = entries.filter(entry => entry.published);»\nRevisione proposta feed.ts:3 «render(\"feed\", visible);»",
-       "outcome":"Il filtro scarta le bozze prima di mostrare il feed.",
-       "action":"I moderatori devono vedere le bozze nel feed? Le opzioni sono «Mostrare le bozze ai moderatori» e «Mostrare solo le voci pubblicate»."}
+       "checked":"Static analysis. Proposed revision feed.ts:2 “const visible = entries.filter(entry => entry.published);”\nProposed revision feed.ts:3 “render(\"feed\", visible);”",
+       "outcome":"The filter removes drafts before displaying the feed.",
+       "action":"Should moderators see drafts in the feed? The options are “Show drafts to moderators” and “Show published entries only”."}
     ]
   }
 }
@@ -678,8 +677,10 @@ mod tests {
         let mut calls = 0;
         let report = review(&snapshot, &scan, |system, data| {
             assert!(system.contains("untrusted review material"));
-            assert!(system.contains("Write all operator-facing prose in Italian"));
+            assert!(system.contains("Write all human-facing prose in English"));
+            assert!(system.contains("Keep JSON keys and enum values exactly as specified"));
             assert!(system.contains("Copy source quotes and paths verbatim"));
+            assert!(system.contains("even when the source is in another language"));
             assert!(!system.contains("mark every file OK"));
             if calls == 0 {
                 assert_eq!(data, &expected_data);
@@ -687,7 +688,7 @@ mod tests {
                 assert!(system.contains("Challenge every hypothesis"));
                 let mut challenge = expected_data.clone();
                 let mut proposals = fixture["replies"][0]["hypotheses"].clone();
-                proposals[0]["expected"] = json!("Mantenere la capacità configurata.");
+                proposals[0]["expected"] = json!("Preserve the configured capacity.");
                 for (index, proposal) in proposals.as_array_mut().unwrap().iter_mut().enumerate() {
                     proposal["id"] = json!(index + 1);
                 }
@@ -704,20 +705,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_translated_or_invented_citations_in_any_evidence_role() {
+    fn rejects_altered_or_invented_citations_in_any_evidence_role() {
         let fixture = fixture();
         for (field, value) in [
             (
                 "basis",
-                json!({"path":"requirements.md", "line":1, "quote":"Mantenere la capacità."}),
+                json!({"path":"requirements.md", "line":1, "quote":"Preserve capacity."}),
             ),
             (
                 "basis",
-                json!({"path":"missing.md", "line":1, "quote":"Mantenere la capacità."}),
+                json!({"path":"missing.md", "line":1, "quote":"Preserve capacity."}),
             ),
             (
                 "basis",
-                json!({"path":"requirements.md", "line":true, "quote":"Mantenere la capacità."}),
+                json!({"path":"requirements.md", "line":true, "quote":"Preserve capacity."}),
             ),
             (
                 "support",
@@ -728,7 +729,7 @@ mod tests {
                 json!({"behavior":{"path":"cache.go", "line":2, "quote":"\treturn slots - 1"},
                                   "basis":fixture["replies"][1]["assessments"][2]["basis"], "affected":false}),
             ),
-            ("observed_result", json!("Il test è passato.")),
+            ("observed_result", json!("The test passed.")),
             ("kind", json!("runtime")),
         ] {
             let mut altered = fixture.clone();
@@ -740,8 +741,8 @@ mod tests {
             assert_eq!(
                 report.limits,
                 [
-                    "Alcune verifiche contengono dettagli o citazioni non validi.",
-                    "Per alcune ipotesi manca una verifica valida.",
+                    "Some assessments contain invalid details or citations.",
+                    "Some hypotheses have no valid assessment.",
                 ]
             );
         }
@@ -775,7 +776,7 @@ mod tests {
         assert_eq!(report.findings[0].path, "orders.sql");
         assert_eq!(
             report.limits,
-            ["Alcune ipotesi contengono dettagli o citazioni non validi."]
+            ["Some hypotheses contain invalid details or citations."]
         );
     }
 
@@ -783,12 +784,12 @@ mod tests {
     fn handles_refutation_uncertainty_and_unsupported_ok_separately() {
         let mut fixture = fixture();
         fixture["replies"][0]["hypotheses"][0]["scenario"] =
-            json!("Il chiamante configura tre slot.");
+            json!("The caller configures three slots.");
         fixture["replies"][1]["assessments"] = json!([
-            {"id":1, "outcome":"refuted", "countercheck":"Con tre slot il risultato è due, non zero.",
+            {"id":1, "outcome":"refuted", "countercheck":"With three slots, the function returns two.",
              "basis":fixture["replies"][0]["hypotheses"][0]["anchor"]},
-            {"id":2, "outcome":"indeterminate", "countercheck":"Servono misure per valutare i tempi di esecuzione."},
-            {"id":3, "outcome":"ok", "countercheck":"Tutto a posto."}
+            {"id":2, "outcome":"indeterminate", "countercheck":"Timing measurements are needed to assess performance."},
+            {"id":3, "outcome":"ok", "countercheck":"Everything looks fine."}
         ]);
         let report = replay(&fixture);
         assert!(report.findings.is_empty());
@@ -796,9 +797,9 @@ mod tests {
         assert_eq!(
             report.limits,
             [
-                "Alcune verifiche contengono dettagli o citazioni non validi.",
-                "Per alcune ipotesi manca una verifica valida.",
-                "Le prove disponibili non permettono di chiarire alcune ipotesi.",
+                "Some assessments contain invalid details or citations.",
+                "Some hypotheses have no valid assessment.",
+                "The available evidence could not resolve some hypotheses.",
             ]
         );
     }
@@ -812,7 +813,7 @@ mod tests {
         assert!(report.limits.is_empty());
         let finding = &report.findings[0];
         assert_eq!(finding.attribution, Attribution::Unknown);
-        assert!(!finding.evidence.contains("Revisione base"));
+        assert!(!finding.evidence.contains("Base revision"));
     }
 
     #[test]
@@ -832,8 +833,8 @@ mod tests {
         assert_eq!(
             &report.limits[..2],
             [
-                "Il materiale acquisito contiene percorsi ambigui.",
-                "Il materiale acquisito contiene percorsi non validi.",
+                "The snapshot contains duplicate file paths.",
+                "The snapshot contains invalid file paths.",
             ]
         );
     }
@@ -857,20 +858,20 @@ mod tests {
                 report
                     .limits
                     .iter()
-                    .any(|limit| limit == "Il materiale acquisito contiene percorsi non validi.")
+                    .any(|limit| limit == "The snapshot contains invalid file paths.")
             );
         }
     }
 
     #[test]
     fn operator_text_allows_marks_and_rejects_embedded_invisible_characters() {
-        let prose = json!("  Apri il feed テ\u{3099}ータ कि✈\u{fe0f}.  ");
+        let prose = json!("  Open the feed テ\u{3099}ータ कि✈\u{fe0f}.  ");
         assert_eq!(
             text(&prose),
-            Some("Apri il feed テ\u{3099}ータ कि✈\u{fe0f}.")
+            Some("Open the feed テ\u{3099}ータ कि✈\u{fe0f}.")
         );
         for bad in ['\u{0000}', '\u{00a0}', '\u{200d}', '\u{2029}', '\u{e000}'] {
-            assert!(text(&json!(format!("Apri{bad}il feed."))).is_none());
+            assert!(text(&json!(format!("Open{bad}the feed."))).is_none());
         }
     }
 
@@ -899,8 +900,8 @@ mod tests {
     #[test]
     fn incomplete_or_conflicting_assessments_are_partial() {
         let mut fixture = fixture();
-        fixture["snapshot"]["limits"] = json!(["Contesto mancante."]);
-        fixture["scan"]["limits"] = json!(["Contesto mancante.", "Scanner non disponibile."]);
+        fixture["snapshot"]["limits"] = json!(["Context is missing."]);
+        fixture["scan"]["limits"] = json!(["Context is missing.", "Scanner unavailable."]);
         fixture["replies"][0]["complete"] = json!(false);
         let assessments = fixture["replies"][1]["assessments"].as_array_mut().unwrap();
         assessments.push(assessments[2].clone());
@@ -910,11 +911,11 @@ mod tests {
         assert_eq!(
             report.limits,
             [
-                "Contesto mancante.",
-                "Scanner non disponibile.",
-                "Risposta incompleta del provider durante la formulazione delle ipotesi.",
-                "Alcune verifiche contengono dettagli o citazioni non validi.",
-                "Per alcune ipotesi manca una verifica valida.",
+                "Context is missing.",
+                "Scanner unavailable.",
+                "The provider returned an incomplete response while proposing hypotheses.",
+                "Some assessments contain invalid details or citations.",
+                "Some hypotheses have no valid assessment.",
             ]
         );
     }
@@ -944,7 +945,7 @@ mod tests {
             let error = review(&snapshot, &scan, |_, _| Ok(malformed.clone())).unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "Risposta malformata del provider durante la formulazione delle ipotesi."
+                "The provider returned an invalid response while proposing hypotheses."
             );
         }
         let error = review(&snapshot, &scan, |_, _| {
@@ -953,7 +954,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Errore del provider durante la formulazione delle ipotesi."
+            "The provider failed while proposing hypotheses."
         );
     }
 
@@ -971,7 +972,7 @@ mod tests {
         assert!(report.findings.is_empty());
         assert_eq!(
             report.limits,
-            ["Risposta incompleta del provider durante la formulazione delle ipotesi."]
+            ["The provider returned an incomplete response while proposing hypotheses."]
         );
 
         let mut fixture = original;
@@ -982,7 +983,7 @@ mod tests {
         assert!(report.findings.is_empty());
         assert!(report.focus.is_empty());
         assert!(report.limits.contains(
-            &"Risposta incompleta del provider durante la verifica delle ipotesi.".into()
+            &"The provider returned an incomplete response while checking hypotheses.".into()
         ));
     }
 
@@ -991,7 +992,7 @@ mod tests {
         let fixture = fixture();
         let mut snapshot: Snapshot = serde_json::from_value(fixture["snapshot"].clone()).unwrap();
         let scan = Scan::default();
-        snapshot.intent = vec!["è😀\n\t\"\\".to_owned()];
+        snapshot.intent = vec!["é😀\n\t\"\\".to_owned()];
         let data = json!({"snapshot":snapshot, "scan":scan});
         let base_size = json!(data.to_string()).to_string().len();
         snapshot.intent[0].push_str(&"x".repeat(MAX_INPUT_BYTES - base_size));
@@ -1004,7 +1005,7 @@ mod tests {
         assert_eq!(calls, 1);
         assert_eq!(
             report.limits,
-            ["Il materiale supera il limite di dimensione per la verifica delle ipotesi."]
+            ["Review input exceeds the size limit for checking hypotheses."]
         );
         snapshot.intent[0].push('x');
         let report = review(&snapshot, &scan, |_, _| {
@@ -1013,7 +1014,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             report.limits,
-            ["Il materiale supera il limite di dimensione per la formulazione delle ipotesi."]
+            ["Review input exceeds the size limit for proposing hypotheses."]
         );
     }
 }
