@@ -16,6 +16,7 @@ use reqwest::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::{contracts::PublishedReport, source::valid_repo};
 
@@ -24,6 +25,7 @@ const MAX_PAGES: usize = 5;
 const MAX_PAGE_BYTES: u64 = 8_000_000;
 const MAX_FINISHED_PER_REPO: usize = 8;
 const MAX_PUBLISH_ATTEMPTS: i64 = 3;
+const MAX_ANALYSIS_ATTEMPTS: i64 = 3;
 const FIRST_RETRY_SECONDS: i64 = 60;
 const PROVIDER_CHANGED: &str =
     "The provider changed. Enable automation again to confirm the new provider.";
@@ -61,11 +63,95 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             state TEXT NOT NULL DEFAULT 'pending',
             publish_attempts INTEGER NOT NULL DEFAULT 0,
             retry_at INTEGER NOT NULL DEFAULT 0,
+            analysis_attempts INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (repo, number, head)
         );
         CREATE INDEX IF NOT EXISTS automation_jobs_pending
             ON automation_jobs (repo, review_id) WHERE state = 'pending';",
+    )?;
+    if !has_analysis_attempts(conn)? {
+        let tx = immediate(conn)?;
+        if !has_analysis_attempts(&tx)? {
+            tx.execute_batch(
+                "ALTER TABLE automation_jobs ADD COLUMN analysis_attempts INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            migrate_job_states(&tx)?;
+        }
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn has_analysis_attempts(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('automation_jobs') WHERE name = 'analysis_attempts')",
+        [],
+        |row| row.get(0),
     )
+}
+
+fn migrate_job_states(conn: &Connection) -> rusqlite::Result<()> {
+    let has_publications: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'github_publications')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_publications {
+        let mut query =
+            conn.prepare("SELECT repo, number, head, review_id FROM automation_jobs")?;
+        let jobs = query
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut mark_published = conn.prepare(
+            "UPDATE automation_jobs SET state = 'published' WHERE review_id = ?1 AND EXISTS (
+                 SELECT 1 FROM github_publications WHERE scope = ?2 AND review_id > 0
+             )",
+        )?;
+        for (repo, number, head, id) in jobs {
+            // The d2a4684 publisher used this key for automatic COMMENT reviews.
+            let scope = hex::encode(Sha256::digest(format!(
+                "{}:{number}:{}:true:COMMENT",
+                repo.to_ascii_lowercase(),
+                head.to_ascii_lowercase(),
+            )));
+            mark_published.execute(params![id, scope])?;
+        }
+    }
+    conn.execute(
+        "UPDATE automation_jobs AS job SET state = CASE WHEN EXISTS (
+             SELECT 1 FROM automation_settings AS settings
+             JOIN automation_seen AS seen ON seen.repo = settings.repo
+             WHERE settings.repo = job.repo AND settings.mode <> 'manual'
+               AND seen.number = job.number AND seen.head = job.head AND seen.ready = 1
+         ) THEN 'stopped' ELSE 'canceled' END
+         WHERE state = 'handled'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Resume interrupted automatic analyses before web recovery fails other running reviews.
+pub fn recover(conn: &Connection, provider: &str) -> rusqlite::Result<()> {
+    bind_provider(conn, provider)?;
+    conn.execute(
+        "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
+         WHERE status = 'running' AND provider = ?1 AND id IN (
+             SELECT job.review_id FROM automation_jobs AS job
+             JOIN automation_settings AS settings ON settings.repo = job.repo
+             JOIN automation_seen AS seen ON seen.repo = job.repo AND seen.number = job.number
+             WHERE job.state = 'pending' AND settings.mode <> 'manual'
+               AND seen.ready = 1 AND seen.head = job.head
+         )",
+        [provider],
+    )?;
+    Ok(())
 }
 
 /// Bind automatic consent to the provider currently configured at startup.
@@ -127,7 +213,7 @@ pub fn last_error(conn: &Connection, repo: &str) -> rusqlite::Result<Option<Stri
 
 pub fn set_mode(conn: &Connection, repo: &str, mode: &str) -> Result<()> {
     let token = env::var("JIDOKA_BOT_TOKEN").ok();
-    save_mode(conn, repo, mode, token.as_deref())
+    save_mode(conn, repo, mode, token.as_deref().map(str::trim))
 }
 
 fn save_mode(conn: &Connection, repo: &str, mode: &str, token: Option<&str>) -> Result<()> {
@@ -174,7 +260,7 @@ fn immediate(conn: &Connection) -> rusqlite::Result<Transaction<'_>> {
 fn cancel_jobs(conn: &Connection, repo: Option<&str>, reason: &str) -> rusqlite::Result<()> {
     let count = conn.execute(
         "UPDATE automation_jobs SET state = 'canceled'
-         WHERE state IN ('pending', 'deferred') AND (?1 IS NULL OR repo = ?1)",
+         WHERE state IN ('pending', 'deferred', 'stopped', 'waiting_analysis') AND (?1 IS NULL OR repo = ?1)",
         [repo],
     )?;
     if count != 0 {
@@ -202,6 +288,7 @@ fn valid_token(token: &str) -> bool {
 fn github_client() -> Result<Client> {
     let token = env::var("JIDOKA_BOT_TOKEN")
         .ok()
+        .map(|s| s.trim().to_owned())
         .filter(|token| valid_token(token))
         .context(BOT_TOKEN_REQUIRED)?;
     let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
@@ -384,13 +471,12 @@ fn apply_poll(
     };
     tx.execute("DELETE FROM automation_seen WHERE repo = ?1", [repo])?;
     for (number, pull) in pulls {
-        if baselined
-            && pull.ready
-            && previous
-                .get(&number)
-                .is_none_or(|last| !last.ready || last.head != pull.head)
-        {
-            enqueue(&tx, repo, provider, number, &pull.head)?;
+        if pull.ready {
+            let newly_ready = baselined
+                && previous
+                    .get(&number)
+                    .is_none_or(|last| !last.ready || last.head != pull.head);
+            enqueue(&tx, repo, provider, number, &pull.head, newly_ready)?;
         }
         tx.execute(
             "INSERT INTO automation_seen (repo, number, head, ready) VALUES (?1, ?2, ?3, ?4)",
@@ -398,10 +484,8 @@ fn apply_poll(
         )?;
     }
     let canceled = tx.execute(
-        "UPDATE automation_jobs AS job SET state = CASE WHEN EXISTS (
-           SELECT 1 FROM reviews WHERE id = job.review_id AND provider = ?2 AND status = 'queued'
-         ) THEN 'deferred' ELSE 'canceled' END
-         WHERE repo = ?1 AND state = 'pending' AND (
+        "UPDATE automation_jobs AS job SET state = 'canceled'
+         WHERE repo = ?1 AND state IN ('pending', 'waiting_analysis', 'stopped') AND (
            NOT EXISTS (SELECT 1 FROM automation_seen AS seen
                        WHERE seen.repo = job.repo AND seen.number = job.number
                          AND seen.head = job.head AND seen.ready = 1)
@@ -412,6 +496,20 @@ fn apply_poll(
     if canceled != 0 {
         cancel_queued(&tx, Some(repo), STALE)?;
     }
+    tx.execute(
+        "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
+         WHERE status = 'failed' AND id IN (
+             SELECT review_id FROM automation_jobs
+             WHERE repo = ?1 AND state = 'waiting_analysis' AND retry_at <= unixepoch()
+         )",
+        [repo],
+    )?;
+    tx.execute(
+        "UPDATE automation_jobs AS job SET state = 'pending', retry_at = 0
+         WHERE repo = ?1 AND state = 'waiting_analysis' AND retry_at <= unixepoch()
+           AND EXISTS (SELECT 1 FROM reviews WHERE id = job.review_id AND status = 'queued')",
+        [repo],
+    )?;
     tx.execute(
         "UPDATE automation_settings SET baselined = 1, poll_error = NULL WHERE repo = ?1",
         [repo],
@@ -430,6 +528,7 @@ fn enqueue(
     provider: &str,
     number: i64,
     head: &str,
+    allow_new: bool,
 ) -> rusqlite::Result<()> {
     let existing: Option<(i64, String)> = conn.query_row(
         "SELECT review_id, state FROM automation_jobs WHERE repo = ?1 AND number = ?2 AND head = ?3",
@@ -437,30 +536,51 @@ fn enqueue(
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()?;
     if let Some((id, state)) = existing {
-        // A head that became a draft or closed before the worker started retains its slot.
-        if state == "deferred"
-            && conn.execute(
-                "UPDATE reviews SET status = 'queued', error = NULL
-             WHERE id = ?1 AND provider = ?2 AND status = 'failed'",
-                params![id, provider],
-            )? != 0
-        {
+        if matches!(state.as_str(), "canceled" | "deferred") || (state == "stopped" && allow_new) {
+            let url = pr_url(repo, number);
+            let prior = conn.query_row(
+                "SELECT status, report FROM reviews WHERE id = ?1 AND provider = ?2 AND url = ?3",
+                params![id, provider, url],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            ).optional()?;
+            let reusable = prior.as_ref().is_some_and(|(status, raw)| {
+                matches!(status.as_str(), "queued" | "running" | "failed")
+                    || matching_report(status, raw.as_deref(), repo, head).is_some()
+            });
+            let review_id = if reusable {
+                conn.execute(
+                    "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
+                     WHERE id = ?1 AND status = 'failed'",
+                    [id],
+                )?;
+                id
+            } else {
+                insert_review(conn, &url, provider)?
+            };
             conn.execute(
-                "UPDATE automation_jobs SET state = 'pending' WHERE review_id = ?1",
-                [id],
+                "UPDATE automation_jobs SET review_id = ?1, state = 'pending',
+                    analysis_attempts = 0, publish_attempts = 0, retry_at = 0 WHERE review_id = ?2",
+                params![review_id, id],
             )?;
         }
         return Ok(());
     }
+    if allow_new {
+        let id = insert_review(conn, &pr_url(repo, number), provider)?;
+        conn.execute(
+            "INSERT INTO automation_jobs (repo, number, head, review_id) VALUES (?1, ?2, ?3, ?4)",
+            params![repo, number, head, id],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_review(conn: &Connection, url: &str, provider: &str) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO reviews (url, provider, status) VALUES (?1, ?2, 'queued')",
-        params![pr_url(repo, number), provider],
+        params![url, provider],
     )?;
-    conn.execute(
-        "INSERT INTO automation_jobs (repo, number, head, review_id) VALUES (?1, ?2, ?3, ?4)",
-        params![repo, number, head, conn.last_insert_rowid()],
-    )?;
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
 struct Finished {
@@ -472,6 +592,7 @@ struct Finished {
     url: String,
     inline: bool,
     publish_attempts: i64,
+    analysis_attempts: i64,
 }
 
 fn next_finished(
@@ -482,7 +603,7 @@ fn next_finished(
 ) -> rusqlite::Result<Option<Finished>> {
     conn.query_row(
         "SELECT job.review_id, job.number, job.head, review.status, review.report, review.url,
-                settings.mode = 'inline', job.publish_attempts
+                settings.mode = 'inline', job.publish_attempts, job.analysis_attempts
          FROM automation_jobs AS job JOIN reviews AS review ON review.id = job.review_id
          JOIN automation_settings AS settings ON settings.repo = job.repo
          WHERE job.repo = ?1 AND job.state = 'pending' AND review.provider = ?2
@@ -504,6 +625,7 @@ fn next_finished(
                 url: row.get(5)?,
                 inline: row.get(6)?,
                 publish_attempts: row.get(7)?,
+                analysis_attempts: row.get(8)?,
             })
         },
     )
@@ -511,13 +633,28 @@ fn next_finished(
 }
 
 fn eligible_report(finished: &Finished, repo: &str) -> Option<PublishedReport> {
-    if !matches!(finished.status.as_str(), "completed" | "partial")
-        || finished.url != pr_url(repo, finished.number)
-    {
+    if finished.url != pr_url(repo, finished.number) {
         return None;
     }
-    let report: PublishedReport = serde_json::from_str(finished.report.as_deref()?).ok()?;
-    (report.repo.eq_ignore_ascii_case(repo) && report.head.eq_ignore_ascii_case(&finished.head))
+    matching_report(
+        &finished.status,
+        finished.report.as_deref(),
+        repo,
+        &finished.head,
+    )
+}
+
+fn matching_report(
+    status: &str,
+    raw: Option<&str>,
+    repo: &str,
+    head: &str,
+) -> Option<PublishedReport> {
+    if !matches!(status, "completed" | "partial") {
+        return None;
+    }
+    let report: PublishedReport = serde_json::from_str(raw?).ok()?;
+    (report.repo.eq_ignore_ascii_case(repo) && report.head.eq_ignore_ascii_case(head))
         .then_some(report)
 }
 
@@ -537,64 +674,101 @@ fn publish_finished(
             break;
         }
         let number = finished.number;
-        let (error, wait) = match eligible_report(&finished, repo) {
+        let outcome = match eligible_report(&finished, repo) {
             Some(report) => match publish(&report, number as u64, finished.inline) {
-                Ok(()) => (None, None),
+                Ok(()) => Outcome::Published,
                 Err(_) => {
-                    let retry = (finished.publish_attempts + 1 < MAX_PUBLISH_ATTEMPTS)
-                        .then(|| FIRST_RETRY_SECONDS << finished.publish_attempts);
-                    let next = if retry.is_some() {
-                        "Will retry automatically."
-                    } else {
-                        "Automatic attempts stopped."
-                    };
-                    (
-                        Some(format!(
-                            "Could not publish the automatic review for PR #{number}. {next}"
-                        )),
+                    let retry = retry_delay(finished.publish_attempts, MAX_PUBLISH_ATTEMPTS);
+                    Outcome::PublishFailed {
+                        error: retry_message(
+                            format!("Could not publish the automatic review for PR #{number}."),
+                            retry,
+                        ),
                         retry,
-                    )
+                    }
                 }
             },
-            None if finished.status == "failed" => (
-                Some(format!("The automatic review for PR #{number} failed.")),
-                None,
-            ),
-            None => (
-                Some(format!(
-                    "The automatic review for PR #{number} did not match the expected pull request and head."
-                )),
-                None,
-            ),
+            None if finished.status == "failed" => {
+                let retry = retry_delay(finished.analysis_attempts, MAX_ANALYSIS_ATTEMPTS);
+                Outcome::AnalysisFailed {
+                    error: retry_message(
+                        format!("The automatic review for PR #{number} failed."),
+                        retry,
+                    ),
+                    retry,
+                }
+            }
+            None => Outcome::Invalid(format!(
+                "The automatic review for PR #{number} did not match the expected pull request and head."
+            )),
         };
-        failed |= error.is_some();
-        finish_publication(
-            conn,
-            repo,
-            expected_generation,
-            finished.review_id,
-            error.as_deref(),
-            wait,
-        )?;
+        failed |= !matches!(outcome, Outcome::Published);
+        finish_job(conn, repo, expected_generation, finished.review_id, outcome)?;
     }
     Ok(failed)
 }
 
-fn finish_publication(
+enum Outcome {
+    Published,
+    Invalid(String),
+    AnalysisFailed { error: String, retry: Option<i64> },
+    PublishFailed { error: String, retry: Option<i64> },
+}
+
+fn retry_delay(attempts: i64, limit: i64) -> Option<i64> {
+    (0..limit - 1)
+        .contains(&attempts)
+        .then(|| FIRST_RETRY_SECONDS << attempts)
+}
+
+fn retry_message(message: String, retry: Option<i64>) -> String {
+    if retry.is_some() {
+        format!("{message} Will retry automatically.")
+    } else {
+        format!("{message} Automatic attempts stopped.")
+    }
+}
+
+fn finish_job(
     conn: &Connection,
     repo: &str,
     generation: i64,
     review_id: i64,
-    error: Option<&str>,
-    wait: Option<i64>,
+    outcome: Outcome,
 ) -> rusqlite::Result<()> {
     // The publisher owns POST idempotency. A crash before this transaction leaves the job pending.
     let tx = immediate(conn)?;
+    let (state, wait, analysis, publication, error) = match outcome {
+        Outcome::Published => ("published", None, 0, 1, None),
+        Outcome::Invalid(error) => ("stopped", None, 0, 0, Some(error)),
+        Outcome::AnalysisFailed { error, retry } => (
+            if retry.is_some() {
+                "waiting_analysis"
+            } else {
+                "stopped"
+            },
+            retry,
+            1,
+            0,
+            Some(error),
+        ),
+        Outcome::PublishFailed { error, retry } => (
+            if retry.is_some() {
+                "pending"
+            } else {
+                "stopped"
+            },
+            retry,
+            0,
+            1,
+            Some(error),
+        ),
+    };
     tx.execute(
-        "UPDATE automation_jobs SET state = CASE WHEN ?1 IS NULL THEN 'handled' ELSE 'pending' END,
-            retry_at = COALESCE(unixepoch() + ?1, 0), publish_attempts = publish_attempts + 1
-         WHERE review_id = ?2 AND state = 'pending'",
-        params![wait, review_id],
+        "UPDATE automation_jobs SET state = ?1, retry_at = COALESCE(unixepoch() + ?2, 0),
+            analysis_attempts = analysis_attempts + ?3, publish_attempts = publish_attempts + ?4
+         WHERE review_id = ?5 AND state = 'pending'",
+        params![state, wait, analysis, publication, review_id],
     )?;
     if let Some(error) = error {
         tx.execute(
@@ -612,6 +786,13 @@ fn finish_publication(
     tx.commit()
 }
 
+fn ordered_repos(repos: &HashSet<String>) -> Vec<String> {
+    let mut repos: Vec<_> = repos.iter().map(|repo| repo.to_ascii_lowercase()).collect();
+    repos.sort_unstable();
+    repos.dedup();
+    repos
+}
+
 fn tick_with(
     conn: &Connection,
     provider: &str,
@@ -620,11 +801,8 @@ fn tick_with(
     mut publish: impl FnMut(&PublishedReport, u64, bool) -> Result<()>,
 ) -> Result<()> {
     bind_provider(conn, provider)?;
-    let mut repos: Vec<_> = repos.iter().map(|repo| repo.to_ascii_lowercase()).collect();
-    repos.sort_unstable();
-    repos.dedup();
     let mut failed = false;
-    for repo in repos {
+    for repo in ordered_repos(repos) {
         let Some(generation) = generation(conn, &repo)? else {
             continue;
         };
@@ -647,11 +825,49 @@ fn tick_with(
     Ok(())
 }
 
-/// Poll once. The worker calls this periodically between reviews.
-pub fn tick(db: &Path, provider: &str, repos: &HashSet<String>) -> Result<()> {
+fn open(db: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(db)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     init(&conn)?;
+    Ok(conn)
+}
+
+fn publish_report(db: &Path, report: &PublishedReport, number: u64, inline: bool) -> Result<()> {
+    let indexes: Vec<_> = (0..report.report.findings.len()).collect();
+    let prepared = crate::publish::prepare(report, &indexes, inline);
+    crate::publish::submit(db, report, number, &prepared, "COMMENT", true).map(|_| ())
+}
+
+fn publish_ready_with(
+    conn: &Connection,
+    provider: &str,
+    repos: &HashSet<String>,
+    mut publish: impl FnMut(&PublishedReport, u64, bool) -> Result<()>,
+) -> Result<()> {
+    bind_provider(conn, provider)?;
+    let mut failed = false;
+    for repo in ordered_repos(repos) {
+        if let Some(generation) = generation(conn, &repo)? {
+            failed |= publish_finished(conn, &repo, generation, provider, &mut publish)?;
+        }
+    }
+    ensure!(
+        !failed,
+        "Automatic review encountered an error. Check the repository settings."
+    );
+    Ok(())
+}
+
+/// Publish finished jobs using the last poll. The publisher rechecks the live PR before posting.
+pub fn publish_ready(db: &Path, provider: &str, repos: &HashSet<String>) -> Result<()> {
+    publish_ready_with(&open(db)?, provider, repos, |report, number, inline| {
+        publish_report(db, report, number, inline)
+    })
+}
+
+/// Poll once. The worker calls this periodically between reviews.
+pub fn tick(db: &Path, provider: &str, repos: &HashSet<String>) -> Result<()> {
+    let conn = open(db)?;
     let mut client = None;
     tick_with(
         &conn,
@@ -663,11 +879,7 @@ pub fn tick(db: &Path, provider: &str, repos: &HashSet<String>) -> Result<()> {
             }
             poll(client.as_ref().expect("GitHub client initialized"), repo)
         },
-        |report, number, inline| {
-            let indexes: Vec<_> = (0..report.report.findings.len()).collect();
-            let prepared = crate::publish::prepare(report, &indexes, inline);
-            crate::publish::submit(db, report, number, &prepared, "COMMENT", true).map(|_| ())
-        },
+        |report, number, inline| publish_report(db, report, number, inline),
     )
 }
 
@@ -837,6 +1049,180 @@ mod tests {
         )
         .unwrap();
         assert_eq!(states(&conn).len(), 2);
+        let (provider, status): (String, String) = conn
+            .query_row(
+                "SELECT reviews.provider, reviews.status FROM automation_jobs AS job
+             JOIN reviews ON reviews.id = job.review_id WHERE job.number = 2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (provider.as_str(), status.as_str()),
+            ("another provider", "queued")
+        );
+    }
+
+    #[test]
+    fn stale_result_can_publish_when_its_head_returns_and_stays_deduped() {
+        let conn = fixture("summary");
+        snapshot(&conn, &[]);
+        snapshot(&conn, &[(1, OLD, true)]);
+        finish(&conn, 1, "completed", Some(report(REPO, OLD, &[])));
+        snapshot(&conn, &[(1, NEW, true)]);
+        let mut titles = Vec::new();
+        tick_with(
+            &conn,
+            PROVIDER,
+            &repos(),
+            |_| Ok(pulls(&[(1, OLD, true)])),
+            |report, number, _| {
+                titles.push((number, report.head.clone()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(titles, [(1, OLD.to_owned())]);
+        snapshot(&conn, &[(1, NEW, true)]);
+        snapshot(&conn, &[(1, OLD, true)]);
+        save_mode(&conn, REPO, "manual", None).unwrap();
+        save_mode(&conn, REPO, "summary", Some(TOKEN)).unwrap();
+        snapshot(&conn, &[(1, OLD, true), (2, OLD, true)]);
+        assert_eq!(
+            states(&conn).len(),
+            2,
+            "first poll did not enqueue the new baseline PR"
+        );
+    }
+
+    #[test]
+    fn reopening_the_previous_schema_preserves_published_heads_and_revives_unpublished_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("reviews.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        setup(&conn);
+        save_mode(&conn, REPO, "inline", Some(TOKEN)).unwrap();
+        let ready = [(1, OLD, true), (2, OLD, true), (3, OLD, true)];
+        snapshot(&conn, &[]);
+        snapshot(&conn, &ready);
+        finish(&conn, 1, "completed", Some(report(REPO, OLD, &[])));
+        finish(&conn, 2, "completed", Some(report(REPO, OLD, &[])));
+        conn.execute_batch(
+            "ALTER TABLE automation_jobs DROP COLUMN analysis_attempts;
+             UPDATE automation_jobs SET state = 'handled' WHERE number IN (1, 2);
+             UPDATE automation_jobs SET state = 'deferred' WHERE number = 3;
+             UPDATE reviews SET status = 'failed' WHERE id = 3;
+             CREATE TABLE github_publications (
+                 scope TEXT PRIMARY KEY, actor INTEGER NOT NULL, fingerprint TEXT NOT NULL,
+                 review_id INTEGER
+             );",
+        )
+        .unwrap();
+        let scope = hex::encode(Sha256::digest(format!("{REPO}:1:{OLD}:true:COMMENT")));
+        conn.execute(
+            "INSERT INTO github_publications VALUES (?1, 99, 'fixture', 17)",
+            [scope],
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path).unwrap();
+        init(&conn).unwrap();
+        assert_eq!(mode(&conn, REPO).unwrap(), "inline");
+        assert!(has_analysis_attempts(&conn).unwrap());
+        save_mode(&conn, REPO, "manual", None).unwrap();
+        save_mode(&conn, REPO, "summary", Some(TOKEN)).unwrap();
+        let mut published = Vec::new();
+        tick_with(
+            &conn,
+            PROVIDER,
+            &repos(),
+            |_| Ok(pulls(&ready)),
+            |_, number, _| {
+                published.push(number);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(published, [2]);
+        assert_eq!(states(&conn)[2].2, "queued");
+        snapshot(&conn, &ready);
+    }
+
+    #[test]
+    fn startup_resumes_only_enabled_interrupted_automatic_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("reviews.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        setup(&conn);
+        save_mode(&conn, REPO, "inline", Some(TOKEN)).unwrap();
+        snapshot(&conn, &[]);
+        snapshot(&conn, &[(1, OLD, true), (2, OLD, true)]);
+        finish(&conn, 1, "running", None);
+        finish(&conn, 2, "running", None);
+        snapshot(&conn, &[(1, OLD, true), (2, OLD, false)]);
+        conn.execute(
+            "INSERT INTO reviews (url, provider, status) VALUES (?1, ?2, 'running')",
+            params![pr_url(REPO, 3), PROVIDER],
+        )
+        .unwrap();
+        drop(conn);
+
+        crate::web::recover(&path, PROVIDER).unwrap();
+        let conn = open(&path).unwrap();
+        let statuses: Vec<String> = conn
+            .prepare("SELECT status FROM reviews ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(statuses, ["queued", "failed", "failed"]);
+    }
+
+    #[test]
+    fn failed_analysis_retries_on_later_polls_and_ready_reports_publish_without_polling() {
+        let conn = fixture("summary");
+        snapshot(&conn, &[]);
+        let ready = [(1, OLD, true), (2, OLD, true)];
+        snapshot(&conn, &ready);
+        let mut sent = Vec::new();
+        for attempt in 1..=MAX_ANALYSIS_ATTEMPTS {
+            finish(&conn, 1, "failed", None);
+            if attempt == 1 {
+                finish(&conn, 2, "completed", Some(report(REPO, OLD, &[])));
+            }
+            assert!(
+                publish_ready_with(&conn, PROVIDER, &repos(), |_, number, _| {
+                    sent.push(number);
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert_eq!(sent, [2]);
+            snapshot(&conn, &ready);
+            assert_eq!(states(&conn)[0].2, "failed");
+            conn.execute(
+                "UPDATE automation_jobs SET retry_at = 0 WHERE number = 1",
+                [],
+            )
+            .unwrap();
+            snapshot(&conn, &ready);
+            assert_eq!(
+                states(&conn)[0].2,
+                if attempt < MAX_ANALYSIS_ATTEMPTS {
+                    "queued"
+                } else {
+                    "failed"
+                }
+            );
+        }
+        assert!(
+            last_error(&conn, REPO)
+                .unwrap()
+                .unwrap()
+                .contains("Automatic attempts stopped.")
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::{
     contracts::{DiffFile, Finding, PinnedDiff, PublishedReport, Snapshot},
     hunks,
-    source::safe_path,
+    source::{safe_path, safe_previous_path},
 };
 use std::{collections::HashMap, fmt::Write};
 
@@ -42,7 +42,8 @@ fn rows<'a>(diff: &PinnedDiff, file: &'a DiffFile) -> Option<Vec<Row<'a>>> {
     let valid = match file.status.as_str() {
         "added" => rows.iter().all(|row| row.0.is_none()),
         "removed" => rows.iter().all(|row| row.1.is_none()),
-        "modified" | "changed" | "renamed" | "copied" => true,
+        "renamed" | "copied" => previous_path(file).is_some(),
+        "modified" | "changed" => true,
         _ => false,
     };
     (valid && rows.iter().any(|row| row.0.is_none() || row.1.is_none())).then_some(rows)
@@ -88,12 +89,19 @@ fn escape(text: &str) -> String {
     escaped
 }
 
-fn change_label(status: &str) -> &str {
-    match status {
+fn previous_path(file: &DiffFile) -> Option<&str> {
+    match file.status.as_str() {
+        "renamed" | "copied" => safe_previous_path(&file.path, file.previous_path.as_deref()),
+        _ => None,
+    }
+}
+
+fn change_label(file: &DiffFile) -> &str {
+    match file.status.as_str() {
         "added" => "Added",
         "removed" => "Removed",
-        "renamed" => "Renamed",
-        "copied" => "Copied",
+        "renamed" if previous_path(file).is_some() => "Renamed",
+        "copied" if previous_path(file).is_some() => "Copied",
         "modified" | "changed" => "Modified",
         _ => "Change type unavailable",
     }
@@ -236,10 +244,10 @@ pub fn render(report: &PublishedReport) -> String {
                 r#"<section class="diff-file" id="{id}" aria-labelledby="{id}-title"><header>
                 <h3 id="{id}-title"><code>{}</code></h3><p>{}"#,
                 escape(&file.path),
-                change_label(&file.status)
+                change_label(file)
             )
             .unwrap();
-            if let Some(previous) = file.previous_path.as_deref().filter(|path| safe_path(path)) {
+            if let Some(previous) = previous_path(file) {
                 write!(html, " from <code>{}</code>", escape(previous)).unwrap();
             }
             html.push_str("</p></header>");
@@ -370,6 +378,27 @@ mod tests {
         for path in ["../escape.rs", "twice.rs", "bad.rs", "removed.rs"] {
             assert!(anchor(&report, path, 1).is_none());
         }
+    }
+
+    #[test]
+    fn unsafe_rename_sources_have_no_label_or_anchor() {
+        let patch = Some("@@ -1 +1 @@\n-old\n+new");
+        let mut invalid = file("src/current.rs", "renamed", patch);
+        invalid.previous_path = Some("../unsafe.rs".into());
+        let mut modified = file("src/other.rs", "modified", patch);
+        modified.previous_path = Some("src/unrelated.rs".into());
+        let report = report(Some(PinnedDiff {
+            total_files: 2,
+            files: vec![invalid, modified],
+            supporting_paths: vec![],
+        }));
+        let html = render(&report);
+        assert!(html.contains("Change type unavailable"));
+        for text in ["Renamed", "../unsafe.rs", "src/unrelated.rs"] {
+            assert!(!html.contains(text));
+        }
+        assert!(anchor(&report, "src/current.rs", 1).is_none());
+        assert!(anchor(&report, "src/other.rs", 1).is_some());
     }
 
     #[test]

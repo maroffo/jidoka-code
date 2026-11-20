@@ -72,6 +72,8 @@ fn init_db(connection: &Connection) -> rusqlite::Result<()> {
 pub fn recover(db: &Path, provider: &str) -> Result<()> {
     let mut connection = connect(db)?;
     init_db(&connection)?;
+    crate::automation::init(&connection)?;
+    crate::automation::recover(&connection, provider)?;
     let transaction = connection.transaction()?;
     transaction.execute(
         "UPDATE reviews SET status = 'failed', error = ?1 WHERE status = 'running'",
@@ -117,6 +119,13 @@ pub fn run_one<F>(db: &Path, process: F) -> Result<bool>
 where
     F: FnOnce(&str) -> Result<PublishedReport>,
 {
+    run_one_pinned(db, |url, _| process(url))
+}
+
+pub fn run_one_pinned<F>(db: &Path, process: F) -> Result<bool>
+where
+    F: FnOnce(&str, Option<&str>) -> Result<PublishedReport>,
+{
     let mut connection = connect(db)?;
     let transaction = connection.transaction()?;
     let job: Option<(i64, String)> = transaction
@@ -128,12 +137,24 @@ where
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    transaction.commit()?;
     let Some((id, url)) = job else {
+        transaction.commit()?;
         return Ok(false);
     };
+    let expected_head: Option<String> = transaction
+        .query_row(
+            "SELECT head FROM automation_jobs WHERE review_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    transaction.commit()?;
 
-    let outcome = process(&url).and_then(|report| {
+    let outcome = process(&url, expected_head.as_deref()).and_then(|report| {
+        anyhow::ensure!(
+            expected_head.is_none_or(|head| report.head.eq_ignore_ascii_case(&head)),
+            "The pull request changed before review."
+        );
         let status = if partial(&report) {
             "partial"
         } else {
@@ -161,7 +182,6 @@ pub fn router(db: &Path, provider: &str, allowed_repos: &HashSet<String>) -> Res
     let connection = connect(db)?;
     init_db(&connection)?;
     crate::automation::init(&connection)?;
-    crate::automation::bind_provider(&connection, provider)?;
     let state = Arc::new(WebState {
         db: db.to_owned(),
         provider: provider.to_owned(),
@@ -1280,6 +1300,52 @@ mod tests {
                 status
             );
         }
+    }
+
+    #[test]
+    fn constructing_another_router_preserves_the_running_provider() {
+        let f = Fixture::new();
+        recover(&f.db, PROVIDER).unwrap();
+        let conn = connect(&f.db).unwrap();
+        conn.execute(
+            "INSERT INTO automation_settings(repo,mode) VALUES ('test/demo','summary')",
+            [],
+        )
+        .unwrap();
+        let _unused_router = router(&f.db, "other provider", &allowed_repos()).unwrap();
+        assert_eq!(
+            crate::automation::mode(&conn, "test/demo").unwrap(),
+            "summary"
+        );
+    }
+
+    #[test]
+    fn automatic_queue_passes_the_pinned_head_and_rejects_a_mismatch() {
+        let f = Fixture::new();
+        let conn = connect(&f.db).unwrap();
+        conn.execute(
+            "INSERT INTO reviews(url,provider,status) VALUES (?1,?2,'queued')",
+            [URL, PROVIDER],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        let expected = "a".repeat(40);
+        conn.execute(
+            "INSERT INTO automation_jobs(repo,number,head,review_id) VALUES ('test/demo',7,?1,?2)",
+            params![expected, id],
+        )
+        .unwrap();
+        run_one_pinned(&f.db, |_, head| {
+            assert_eq!(head, Some(expected.as_str()));
+            Ok(report(None))
+        })
+        .unwrap();
+        let stored: (String, Option<String>) = conn
+            .query_row("SELECT status,report FROM reviews WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(stored, ("failed".to_owned(), None));
     }
 
     fn form_body(token: &str, url: &str, consent: Option<&str>) -> String {

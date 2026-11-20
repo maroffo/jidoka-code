@@ -8,6 +8,13 @@ struct Target {
     report: PublishedReport,
 }
 
+fn review_id(raw: &str) -> Result<i64, PageError> {
+    raw.parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(PageError::missing)
+}
+
 async fn target(state: &WebState, id: i64) -> Result<Target, PageError> {
     let row = with_db(state, move |connection| {
         connection.query_row(
@@ -50,9 +57,10 @@ fn heading(id: i64, report: &PublishedReport, number: u64, title: &str) -> Strin
 
 pub(super) async fn compose(
     State(state): State<Arc<WebState>>,
-    RoutePath(id): RoutePath<i64>,
+    RoutePath(id): RoutePath<String>,
     headers: HeaderMap,
 ) -> Result<Response, PageError> {
+    let id = review_id(&id)?;
     let target = target(&state, id).await?;
     let (token, cookie) = page_token(&state, &headers);
     let mut body = heading(id, &target.report, target.number, "Submit review");
@@ -212,17 +220,19 @@ async fn decision(
 
 pub(super) async fn preview(
     State(state): State<Arc<WebState>>,
-    RoutePath(id): RoutePath<i64>,
+    RoutePath(id): RoutePath<String>,
     request: Request,
 ) -> Result<Response, PageError> {
+    let id = review_id(&id)?;
     decision(&state, request, id, false).await
 }
 
 pub(super) async fn publish(
     State(state): State<Arc<WebState>>,
-    RoutePath(id): RoutePath<i64>,
+    RoutePath(id): RoutePath<String>,
     request: Request,
 ) -> Result<Response, PageError> {
+    let id = review_id(&id)?;
     decision(&state, request, id, true).await
 }
 
@@ -309,28 +319,19 @@ pub(super) async fn save_settings(
 
 pub(super) async fn load_diff(
     State(state): State<Arc<WebState>>,
-    RoutePath(id): RoutePath<i64>,
+    RoutePath(id): RoutePath<String>,
     request: Request,
 ) -> Result<Response, PageError> {
     checked_form(&state, request, 1).await?;
+    let id = review_id(&id)?;
     let target = target(&state, id).await?;
     if !crate::diff::available(&target.report) {
         let db = state.db.clone();
         let repos = state.allowed_repos.clone();
-        let loaded = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let mut report = target.report;
-            let url = canonical_pull_url(&report.repo, &target.number.to_string());
-            let snapshot = crate::source::collect(&url, &repos)?;
-            crate::diff::attach(&mut report, &snapshot);
-            let Some(diff) = report.diff else { return Ok(false); };
-            connect(&db)?.execute(
-                "UPDATE reviews SET report = json_set(report, '$.diff', json(?1))
-                 WHERE id = ?2 AND json_extract(report, '$.diff') IS NULL",
-                params![serde_json::to_string(&diff)?, id],
-            )?;
-            Ok(true)
-        }).await.map_err(|_| PageError::from(StorageError))?
-          .map_err(|_| PageError::new(StatusCode::BAD_GATEWAY, "Could not load the reviewed diff from GitHub. Check repository access and try again."))?;
+        let loaded =
+            tokio::task::spawn_blocking(move || store_archived_diff(&db, &repos, id, target))
+                .await
+                .map_err(|_| PageError::from(StorageError))??;
         if !loaded {
             return Err(PageError::new(
                 StatusCode::CONFLICT,
@@ -339,4 +340,40 @@ pub(super) async fn load_diff(
         }
     }
     Ok(Redirect::to(&format!("/reviews/{id}#review-diff")).into_response())
+}
+
+fn store_archived_diff(
+    db: &Path,
+    repos: &HashSet<String>,
+    id: i64,
+    target: Target,
+) -> Result<bool, PageError> {
+    let report = target.report;
+    let url = canonical_pull_url(&report.repo, &target.number.to_string());
+    let diff = crate::source::collect_pinned_diff(&url, &report.base, &report.head, repos)
+        .map_err(|error| match error.downcast_ref::<GitHubRateLimit>() {
+            Some(limit) => PageError::new(StatusCode::TOO_MANY_REQUESTS, &limit.to_string()),
+            None => PageError::new(StatusCode::BAD_GATEWAY, "Could not load the reviewed diff from GitHub. Check repository access and try again."),
+        })?;
+    let Some(mut diff) = diff else {
+        return Ok(false);
+    };
+    if let Some(paths) = report.patch_files {
+        for file in &mut diff.files {
+            if !paths.contains(&file.path) {
+                file.patch = None;
+            }
+        }
+    }
+    let json = serde_json::to_string(&diff).map_err(|_| StorageError)?;
+    connect(db)
+        .and_then(|conn| {
+            conn.execute(
+                "UPDATE reviews SET report = json_set(report, '$.diff', json(?1))
+         WHERE id = ?2 AND json_extract(report, '$.diff') IS NULL",
+                params![json, id],
+            )
+        })
+        .map_err(|_| StorageError)?;
+    Ok(true)
 }

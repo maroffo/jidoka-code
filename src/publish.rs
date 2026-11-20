@@ -1,4 +1,4 @@
-//! Prepare and submit one pinned GitHub review per decision and publication mode.
+//! Prepare and submit pinned GitHub reviews with durable duplicate prevention.
 
 use std::{collections::BTreeSet, env, fmt::Write, io::Read, path::Path, time::Duration};
 
@@ -26,6 +26,9 @@ const RESPONSE_BYTES: u64 = 8_000_000;
 const STORAGE: &str = "Could not access the local GitHub publication record.";
 const PENDING: &str = "GitHub has not confirmed this submission. Check the pull request before attempting to post it separately.";
 const DIFFERENT: &str = "A review with this decision and revision was already submitted or is awaiting confirmation with different content.";
+const DIFFERENT_ACTOR: &str =
+    "A different GitHub account already reserved or submitted this automatic review.";
+const UNREACHABLE: &str = "Could not reach GitHub.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prepared {
@@ -220,7 +223,7 @@ trait Transport {
     fn request<T: DeserializeOwned>(&self, route: &str, payload: Option<&Value>) -> Result<T> {
         let (status, bytes) = self.exchange(route, payload)?;
         if !status.is_success() {
-            return Err(GitHubStatus(status).into());
+            return Err(GitHubFailure::Status(status).into());
         }
         serde_json::from_slice(&bytes)
             .ok()
@@ -263,8 +266,13 @@ impl Transport for GitHub {
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "jidoka-code")
             .send()
-            .ok()
-            .context("Could not reach GitHub.")?;
+            .map_err(|error| {
+                if error.is_connect() {
+                    GitHubFailure::Connect.into()
+                } else {
+                    anyhow::anyhow!(UNREACHABLE)
+                }
+            })?;
         let status = response.status();
         if !status.is_success() {
             return Ok((status, Vec::new()));
@@ -284,11 +292,17 @@ impl Transport for GitHub {
 }
 
 #[derive(Debug)]
-struct GitHubStatus(StatusCode);
+enum GitHubFailure {
+    Connect,
+    Status(StatusCode),
+}
 
-impl std::fmt::Display for GitHubStatus {
+impl std::fmt::Display for GitHubFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self.0 {
+        let Self::Status(status) = self else {
+            return f.write_str(UNREACHABLE);
+        };
+        f.write_str(match *status {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 "GitHub denied access. Check the configured token and its permissions."
             }
@@ -302,19 +316,23 @@ impl std::fmt::Display for GitHubStatus {
     }
 }
 
-impl std::error::Error for GitHubStatus {}
+impl std::error::Error for GitHubFailure {}
 
-fn rejected(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<GitHubStatus>().is_some_and(|status| {
-        matches!(
-            status.0,
-            StatusCode::BAD_REQUEST
-                | StatusCode::UNAUTHORIZED
-                | StatusCode::FORBIDDEN
-                | StatusCode::NOT_FOUND
-                | StatusCode::UNPROCESSABLE_ENTITY
+fn definitely_unsent(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<GitHubFailure>(),
+        Some(
+            GitHubFailure::Connect
+                | GitHubFailure::Status(
+                    StatusCode::BAD_REQUEST
+                        | StatusCode::UNAUTHORIZED
+                        | StatusCode::FORBIDDEN
+                        | StatusCode::NOT_FOUND
+                        | StatusCode::UNPROCESSABLE_ENTITY
+                        | StatusCode::TOO_MANY_REQUESTS
+                )
         )
-    })
+    )
 }
 
 #[derive(Deserialize)]
@@ -349,6 +367,7 @@ struct RemoteReview {
 }
 
 struct Record {
+    scope: String,
     actor: i64,
     fingerprint: String,
     id: Option<i64>,
@@ -360,7 +379,7 @@ struct Submission<'a> {
     head: &'a str,
     event: &'a str,
     automatic: bool,
-    scope: String,
+    legacy_scope: String,
     fingerprint: String,
     payload: Value,
 }
@@ -400,7 +419,7 @@ impl<'a> Submission<'a> {
             "The review is too large or contains an invalid comment."
         );
 
-        let scope = hash(format!(
+        let legacy_scope = hash(format!(
             "{}:{number}:{}:{automatic}:{event}",
             report.repo.to_ascii_lowercase(),
             report.head.to_ascii_lowercase()
@@ -417,7 +436,7 @@ impl<'a> Submission<'a> {
                 })
             })
             .collect();
-        let mut payload = json!({
+        let payload = json!({
             "body": prepared.body,
             "commit_id": report.head,
             "event": event,
@@ -428,23 +447,27 @@ impl<'a> Submission<'a> {
                 .ok()
                 .context("Could not encode the GitHub review.")?,
         );
-        payload["body"] = json!(format!(
-            "{}\n\n{MARKER}{scope}:{fingerprint} -->",
-            prepared.body
-        ));
         Ok(Self {
             repo: &report.repo,
             number,
             head: &report.head,
             event,
             automatic,
-            scope,
+            legacy_scope,
             fingerprint,
             payload,
         })
     }
 
     fn send(&self, db: &Path, github: &impl Transport) -> Result<String> {
+        let actor: Actor = github.request("/user", None)?;
+        ensure!(actor.id > 0, "GitHub did not identify the review account.");
+        ensure!(
+            self.automatic || actor.kind == "User",
+            "Operator reviews require a GitHub user token."
+        );
+        let scope = self.scope(actor.id);
+
         // A committed reservation outlives both the process and a lost POST response.
         // Never retry a POST on an existing reservation, even if GitHub lists no marker yet.
         let connection = Connection::open(db).ok().context(STORAGE)?;
@@ -467,20 +490,22 @@ impl<'a> Submission<'a> {
 
         let route = format!("/repos/{}/pulls/{}", self.repo, self.number);
         let reviews = format!("{route}/reviews");
-        if let Some(record) = self.load(&connection)? {
-            return self.resume(&connection, github, &reviews, record);
+        if let Some(record) = Self::load(&connection, &scope)? {
+            return self.resume(&connection, github, &reviews, actor.id, record);
         }
-
-        let actor: Actor = github.request("/user", None)?;
-        ensure!(actor.id > 0, "GitHub did not identify the review account.");
-        ensure!(
-            self.automatic || actor.kind == "User",
-            "Operator reviews require a GitHub user token."
-        );
-        if let Some(record) = self.find_remote(github, &reviews, actor.id)? {
-            self.insert(&connection, &record)?;
-            let stored = self.load(&connection)?.context(STORAGE)?;
-            return self.resume(&connection, github, &reviews, stored);
+        if !self.automatic
+            && let Some(record) = Self::load(&connection, &self.legacy_scope)?
+            && record.actor == actor.id
+            && self.matches_slot(&record.fingerprint)
+        {
+            return self.resume(&connection, github, &reviews, actor.id, record);
+        }
+        let keys = [scope.as_str(), self.legacy_scope.as_str()];
+        if let Some(mut record) = self.find_remote(github, &reviews, actor.id, &keys)? {
+            record.scope.clone_from(&scope);
+            Self::insert(&connection, &record)?;
+            let stored = Self::load(&connection, &scope)?.context(STORAGE)?;
+            return self.resume(&connection, github, &reviews, actor.id, stored);
         }
 
         let pull: Pull = github.request(&route, None)?;
@@ -494,80 +519,105 @@ impl<'a> Submission<'a> {
             pull.head.sha.eq_ignore_ascii_case(self.head),
             "The pull request has changed. Review its current revision before publishing."
         );
-        if self.event == "APPROVE" {
-            let author = pull.user.filter(|user| user.id > 0);
+        if self.event != "COMMENT" {
+            let author = pull
+                .user
+                .filter(|user| user.id > 0)
+                .context("GitHub could not verify the pull request author.")?;
             ensure!(
-                author.is_some(),
-                "GitHub could not verify the pull request author."
-            );
-            ensure!(
-                author.is_some_and(|user| user.id != actor.id),
-                "The pull request author cannot approve their own pull request."
+                author.id != actor.id,
+                "The pull request author cannot approve or request changes on their own pull request."
             );
         }
 
         let record = Record {
+            scope,
             actor: actor.id,
             fingerprint: self.fingerprint.clone(),
             id: None,
         };
-        if !self.insert(&connection, &record)? {
-            let stored = self.load(&connection)?.context(STORAGE)?;
-            return self.resume(&connection, github, &reviews, stored);
+        if !Self::insert(&connection, &record)? {
+            let stored = Self::load(&connection, &record.scope)?.context(STORAGE)?;
+            return self.resume(&connection, github, &reviews, actor.id, stored);
         }
 
+        let mut payload = self.payload.clone();
+        let body = payload["body"].as_str().expect("review body was validated");
+        let scope = &record.scope;
+        let fingerprint = &record.fingerprint;
+        payload["body"] = json!(format!("{body}\n\n{MARKER}{scope}:{fingerprint} -->"));
+        let keys = [scope.as_str()];
         let posted = github
-            .request::<RemoteReview>(&reviews, Some(&self.payload))
+            .request::<RemoteReview>(&reviews, Some(&payload))
             .and_then(|review| {
-                let result = self.match_review(&review, actor.id)?;
+                let result = self.match_review(&review, actor.id, &keys)?;
                 result
                     .filter(|record| record.fingerprint == self.fingerprint)
                     .context("GitHub did not identify the submitted review.")
             });
         match posted {
-            Ok(result) => self.confirm(&connection, result.id.context(STORAGE)?),
-            Err(error) if rejected(&error) => {
+            Ok(result) => self.confirm(&connection, &record, result.id.context(STORAGE)?),
+            Err(error) if definitely_unsent(&error) => {
                 // Only the caller that inserted this reservation issued the POST.
                 connection
                     .execute(
                         "DELETE FROM github_publications
                      WHERE scope = ?1 AND actor = ?2 AND fingerprint = ?3 AND review_id IS NULL",
-                        params![self.scope, actor.id, self.fingerprint],
+                        params![scope, actor.id, fingerprint],
                     )
                     .ok()
                     .context(STORAGE)?;
                 Err(error)
             }
             Err(error) => {
-                if let Ok(Some(result)) = self.find_remote(github, &reviews, actor.id)
+                if let Ok(Some(result)) = self.find_remote(github, &reviews, actor.id, &keys)
                     && result.fingerprint == self.fingerprint
                 {
-                    return self.confirm(&connection, result.id.context(STORAGE)?);
+                    return self.confirm(&connection, &record, result.id.context(STORAGE)?);
                 }
                 bail!("{error} {PENDING}");
             }
         }
     }
 
-    fn insert(&self, connection: &Connection, record: &Record) -> Result<bool> {
+    fn scope(&self, actor: i64) -> String {
+        if self.automatic {
+            // The bot gets one slot per head, even if its configured account changes.
+            self.legacy_scope.clone()
+        } else if self.event == "COMMENT" {
+            hash(format!(
+                "{}:{actor}:{}",
+                self.legacy_scope, self.fingerprint
+            ))
+        } else {
+            hash(format!("{}:{actor}", self.legacy_scope))
+        }
+    }
+
+    fn matches_slot(&self, fingerprint: &str) -> bool {
+        self.automatic || self.event != "COMMENT" || fingerprint == self.fingerprint
+    }
+
+    fn insert(connection: &Connection, record: &Record) -> Result<bool> {
         let rows = connection
             .execute(
                 "INSERT INTO github_publications (scope, actor, fingerprint, review_id)
                  VALUES (?1, ?2, ?3, ?4) ON CONFLICT(scope) DO NOTHING",
-                params![self.scope, record.actor, record.fingerprint, record.id],
+                params![record.scope, record.actor, record.fingerprint, record.id],
             )
             .ok()
             .context(STORAGE)?;
         Ok(rows == 1)
     }
 
-    fn load(&self, connection: &Connection) -> Result<Option<Record>> {
+    fn load(connection: &Connection, scope: &str) -> Result<Option<Record>> {
         connection
             .query_row(
                 "SELECT actor, fingerprint, review_id FROM github_publications WHERE scope = ?1",
-                [&self.scope],
+                [scope],
                 |row| {
                     Ok(Record {
+                        scope: scope.to_owned(),
                         actor: row.get(0)?,
                         fingerprint: row.get(1)?,
                         id: row.get(2)?,
@@ -584,26 +634,35 @@ impl<'a> Submission<'a> {
         connection: &Connection,
         github: &impl Transport,
         route: &str,
+        actor: i64,
         record: Record,
     ) -> Result<String> {
+        ensure!(record.actor == actor, "{DIFFERENT_ACTOR}");
         ensure!(record.fingerprint == self.fingerprint, "{DIFFERENT}");
         if let Some(id) = record.id {
             return self.url(id);
         }
-        if let Some(found) = self.find_remote(github, route, record.actor)? {
+        if let Some(found) = self.find_remote(github, route, actor, &[&record.scope])? {
             ensure!(found.fingerprint == self.fingerprint, "{DIFFERENT}");
-            return self.confirm(connection, found.id.context(STORAGE)?);
+            return self.confirm(connection, &record, found.id.context(STORAGE)?);
         }
         bail!("{PENDING}")
     }
 
-    fn confirm(&self, connection: &Connection, id: i64) -> Result<String> {
-        connection.execute(
-            "UPDATE github_publications SET review_id = ?2 WHERE scope = ?1 AND review_id IS NULL",
-            params![self.scope, id],
-        ).ok().context(STORAGE)?;
+    fn confirm(&self, connection: &Connection, record: &Record, id: i64) -> Result<String> {
+        connection
+            .execute(
+                "UPDATE github_publications SET review_id = ?4
+                 WHERE scope = ?1 AND actor = ?2 AND fingerprint = ?3 AND review_id IS NULL",
+                params![record.scope, record.actor, record.fingerprint, id],
+            )
+            .ok()
+            .context(STORAGE)?;
         self.url(
-            self.load(connection)?
+            Self::load(connection, &record.scope)?
+                .filter(|stored| {
+                    stored.actor == record.actor && stored.fingerprint == record.fingerprint
+                })
                 .and_then(|record| record.id)
                 .context(STORAGE)?,
         )
@@ -614,12 +673,13 @@ impl<'a> Submission<'a> {
         github: &impl Transport,
         route: &str,
         actor: i64,
+        keys: &[&str],
     ) -> Result<Option<Record>> {
         for page in 1..=MAX_PAGES {
             let reviews: Vec<RemoteReview> =
                 github.request(&format!("{route}?per_page={PAGE_SIZE}&page={page}"), None)?;
             for review in &reviews {
-                if let Some(record) = self.match_review(review, actor)? {
+                if let Some(record) = self.match_review(review, actor, keys)? {
                     return Ok(Some(record));
                 }
             }
@@ -630,7 +690,12 @@ impl<'a> Submission<'a> {
         bail!("Could not check all existing GitHub reviews for a matching submission.")
     }
 
-    fn match_review(&self, review: &RemoteReview, actor: i64) -> Result<Option<Record>> {
+    fn match_review(
+        &self,
+        review: &RemoteReview,
+        actor: i64,
+        keys: &[&str],
+    ) -> Result<Option<Record>> {
         let expected_state = match self.event {
             "APPROVE" => "APPROVED",
             "REQUEST_CHANGES" => "CHANGES_REQUESTED",
@@ -645,13 +710,21 @@ impl<'a> Submission<'a> {
         {
             return Ok(None);
         }
-        let prefix = format!("{MARKER}{}:", self.scope);
-        let Some(fingerprint) = review
+        let Some((scope, fingerprint)) = review
             .body
             .as_deref()
             .and_then(|body| body.trim_end().lines().last())
-            .and_then(|line| line.strip_prefix(&prefix)?.strip_suffix(" -->"))
-            .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            .and_then(|line| {
+                line.strip_prefix(MARKER)?
+                    .strip_suffix(" -->")?
+                    .split_once(':')
+            })
+            .filter(|(scope, fingerprint)| {
+                keys.contains(scope)
+                    && fingerprint.len() == 64
+                    && fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+                    && self.matches_slot(fingerprint)
+            })
         else {
             return Ok(None);
         };
@@ -662,6 +735,7 @@ impl<'a> Submission<'a> {
             "GitHub returned an invalid review URL."
         );
         Ok(Some(Record {
+            scope: scope.to_owned(),
             actor,
             fingerprint: fingerprint.to_owned(),
             id: Some(review.id),
@@ -688,7 +762,7 @@ mod tests {
     use std::{
         sync::{
             Arc, Barrier, Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
+            atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering::SeqCst},
         },
         thread,
     };
@@ -818,6 +892,15 @@ mod tests {
         for (event, actor, author, state, draft, head, message) in [
             ("APPROVE", "User", 31, "open", false, HEAD, "their own"),
             (
+                "REQUEST_CHANGES",
+                "User",
+                31,
+                "open",
+                false,
+                HEAD,
+                "their own",
+            ),
+            (
                 "APPROVE",
                 "User",
                 0,
@@ -867,8 +950,8 @@ mod tests {
     }
 
     #[test]
-    fn allows_correction_after_a_definitive_write_rejection() {
-        for status in [403, 422] {
+    fn allows_retry_after_a_definitive_write_rejection_or_connection_failure() {
+        for status in [Some(403), Some(422), Some(429), None] {
             let writes = Arc::new(AtomicUsize::new(0));
             let mock = Mock({
                 let writes = Arc::clone(&writes);
@@ -888,10 +971,12 @@ mod tests {
                             assert_eq!(payload["comments"][0]["side"], "RIGHT");
                             assert_eq!(payload["comments"][0]["line"], 8);
                             assert_eq!(payload["comments"][0]["path"], PATH);
-                            return Some((
-                                status,
-                                json!({"message": "private upstream diagnostic"}),
-                            ));
+                            return status.map_or(Reply::Connect, |status| {
+                                Reply::Http(
+                                    status,
+                                    json!({"message": "private upstream diagnostic"}),
+                                )
+                            });
                         }
                         assert_eq!(payload["comments"], json!([]));
                         return ok(remote(&payload));
@@ -934,7 +1019,7 @@ mod tests {
                 if request.method == "POST" {
                     writes.fetch_add(1, SeqCst);
                     *posted.lock().unwrap() = Some(remote(&request.payload));
-                    return None;
+                    return Reply::Lost;
                 }
                 if request.path.starts_with(REVIEWS)
                     && let Some(review) = posted.lock().unwrap().as_ref()
@@ -986,7 +1071,7 @@ mod tests {
                             invalid["html_url"] = json!("https://github.com.evil.invalid/review");
                             return ok(invalid);
                         }
-                        return Some((503, json!({"message": "unknown write outcome"})));
+                        return Reply::Http(503, json!({"message": "unknown write outcome"}));
                     }
                     preflight(&request)
                 }
@@ -995,7 +1080,7 @@ mod tests {
             let db = db.path().join("app.db");
             let report = report();
             let prepared = prepare(&report, &[0], true);
-            let submission = Submission::new(&report, 7, &prepared, "COMMENT", false).unwrap();
+            let submission = Submission::new(&report, 7, &prepared, "COMMENT", true).unwrap();
             for _ in 0..2 {
                 let message = submission.send(&db, &mock).unwrap_err().to_string();
                 assert!(message.contains(PENDING));
@@ -1003,13 +1088,105 @@ mod tests {
                 assert!(!message.contains("unknown write outcome"));
             }
             let different = prepare(&report, &[], false);
-            let different = Submission::new(&report, 7, &different, "COMMENT", false).unwrap();
+            let different = Submission::new(&report, 7, &different, "COMMENT", true).unwrap();
             assert_eq!(
                 different.send(&db, &mock).unwrap_err().to_string(),
                 DIFFERENT
             );
             assert_eq!(writes.load(SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn deduplicates_manual_comments_by_account_and_payload_and_preserves_the_bot_slot() {
+        let actor = AtomicI64::new(31);
+        let remote_reviews = Mutex::new(Vec::new());
+        let mock = Mock(|request| {
+            let actor = actor.load(SeqCst);
+            if request.path == "/user" {
+                return ok(json!({"id": actor, "type": "User"}));
+            }
+            let mut reviews = remote_reviews.lock().unwrap();
+            if request.method == "POST" {
+                let id = 91 + reviews.len();
+                let mut review = remote(&request.payload);
+                review["user"]["id"] = json!(actor);
+                review["id"] = json!(id);
+                review["html_url"] =
+                    json!(format!("{WEB}/team/example/pull/7#pullrequestreview-{id}"));
+                reviews.push(review.clone());
+                return ok(review);
+            }
+            if request.path.starts_with(REVIEWS) {
+                return ok(json!(*reviews));
+            }
+            preflight(&request)
+        });
+        let local = tempfile::tempdir().unwrap();
+        let db = local.path().join("app.db");
+        let report = report();
+        let first = prepare(&report, &[0], true);
+        let second = prepare(&report, &[1], true);
+        let submit = |db: &Path, prepared, automatic| {
+            Submission::new(&report, 7, prepared, "COMMENT", automatic)
+                .unwrap()
+                .send(db, &mock)
+        };
+
+        assert_eq!(submit(&db, &first, false).unwrap(), LINK);
+        assert_eq!(submit(&db, &first, false).unwrap(), LINK);
+        let other_selection = submit(&db, &second, false).unwrap();
+        assert_ne!(other_selection, LINK);
+        assert_eq!(submit(&db, &second, false).unwrap(), other_selection);
+        assert_eq!(
+            submit(&local.path().join("fresh.db"), &second, false).unwrap(),
+            other_selection
+        );
+
+        actor.store(0, SeqCst);
+        assert!(submit(&db, &first, false).is_err());
+        actor.store(44, SeqCst);
+        let other_operator = submit(&db, &first, false).unwrap();
+        assert_ne!(other_operator, LINK);
+        assert_eq!(submit(&db, &first, false).unwrap(), other_operator);
+
+        let bot = submit(&db, &first, true).unwrap();
+        assert_eq!(submit(&db, &first, true).unwrap(), bot);
+        assert_eq!(
+            submit(&db, &second, true).unwrap_err().to_string(),
+            DIFFERENT
+        );
+        actor.store(31, SeqCst);
+        assert_eq!(
+            submit(&db, &first, true).unwrap_err().to_string(),
+            DIFFERENT_ACTOR
+        );
+        assert_eq!(submit(&db, &first, false).unwrap(), LINK);
+        assert_eq!(remote_reviews.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn reconciles_a_legacy_manual_marker_for_the_original_actor_and_content() {
+        let report = report();
+        let prepared = prepare(&report, &[0], true);
+        let submission = Submission::new(&report, 7, &prepared, "COMMENT", false).unwrap();
+        let mut payload = submission.payload.clone();
+        payload["body"] = json!(format!(
+            "{}\n\n{MARKER}{}:{} -->",
+            prepared.body, submission.legacy_scope, submission.fingerprint
+        ));
+        let original = remote(&payload);
+        let mock = Mock(|request| {
+            if request.path.starts_with(REVIEWS) {
+                assert_eq!(request.method, "GET");
+                return ok(json!([original]));
+            }
+            preflight(&request)
+        });
+        let local = tempfile::tempdir().unwrap();
+        let db = local.path().join("app.db");
+        assert_eq!(submission.send(&db, &mock).unwrap(), LINK);
+        assert_eq!(submission.send(&db, &mock).unwrap(), LINK);
     }
 
     #[test]
@@ -1074,10 +1251,14 @@ mod tests {
         })
     }
 
-    type Reply = Option<(u16, Value)>;
+    enum Reply {
+        Http(u16, Value),
+        Connect,
+        Lost,
+    }
 
     fn ok(value: Value) -> Reply {
-        Some((200, value))
+        Reply::Http(200, value)
     }
 
     fn preflight(request: &Request) -> Reply {
@@ -1105,11 +1286,14 @@ mod tests {
                 path: route.to_owned(),
                 payload: payload.cloned().unwrap_or(Value::Null),
             };
-            let (status, value) = (self.0)(request).context("Could not reach GitHub.")?;
-            Ok((
-                StatusCode::from_u16(status).unwrap(),
-                serde_json::to_vec(&value).unwrap(),
-            ))
+            match (self.0)(request) {
+                Reply::Http(status, value) => Ok((
+                    StatusCode::from_u16(status).unwrap(),
+                    serde_json::to_vec(&value).unwrap(),
+                )),
+                Reply::Connect => Err(GitHubFailure::Connect.into()),
+                Reply::Lost => bail!(UNREACHABLE),
+            }
         }
     }
 }
