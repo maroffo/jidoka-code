@@ -1,0 +1,10 @@
+rules:
+  - id: python-subprocess-shell
+    languages: [python]
+    severity: WARNING
+    message: Review whether inputs to this subprocess call can be influenced by an untrusted source when shell parsing is enabled.
+    patterns:
+      - pattern: subprocess.$CALL(..., shell=True, ...)
+      - metavariable-regex:
+          metavariable: $CALL
+          regex: '^(Popen|run|call|check_call|check_output)$'
