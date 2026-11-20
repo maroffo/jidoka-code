@@ -1338,7 +1338,7 @@ mod tests {
             ("content-type", "application/x-www-form-urlencoded"),
         ];
         let path = "/repositories/authorize";
-        let body = format!("csrf_token={token}&repo=https://github.com/Acme/Tools.git/");
+        let body = format!("csrf_token={token}&repo=HTTPS://GitHub.com/Acme/Tools.GIT/");
         assert_eq!(
             f.request(Method::POST, path, &[], body.clone()).await.0,
             StatusCode::FORBIDDEN
@@ -1347,6 +1347,8 @@ mod tests {
             "https://evil.example/acme/tools",
             "acme/tools/pull/1",
             "owner/..",
+            "acme/.git",
+            "acme/tools.git.git",
         ] {
             let (status, _, html) = f
                 .request(
@@ -1399,10 +1401,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            f.request(Method::POST, path, &headers, body).await.0,
+            f.request(
+                Method::POST,
+                path,
+                &headers,
+                format!("csrf_token={token}&repo=Acme/Tools.git")
+            )
+            .await
+            .0,
             StatusCode::SEE_OTHER
         );
         f.app = router(&f.db, PROVIDER, &empty).unwrap();
+        assert_eq!(
+            crate::automation::repositories_at(&f.db, &empty)
+                .unwrap()
+                .len(),
+            1
+        );
         let page = f.get("/repositories").await;
         assert_eq!(page.matches("<h2>acme/tools</h2>").count(), 1);
         assert!(page.contains(r#"value="summary" selected"#));
