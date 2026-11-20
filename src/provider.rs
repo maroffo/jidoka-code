@@ -49,7 +49,8 @@ impl Provider {
         let client = Client::builder()
             .redirect(Policy::none())
             .no_proxy()
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(300))
             .build()?;
         Ok(Self {
             client,
