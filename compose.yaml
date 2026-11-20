@@ -1,8 +1,8 @@
 services:
   web:
     build: .
-    # Allow the bounded GitHub, scanner and two model calls of the active job to finish.
-    stop_grace_period: 11m
+    # Allow the bounded GitHub, scanner and up to three model calls of the active job to finish.
+    stop_grace_period: 17m
     ports:
       - "127.0.0.1:8080:8080"
     environment:

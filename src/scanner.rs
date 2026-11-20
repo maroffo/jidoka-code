@@ -49,7 +49,18 @@ fn targets<'a>(snapshot: &'a Snapshot, limits: &mut Vec<String>) -> Vec<(&'a str
     for file in &snapshot.files {
         let path = file.path.as_str();
         let text = file.after.as_str();
-        if text.is_empty() || !applicable(path) {
+        if !applicable(path) {
+            continue;
+        }
+        if text.is_empty() {
+            // A patch excerpt cannot stand in for the full file passed to Semgrep.
+            if crate::hunks::lines(&file.patch)
+                .is_some_and(|lines| lines.iter().any(|(_, head, _)| head.is_some()))
+            {
+                limits.push(format!(
+                    "Semgrep requires the full head file for {path}; only its patch was available."
+                ));
+            }
             continue;
         }
         if !safe_path(path) || counts[path] != 1 {
@@ -470,6 +481,7 @@ mod tests {
             intent: Vec::new(),
             limits: Vec::new(),
             files,
+            head_context: Vec::new(),
         }
     }
 
@@ -495,6 +507,22 @@ mod tests {
                 && scan.covered.is_empty()
                 && scan.limits.is_empty()
                 && scan.version.is_empty()
+        );
+    }
+
+    #[test]
+    fn patch_only_python_is_not_counted_as_scanned() {
+        let mut changed = file("changed.py", "");
+        changed.patch = "@@ -4 +4 @@\n-before()\n+after()".into();
+        let mut removed = file("removed.py", "");
+        removed.patch = "@@ -1 +0,0 @@\n-gone()".into();
+        let report = scan_using(&snapshot(vec![changed, removed]), || {
+            panic!("no full files")
+        });
+        assert!(report.covered.is_empty());
+        assert_eq!(
+            report.limits,
+            ["Semgrep requires the full head file for changed.py; only its patch was available."]
         );
     }
 

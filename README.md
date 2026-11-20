@@ -2,7 +2,11 @@
 
 Jidoka Code is a single-user Rust web service for reviewing GitHub pull requests. Each report opens with **Where to focus**, a short guide to the lines worth reading, what the reviewer already checked, and which decisions need a maintainer.
 
-The engine reviews text changes across languages and frameworks. It makes two passes. The first proposes findings. The second looks for evidence in the code that could disprove them. Jidoka checks file paths, line numbers, and quotations against the revisions under review. Semgrep supplies additional leads when a bundled rule applies. The pilot includes one Python rule. Pull requests in other languages and changes that span multiple stacks go through the same review.
+The engine reviews text changes across languages and frameworks. It proposes findings, then checks the code for evidence that could disprove each one. When evidence is missing, the model can ask for a file and a search term. Jidoka reads matching lines at the reviewed commit for one targeted recheck. The report gives the reviewer a concrete manual test when a behavior needs to be observed at runtime.
+
+Jidoka collects changed lines before spending its budget on surrounding files. It verifies source references and lists the files supplied with patches and any gaps in coverage. Semgrep supplies additional leads when a bundled rule applies. The pilot includes one Python rule. Pull requests in other languages and changes that span multiple stacks go through the same review.
+
+When you repeat a review with the same provider and both Git revisions still match, Jidoka rechecks up to two previous findings against the current evidence.
 
 ## Getting started
 
@@ -24,7 +28,7 @@ For private repositories, set `JIDOKA_GITHUB_TOKEN` to a GitHub token with read 
 
 Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the provider before submitting. The service listens on the loopback interface for one trusted user. The `reviews` volume stores the SQLite history and supports reports from the Python pilot. Existing reports retain their original text.
 
-Running `docker compose stop` stops the service from accepting HTTP requests and lets the active review finish. Queued reviews resume on the next startup. Each of the two model calls can take up to five minutes. Compose allows up to eleven minutes for shutdown so the worker can finish the active review.
+Running `docker compose stop` stops the service from accepting HTTP requests and lets the active review finish. Queued reviews resume on the next startup. Each model call can take up to five minutes. The engine can request one targeted recheck for an unresolved assessment. Compose allows up to seventeen minutes for shutdown so the worker can finish the active review.
 
 ## Development
 

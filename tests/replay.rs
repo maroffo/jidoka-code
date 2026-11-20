@@ -22,7 +22,7 @@ fn replays_complete_python_reports_without_scanner_signals() {
         serde_json::from_str(include_str!("fixtures/pilot-replay.json")).unwrap();
     for case in cases {
         let mut replies = case.replies.into_iter();
-        let report = engine::review(&case.snapshot, &case.scan, |_, _| {
+        let report = engine::review_replay(&case.snapshot, &case.scan, |_, _| {
             Ok(replies
                 .next()
                 .unwrap_or_else(|| panic!("{}: unexpected provider call", case.name)))

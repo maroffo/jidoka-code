@@ -1,6 +1,12 @@
 //! Collect a pinned, bounded snapshot without cloning or executing repository code.
 
-use crate::contracts::{GitHubRateLimit, Snapshot, SourceFile};
+mod callers;
+mod local_dependencies;
+mod reads;
+
+pub use reads::read_context;
+
+use crate::contracts::{GitHubRateLimit, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use icu_properties::{
@@ -25,19 +31,26 @@ const REQUESTS: usize = 48;
 const DOWNLOAD: usize = 6_000_000;
 const RESPONSE: usize = 2_000_000;
 const PULL_BYTES: usize = 128_000;
-const DEADLINE: Duration = Duration::from_secs(30);
+const DEADLINE: Duration = Duration::from_secs(45);
 const REQUEST_TIME: Duration = Duration::from_secs(5);
+const INVENTORY_TIME: Duration = Duration::from_secs(15);
 const COMMITS_PER_PAGE: usize = 20;
 const COMMIT_PAGES: usize = 3;
-const CHANGED_FILES: usize = 20;
+// GitHub's pinned comparison lists at most 300 changed files.
+const CHANGED_FILES: usize = 300;
 const CONTEXT_FILES: usize = 8;
 const CONTEXT_PROBES: usize = 12;
 const WIDER_PROBES: usize = 3;
-const INVENTORY_BYTES: usize = 700_000;
+const INVENTORY_BYTES: usize = 12_000_000;
+const CONTEXT_TEXT_BYTES: usize = 16_000;
 const INTENT_BYTES: usize = 8_000;
 const BLOB_BYTES: usize = 24_000;
-const PATCH_BYTES: usize = 16_000;
-const SOURCE_BYTES: usize = 96_000;
+const WINDOW_BLOB_BYTES: usize = 256 * 1024;
+const HEAD_CONTEXT_BYTES: usize = 12_000;
+const HEAD_WINDOWS: usize = 32;
+const WINDOWS_PER_FILE: usize = 3;
+const WINDOW_RADIUS: usize = 8;
+const WINDOW_BYTES: usize = 2_000;
 
 fn valid_repo(repo: &str) -> bool {
     let Some((owner, name)) = repo.split_once('/') else {
@@ -160,8 +173,16 @@ struct GitHub<T> {
     deadline: Instant,
     requests: usize,
     remaining: usize,
+    inventory_remaining: usize,
     rate_limited: bool,
     blobs: HashMap<String, (usize, Option<String>)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Request {
+    Regular,
+    Inventory,
+    Final,
 }
 
 impl<T: Transport> GitHub<T> {
@@ -171,6 +192,7 @@ impl<T: Transport> GitHub<T> {
             deadline: Instant::now() + DEADLINE,
             requests: REQUESTS,
             remaining: DOWNLOAD,
+            inventory_remaining: INVENTORY_BYTES,
             rate_limited: false,
             blobs: HashMap::new(),
         }
@@ -182,12 +204,37 @@ impl<T: Transport> GitHub<T> {
         cap: usize,
         final_check: bool,
     ) -> Result<R> {
+        let request = if final_check {
+            Request::Final
+        } else {
+            Request::Regular
+        };
+        self.request(route, cap, request)
+    }
+
+    fn request<R: DeserializeOwned>(
+        &mut self,
+        route: &str,
+        cap: usize,
+        request: Request,
+    ) -> Result<R> {
         if self.rate_limited {
             return Err(GitHubRateLimit.into());
         }
         // Reserve one request, its bytes, and time for the last PR metadata check.
+        let final_check = request == Request::Final;
         let reserve = usize::from(!final_check);
-        let budget = cap.min(self.remaining.saturating_sub(reserve * PULL_BYTES));
+        let (available, max_time) = if request == Request::Inventory {
+            (&mut self.inventory_remaining, INVENTORY_TIME)
+        } else {
+            (&mut self.remaining, REQUEST_TIME)
+        };
+        let reserve_bytes = if request == Request::Inventory {
+            0
+        } else {
+            reserve * PULL_BYTES
+        };
+        let budget = cap.min(available.saturating_sub(reserve_bytes));
         let timeout = self
             .deadline
             .saturating_duration_since(Instant::now())
@@ -196,7 +243,7 @@ impl<T: Transport> GitHub<T> {
             } else {
                 REQUEST_TIME
             })
-            .min(REQUEST_TIME);
+            .min(max_time);
         ensure!(
             self.requests > reserve && budget > 0 && !timeout.is_zero(),
             "GitHub collection budget exhausted."
@@ -211,7 +258,7 @@ impl<T: Transport> GitHub<T> {
             .take((budget + 1) as u64);
         let mut bytes = Vec::new();
         let read = response.read_to_end(&mut bytes);
-        self.remaining = self.remaining.saturating_sub(bytes.len());
+        *available = available.saturating_sub(bytes.len());
         ensure!(
             read.is_ok() && bytes.len() <= budget,
             "GitHub response was incomplete or too large."
@@ -221,12 +268,14 @@ impl<T: Transport> GitHub<T> {
 
     fn blob(&mut self, repo: &str, id: &str, size: usize) -> Result<Option<String>> {
         sha(id)?;
-        ensure!(size <= BLOB_BYTES, "File exceeds the size limit.");
+        ensure!(size <= WINDOW_BLOB_BYTES, "File exceeds the size limit.");
         if let Some((known_size, text)) = self.blobs.get(id) {
             ensure!(*known_size == size, "Git blob size mismatch.");
             return Ok(text.clone());
         }
-        let blob: GitBlob = self.get(&format!("{repo}/git/blobs/{id}"), 40_000, false)?;
+        // Account for base64, escaped line breaks, and GitHub's JSON envelope.
+        let cap = if size <= BLOB_BYTES { 40_000 } else { 400_000 };
+        let blob: GitBlob = self.get(&format!("{repo}/git/blobs/{id}"), cap, false)?;
         ensure!(blob.encoding == "base64", "Unsupported Git blob encoding.");
         let bytes = STANDARD.decode(blob.content.replace(['\n', '\r'], ""))?;
         ensure!(bytes.len() == size, "Git blob size mismatch.");
@@ -331,10 +380,12 @@ struct Entry {
 }
 
 impl Entry {
+    fn is_regular(&self) -> bool {
+        self.kind == "blob" && matches!(self.mode.as_str(), "100644" | "100755")
+    }
+
     fn file_size(&self) -> Option<usize> {
-        (self.kind == "blob" && matches!(self.mode.as_str(), "100644" | "100755"))
-            .then_some(self.size)
-            .flatten()
+        self.is_regular().then_some(self.size).flatten()
     }
 }
 
@@ -426,15 +477,30 @@ impl<'a> Tree<'a> {
         Ok(entries)
     }
 
-    fn text<T: Transport>(&mut self, hub: &mut GitHub<T>, path: &str) -> Result<Option<String>> {
+    fn entry<T: Transport>(&mut self, hub: &mut GitHub<T>, path: &str) -> Result<Option<&Entry>> {
         let (dir, name) = parent(path);
+        Ok(self.directory(hub, dir)?.get(name))
+    }
+
+    fn cached_entry(&self, path: &str) -> Option<&Entry> {
+        let (dir, name) = parent(path);
+        self.directories.get(dir)?.as_ref()?.get(name)
+    }
+
+    fn text<T: Transport>(
+        &mut self,
+        hub: &mut GitHub<T>,
+        path: &str,
+        remaining: usize,
+    ) -> Result<Option<String>> {
         let repo = self.repo;
-        let Some(entry) = self.directory(hub, dir)?.get(name) else {
+        let Some(entry) = self.entry(hub, path)? else {
             return Ok(None);
         };
         let size = entry
             .file_size()
             .context("Git entry must be a regular file.")?;
+        ensure!(size <= remaining, "File exceeds the remaining text budget.");
         hub.blob(repo, &entry.sha, size)?
             .map(Some)
             .context("File must contain UTF-8 text.")
@@ -444,28 +510,21 @@ impl<'a> Tree<'a> {
         &mut self,
         hub: &mut GitHub<T>,
         changed: &[SourceFile],
-        limits: &mut Vec<String>,
     ) -> Vec<Entry> {
         let repo = self.repo;
         let recursive = self.root(hub).and_then(|root| {
-            let data: TreeData = hub.get(
+            let data: TreeData = hub.request(
                 &format!("{repo}/git/trees/{root}?recursive=1"),
                 INVENTORY_BYTES,
-                false,
+                Request::Inventory,
             )?;
             ensure!(data.sha == root, "Unexpected Git tree listing.");
             Ok(data)
         });
         if let Ok(data) = recursive {
-            if data.truncated {
-                limits.push("The Git tree listing for context is truncated.".into());
-            }
             return data.tree;
         }
         // Large repositories can exceed the inventory cap. Keep the directly relevant directories.
-        limits.push(
-            "Git tree listing is unavailable. Context discovery uses nearby directories.".into(),
-        );
         let mut dirs: BTreeSet<&str> = changed.iter().map(|file| parent(&file.path).0).collect();
         dirs.extend(["", "docs", "test", "tests", "spec"]);
         let mut entries = Vec::new();
@@ -526,23 +585,167 @@ impl Change {
         }
     }
 
-    fn patch(&self, limits: &mut Vec<String>) -> String {
-        if let Some(patch) = &self.patch
-            && patch.starts_with("@@ ")
-            && patch.len() <= PATCH_BYTES
-            && self.additions == Some(patch.lines().filter(|line| line.starts_with('+')).count())
-            && self.deletions == Some(patch.lines().filter(|line| line.starts_with('-')).count())
-        {
-            return patch.clone();
+    fn complete_patch(&self) -> Option<&str> {
+        let patch = self.patch.as_deref()?;
+        let mut additions = 0;
+        let mut deletions = 0;
+        for (base, head, _) in crate::hunks::lines(patch)? {
+            additions += usize::from(base.is_none() && head.is_some());
+            deletions += usize::from(base.is_some() && head.is_none());
         }
-        if self.changes != Some(0) || self.patch.is_some() {
-            limits.push(format!(
-                "Patch is missing, incomplete, or too large for {}.",
-                self.filename
-            ));
-        }
-        String::new()
+        (additions + deletions > 0
+            && !patch.contains('\0')
+            && self.additions == Some(additions)
+            && self.deletions == Some(deletions)
+            && self
+                .changes
+                .is_none_or(|total| total == additions + deletions))
+        .then_some(patch)
     }
+
+    fn pinned_entries<'a, T: Transport>(
+        &self,
+        hub: &mut GitHub<T>,
+        base: &'a mut Tree<'_>,
+        head: &'a mut Tree<'_>,
+        previous: &str,
+    ) -> (Option<&'a Entry>, Option<&'a Entry>) {
+        let old = if self.status == "added" {
+            None
+        } else {
+            base.entry(hub, previous).ok().flatten()
+        };
+        let new = if self.status == "removed" {
+            None
+        } else {
+            head.entry(hub, &self.filename).ok().flatten()
+        };
+        (old, new)
+    }
+
+    fn review_patchless<T: Transport>(
+        &self,
+        hub: &mut GitHub<T>,
+        base: &mut Tree<'_>,
+        head: &mut Tree<'_>,
+        previous: &str,
+        limits: &mut Vec<String>,
+    ) -> bool {
+        // Binary changes can also have zero line counts. Check the pinned tree entries.
+        if self.patch.is_none()
+            && self.changes == Some(0)
+            && self.additions.is_none_or(|count| count == 0)
+            && self.deletions.is_none_or(|count| count == 0)
+        {
+            let (old, new) = self.pinned_entries(hub, base, head, previous);
+            if report_mode_limits(&self.filename, old, new, limits) {
+                return false;
+            }
+            let unchanged = match (self.status.as_str(), old, new) {
+                ("added", None, Some(entry)) | ("removed", Some(entry), None) => {
+                    entry.file_size() == Some(0) && sha(&entry.sha).is_ok()
+                }
+                (_, Some(old), Some(new)) => {
+                    old.file_size().is_some()
+                        && old.file_size() == new.file_size()
+                        && old.sha == new.sha
+                        && sha(&old.sha).is_ok()
+                }
+                _ => false,
+            };
+            if unchanged {
+                return true;
+            }
+        }
+        limits.push(format!(
+            "Patch is missing or incomplete for {}.",
+            self.filename
+        ));
+        false
+    }
+}
+
+// Record metadata outside text review. Return true when a side cannot have citable file text.
+fn report_mode_limits(
+    path: &str,
+    old: Option<&Entry>,
+    new: Option<&Entry>,
+    limits: &mut Vec<String>,
+) -> bool {
+    let entries = [old, new];
+    if entries
+        .into_iter()
+        .flatten()
+        .any(|entry| entry.mode == "160000" || entry.kind == "commit")
+    {
+        limits.push(format!("Submodule change for {path} was not reviewed."));
+        return true;
+    }
+    if entries
+        .into_iter()
+        .flatten()
+        .any(|entry| entry.mode == "120000")
+    {
+        limits.push(format!("Symbolic link change for {path} was not reviewed."));
+        return true;
+    }
+    if let (Some(old), Some(new)) = (old, new)
+        && old.is_regular()
+        && new.is_regular()
+        && old.mode != new.mode
+    {
+        limits.push(format!(
+            "Git file mode change for {path} ({} to {}) was not reviewed.",
+            old.mode, new.mode
+        ));
+    }
+    false
+}
+
+fn has_gitlink_pointer(patch: &str) -> bool {
+    patch
+        .lines()
+        .filter_map(|line| line.strip_prefix(['+', '-']))
+        .filter_map(|line| line.strip_prefix("Subproject commit "))
+        .any(|id| sha(id).is_ok())
+}
+
+fn may_be_symlink(change: &Change, patch: &str) -> bool {
+    (change.additions == Some(1) || change.deletions == Some(1))
+        && patch
+            .lines()
+            .any(|line| line == r"\ No newline at end of file")
+}
+
+fn inspect_patch_modes<T: Transport>(
+    change: &Change,
+    patch: &str,
+    hub: &mut GitHub<T>,
+    base: &mut Tree<'_>,
+    head: &mut Tree<'_>,
+    previous: &str,
+    limits: &mut Vec<String>,
+) -> bool {
+    let gitlink = has_gitlink_pointer(patch);
+    if !gitlink && !may_be_symlink(change, patch) {
+        return true;
+    }
+    let path = &change.filename;
+    let (old, new) = change.pinned_entries(hub, base, head, previous);
+    if report_mode_limits(path, old, new, limits) {
+        return false;
+    }
+    let regular = |entry: &Entry| entry.is_regular() && sha(&entry.sha).is_ok();
+    if gitlink
+        && (!(change.status == "added" || old.is_some_and(regular))
+            || !(change.status == "removed" || new.is_some_and(regular)))
+    {
+        limits.push(format!(
+            "Could not verify the Git entry type for {path}. Its patch was excluded."
+        ));
+        return false;
+    }
+    true
 }
 
 fn intent<T: Transport>(
@@ -620,34 +823,131 @@ fn read_source<T: Transport>(
     hub: &mut GitHub<T>,
     tree: &mut Tree<'_>,
     path: &str,
-    required: bool,
-    limits: &mut Vec<String>,
+    remaining: &mut usize,
 ) -> String {
-    match tree.text(hub, path) {
-        Ok(Some(text)) => return text,
-        Ok(None) if !required => return String::new(),
-        _ => {}
+    if *remaining == 0 {
+        return String::new();
     }
-    limits.push(format!(
-        "Text for {path} at {} is unavailable or exceeds the limit.",
-        &tree.commit[..12]
-    ));
-    String::new()
+    let text = tree
+        .text(hub, path, BLOB_BYTES.min(*remaining))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    *remaining -= text.len();
+    text
 }
 
-fn add_file(
-    file: SourceFile,
-    files: &mut Vec<SourceFile>,
+fn generated_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    let name = parent(&path).1;
+    path.split('/').any(|part| {
+        matches!(
+            part,
+            "generated" | "__generated__" | "vendor" | "dist" | "node_modules"
+        )
+    }) || name.starts_with("zz_generated")
+        || name.ends_with(".lock")
+        || [".generated.", ".gen.", ".pb.", ".min.", "-lock."]
+            .iter()
+            .any(|marker| name.contains(marker))
+}
+
+fn head_windows(
+    path: &str,
+    text: &str,
+    positions: &[usize],
+    windows: &mut Vec<SourceWindow>,
     remaining: &mut usize,
-    limits: &mut Vec<String>,
 ) {
-    let size = file.before.len() + file.after.len() + file.patch.len();
-    if size <= *remaining {
-        *remaining -= size;
-        files.push(file);
-    } else {
-        limits.push(format!("Excluded {} due to the text limit.", file.path));
+    // Use exact original line bytes, including CRLF and an absent final newline.
+    let lines: Vec<_> = text.split_inclusive('\n').collect();
+    let positions = &positions[..positions.partition_point(|&line| line <= lines.len())];
+    let anchors = positions
+        .chunk_by(|a, b| a.checked_add(1) == Some(*b))
+        .flat_map(|run| {
+            let first = run[0];
+            let last = run[run.len() - 1];
+            if last - first <= WINDOW_RADIUS {
+                [Some(first + (last - first) / 2), None]
+            } else {
+                [Some(first), Some(last)]
+            }
+        })
+        .flatten();
+    let mut next_start = 0;
+    let max_windows = HEAD_WINDOWS.min(windows.len() + WINDOWS_PER_FILE);
+    for anchor in anchors {
+        if windows.len() == max_windows || *remaining == 0 {
+            break;
+        }
+        let anchor = anchor - 1;
+        if anchor < next_start {
+            continue;
+        }
+        let mut start = anchor.saturating_sub(WINDOW_RADIUS).max(next_start);
+        let mut end = (anchor + WINDOW_RADIUS + 1).min(lines.len());
+        let mut bytes: usize = lines[start..end].iter().map(|line| line.len()).sum();
+        let cap = WINDOW_BYTES.min(*remaining);
+        // Trim only whole lines, keeping the anchor and the closest available context.
+        while bytes > cap && end - start > 1 {
+            if anchor - start > end - anchor - 1 {
+                bytes -= lines[start].len();
+                start += 1;
+            } else {
+                end -= 1;
+                bytes -= lines[end].len();
+            }
+        }
+        if bytes > cap || (start + 1..=end).all(|line| positions.binary_search(&line).is_ok()) {
+            continue;
+        }
+        *remaining -= bytes;
+        next_start = end;
+        windows.push(SourceWindow {
+            path: path.to_owned(),
+            start: start + 1,
+            text: lines[start..end].concat(),
+        });
     }
+}
+
+fn collect_head_context<T: Transport>(
+    hub: &mut GitHub<T>,
+    head: &mut Tree<'_>,
+    files: &[SourceFile],
+    remaining: &mut usize,
+) -> Vec<SourceWindow> {
+    let mut candidates: Vec<_> = files.iter().filter(|file| !file.patch.is_empty()).collect();
+    // Prefer handwritten paths, then files that already lack whole head text.
+    candidates.sort_by_key(|file| (generated_path(&file.path), !file.after.is_empty()));
+    let mut windows = Vec::new();
+    for file in candidates {
+        if *remaining == 0 || windows.len() == HEAD_WINDOWS {
+            break;
+        }
+        let Some(rows) = crate::hunks::lines(&file.patch) else {
+            continue;
+        };
+        let positions: Vec<_> = rows.into_iter().filter_map(|(_, head, _)| head).collect();
+        if positions.is_empty() {
+            continue;
+        }
+        let downloaded;
+        let text = if file.after.is_empty() {
+            let Ok(Some(text)) = head.text(hub, &file.path, WINDOW_BLOB_BYTES) else {
+                continue;
+            };
+            downloaded = text;
+            downloaded.as_str()
+        } else {
+            &file.after
+        };
+        head_windows(&file.path, text, &positions, &mut windows, remaining);
+        if file.after.is_empty() && !generated_path(&file.path) {
+            callers::append(file, text, &positions, &mut windows, remaining);
+        }
+    }
+    windows
 }
 
 fn words(text: &str) -> impl Iterator<Item = &str> {
@@ -774,16 +1074,192 @@ fn nearby(path: &str, changed: &str) -> bool {
                 .is_some_and(|rest| rest.starts_with('/')))
 }
 
+fn labels(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .flat_map(|mut part| {
+            std::iter::from_fn(move || {
+                if part.is_empty() {
+                    return None;
+                }
+                let end = part
+                    .as_bytes()
+                    .windows(2)
+                    .position(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+                    .map_or(part.len(), |index| index + 1);
+                let (label, rest) = part.split_at(end);
+                part = rest;
+                Some(label)
+            })
+        })
+}
+
+fn role(label: &str) -> Option<&'static str> {
+    match label.trim_end_matches('s') {
+        "admin" | "administrator" | "backoffice" => Some("admin"),
+        "write" | "writer" | "edit" | "editor" | "save" | "persist" | "update" | "action"
+        | "mutation" => Some("write"),
+        "config" | "configuration" | "setting" | "preference" => Some("config"),
+        "resource" | "controller" | "handler" | "api" | "route" | "endpoint" => Some("resource"),
+        _ => None,
+    }
+}
+
+fn path_parts(path: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(stem(path)).chain(parent(path).0.rsplit('/').take(4))
+}
+
+fn module_basename(path: &str) -> &str {
+    let filename = parent(path).1;
+    filename
+        .split_once('.')
+        .map_or(filename, |(module, _)| module)
+}
+
+fn feature_key(part: &str) -> String {
+    labels(part)
+        .map(str::to_ascii_lowercase)
+        .filter(|label| {
+            label.len() >= 3
+                && role(label).is_none()
+                && !matches!(
+                    label.as_str(),
+                    "app"
+                        | "apps"
+                        | "packages"
+                        | "src"
+                        | "lib"
+                        | "feature"
+                        | "features"
+                        | "test"
+                        | "tests"
+                        | "spec"
+                        | "specs"
+                        | "generated"
+                        | "client"
+                        | "server"
+                        | "frontend"
+                        | "backend"
+                        | "ui"
+                        | "index"
+                        | "main"
+                        | "view"
+                        | "views"
+                )
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn package<'a>(path: &'a str, roots: &HashSet<String>) -> &'a str {
+    let (mut directory, _) = parent(path);
+    while !directory.is_empty() {
+        if roots.contains(directory) {
+            return directory;
+        }
+        directory = parent(directory).0;
+    }
+    let Some((top, rest)) = path.split_once('/') else {
+        return "";
+    };
+    if matches!(
+        top,
+        "apps" | "packages" | "services" | "modules" | "crates" | "libs"
+    ) && let Some((name, _)) = rest.split_once('/')
+    {
+        return &path[..top.len() + 1 + name.len()];
+    }
+    top
+}
+
+struct ContextQuery<'a> {
+    changed: &'a [SourceFile],
+    terms: HashSet<String>,
+    modules: HashSet<String>,
+    stems: HashSet<String>,
+    features: HashSet<String>,
+    roles: HashSet<&'static str>,
+    roots: HashSet<String>,
+    packages: HashSet<&'a str>,
+}
+
+impl<'a> ContextQuery<'a> {
+    fn new(changed: &'a [SourceFile], intent: &[String], entries: &[Entry]) -> Self {
+        let roots = entries
+            .iter()
+            .filter(|entry| entry.is_regular() && safe_path(&entry.path))
+            .map(|entry| parent(&entry.path))
+            .filter(|(dir, name)| {
+                !dir.is_empty()
+                    && matches!(
+                        *name,
+                        "package.json"
+                            | "composer.json"
+                            | "Cargo.toml"
+                            | "pyproject.toml"
+                            | "go.mod"
+                    )
+            })
+            .map(|(dir, _)| dir.to_owned())
+            .collect();
+        let packages = changed
+            .iter()
+            .map(|file| package(&file.path, &roots))
+            .collect();
+        let modules = changed
+            .iter()
+            .flat_map(|file| {
+                let root = package(&file.path, &roots);
+                let directories =
+                    std::iter::successors(Some(parent(&file.path).0), |dir| Some(parent(dir).0))
+                        .take_while(move |dir| !dir.is_empty() && *dir != root)
+                        .take(4)
+                        .map(|dir| parent(dir).1);
+                std::iter::once(module_basename(&file.path)).chain(directories)
+            })
+            .filter(|name| !feature_key(name).is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let stems: HashSet<_> = changed
+            .iter()
+            .flat_map(|file| path_parts(&file.path))
+            .map(feature_key)
+            .filter(|name| !name.is_empty())
+            .collect();
+        let features = stems
+            .iter()
+            .flat_map(|name| name.split('-'))
+            .map(str::to_owned)
+            .collect();
+        let roles = intent
+            .iter()
+            .flat_map(|text| labels(text))
+            .filter_map(|label| role(&label.to_ascii_lowercase()))
+            .collect();
+        Self {
+            changed,
+            terms: search_terms(changed),
+            modules,
+            stems,
+            features,
+            roles,
+            roots,
+            packages,
+        }
+    }
+}
+
 struct Candidate {
     entry: Entry,
     size: usize,
     score: u32,
+    module_rank: u8,
     nearby: bool,
     plausible: bool,
+    preferred: bool,
 }
 
 impl Candidate {
-    fn new(entry: Entry, changed: &[SourceFile], terms: &HashSet<String>) -> Option<Self> {
+    fn new(entry: Entry, query: &ContextQuery<'_>) -> Option<Self> {
         let size = entry.file_size()?;
         if size == 0 || size > BLOB_BYTES || !safe_path(&entry.path) {
             return None;
@@ -815,129 +1291,207 @@ impl Candidate {
         {
             return None;
         }
-        let is_nearby = changed.iter().any(|file| nearby(&entry.path, &file.path));
+        let is_nearby = query
+            .changed
+            .iter()
+            .any(|file| nearby(&entry.path, &file.path));
         let related =
-            file_terms(&entry.path).any(|term| terms.contains(&term.to_ascii_lowercase()));
+            file_terms(&entry.path).any(|term| query.terms.contains(&term.to_ascii_lowercase()));
         let guidance = contract(&entry.path);
         let test = test_path(&entry.path);
         let root = !entry.path.contains('/');
-        let score = u32::from(related) * 30
+        let keys: Vec<_> = path_parts(&entry.path)
+            .map(feature_key)
+            .filter(|key| !key.is_empty())
+            .collect();
+        let exact = keys.iter().any(|key| query.stems.contains(key));
+        let features: HashSet<_> = keys
+            .iter()
+            .flat_map(|key| key.split('-'))
+            .filter(|term| query.features.contains(*term))
+            .collect();
+        let matches_feature = exact || !features.is_empty();
+        let roles: HashSet<_> = path_parts(&entry.path)
+            .flat_map(labels)
+            .filter_map(|label| role(&label.to_ascii_lowercase()))
+            .collect();
+        let intent_roles = roles.intersection(&query.roles).count() as u32;
+        let implementation = !test
+            && !generated_path(&entry.path)
+            && !entry
+                .path
+                .split('/')
+                .any(|part| matches!(part, "locales" | "i18n" | "l10n" | "translations"));
+        let external = !query.packages.contains(package(&entry.path, &query.roots));
+        let literal_module = query
+            .modules
+            .contains(&module_basename(&entry.path).to_ascii_lowercase());
+        let literal_directory = parent(&entry.path)
+            .0
+            .rsplit('/')
+            .take(4)
+            .any(|dir| query.modules.contains(&dir.to_ascii_lowercase()));
+        // Keep literal module matches ahead of lexical and content matches after inspecting blobs.
+        let module_rank = match (literal_module, literal_directory, implementation, external) {
+            (true, _, true, true) => 3,
+            (true, _, true, false) => 2,
+            (false, true, true, true) => 1,
+            _ => 0,
+        };
+        let score = (u32::from(related) * 30
             + u32::from(guidance) * 36
             + u32::from(test) * 12
             + u32::from(is_nearby) * 16
             + u32::from(root) * 3
-            + u32::from(test && related) * 12;
+            + u32::from(test && related) * 12
+            + u32::from(exact) * 56
+            + (features.len().min(3) as u32) * 16
+            + u32::from(matches_feature && implementation) * (22 + intent_roles * 22))
+            .saturating_sub(if implementation { 0 } else { 18 });
+        let preferred = implementation && external && (matches_feature || module_rank > 0);
         Some(Self {
             entry,
             size,
             score,
+            module_rank,
             nearby: is_nearby,
-            plausible: related || guidance || is_nearby,
+            plausible: related || guidance || is_nearby || matches_feature || module_rank > 0,
+            preferred,
         })
     }
 }
 
-fn probe_indices(candidates: &[Candidate]) -> Vec<usize> {
+fn probe_indices(candidates: &[Candidate], roots: &HashSet<String>) -> (Vec<usize>, usize) {
+    let rank = candidates
+        .first()
+        .map_or(0, |candidate| candidate.module_rank);
+    let best = candidates
+        .iter()
+        .find(|candidate| candidate.preferred && candidate.module_rank == rank)
+        .map_or(0, |candidate| candidate.score);
+    let mut packages = HashSet::new();
+    let mut picked: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate.preferred
+                && candidate.module_rank == rank
+                && candidate.score >= best.saturating_sub(45)
+                && packages.insert(package(&candidate.entry.path, roots))
+        })
+        .take(WIDER_PROBES)
+        .map(|(index, _)| index)
+        .collect();
+    let priority = picked.len();
     let primary = (CONTEXT_PROBES - WIDER_PROBES).min(candidates.len());
-    let mut picked: Vec<_> = (0..primary).collect();
-    // Leave a few reads for tests or possible callers in other implementation stacks.
-    picked.extend(
-        candidates
-            .iter()
-            .enumerate()
-            .skip(primary)
-            .filter(|(_, candidate)| !candidate.nearby)
-            .take(WIDER_PROBES)
-            .map(|(index, _)| index),
-    );
-    for index in primary..candidates.len() {
-        if picked.len() == CONTEXT_PROBES {
+    for (index, candidate) in candidates.iter().enumerate() {
+        if picked.len() == CONTEXT_PROBES || (picked.len() >= primary && candidate.module_rank == 0)
+        {
             break;
         }
         if !picked.contains(&index) {
             picked.push(index);
         }
     }
-    picked
+    // Leave a few reads for tests or possible callers in other implementation stacks.
+    for wider in [true, false] {
+        for (index, candidate) in candidates.iter().enumerate() {
+            if picked.len() == CONTEXT_PROBES {
+                break;
+            }
+            if (!wider || !candidate.nearby) && !picked.contains(&index) {
+                picked.push(index);
+            }
+        }
+    }
+    (picked, priority)
 }
 
-fn append_context<T: Transport>(
+fn collect_context<T: Transport>(
     hub: &mut GitHub<T>,
-    base: &mut Tree<'_>,
     head: &mut Tree<'_>,
     excluded: &HashSet<&str>,
-    files: &mut Vec<SourceFile>,
+    changed: &[SourceFile],
+    intent: &[String],
     remaining: &mut usize,
-    limits: &mut Vec<String>,
-) {
-    if files.is_empty() {
-        return;
+) -> Vec<SourceFile> {
+    if changed.is_empty() || *remaining == 0 {
+        return Vec::new();
     }
-    let entries = head.inventory(hub, files, limits);
-    let terms = search_terms(files);
+    let entries = head.inventory(hub, changed);
+    let query = ContextQuery::new(changed, intent, &entries);
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     for entry in entries {
         if !excluded.contains(entry.path.as_str())
             && seen.insert(entry.path.clone())
-            && let Some(candidate) = Candidate::new(entry, files, &terms)
+            && let Some(candidate) = Candidate::new(entry, &query)
         {
             candidates.push(candidate);
         }
     }
-    candidates.sort_by(|a, b| b.score.cmp(&a.score).then(a.entry.path.cmp(&b.entry.path)));
-    let picked = probe_indices(&candidates);
-    if candidates
-        .iter()
-        .enumerate()
-        .any(|(index, candidate)| candidate.plausible && !picked.contains(&index))
-    {
-        limits.push(format!(
-            "Context discovery examined at most {CONTEXT_PROBES} candidate files."
-        ));
-    }
+    candidates.sort_by(|a, b| {
+        b.module_rank
+            .cmp(&a.module_rank)
+            .then(b.score.cmp(&a.score))
+            .then(a.entry.path.cmp(&b.entry.path))
+    });
+    let (picked, priority) = probe_indices(&candidates, &query.roots);
     let mut ranked = Vec::new();
-    for index in picked {
+    for (position, index) in picked.into_iter().enumerate() {
         let candidate = &candidates[index];
         let entry = &candidate.entry;
-        match hub.blob(head.repo, &entry.sha, candidate.size) {
-            Ok(Some(text)) => {
-                let matches: HashSet<_> = words(&text)
-                    .map(str::to_ascii_lowercase)
-                    .filter(|word| terms.contains(word))
-                    .collect();
-                let references_path = files
-                    .iter()
-                    .any(|file| file.path.contains('/') && text.contains(&file.path));
-                if candidate.plausible || !matches.is_empty() || references_path {
-                    let score = candidate.score
-                        + u32::from(references_path) * 80
-                        + matches.len().min(4) as u32 * 48;
-                    ranked.push((score, &entry.path, text));
-                }
-            }
-            Ok(None) => {}
-            Err(_) => limits.push("Some context files are unavailable.".into()),
+        if candidate.size > *remaining {
+            continue;
+        }
+        let Ok(Some(text)) = hub.blob(head.repo, &entry.sha, candidate.size) else {
+            continue;
+        };
+        let matches: HashSet<_> = words(&text)
+            .map(str::to_ascii_lowercase)
+            .filter(|word| query.terms.contains(word))
+            .collect();
+        let references_path = changed
+            .iter()
+            .any(|file| file.path.contains('/') && text.contains(&file.path));
+        if candidate.plausible || !matches.is_empty() || references_path {
+            let score = candidate.score
+                + u32::from(references_path) * 80
+                + matches.len().min(4) as u32 * 48;
+            ranked.push((
+                candidate.module_rank,
+                position < priority,
+                score,
+                &entry.path,
+                text,
+            ));
         }
     }
-    ranked.sort_by(|(x, a, _), (y, b, _)| y.cmp(x).then(a.cmp(b)));
-    if ranked.len() > CONTEXT_FILES {
-        limits.push(format!("Context is limited to {CONTEXT_FILES} files."));
+    ranked.sort_by(|(rank_a, wide_a, x, a, _), (rank_b, wide_b, y, b, _)| {
+        rank_b
+            .cmp(rank_a)
+            .then(wide_b.cmp(wide_a))
+            .then(y.cmp(x))
+            .then(a.cmp(b))
+    });
+    // Optional context may be limited without losing any of the retained patches.
+    let mut files = Vec::new();
+    for (_, _, _, path, after) in ranked {
+        if files.len() == CONTEXT_FILES {
+            break;
+        }
+        if after.len() > *remaining {
+            continue;
+        }
+        *remaining -= after.len();
+        files.push(SourceFile {
+            path: path.clone(),
+            patch: String::new(),
+            before: String::new(),
+            after,
+        });
     }
-    for (_, path, after) in ranked.into_iter().take(CONTEXT_FILES) {
-        let before = read_source(hub, base, path, false, limits);
-        add_file(
-            SourceFile {
-                path: path.clone(),
-                patch: String::new(),
-                before,
-                after,
-            },
-            files,
-            remaining,
-            limits,
-        );
-    }
+    files
 }
 
 fn pinned<T: Transport>(
@@ -985,7 +1539,8 @@ fn pinned<T: Transport>(
     }
 
     let mut files = Vec::new();
-    let mut remaining = SOURCE_BYTES;
+    let mut selected = Vec::new();
+    let mut remaining = SNAPSHOT_TEXT_BYTES;
     let mut seen = HashSet::new();
     let mut before = Tree::new(&repo, base);
     let mut after = Tree::new(&pull.head.repo.full_name, &pull.head.sha);
@@ -1011,39 +1566,105 @@ fn pinned<T: Transport>(
             limits.push(format!("Unsupported change type for {path}."));
             continue;
         }
-        let patch = change.patch(&mut limits);
-        let old_text = if change.status == "added" {
-            String::new()
-        } else {
-            read_source(hub, &mut before, previous, true, &mut limits)
-        };
-        let new_text = if change.status == "removed" {
-            String::new()
-        } else {
-            read_source(hub, &mut after, path, true, &mut limits)
-        };
-        add_file(
-            SourceFile {
-                path: path.clone(),
-                patch,
-                before: old_text,
-                after: new_text,
-            },
-            &mut files,
-            &mut remaining,
+        if change
+            .patch
+            .as_ref()
+            .is_some_and(|patch| patch.len() > remaining)
+        {
+            limits.push(format!(
+                "Patch for {path} exceeds the remaining review text limit."
+            ));
+            continue;
+        }
+        let patch = change.complete_patch().unwrap_or_default();
+        if !inspect_patch_modes(
+            change,
+            patch,
+            hub,
+            &mut before,
+            &mut after,
+            previous,
             &mut limits,
-        );
+        ) {
+            continue;
+        }
+        remaining -= patch.len();
+        selected.push((files.len(), change, previous));
+        files.push(SourceFile {
+            path: path.clone(),
+            patch: patch.to_owned(),
+            before: String::new(),
+            after: String::new(),
+        });
     }
     let intent = intent(hub, &pull, &route, &first, &mut limits);
-    append_context(
+    selected.retain(|&(index, change, previous)| {
+        !files[index].patch.is_empty()
+            || change.review_patchless(hub, &mut before, &mut after, previous, &mut limits)
+    });
+
+    // Reserve source for supporting heads before full changed bodies and their base copies.
+    let context_allotment = remaining.min(CONTEXT_TEXT_BYTES);
+    let mut context_budget = context_allotment;
+    let mut supporting = collect_context(
+        hub,
+        &mut after,
+        &excluded,
+        &files,
+        &intent,
+        &mut context_budget,
+    );
+    remaining -= context_allotment - context_budget;
+    let excluded = excluded
+        .into_iter()
+        .chain(supporting.iter().map(|file| file.path.as_str()))
+        .collect();
+    // Patches and any checks for missing ones take priority over full source bodies.
+    let mut dependency_budget = local_dependencies::TEXT_BYTES.min(remaining / 2);
+    remaining -= dependency_budget;
+    let mut window_budget = remaining.min(HEAD_CONTEXT_BYTES);
+    remaining -= window_budget;
+    for &(index, change, _) in &selected {
+        if change.status != "removed" {
+            files[index].after = read_source(hub, &mut after, &change.filename, &mut remaining);
+        }
+    }
+    let dependencies = local_dependencies::collect(
         hub,
         &mut before,
         &mut after,
+        &files,
         &excluded,
-        &mut files,
-        &mut remaining,
-        &mut limits,
+        &mut dependency_budget,
     );
+    remaining += dependency_budget;
+    let mut head_context = collect_head_context(hub, &mut after, &files, &mut window_budget);
+    remaining += window_budget;
+    for file in &mut supporting {
+        file.before = read_source(hub, &mut before, &file.path, &mut remaining);
+    }
+    let mut metadata_paths = HashSet::new();
+    for (index, change, previous) in selected {
+        if change.status != "added" {
+            files[index].before = read_source(hub, &mut before, previous, &mut remaining);
+        }
+        // Read known modes from optional tree lookups without charging more requests for ordinary patches.
+        let old = (change.status != "added")
+            .then(|| before.cached_entry(previous))
+            .flatten();
+        let new = (change.status != "removed")
+            .then(|| after.cached_entry(&change.filename))
+            .flatten();
+        if report_mode_limits(&change.filename, old, new, &mut limits) {
+            files[index].patch.clear();
+            files[index].before.clear();
+            files[index].after.clear();
+            metadata_paths.insert(change.filename.as_str());
+        }
+    }
+    head_context.retain(|window| !metadata_paths.contains(window.path.as_str()));
+    files.extend(dependencies);
+    files.extend(supporting);
     let mut final_pull: Pull = hub.get(&pull_route, PULL_BYTES, true)?;
     final_pull.validate(&repo, number, allowed)?;
     if !pull.same_revisions(&final_pull) {
@@ -1059,12 +1680,17 @@ fn pinned<T: Transport>(
         head: pull.head.sha,
         intent,
         files,
+        head_context,
         limits,
     })
 }
 
 pub fn collect(url: &str, allowed: &HashSet<String>) -> Result<Snapshot> {
     let (repo, number) = pull_url(url, allowed)?;
+    pinned(&mut github()?, repo, number, allowed)
+}
+
+fn github() -> Result<GitHub<Http>> {
     let mut headers = HeaderMap::new();
     if let Some(token) = std::env::var_os("JIDOKA_GITHUB_TOKEN").filter(|value| !value.is_empty()) {
         let token = token.to_str().context("Invalid GitHub token")?;
@@ -1081,7 +1707,7 @@ pub fn collect(url: &str, allowed: &HashSet<String>) -> Result<Snapshot> {
         .connect_timeout(REQUEST_TIME)
         .user_agent("jidoka-review")
         .build()?;
-    pinned(&mut GitHub::new(Http(client)), repo, number, allowed)
+    Ok(GitHub::new(Http(client)))
 }
 
 #[cfg(test)]
@@ -1100,8 +1726,10 @@ mod tests {
 
     enum File<'a> {
         Text(&'a str),
+        Executable(&'a str),
         Bytes(&'a [u8]),
         Symlink,
+        Gitlink(&'a str),
     }
 
     #[derive(Default)]
@@ -1173,11 +1801,12 @@ mod tests {
                     File::Symlink => {
                         json!({"mode": "120000", "type": "blob", "sha": MOVED, "size": 1})
                     }
+                    File::Gitlink(sha) => json!({"mode": "160000", "type": "commit", "sha": sha}),
                     _ => {
                         let bytes = match file {
-                            File::Text(text) => text.as_bytes(),
+                            File::Text(text) | File::Executable(text) => text.as_bytes(),
                             File::Bytes(bytes) => bytes,
-                            File::Symlink => unreachable!(),
+                            File::Symlink | File::Gitlink(_) => unreachable!(),
                         };
                         let hash =
                             id(&[format!("blob {}\0", bytes.len()).as_bytes(), bytes].concat());
@@ -1187,7 +1816,12 @@ mod tests {
                                 "encoding": "base64", "content": STANDARD.encode(bytes),
                             }),
                         );
-                        json!({"mode": "100644", "type": "blob", "sha": hash, "size": bytes.len()})
+                        let mode = if matches!(file, File::Executable(_)) {
+                            "100755"
+                        } else {
+                            "100644"
+                        };
+                        json!({"mode": mode, "type": "blob", "sha": hash, "size": bytes.len()})
                     }
                 };
                 entry["path"] = json!(path);
@@ -1234,7 +1868,12 @@ mod tests {
     impl Transport for Fixture {
         fn open(&mut self, route: &str, timeout: Duration) -> Result<Box<dyn Read>> {
             assert!(!route.starts_with('/') && !route.contains("://"));
-            assert!(!timeout.is_zero() && timeout <= REQUEST_TIME);
+            let cap = if route.ends_with("?recursive=1") {
+                INVENTORY_TIME
+            } else {
+                REQUEST_TIME
+            };
+            assert!(!timeout.is_zero() && timeout <= cap);
             self.requests.push(route.to_owned());
             if self.quota_on.as_deref() == Some(route)
                 && (route != PULL || self.requests.iter().filter(|r| *r == PULL).count() > 1)
@@ -1254,6 +1893,215 @@ mod tests {
 
     fn snapshot(hub: &mut GitHub<Fixture>) -> Result<Snapshot> {
         pinned(hub, REPO.into(), 3, &HashSet::from([REPO.to_owned()]))
+    }
+
+    fn context_snapshot(changed: &str) -> Snapshot {
+        Snapshot {
+            url: format!("https://github.com/{REPO}/pull/3"),
+            repo: REPO.into(),
+            number: 3,
+            base: BASE.into(),
+            head: HEAD.into(),
+            intent: Vec::new(),
+            files: vec![SourceFile {
+                path: changed.into(),
+                patch: "@@ -1 +1 @@\n-old\n+new".into(),
+                before: String::new(),
+                after: String::new(),
+            }],
+            head_context: Vec::new(),
+            limits: Vec::new(),
+        }
+    }
+
+    fn context_read(path: &str, term: &str) -> crate::contracts::ContextRead {
+        crate::contracts::ContextRead {
+            path: path.into(),
+            term: term.into(),
+        }
+    }
+
+    #[test]
+    fn contextual_stem_prefers_qualified_implementation_and_finds_later_uses() {
+        let sample = "ui/widget/widget.component.tsx";
+        let declaration = "export interface Options { minLength: number }\r\n";
+        let padding = "// Fixture padding.\r\n".repeat(26);
+        let text = format!(
+            "{declaration}{padding}const valid = value.length >= minLength;\r\n{padding}return <input minLength={{minLength}} />;"
+        );
+        let mut fixture = Fixture::new(Vec::new());
+        for pull in &mut fixture.pulls {
+            pull["head"]["repo"]["private"] = json!(true);
+        }
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                (sample, File::Text(&text)),
+                ("ui/widget.test.tsx", File::Text(declaration)),
+                ("ui/widget.types.ts", File::Text(declaration)),
+                ("ui/widget.stories.tsx", File::Text(declaration)),
+                ("ui/widget.mdx", File::Text(declaration)),
+                ("ui/widget/index.ts", File::Text(declaration)),
+                (
+                    "archive/widget/widget.component.tsx",
+                    File::Text(declaration),
+                ),
+            ],
+        );
+        let mut hub = GitHub::new(fixture);
+        let windows = reads::read_with(
+            &mut hub,
+            &context_snapshot("ui/panel.tsx"),
+            &HashSet::from([REPO.into(), FORK.into()]),
+            &[context_read("Widget", "minLength")],
+        )
+        .unwrap();
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|window| window.path == sample));
+        assert!(windows[0].text.contains("return <input"));
+        assert!(windows[1].text.contains("value.length >= minLength"));
+        let lines: Vec<_> = text.split_inclusive('\n').collect();
+        for window in windows {
+            let start = window.start - 1;
+            assert_eq!(
+                window.text,
+                lines[start..start + window.text.lines().count()].concat()
+            );
+        }
+        assert_eq!(hub.transport.requests.first().unwrap(), PULL);
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+        assert!(
+            hub.transport.requests[1..hub.transport.requests.len() - 1]
+                .iter()
+                .all(|route| route.starts_with(FORK))
+        );
+    }
+
+    #[test]
+    fn contextual_reads_keep_two_tied_paths_and_bound_each_batch() {
+        let text = format!(
+            "first token\n{}last token\n",
+            ("Fixture line for budget testing. ".repeat(4) + "\n").repeat(30)
+        );
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                ("packages/alpha/widget.ts", File::Text(&text)),
+                ("packages/beta/widget.component.tsx", File::Text(&text)),
+                ("packages/gamma/widget.ts", File::Text(&text)),
+                ("docs/config.txt", File::Text(&text)),
+                ("docs/options.txt", File::Text(&text)),
+                ("docs/unrequested.txt", File::Text(&text)),
+            ],
+        );
+        let windows = reads::read_with(
+            &mut GitHub::new(fixture),
+            &context_snapshot("packages/ui/main.ts"),
+            &HashSet::from([REPO.into()]),
+            &[
+                context_read("widget", "token"),
+                context_read("docs/config.txt", "token"),
+                context_read("docs/options.txt", "token"),
+                context_read("docs/unrequested.txt", "token"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(windows.len(), 6);
+        assert_eq!(windows[0].path, "packages/alpha/widget.ts");
+        assert_eq!(windows[1].path, "packages/beta/widget.component.tsx");
+        assert!(
+            windows[2..4]
+                .iter()
+                .all(|window| window.path == "docs/config.txt")
+        );
+        assert!(
+            windows[4..6]
+                .iter()
+                .all(|window| window.path == "docs/options.txt")
+        );
+        assert!(
+            windows
+                .iter()
+                .map(|window| window.text.len())
+                .sum::<usize>()
+                <= 12_000
+        );
+    }
+
+    #[test]
+    fn contextual_reads_validate_the_snapshot_and_fork_before_reading_blobs() {
+        let view = context_snapshot("ui/panel.tsx");
+        let allowed = HashSet::from([REPO.into()]);
+        let request = [context_read("ui/helper.ts", "const")];
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.pulls[0] = pull(MOVED, 0);
+        let mut hub = GitHub::new(fixture);
+        assert!(reads::read_with(&mut hub, &view, &allowed, &request).is_err());
+        assert_eq!(hub.transport.requests, [PULL]);
+
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.pulls[0]["head"]["repo"]["private"] = json!(true);
+        let mut hub = GitHub::new(fixture);
+        assert!(reads::read_with(&mut hub, &view, &allowed, &request).is_err());
+        assert_eq!(hub.transport.requests, [PULL]);
+
+        let mut hub = GitHub::new(Fixture::new(Vec::new()));
+        let mut wrong = view;
+        wrong.number = 4;
+        assert!(reads::read_with(&mut hub, &wrong, &allowed, &request).is_err());
+        assert!(hub.transport.requests.is_empty());
+    }
+
+    #[test]
+    fn contextual_reads_skip_unsafe_paths_unverified_blobs_and_nonliteral_hits() {
+        let mut fixture = Fixture::new(Vec::new());
+        let file = "ui/helper.ts";
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                (file, File::Text("const option = true;\n")),
+                ("ui/link.ts", File::Symlink),
+                ("ui/literal.ts", File::Text("const value = 'ab';\n")),
+            ],
+        );
+        let blob = id(b"blob 21\0const option = true;\n");
+        let corrupt = format!("{FORK}/git/blobs/{blob}");
+        fixture.responses.get_mut(&corrupt).unwrap()["content"] =
+            json!(STANDARD.encode("const option = fake;\n"));
+        let mut hub = GitHub::new(fixture);
+        let view = context_snapshot("ui/panel.tsx");
+        let allowed = HashSet::from([REPO.into()]);
+        let invalid = [
+            context_read("../ui/helper.ts", "const"),
+            context_read("ui/literal.ts", " "),
+        ];
+        assert!(
+            reads::read_with(&mut hub, &view, &allowed, &invalid)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(hub.transport.requests.is_empty());
+        let rejected = [
+            context_read(file, "const"),
+            context_read("ui/link.ts", "const"),
+            context_read("ui/literal.ts", "a.b"),
+        ];
+        assert!(
+            reads::read_with(&mut hub, &view, &allowed, &rejected)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(hub.transport.requests.contains(&corrupt));
+        assert!(
+            hub.transport
+                .requests
+                .iter()
+                .all(|route| !route.ends_with(MOVED))
+        );
     }
 
     #[test]
@@ -1413,6 +2261,401 @@ mod tests {
     }
 
     #[test]
+    fn reserves_every_mixed_language_patch_before_reading_full_files() {
+        let paths = ["server/task.go", "api/task.rs", "db/task.sql", "ui/task.ts"];
+        let normal = "fixture\n".repeat(2_900);
+        let large = "fixture\n".repeat(4_000);
+        let mut entries = Vec::new();
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        for (index, path) in paths.into_iter().enumerate() {
+            let prefix = if index == paths.len() - 1 {
+                &large
+            } else {
+                &normal
+            };
+            let line = prefix.lines().count() + 1;
+            let mut entry = change(path);
+            entry["patch"] = json!(format!("@@ -{line} +{line} @@\n-old\n+new"));
+            entries.push(entry);
+            old.push((path, format!("{prefix}old\n")));
+            new.push((path, format!("{prefix}new\n")));
+        }
+        let mut fixture = Fixture::new(entries);
+        fn files<'a>(versions: &'a [(&'a str, String)]) -> Vec<(&'a str, File<'a>)> {
+            versions
+                .iter()
+                .map(|(path, text)| (*path, File::Text(text)))
+                .collect()
+        }
+        fixture.revision(REPO, BASE, &files(&old));
+        fixture.revision(FORK, HEAD, &files(&new));
+        let large_blob = id(&[
+            format!("blob {}\0", new[3].1.len()).as_bytes(),
+            new[3].1.as_bytes(),
+        ]
+        .concat());
+        let mut hub = GitHub::new(fixture);
+        let view = snapshot(&mut hub).unwrap();
+        assert_eq!(view.files.len(), paths.len());
+        for (file, path) in view.files.iter().zip(paths) {
+            assert_eq!(file.path, path);
+            assert!(file.patch.ends_with("\n-old\n+new"), "{path}");
+        }
+        assert_eq!(view.files[0].after, new[0].1);
+        assert_eq!(view.files[3].patch, "@@ -4001 +4001 @@\n-old\n+new");
+        assert!(view.files[3].after.is_empty());
+        assert!(view.limits.is_empty(), "{:?}", view.limits);
+        assert!(
+            view.files
+                .iter()
+                .map(|file| file.patch.len() + file.before.len() + file.after.len())
+                .sum::<usize>()
+                + view
+                    .head_context
+                    .iter()
+                    .map(|window| window.text.len())
+                    .sum::<usize>()
+                <= SNAPSHOT_TEXT_BYTES
+        );
+        assert_eq!(
+            hub.transport
+                .requests
+                .iter()
+                .filter(|route| route.ends_with(&large_blob))
+                .count(),
+            1
+        );
+        assert!(
+            view.head_context
+                .iter()
+                .any(|window| window.path == paths[3])
+        );
+    }
+
+    #[test]
+    fn collects_nonoverlapping_windows_from_sparse_large_head_and_prefers_handwritten_files() {
+        let path = "src/sparse.rs";
+        let generated = "generated/schema.pb.go";
+        let text = (1..=3_300)
+            .map(|line| format!("fixture_{line:05}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        assert!(text.len() > BLOB_BYTES && text.len() < WINDOW_BLOB_BYTES);
+        let mut sparse = change(path);
+        sparse["patch"] = json!(
+            "@@ -500 +500 @@\n-old\n+fixture_00500\r\n@@ -505 +505 @@\n-old\n+fixture_00505\r\n@@ -3300 +3300 @@\n-old\n\\ No newline at end of file\n+fixture_03300\n\\ No newline at end of file"
+        );
+        for field in ["additions", "deletions"] {
+            sparse[field] = json!(3);
+        }
+        sparse["changes"] = json!(6);
+        let mut generated_change = change(generated);
+        generated_change["patch"] = json!("@@ -2 +2 @@\n-old\n+new");
+        let mut fixture = Fixture::new(vec![generated_change, sparse]);
+        fixture.revision(REPO, BASE, &[]);
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                (generated, File::Text("first\nnew\nlast\n")),
+                (path, File::Text(&text)),
+            ],
+        );
+        let mut hub = GitHub::new(fixture);
+        let view = snapshot(&mut hub).unwrap();
+        assert!(view.limits.is_empty(), "{:?}", view.limits);
+        assert!(view.files[1].after.is_empty());
+        assert!(view.files.iter().all(|file| !file.patch.is_empty()));
+        let source: Vec<_> = text.split_inclusive('\n').collect();
+        let windows = &view.head_context;
+        assert_eq!(windows.len(), 3);
+        assert_eq!((&*windows[0].path, windows[0].start), (path, 492));
+        assert_eq!(windows[0].text, source[491..508].concat());
+        assert_eq!((&*windows[1].path, windows[1].start), (path, 3292));
+        assert_eq!(windows[1].text, source[3291..].concat());
+        assert!(!windows[1].text.ends_with('\n'));
+        assert_eq!((&*windows[2].path, windows[2].start), (generated, 1));
+        assert_eq!(windows[2].text, "first\nnew\nlast\n");
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+    }
+
+    #[test]
+    fn oversized_and_corrupt_blobs_cannot_supply_head_windows() {
+        let changed = ["src/oversized.rs", "src/corrupt.rs"];
+        let oversized = "line\n".repeat(WINDOW_BLOB_BYTES / 5 + 1);
+        let corrupt = "line\n".repeat(BLOB_BYTES / 5 + 1);
+        let mut fixture = Fixture::new(changed.iter().map(|path| change(path)).collect());
+        fixture.revision(REPO, BASE, &[]);
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                (changed[0], File::Text(&oversized)),
+                (changed[1], File::Text(&corrupt)),
+            ],
+        );
+        let route = |text: &str| {
+            let sha = id(&[format!("blob {}\0", text.len()).as_bytes(), text.as_bytes()].concat());
+            format!("{FORK}/git/blobs/{sha}")
+        };
+        let corrupt_route = route(&corrupt);
+        fixture.responses.get_mut(&corrupt_route).unwrap()["content"] =
+            json!(STANDARD.encode(corrupt.replace("line", "fake")));
+        let mut hub = GitHub::new(fixture);
+        let view = snapshot(&mut hub).unwrap();
+        assert!(view.files.iter().all(|file| !file.patch.is_empty()));
+        assert!(view.head_context.is_empty());
+        assert!(view.limits.is_empty(), "{:?}", view.limits);
+        assert!(hub.transport.requests.contains(&corrupt_route));
+        assert!(!hub.transport.requests.contains(&route(&oversized)));
+        let old_format = serde_json::to_value(&view).unwrap();
+        assert!(old_format.get("head_context").is_none());
+        assert!(
+            serde_json::from_value::<Snapshot>(old_format)
+                .unwrap()
+                .head_context
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reports_a_patch_that_cannot_fit_and_keeps_later_complete_patches() {
+        let mut first = change("db/migration.sql");
+        first["patch"] = json!(format!("@@ -1 +1 @@\n-old\n+{}", "a".repeat(60_000)));
+        let mut omitted = change("server/routes.go");
+        omitted["patch"] = json!(format!("@@ -1 +1 @@\n-old\n+{}", "b".repeat(50_000)));
+        let mut entries = vec![first, omitted];
+        entries.extend((0..25).map(|index| change(&format!("ui/view_{index}.ts"))));
+        let mut fixture = Fixture::new(entries);
+        fixture.revision(REPO, BASE, &[]);
+        fixture.revision(FORK, HEAD, &[]);
+        let mut hub = GitHub::new(fixture);
+        let view = snapshot(&mut hub).unwrap();
+        assert_eq!(view.files.len(), 26);
+        assert!(view.files[0].patch.len() > 60_000);
+        assert_eq!(view.files[25].path, "ui/view_24.ts");
+        assert!(view.files.iter().all(|file| !file.patch.is_empty()));
+        assert_eq!(
+            view.limits,
+            ["Patch for server/routes.go exceeds the remaining review text limit."]
+        );
+        assert!(
+            view.files
+                .iter()
+                .map(|file| file.patch.len())
+                .sum::<usize>()
+                <= SNAPSHOT_TEXT_BYTES
+        );
+    }
+
+    #[test]
+    fn validates_complete_hunks_and_comparison_counts() {
+        let complete = "@@ -2,2 +2,2 @@\n same\n-old\n+new\n@@ -9 +9 @@\n-last old\n\\ No newline at end of file\n+last new\n\\ No newline at end of file";
+        let mut entry = change("source.rs");
+        entry["patch"] = json!(complete);
+        entry["additions"] = json!(2);
+        entry["deletions"] = json!(2);
+        entry["changes"] = json!(4);
+        let change: Change = serde_json::from_value(entry.clone()).unwrap();
+        assert_eq!(change.complete_patch(), Some(complete));
+
+        let mut missing_count = entry.clone();
+        missing_count["additions"] = Value::Null;
+        let mut mismatched_total = entry.clone();
+        mismatched_total["changes"] = json!(5);
+        entry["patch"] = json!(complete.replace(" same\n", ""));
+        for invalid in [missing_count, mismatched_total, entry] {
+            let change: Change = serde_json::from_value(invalid).unwrap();
+            assert!(change.complete_patch().is_none());
+        }
+    }
+
+    #[test]
+    fn reports_mode_only_changes_without_charging_a_regular_patch() {
+        let mode_only = json!({
+            "filename": "script.sh", "status": "modified", "changes": 0,
+            "additions": 0, "deletions": 0,
+        });
+        let mut fixture = Fixture::new(vec![mode_only, change("other.rs")]);
+        fixture.revision(
+            REPO,
+            BASE,
+            &[
+                ("script.sh", File::Text("exit 0\n")),
+                ("other.rs", File::Text("old\n")),
+            ],
+        );
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                ("script.sh", File::Executable("exit 0\n")),
+                ("other.rs", File::Text("new\n")),
+            ],
+        );
+        let view = snapshot(&mut GitHub::new(fixture)).unwrap();
+        assert_eq!(
+            view.limits,
+            ["Git file mode change for script.sh (100644 to 100755) was not reviewed."]
+        );
+        assert!(view.files[0].patch.is_empty());
+        assert_eq!(view.files[1].patch, "@@ -1 +1 @@\n-old\n+new");
+    }
+
+    #[test]
+    fn excludes_gitlink_and_symlink_pointers_and_preserves_the_same_regular_text() {
+        let old_pointer = format!("Subproject commit {BASE}");
+        let new_pointer = format!("Subproject commit {HEAD}");
+        let pointer_patch = format!("@@ -1 +1 @@\n-{old_pointer}\n+{new_pointer}");
+        let mut entries = ["vendor/module", "example.txt", "external.py"].map(change);
+        entries[0]["patch"] = json!(&pointer_patch);
+        entries[1]["patch"] = json!(&pointer_patch);
+        let mut fixture = Fixture::new(entries.to_vec());
+        fixture.revision(
+            REPO,
+            BASE,
+            &[
+                ("vendor/module", File::Gitlink(BASE)),
+                ("example.txt", File::Text(&old_pointer)),
+                ("external.py", File::Symlink),
+            ],
+        );
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                ("vendor/module", File::Gitlink(HEAD)),
+                ("example.txt", File::Text(&new_pointer)),
+                ("external.py", File::Symlink),
+            ],
+        );
+        let mut hub = GitHub::new(fixture);
+        let view = snapshot(&mut hub).unwrap();
+        assert_eq!(
+            view.limits,
+            [
+                "Submodule change for vendor/module was not reviewed.",
+                "Symbolic link change for external.py was not reviewed.",
+            ]
+        );
+        let citable: Vec<_> = view
+            .files
+            .iter()
+            .filter(|file| !file.patch.is_empty())
+            .collect();
+        assert_eq!(citable.len(), 1);
+        assert_eq!(citable[0].path, "example.txt");
+        assert_eq!(citable[0].patch, pointer_patch);
+        assert!(
+            view.files
+                .iter()
+                .filter(|file| file.path != "example.txt")
+                .all(|file| file.before.is_empty() && file.after.is_empty())
+        );
+        assert!(
+            view.head_context
+                .iter()
+                .all(|window| window.path == "example.txt")
+        );
+        assert!(hub.transport.requests.iter().all(|route| {
+            ![BASE, HEAD, MOVED]
+                .iter()
+                .any(|sha| route.ends_with(&format!("/git/blobs/{sha}")))
+        }));
+    }
+
+    #[test]
+    fn withholds_an_unverified_submodule_pointer_when_only_the_final_request_remains() {
+        let mut pointer = change("vendor/module");
+        pointer["patch"] = json!(format!(
+            "@@ -1 +1 @@\n-Subproject commit {BASE}\n+Subproject commit {HEAD}"
+        ));
+        let mut hub = GitHub::new(Fixture::new(vec![pointer, change("keep.rs")]));
+        hub.requests = 4;
+        let view = snapshot(&mut hub).unwrap();
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].path, "keep.rs");
+        assert!(!view.files[0].patch.is_empty());
+        assert_eq!(
+            view.limits,
+            ["Could not verify the Git entry type for vendor/module. Its patch was excluded.",]
+        );
+        assert_eq!(hub.transport.requests.len(), 4);
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+    }
+
+    #[test]
+    fn finds_edited_local_imports_above_a_large_hunk_when_recursive_inventory_is_oversized() {
+        let importer = "apps/client/src/features/panel.ts";
+        let metric = "apps/client/src/tools/metric.ts";
+        let formatter = "apps/client/src/formatters/key/index.ts";
+        let unused = "apps/client/src/tools/unused.ts";
+        let metric_text = "export function measure(value: string) { return value.length; }\n";
+        let formatter_text =
+            "export function encodeToken(value: string) { return value.trim(); }\n";
+        let imports = "import {\n  measure as measureLabel,\n} from '@/tools/metric';\nimport { encodeToken } from '../formatters/key';\nimport { other } from '@/tools/unused';\n";
+        let edit = "const displayed = measureLabel(encodeToken(input));";
+        let head_text = format!("{imports}{}{edit}\n", "// Fixture padding.\n".repeat(2_000));
+        assert!(head_text.len() > BLOB_BYTES);
+        let line = head_text.lines().count();
+        let mut change = change(importer);
+        change["patch"] = json!(format!(
+            "@@ -{line} +{line} @@\n-const displayed = 0;\n+{edit}"
+        ));
+        let mut fixture = Fixture::new(vec![change]);
+        let dependencies = [
+            (metric, File::Text(metric_text)),
+            (formatter, File::Text(formatter_text)),
+        ];
+        fixture.revision(REPO, BASE, &dependencies);
+        let mut head_files = Vec::from(dependencies);
+        head_files.extend([
+            ("apps/client/package.json", File::Text("{}")),
+            (importer, File::Text(&head_text)),
+            (unused, File::Text("export const other = 0;\n")),
+            (
+                "src/tools/metric.ts",
+                File::Text("export const unrelated = 0;\n"),
+            ),
+        ]);
+        let root = fixture.revision(FORK, HEAD, &head_files);
+        let inventory = format!("{FORK}/git/trees/{root}?recursive=1");
+        let inventory_cap = 700_000;
+        fixture.responses.get_mut(&inventory).unwrap()["padding"] =
+            json!("x".repeat(inventory_cap));
+        let mut hub = GitHub::new(fixture);
+        hub.inventory_remaining = inventory_cap;
+
+        let view = snapshot(&mut hub).unwrap();
+        assert!(view.limits.is_empty(), "{:?}", view.limits);
+        assert_eq!(view.files[0].path, importer);
+        assert!(view.files[0].after.is_empty());
+        assert!(!view.files[0].patch.is_empty());
+        assert_eq!(
+            (&*view.files[1].path, &*view.files[1].after),
+            (metric, metric_text)
+        );
+        assert_eq!(
+            (&*view.files[2].path, &*view.files[2].after),
+            (formatter, formatter_text)
+        );
+        assert!(
+            view.files[1..3]
+                .iter()
+                .all(|file| file.patch.is_empty() && file.before == file.after)
+        );
+        assert!(
+            !view
+                .files
+                .iter()
+                .any(|file| [unused, "src/tools/metric.ts"].contains(&file.path.as_str()))
+        );
+        assert!(hub.transport.requests.contains(&inventory));
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+    }
+
+    #[test]
     fn renamed_removed_added_and_unsafe_sources() {
         let mut fixture = Fixture::new(vec![
             json!({"filename": "new.proto", "status": "renamed", "previous_filename": "old.proto", "changes": 0}),
@@ -1423,7 +2666,7 @@ mod tests {
             change("dir\\escape"),
             change("dir/.GiT/config"),
             change("new.proto"),
-            change("binary.dat"),
+            json!({"filename": "binary.dat", "status": "modified", "changes": 0, "additions": 0, "deletions": 0}),
             change("link.py"),
         ]);
         fixture.revision(
@@ -1454,17 +2697,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["new.proto", "gone.rs", "Makefile", "binary.dat", "link.py"]
         );
-        assert_eq!(view.files[0].before, view.files[0].after);
+        assert_eq!(view.files[0].before, "same\n");
+        assert_eq!(view.files[0].after, "same\n");
         assert_eq!(view.files[1].after, "");
         assert_eq!(view.files[2].before, "");
         assert_eq!(view.files[2].after, "new\n");
         assert_eq!(view.files[3].after, "");
+        assert!(view.files[3].patch.is_empty());
+        assert!(view.files[4].after.is_empty());
+        assert!(view.files[4].patch.is_empty());
         assert!(
             view.limits
                 .iter()
                 .any(|limit| limit.contains("duplicate paths"))
         );
-        assert!(view.limits.iter().any(|limit| limit.contains("link.py")));
+        assert!(view.limits.iter().any(|limit| limit.contains("binary.dat")));
+        assert!(
+            view.limits
+                .iter()
+                .any(|limit| limit.contains("Symbolic link change for link.py"))
+        );
+        assert!(!view.limits.iter().any(|limit| limit.contains("new.proto")));
         assert!(
             hub.transport
                 .requests
@@ -1538,10 +2791,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_inconsistent_patch_and_blob_and_preserves_final_request_budget() {
-        let mut entry = change("source.rs");
-        entry["additions"] = json!(2);
-        let mut fixture = Fixture::new(vec![entry]);
+    fn rejects_inconsistent_patch_and_ignores_a_bad_optional_blob() {
+        let mut incomplete = change("incomplete.rs");
+        incomplete["patch"] = json!("@@ -1,2 +1,2 @@\n-old\n+new");
+        let mut missing = change("missing.ts");
+        missing["patch"] = Value::Null;
+        missing["changes"] = Value::Null;
+        let mut fixture = Fixture::new(vec![incomplete, missing, change("source.rs")]);
         fixture.revision(REPO, BASE, &[("source.rs", File::Text("old\n"))]);
         fixture.revision(FORK, HEAD, &[("source.rs", File::Text("new\n"))]);
         let route = fixture
@@ -1554,24 +2810,170 @@ mod tests {
         let mut hub = GitHub::new(fixture);
         let view = snapshot(&mut hub).unwrap();
         assert!(view.files[0].patch.is_empty());
-        assert!(view.files[0].after.is_empty());
-        assert!(view.limits.iter().any(|limit| limit.contains("Patch")));
-        assert!(
-            view.limits
+        assert!(view.files[1].patch.is_empty());
+        assert_eq!(view.files[2].patch, "@@ -1 +1 @@\n-old\n+new");
+        assert!(view.files[2].after.is_empty());
+        assert!(hub.transport.requests.contains(&route));
+        assert_eq!(
+            view.limits,
+            [
+                "Patch is missing or incomplete for incomplete.rs.",
+                "Patch is missing or incomplete for missing.ts.",
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_exact_cross_package_writers_in_a_large_monorepo() {
+        let paths = [
+            "apps/console/src/views/config-delivery-window.form.ts",
+            "apps/console/src/views/calendar.ts",
+            "apps/console/src/views/filter.ts",
+            "apps/console/src/views/timeline.ts",
+        ];
+        let resource = "packages/office-api/src/resources/config-delivery-window.resource.ts";
+        let actions = "packages/office-api/src/actions/config-delivery-window.actions.ts";
+        let writer = "packages/storage/src/config-delivery-window.writer.ts";
+        let weak = "packages/analytics/src/delivery-window.controller.ts";
+        let guidance = "packages/office-api/AGENTS.md";
+        let edit = "const duration = editWindow;";
+        let changed_text = format!(
+            "{edit}\n{}",
+            "// Synthetic supporting source.\n".repeat(710)
+        );
+        let reference = format!("{}\nconst duration = editWindow;\n", paths[0]);
+        let weak_text = reference.repeat(85);
+        let guidance_text = format!("{weak_text}{}", "Read this guide.\n".repeat(120));
+        assert!(guidance_text.len() > 8_000);
+        let support_padding = "// Synthetic package source.\n".repeat(140);
+        let resource_text = format!("export const storesEdits = true;\n{support_padding}");
+        let action_text = format!("export const appliesEdits = true;\n{support_padding}");
+        let writer_text = format!("export const persistsEdits = true;\n{support_padding}");
+        let locale = format!("{{\"label\":\"{}\"}}\n", "l".repeat(16_740));
+        let mut fixture = Fixture::new(
+            paths
                 .iter()
-                .any(|limit| limit.contains("is unavailable or exceeds the limit"))
+                .map(|path| {
+                    let mut entry = change(path);
+                    entry["patch"] = json!(format!(
+                        "@@ -1 +1 @@\n-const duration = defaultWindow;\n+{edit}"
+                    ));
+                    entry
+                })
+                .collect(),
+        );
+        for pull in &mut fixture.pulls {
+            pull["title"] = json!("Keep resource settings when admins edit the delivery window");
+        }
+        fixture.revision(REPO, BASE, &[]);
+        let mut head_files: Vec<_> = paths
+            .iter()
+            .map(|path| (*path, File::Text(&changed_text)))
+            .collect();
+        head_files.extend([
+            (resource, File::Text(&resource_text)),
+            (actions, File::Text(&action_text)),
+            (writer, File::Text(&writer_text)),
+            (weak, File::Text(&weak_text)),
+            (guidance, File::Text(&guidance_text)),
+            (
+                "apps/console/src/views/config-delivery-window.controller.ts",
+                File::Text(&weak_text),
+            ),
+            (
+                "apps/console/src/views/locales/en.json",
+                File::Text(&locale),
+            ),
+            (
+                "apps/console/src/views/locales/fr.json",
+                File::Text(&locale),
+            ),
+            (
+                "packages/office-api/generated/config-delivery-window.spec.ts",
+                File::Text(&weak_text),
+            ),
+        ]);
+        let root = fixture.revision(FORK, HEAD, &head_files);
+        let inventory_route = format!("{FORK}/git/trees/{root}?recursive=1");
+        let inventory = fixture.responses.get_mut(&inventory_route).unwrap();
+        let tree = inventory["tree"].as_array_mut().unwrap();
+        let filler = "component-segment-".repeat(7);
+        let blob_url = format!("https://api.github.com/repos/{FORK}/git/blobs/{MOVED}");
+        for index in 0..28_000 {
+            tree.push(json!({
+                "path": format!("packages/archive/generated/{filler}/{index:05}.ts"),
+                "mode": "100644", "type": "blob", "sha": MOVED, "size": 50, "url": blob_url,
+            }));
+        }
+        let inventory_bytes = serde_json::to_vec(inventory).unwrap().len();
+        assert!(
+            (8_000_000..INVENTORY_BYTES).contains(&inventory_bytes),
+            "{inventory_bytes}"
         );
 
+        let mut hub = GitHub::new(fixture);
+        let view = snapshot(&mut hub).unwrap();
+        assert!(view.limits.is_empty(), "{:?}", view.limits);
+        assert!(
+            view.files[..paths.len()]
+                .iter()
+                .all(|file| !file.patch.is_empty())
+        );
+        assert!(
+            view.files[..paths.len()]
+                .iter()
+                .any(|file| file.after.is_empty())
+        );
+        let supporting = &view.files[paths.len()..];
+        let strongest: HashMap<_, _> = supporting
+            .iter()
+            .take(3)
+            .map(|file| (file.path.as_str(), file.after.as_str()))
+            .collect();
+        assert_eq!(
+            strongest,
+            HashMap::from([
+                (resource, resource_text.as_str()),
+                (writer, writer_text.as_str()),
+                (actions, action_text.as_str()),
+            ])
+        );
+        assert_eq!(supporting[1].path, writer);
+        assert_eq!(supporting[1].after, writer_text);
+        assert!(
+            !supporting
+                .iter()
+                .any(|file| file.path == guidance || file.path.contains("/locales/"))
+        );
+        assert_eq!(hub.inventory_remaining, INVENTORY_BYTES - inventory_bytes);
+        assert!(hub.remaining > DOWNLOAD / 2);
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+        let source_bytes = view
+            .files
+            .iter()
+            .map(|file| file.patch.len() + file.before.len() + file.after.len())
+            .sum::<usize>()
+            + view
+                .head_context
+                .iter()
+                .map(|window| window.text.len())
+                .sum::<usize>();
+        assert!(source_bytes <= SNAPSHOT_TEXT_BYTES);
+    }
+
+    #[test]
+    fn preserves_final_request_budget_when_optional_context_is_unavailable() {
         let mut hub = GitHub::new(Fixture::new(vec![change("source.rs")]));
         hub.requests = 4;
         let view = snapshot(&mut hub).unwrap();
-        assert!(!view.limits.is_empty());
+        assert!(!view.files[0].patch.is_empty());
+        assert!(view.limits.is_empty());
         assert_eq!(hub.transport.requests.len(), 4);
         assert_eq!(hub.transport.requests.last().unwrap(), PULL);
     }
 
     #[test]
-    fn bounded_response_and_context_inventory_report_gaps() {
+    fn bounds_responses_and_uses_partial_inventory_as_optional_context() {
         let mut fixture = Fixture::new(vec![change("source.rs")]);
         fixture.revision(REPO, BASE, &[("source.rs", File::Text("old\n"))]);
         let head = fixture.revision(
@@ -1588,11 +2990,7 @@ mod tests {
             .unwrap()["truncated"] = json!(true);
         let mut hub = GitHub::new(fixture);
         let view = snapshot(&mut hub).unwrap();
-        assert!(
-            view.limits
-                .iter()
-                .any(|limit| limit.contains("Git tree listing"))
-        );
+        assert!(view.limits.is_empty(), "{:?}", view.limits);
         assert!(view.files.iter().any(|file| file.path == "README.md"));
         let remaining = hub.remaining;
         assert!(hub.get::<Pull>(PULL, 10, false).is_err());

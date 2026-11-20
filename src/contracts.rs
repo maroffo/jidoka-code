@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+
+/// Maximum combined size of patches and optional source text in a snapshot.
+pub(crate) const SNAPSHOT_TEXT_BYTES: usize = 96_000;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceFile {
     pub path: String,
@@ -6,6 +10,22 @@ pub struct SourceFile {
     pub before: String,
     pub after: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRead {
+    pub path: String,
+    pub term: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceWindow {
+    pub path: String,
+    /// The 1-based head line at which this exact source text starts.
+    pub start: usize,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub url: String,
@@ -15,6 +35,8 @@ pub struct Snapshot {
     pub head: String,
     pub intent: Vec<String>,
     pub files: Vec<SourceFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub head_context: Vec<SourceWindow>,
     pub limits: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,6 +92,8 @@ pub struct PublishedReport {
     pub report: Report,
     #[serde(default)]
     pub scan: Option<Scan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_files: Option<Vec<String>>,
 }
 
 /// Safe, operator-facing reason when GitHub's public API quota is exhausted.
