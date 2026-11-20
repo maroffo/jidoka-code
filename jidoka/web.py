@@ -31,7 +31,7 @@ _ATTRIBUTION = {
 _FAILED = "L’analisi non è riuscita. Puoi inviare di nuovo la PR dalla pagina iniziale."
 _INTERRUPTED = "L’analisi è stata interrotta prima della fine. Invia di nuovo la PR per riprovare."
 _PROVIDER_CHANGED = "Il provider è cambiato. Invia di nuovo la PR per confermare il destinatario."
-_REPO = r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.{1,2}(?:/|$))[A-Za-z0-9_.-]+"
+_REPO = r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.{1,2}(?:/|$))[A-Za-z0-9_.-]{1,100}"
 _PULL_URL = re.compile(
     rf"https://github\.com/({_REPO})/pull/([1-9][0-9]{{0,9}})/?(?:[?#][^\s]*)?",
     re.IGNORECASE | re.ASCII,
@@ -299,15 +299,30 @@ def _report_html(report):
     else:
         findings_html = "<p>Nessun problema verificato.</p>"
     limits_html = f"<ul>{limits}</ul>" if limits else "<p>Nessun limite segnalato.</p>"
+    scan = report.get("scan")
+    scan_html = ""
+    if scan:
+        covered = ", ".join(scan["covered"]) or "Nessun file"
+        signals = "".join(
+            f'<li>{escape(signal["rule"])} · {_position(report, signal)}</li>'
+            for signal in scan["signals"]
+        )
+        scan_html = (
+            f'<details><summary>Scansione Semgrep</summary>'
+            f'<p>Versione: {escape(scan["version"] or "non disponibile")}</p>'
+            f'<p>File esaminati: {escape(covered)}</p>'
+            + (f'<ul>{signals}</ul>' if signals else '')
+            + '</details>'
+        )
     return f"""
+<section><h2>Dove concentrarti</h2>{focus_html}</section>
 <dl>
   <dt>Repository</dt><dd>{escape(report["repo"])}</dd>
   <dt>Revisione base</dt><dd><code>{escape(report["base"])}</code></dd>
   <dt>Revisione esaminata</dt><dd><code>{escape(report["head"])}</code></dd>
 </dl>
-<section><h2>Dove concentrarti</h2>{focus_html}</section>
 <section><h2>Problemi verificati</h2>{findings_html}</section>
-<section><h2>Limiti di copertura</h2>{limits_html}</section>
+<section><h2>Limiti di copertura</h2>{limits_html}{scan_html}</section>
 """
 
 

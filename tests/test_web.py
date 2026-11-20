@@ -133,6 +133,7 @@ class WebTests(unittest.TestCase):
             "https://github.com/example/../pull/1",
             "https://github.com/example/demo/issues/1",
             "https://github.com/example/demo/pull/0",
+            f"https://github.com/example/{'a' * 101}/pull/1",
             '"><script>alert(1)</script>',
         ):
             with self.subTest(url=url):

@@ -1,6 +1,6 @@
 """Payloads shared by the collector, review engine and web worker."""
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 class SourceFile(TypedDict):
@@ -59,6 +59,7 @@ class Report(TypedDict):
 
 
 class PublishedReport(Report):
+    scan: NotRequired[Scan]
     repo: str
     base: str
     head: str

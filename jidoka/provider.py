@@ -23,7 +23,7 @@ class Provider:
         if not model.strip():
             raise ValueError("Missing provider model")
         self.endpoint = endpoint
-        self.label = f"{url.netloc} ({model})"
+        self.label = f"{endpoint} ({model})"
         self.model = model
         self.api_key = api_key
         self.client = build_opener(_NoRedirect())
@@ -54,7 +54,7 @@ class Provider:
                 raise ValueError("Incomplete response")
             result = json.loads(choice["message"]["content"])
             if not isinstance(result, dict):
-                raise ValueError("Expected object")
+                raise TypeError("Expected object")
         except (OSError, HTTPError, URLError, ValueError, KeyError, IndexError, TypeError):
             raise RuntimeError("Provider request failed or returned incomplete JSON") from None
         return result

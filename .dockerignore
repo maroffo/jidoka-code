@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!jidoka/
+!jidoka/*.py
+!rules/
+!rules/**
+**/__pycache__
+**/*.pyc
