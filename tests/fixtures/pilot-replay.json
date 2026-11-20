@@ -97,21 +97,26 @@
       }
     ],
     "expected": {
-      "findings": [
-        [
-          "api/capacity.go",
-          2,
-          "introduced"
-        ]
-      ],
       "focus": [
-        [
-          "api/capacity.go",
-          2,
-          "Verifica se una cache con un solo slot può accettare una voce prima del merge."
-        ]
+        {
+          "path": "api/capacity.go",
+          "line": 2,
+          "checked": "Comportamento documentato in db/schema.sql:1. La funzione non applica un minimo prima di restituire il conteggio.",
+          "outcome": "Una cache con un solo slot indica capacità zero.",
+          "action": "Verifica se una cache con un solo slot può accettare una voce prima del merge."
+        }
       ],
-      "partial": false
+      "findings": [
+        {
+          "path": "api/capacity.go",
+          "line": 2,
+          "title": "La capacità perde uno slot configurato",
+          "impact": "Una cache con un solo slot indica capacità zero.",
+          "evidence": "Analisi statica del codice. Il valore restituito è inferiore di uno al conteggio configurato.\nVerifica mirata. La funzione non applica un minimo prima di restituire il conteggio.\nRevisione proposta api/capacity.go:2 «    return slots - 1»\nRevisione proposta db/schema.sql:1 «SELECT slots AS usable_capacity FROM quotas;»\nRevisione proposta client/capacity.ts:1 «export const isFull = (usable_capacity: number) => usable_capacity === 0;»\nRevisione base api/capacity.go:2 «    return slots»\nRevisione base db/schema.sql:1 «SELECT slots AS usable_capacity FROM quotas;»",
+          "attribution": "introduced"
+        }
+      ],
+      "limits": []
     }
   },
   {
@@ -212,9 +217,12 @@
       }
     ],
     "expected": {
-      "findings": [],
       "focus": [],
-      "partial": true
+      "findings": [],
+      "limits": [
+        "Alcune verifiche contengono dettagli o citazioni non validi.",
+        "Per alcune ipotesi manca una verifica valida."
+      ]
     }
   },
   {
@@ -255,9 +263,192 @@
       }
     ],
     "expected": {
-      "findings": [],
       "focus": [],
-      "partial": false
+      "findings": [],
+      "limits": []
+    }
+  },
+  {
+    "name": "unicode-human-refuted-preexisting",
+    "snapshot": {
+      "url": "https://github.com/example/demo/pull/1",
+      "repo": "example/demo",
+      "number": 1,
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "intent": [
+        "Chiarire chi può vedere le bozze nel feed."
+      ],
+      "limits": [
+        "Parte del contesto non è stata acquisita."
+      ],
+      "files": [
+        {
+          "path": "api/capacity.go",
+          "before": "func Capacity(slots int) int {\n\treturn slots\n}\n",
+          "after": "func Capacity(slots int) int {\n\treturn slots\n}\n",
+          "patch": ""
+        },
+        {
+          "path": "db/orders.sql",
+          "before": "SELECT SUM(amount_cents) AS order_total\nFROM orders;\n",
+          "after": "SELECT SUM(amount_cents) AS order_total\nFROM orders;\n",
+          "patch": ""
+        },
+        {
+          "path": "client/データ.ts",
+          "before": "// order_total is always numeric, even when there are no orders.\nconst visible = entries;\nrender(\"कि✈️\", visible);\n",
+          "after": "// order_total is always numeric, even when there are no orders.\nconst visible = entries.filter(entry => entry.published);\nrender(\"कि✈️\", visible);\n",
+          "patch": "-const visible = entries;\n+const visible = entries.filter(entry => entry.published);"
+        }
+      ]
+    },
+    "scan": {
+      "covered": [],
+      "signals": [],
+      "limits": [
+        "Parte del contesto non è stata acquisita.",
+        "Scanner non disponibile."
+      ],
+      "version": ""
+    },
+    "replies": [
+      {
+        "complete": true,
+        "hypotheses": [
+          {
+            "anchor": {
+              "path": "client/データ.ts",
+              "line": 2,
+              "quote": "const visible = entries.filter(entry => entry.published);"
+            },
+            "expected": "La visibilità delle bozze dipende dai requisiti di prodotto.",
+            "scenario": "Un moderatore apre il feed कि✈️.",
+            "consequence": "Il filtro esclude anche le bozze dei moderatori."
+          },
+          {
+            "anchor": {
+              "path": "api/capacity.go",
+              "line": 2,
+              "quote": "\treturn slots"
+            },
+            "expected": "La capacità deve mantenere il valore configurato.",
+            "scenario": "Il chiamante configura un solo slot.",
+            "consequence": "Un conteggio errato mostrerebbe zero slot."
+          },
+          {
+            "anchor": {
+              "path": "db/orders.sql",
+              "line": 1,
+              "quote": "SELECT SUM(amount_cents) AS order_total"
+            },
+            "expected": "Il totale deve essere sempre numerico.",
+            "scenario": "La tabella degli ordini è vuota.",
+            "consequence": "Il client riceve NULL anziché zero."
+          }
+        ]
+      },
+      {
+        "complete": false,
+        "assessments": [
+          {
+            "id": 1,
+            "outcome": "human",
+            "basis": {
+              "path": "client/データ.ts",
+              "line": 3,
+              "quote": "render(\"कि✈️\", visible);"
+            },
+            "severity": "medium",
+            "countercheck": "La pagina usa soltanto le voci già filtrate.",
+            "reason": "Il filtro rimuove le bozze prima del rendering di कि✈️.",
+            "question": "I moderatori devono vedere le bozze nel feed कि✈️?",
+            "alternatives": [
+              "Mostrare le bozze ai moderatori",
+              "Mostrare solo le voci pubblicate"
+            ]
+          },
+          {
+            "id": 2,
+            "outcome": "refuted",
+            "basis": {
+              "path": "api/capacity.go",
+              "line": 2,
+              "quote": "\treturn slots"
+            },
+            "countercheck": "Con uno slot, la funzione restituisce uno direttamente."
+          },
+          {
+            "id": 3,
+            "outcome": "confirmed",
+            "kind": "contract",
+            "basis": {
+              "path": "client/データ.ts",
+              "line": 1,
+              "quote": "// order_total is always numeric, even when there are no orders."
+            },
+            "support": [
+              {
+                "path": "db/orders.sql",
+                "line": 2,
+                "quote": "FROM orders;"
+              }
+            ],
+            "severity": "medium",
+            "countercheck": "Nessun COALESCE converte il valore restituito da SUM.",
+            "title": "Il totale è nullo senza ordini",
+            "impact": "Il client riceve NULL anziché zero.",
+            "reason": "SUM restituisce NULL su una tabella vuota.",
+            "action": "Verifica il totale con una tabella senza ordini.",
+            "comparison": {
+              "behavior": {
+                "path": "db/orders.sql",
+                "line": 1,
+                "quote": "SELECT SUM(amount_cents) AS order_total"
+              },
+              "basis": {
+                "path": "client/データ.ts",
+                "line": 1,
+                "quote": "// order_total is always numeric, even when there are no orders."
+              },
+              "affected": true
+            }
+          }
+        ]
+      }
+    ],
+    "expected": {
+      "focus": [
+        {
+          "path": "db/orders.sql",
+          "line": 1,
+          "checked": "Comportamento documentato in client/データ.ts:1. Nessun COALESCE converte il valore restituito da SUM.",
+          "outcome": "Il client riceve NULL anziché zero.",
+          "action": "Verifica il totale con una tabella senza ordini."
+        },
+        {
+          "path": "client/データ.ts",
+          "line": 2,
+          "checked": "Analisi statica del codice. Revisione proposta client/データ.ts:2 «const visible = entries.filter(entry => entry.published);»\nRevisione proposta client/データ.ts:3 «render(\"कि✈️\", visible);»",
+          "outcome": "Il filtro rimuove le bozze prima del rendering di कि✈️.",
+          "action": "I moderatori devono vedere le bozze nel feed कि✈️? Le opzioni sono «Mostrare le bozze ai moderatori» e «Mostrare solo le voci pubblicate»."
+        }
+      ],
+      "findings": [
+        {
+          "path": "db/orders.sql",
+          "line": 1,
+          "title": "Il totale è nullo senza ordini",
+          "impact": "Il client riceve NULL anziché zero.",
+          "evidence": "Analisi statica del codice. SUM restituisce NULL su una tabella vuota.\nVerifica mirata. Nessun COALESCE converte il valore restituito da SUM.\nRevisione proposta db/orders.sql:1 «SELECT SUM(amount_cents) AS order_total»\nRevisione proposta client/データ.ts:1 «// order_total is always numeric, even when there are no orders.»\nRevisione proposta db/orders.sql:2 «FROM orders;»\nRevisione base db/orders.sql:1 «SELECT SUM(amount_cents) AS order_total»\nRevisione base client/データ.ts:1 «// order_total is always numeric, even when there are no orders.»",
+          "attribution": "preexisting"
+        }
+      ],
+      "limits": [
+        "Parte del contesto non è stata acquisita.",
+        "Scanner non disponibile.",
+        "Risposta incompleta del provider durante la verifica delle ipotesi."
+      ]
     }
   }
 ]

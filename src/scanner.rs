@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     env,
+    ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     os::{
@@ -29,6 +30,7 @@ const INPUT_BYTES: usize = 96_000;
 const OUTPUT_BYTES: usize = 1_000_000;
 const SIGNALS: usize = 100;
 const SCAN_TIME: Duration = Duration::from_secs(20);
+const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 fn applicable(path: &str) -> bool {
     matches!(
@@ -65,9 +67,9 @@ fn targets<'a>(snapshot: &'a Snapshot, limits: &mut Vec<String>) -> Vec<(&'a str
     targets
 }
 
-fn executable() -> Option<PathBuf> {
-    env::split_paths(&env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
-        .filter(|dir| dir.is_absolute())
+fn executable(directories: &[PathBuf]) -> Option<PathBuf> {
+    directories
+        .iter()
         .map(|dir| dir.join("semgrep"))
         .find(|path| {
             fs::metadata(path).is_ok_and(|metadata| {
@@ -118,13 +120,13 @@ impl<'a> Prepared<'a> {
         })
     }
 
-    fn command(&self, path: &Path) -> Command {
+    fn command(&self, executable: &Path, search_path: &OsStr) -> Command {
         let root = self.scratch.path();
-        let mut command = Command::new(path);
+        let mut command = Command::new(executable);
         command
             .current_dir(&self.work)
             .env_clear()
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("PATH", search_path)
             .env("HOME", root)
             .env("XDG_CONFIG_HOME", root)
             .env("XDG_CACHE_HOME", root)
@@ -388,16 +390,31 @@ fn signal_parts(signal: &Value) -> Option<(&str, &str, usize, &str)> {
     ))
 }
 
-fn scan_using(snapshot: &Snapshot, find: impl FnOnce() -> Option<PathBuf>) -> Scan {
+fn scan_using(snapshot: &Snapshot, configured_path: impl FnOnce() -> Option<OsString>) -> Scan {
     let mut report = Scan::default();
     let targets = targets(snapshot, &mut report.limits);
     if targets.is_empty() {
         return report;
     }
-    let Some(path) = find() else {
+    let configured_path = configured_path();
+    // Use the same absolute directories for discovery and for helpers launched from scratch.
+    let directories: Vec<_> = env::split_paths(
+        configured_path
+            .as_deref()
+            .unwrap_or(OsStr::new(DEFAULT_PATH)),
+    )
+    .filter(|directory| directory.is_absolute())
+    .collect();
+    let Some(executable) = executable(&directories) else {
         report
             .limits
             .push("Semgrep CE non è disponibile per i file con regole applicabili.".into());
+        return report;
+    };
+    let Ok(search_path) = env::join_paths(directories) else {
+        report
+            .limits
+            .push("Percorso di ricerca di Semgrep non valido.".into());
         return report;
     };
     let Ok(prepared) = Prepared::new(targets, &mut report.limits) else {
@@ -409,7 +426,11 @@ fn scan_using(snapshot: &Snapshot, find: impl FnOnce() -> Option<PathBuf>) -> Sc
     if prepared.files.is_empty() {
         return report;
     }
-    match run(&mut prepared.command(&path), SCAN_TIME, OUTPUT_BYTES) {
+    match run(
+        &mut prepared.command(&executable, &search_path),
+        SCAN_TIME,
+        OUTPUT_BYTES,
+    ) {
         Ok((status, output)) => {
             if !status.success() {
                 report
@@ -424,7 +445,10 @@ fn scan_using(snapshot: &Snapshot, find: impl FnOnce() -> Option<PathBuf>) -> Sc
 }
 
 pub fn scan(snapshot: &Snapshot) -> Scan {
-    scan_using(snapshot, executable)
+    let mut report = scan_using(snapshot, || env::var_os("PATH"));
+    let mut seen = HashSet::new();
+    report.limits.retain(|limit| seen.insert(limit.clone()));
+    report
 }
 
 #[cfg(test)]
@@ -482,7 +506,9 @@ mod tests {
 
     #[test]
     fn missing_executable_reports_a_scan_error_only_when_applicable() {
-        let scan = scan_using(&snapshot(vec![file("app.py", "pass\n")]), || None);
+        let scan = scan_using(&snapshot(vec![file("app.py", "pass\n")]), || {
+            Some(OsString::new())
+        });
         assert!(scan.covered.is_empty() && scan.signals.is_empty());
         assert!(
             scan.limits
@@ -515,7 +541,7 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(&prepared.rules).unwrap(), RULE);
             assert_eq!(prepared.files, [(path, 1)]);
-            let command = prepared.command(Path::new("/local/semgrep"));
+            let command = prepared.command(Path::new("/local/semgrep"), OsStr::new(DEFAULT_PATH));
             let args: Vec<_> = command.get_args().collect();
             for flag in [
                 "--oss-only",
@@ -548,6 +574,60 @@ mod tests {
             prepared.work.clone()
         };
         assert!(!work.exists());
+    }
+
+    #[test]
+    fn uses_absolute_custom_path_for_tool_and_helpers() {
+        let tools = tempfile::tempdir().unwrap();
+        let bin = tools.path().join("bin");
+        let runtime = tools.path().join("runtime");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(&runtime).unwrap();
+        let fixture = bin.join("semgrep");
+        let helper = runtime.join("jidoka_fixture_runtime");
+        fs::write(&fixture, "#!/bin/sh\nexec jidoka_fixture_runtime\n").unwrap();
+        fs::write(
+            &helper,
+            r#"#!/bin/sh
+directory="${0%/*}"
+[ "$PATH" = "${directory%/*}/bin:$directory" ] || exit 1
+printf '%s\n' '{"version":"1.146.0","paths":{"scanned":["app.py"]},"errors":[],"results":[]}'
+"#,
+        )
+        .unwrap();
+        for script in [&fixture, &helper] {
+            fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let path = env::join_paths([
+            Path::new(""),
+            Path::new("."),
+            &bin,
+            Path::new("relative/helpers"),
+            &runtime,
+            Path::new(""),
+        ])
+        .unwrap();
+        let report = scan_using(&snapshot(vec![file("app.py", "pass\n")]), || Some(path));
+        assert!(report.limits.is_empty(), "{:?}", report.limits);
+        assert_eq!(report.covered, ["app.py"]);
+    }
+
+    #[test]
+    fn deduplicates_limits_in_first_occurrence_order_even_without_scan_targets() {
+        let report = scan(&snapshot(vec![
+            file("../outside.py", "pass\n"),
+            file("oversized.py", &"x".repeat(TARGET_BYTES + 1)),
+            file("repeat.py", "pass\n"),
+            file("repeat.py", "pass\n"),
+        ]));
+        assert!(report.covered.is_empty());
+        assert_eq!(
+            report.limits,
+            [
+                "File escluso dalla scansione per percorso non valido o duplicato.",
+                "File fuori dai limiti di scansione: oversized.py.",
+            ]
+        );
     }
 
     #[test]

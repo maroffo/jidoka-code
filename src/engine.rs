@@ -1,6 +1,9 @@
 //! Review a pinned snapshot in two bounded passes and validate citations locally.
 
-use crate::contracts::{Attribution, Finding, Focus, Report, Scan, Snapshot};
+use crate::{
+    contracts::{Attribution, Finding, Focus, Report, Scan, Snapshot},
+    source::{printable, safe_path},
+};
 use anyhow::{Result, anyhow};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
@@ -114,10 +117,7 @@ fn source_index<'a>(snapshot: &'a Snapshot, limits: &mut Vec<String>) -> Source<
     let mut source = HashMap::new();
     for file in &snapshot.files {
         let path = file.path.as_str();
-        if !printable(path)
-            || path.contains('\\')
-            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
-        {
+        if !safe_path(path) {
             invalid = true;
         } else if counts[path] == 1 {
             source.insert(
@@ -160,16 +160,6 @@ fn citation<'a>(value: &Value, source: &Source<'a>, revision: Revision) -> Optio
 
 fn trim_text(value: &str) -> &str {
     value.trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '\u{001c}'..='\u{001f}'))
-}
-
-fn printable(value: &str) -> bool {
-    value.chars().all(|ch| {
-        // Debug escaping also covers combining marks. Keep decomposed Italian accents.
-        ch == ' '
-            || ch.is_ascii_graphic()
-            || matches!(ch, '\u{0300}'..='\u{036f}')
-            || (!ch.is_ascii() && ch.escape_debug().next() == Some(ch))
-    })
 }
 
 fn text(value: &Value) -> Option<&str> {
@@ -846,6 +836,42 @@ mod tests {
                 "Il materiale acquisito contiene percorsi non validi.",
             ]
         );
+    }
+
+    #[test]
+    fn engine_uses_path_length_depth_and_reserved_component_bounds() {
+        for invalid in [
+            "src/.GiT/cache.go".to_owned(),
+            format!("{}cache.go", "dir/".repeat(16)),
+            format!("{}.go", "a".repeat(238)),
+            "src/a\u{200d}b.go".to_owned(),
+        ] {
+            let mut fixture = fixture();
+            fixture["snapshot"]["files"][0]["path"] = json!(invalid);
+            fixture["replies"][0]["hypotheses"][0]["anchor"]["path"] = json!(invalid);
+            fixture["replies"][1]["assessments"][2]["comparison"] = Value::Null;
+            let report = replay(&fixture);
+            assert_eq!(report.findings.len(), 1, "accepted {invalid:?}");
+            assert_eq!(report.findings[0].path, "orders.sql");
+            assert!(
+                report
+                    .limits
+                    .iter()
+                    .any(|limit| limit == "Il materiale acquisito contiene percorsi non validi.")
+            );
+        }
+    }
+
+    #[test]
+    fn operator_text_allows_marks_and_rejects_embedded_invisible_characters() {
+        let prose = json!("  Apri il feed テ\u{3099}ータ कि✈\u{fe0f}.  ");
+        assert_eq!(
+            text(&prose),
+            Some("Apri il feed テ\u{3099}ータ कि✈\u{fe0f}.")
+        );
+        for bad in ['\u{0000}', '\u{00a0}', '\u{200d}', '\u{2029}', '\u{e000}'] {
+            assert!(text(&json!(format!("Apri{bad}il feed."))).is_none());
+        }
     }
 
     #[test]

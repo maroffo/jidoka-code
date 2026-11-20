@@ -3,6 +3,10 @@
 use crate::contracts::{GitHubRateLimit, Snapshot, SourceFile};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use icu_properties::{
+    CodePointMapData,
+    props::{GeneralCategory, GeneralCategoryGroup},
+};
 use reqwest::{StatusCode, blocking::Client, header::HeaderValue, redirect::Policy};
 use serde::{Deserialize, de::DeserializeOwned};
 use sha1::{Digest, Sha1};
@@ -79,12 +83,18 @@ fn pull_url(url: &str, allowed: &HashSet<String>) -> Result<(String, u64)> {
     Ok((repo, number))
 }
 
+pub(crate) fn printable(text: &str) -> bool {
+    // Python str.isprintable excludes Unicode Other and Separator, except ASCII space.
+    let categories = CodePointMapData::<GeneralCategory>::new();
+    let excluded = GeneralCategoryGroup::Other.union(GeneralCategoryGroup::Separator);
+    text.chars()
+        .all(|ch| ch == ' ' || !excluded.contains(categories.get(ch)))
+}
+
 pub(crate) fn safe_path(path: &str) -> bool {
     path.len() <= 240
         && !path.contains('\\')
-        && !path.chars().any(|c| {
-            c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-        })
+        && printable(path)
         && path.split('/').count() <= 16
         && path
             .split('/')
@@ -1248,6 +1258,46 @@ mod tests {
         ] {
             assert!(pull_url(url, &allowed).is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn safe_paths_allow_unicode_marks_and_reject_invisible_and_reserved_components() {
+        for path in [
+            "src/テ\u{3099}ータ.py",
+            "src/데이터.py",
+            "src/कि.py",
+            "src/a\u{20dd}.py",
+            "src/✈\u{fe0f}.py",
+            "src/prova #.py",
+        ] {
+            assert!(safe_path(path), "rejected {path:?}");
+        }
+        for path in [
+            "",
+            "/src/file.py",
+            "src//file.py",
+            "src/./file.py",
+            "src/../file.py",
+            "src/.GiT/file.py",
+            "src\\file.py",
+            "src/a\0b.py",
+            "src/a\u{0085}b.py",
+            "src/a\u{00a0}b.py",
+            "src/a\u{061c}b.py",
+            "src/a\u{200d}b.py",
+            "src/a\u{2028}b.py",
+            "src/a\u{2029}b.py",
+            "src/a\u{202e}b.py",
+            "src/a\u{2066}b.py",
+            "src/a\u{e000}b.py",
+            "src/a\u{0378}b.py",
+        ] {
+            assert!(!safe_path(path), "accepted {path:?}");
+        }
+        assert!(safe_path(&"è".repeat(120)));
+        assert!(!safe_path(&"è".repeat(121)));
+        assert!(safe_path(&format!("{}file.py", "dir/".repeat(15))));
+        assert!(!safe_path(&format!("{}file.py", "dir/".repeat(16))));
     }
 
     #[test]

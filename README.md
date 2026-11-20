@@ -6,7 +6,7 @@ Il motore legge modifiche testuali di qualsiasi stack. In due passaggi formula i
 
 ## Avvio
 
-Crea un file locale `.env` con i repository pubblici ammessi e il provider autorizzato a ricevere il codice. Il provider deve accettare Chat Completions con output JSON. Inserisci il suo URL completo.
+Crea un file locale `.env` con i repository pubblici ammessi e il provider autorizzato a ricevere il codice. Il provider deve accettare Chat Completions con output JSON. Inserisci il suo URL completo. Jidoka si collega direttamente a quell’indirizzo anche quando la shell configura un proxy.
 
 ```dotenv
 JIDOKA_REPOS=organizzazione/progetto
@@ -20,6 +20,8 @@ docker compose up --build
 ```
 
 Apri [Jidoka](http://localhost:8080), inserisci la PR e conferma il destinatario. La cronologia rimane nel volume SQLite `reviews`, compatibile con il pilota precedente. Il servizio è destinato a un solo utente su loopback.
+
+Con `docker compose stop` il servizio chiude l’ingresso HTTP e attende la review in corso. Le richieste ancora in coda saranno elaborate al riavvio. Compose concede fino a tre minuti e mezzo per completare l’arresto.
 
 ## Sviluppo
 

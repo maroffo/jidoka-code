@@ -1,7 +1,7 @@
 //! Italian review pages and the persistent, single-user work queue.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Write,
     path::{Path, PathBuf},
     sync::Arc,
@@ -23,7 +23,10 @@ use hmac::{Hmac, Mac};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::Sha256;
 
-use crate::contracts::{Attribution, GitHubRateLimit, PublishedReport, Scan};
+use crate::{
+    contracts::{Attribution, GitHubRateLimit, PublishedReport, Scan},
+    source::safe_path,
+};
 
 const FAILED: &str = "L’analisi non è riuscita. Puoi inviare di nuovo la PR dalla pagina iniziale.";
 const INTERRUPTED: &str =
@@ -39,6 +42,7 @@ type TokenMac = Hmac<Sha256>;
 struct WebState {
     db: PathBuf,
     provider: String,
+    allowed_repos: HashSet<String>,
     secret: [u8; 32],
 }
 
@@ -124,11 +128,15 @@ where
     Ok(true)
 }
 
-pub fn router(db: &Path, provider: &str) -> Result<Router> {
+pub fn router(db: &Path, provider: &str, allowed_repos: &HashSet<String>) -> Result<Router> {
     init_db(&connect(db)?)?;
     let state = Arc::new(WebState {
         db: db.to_owned(),
         provider: provider.to_owned(),
+        allowed_repos: allowed_repos
+            .iter()
+            .map(|repo| repo.to_ascii_lowercase())
+            .collect(),
         secret: rand::random(),
     });
     Ok(Router::new()
@@ -281,7 +289,7 @@ fn valid_repo(repo: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
 }
 
-fn pull_url(value: &str) -> Option<String> {
+fn parse_pull_url(value: &str) -> Option<(&str, &str)> {
     let value = value.trim();
     if value.len() > 2048
         || value
@@ -307,7 +315,11 @@ fn pull_url(value: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!("https://github.com/{repo}/pull/{number}"))
+    Some((repo, number))
+}
+
+fn canonical_pull_url(repo: &str, number: &str) -> String {
+    format!("https://github.com/{repo}/pull/{number}")
 }
 
 struct StorageError;
@@ -395,32 +407,35 @@ async fn submit(
 
     let value = fields.get("url").map_or("", |value| value.as_ref());
     let consent = fields.get("consent").is_some_and(|value| value == "yes");
-    let url = pull_url(value);
-    let message = if !consent {
-        "Conferma l’invio del codice al provider prima di avviare la review."
-    } else if let Some(url) = url {
-        let provider = state.provider.clone();
-        let id = with_db(&state, move |connection| {
-            connection.execute(
-                "INSERT INTO reviews (url, provider, status) VALUES (?1, ?2, 'queued')",
-                params![url, provider],
-            )?;
-            Ok(connection.last_insert_rowid())
-        })
-        .await?;
-        let location = format!("/reviews/{id}");
-        let html = page(
-            "Review in coda",
-            &format!(r#"<p><a href="{location}">Apri la review</a></p>"#),
-        );
-        return Ok((
-            StatusCode::SEE_OTHER,
-            [(header::LOCATION, location)],
-            Html(html),
-        )
-            .into_response());
-    } else {
-        "Inserisci l’URL HTTPS di una pull request su github.com."
+    let message = match (consent, parse_pull_url(value)) {
+        (false, _) => "Conferma l’invio del codice al provider prima di avviare la review.",
+        (true, None) => "Inserisci l’URL HTTPS di una pull request su github.com.",
+        (true, Some((repo, _))) if !state.allowed_repos.contains(&repo.to_ascii_lowercase()) => {
+            "Il repository non è nell’elenco autorizzato."
+        }
+        (true, Some((repo, number))) => {
+            let url = canonical_pull_url(repo, number);
+            let provider = state.provider.clone();
+            let id = with_db(&state, move |connection| {
+                connection.execute(
+                    "INSERT INTO reviews (url, provider, status) VALUES (?1, ?2, 'queued')",
+                    params![url, provider],
+                )?;
+                Ok(connection.last_insert_rowid())
+            })
+            .await?;
+            let location = format!("/reviews/{id}");
+            let html = page(
+                "Review in coda",
+                &format!(r#"<p><a href="{location}">Apri la review</a></p>"#),
+            );
+            return Ok((
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, location)],
+                Html(html),
+            )
+                .into_response());
+        }
     };
     let html = home_page(&state, token, value, message).await?;
     Ok((StatusCode::BAD_REQUEST, Html(html)).into_response())
@@ -593,9 +608,7 @@ fn position(report: &PublishedReport, path: &str, line: usize) -> String {
         || !valid_repo(&report.repo)
         || head.len() != 40
         || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || path.contains('\\')
-        || path.chars().any(char::is_control)
-        || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+        || !safe_path(path)
     {
         return label;
     }
@@ -756,7 +769,8 @@ fn review_page(
     failure: Option<&str>,
 ) -> String {
     let label = escape(url);
-    let url = pull_url(url).map_or(label.clone(), |url| {
+    let url = parse_pull_url(url).map_or(label.clone(), |(repo, number)| {
+        let url = canonical_pull_url(repo, number);
         format!(r#"<a href="{url}">{label}</a>"#)
     });
     let (status, details) = match status {
@@ -821,7 +835,7 @@ mod tests {
         fn new() -> Self {
             let tmp = tempfile::tempdir().unwrap();
             let db = tmp.path().join("reviews.sqlite3");
-            let app = router(&db, PROVIDER).unwrap();
+            let app = router(&db, PROVIDER, &allowed_repos()).unwrap();
             Self { _tmp: tmp, db, app }
         }
 
@@ -912,6 +926,10 @@ mod tests {
             body.append_pair("consent", consent);
         }
         body.finish()
+    }
+
+    fn allowed_repos() -> HashSet<String> {
+        HashSet::from(["TEST/Demo".to_owned()])
     }
 
     fn report(scan: Option<Scan>) -> PublishedReport {
@@ -1067,6 +1085,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_unlisted_repository_before_it_reaches_history_or_queue() {
+        let fixture = Fixture::new();
+        let (cookie, token) = fixture.form().await;
+        let unlisted = "https://github.com/test/demo-fork/pull/7";
+        let (status, headers, html) = fixture
+            .post(
+                &cookie,
+                form_body(&token, unlisted, Some("yes")),
+                vec![("origin", ORIGIN)],
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(headers.get(header::LOCATION).is_none());
+        assert!(html.contains("Il repository non è nell’elenco autorizzato."));
+        assert!(html.contains(unlisted));
+        let history = fixture.get("/").await;
+        assert!(history.contains("Nessuna review registrata."));
+        assert!(!history.contains(unlisted));
+        assert!(!run_one(&fixture.db, |_| panic!("unlisted review cannot dispatch")).unwrap());
+
+        let allowed = "https://github.com/TeSt/dEmO/pull/7";
+        let location = fixture.enqueue(allowed).await;
+        assert!(fixture.get(&location).await.contains(allowed));
+    }
+
+    #[tokio::test]
     async fn processes_one_queued_review_in_order_and_persists_distinct_outcomes() {
         let mut fixture = Fixture::new();
         let first = fixture
@@ -1074,7 +1118,7 @@ mod tests {
             .await;
         let second = fixture.enqueue(SECOND_URL).await;
         assert!(fixture.get(&first).await.contains("In coda"));
-        fixture.app = router(&fixture.db, PROVIDER).unwrap();
+        fixture.app = router(&fixture.db, PROVIDER, &allowed_repos()).unwrap();
         recover(&fixture.db, PROVIDER).unwrap();
         assert!(
             run_one(&fixture.db, |url| {
@@ -1110,7 +1154,7 @@ mod tests {
         assert!(html.contains("Scanner assente"));
         assert!(!html.contains("Nessuna regola Semgrep applicabile"));
         assert!(!run_one(&fixture.db, |_| panic!("empty queue cannot dispatch")).unwrap());
-        fixture.app = router(&fixture.db, PROVIDER).unwrap();
+        fixture.app = router(&fixture.db, PROVIDER, &allowed_repos()).unwrap();
         let history = fixture.get("/").await;
         assert!(history.contains(&format!(r#"href="{first}">{URL}</a> · Completata"#)));
         assert!(history.contains(&format!(r#"href="{second}">{SECOND_URL}</a> · Parziale"#)));
@@ -1128,7 +1172,7 @@ mod tests {
             .unwrap();
         assert!(fixture.get(&running).await.contains("In corso"));
 
-        fixture.app = router(&fixture.db, "altro provider").unwrap();
+        fixture.app = router(&fixture.db, "altro provider", &allowed_repos()).unwrap();
         recover(&fixture.db, "altro provider").unwrap();
         recover(&fixture.db, "altro provider").unwrap();
         assert!(fixture.get(&running).await.contains(INTERRUPTED));
@@ -1184,7 +1228,7 @@ mod tests {
             "INSERT INTO reviews (id, url, provider, status, created_at, report) VALUES (9, ?1, ?2, 'completed', '2026-11-20 10:00:00', ?3)",
             params![URL, PROVIDER, legacy_report],
         ).unwrap();
-        let app = router(&db, PROVIDER).unwrap();
+        let app = router(&db, PROVIDER, &allowed_repos()).unwrap();
         recover(&db, PROVIDER).unwrap();
         let fixture = Fixture { _tmp: tmp, db, app };
         let html = fixture.get("/reviews/9").await;
@@ -1203,6 +1247,18 @@ mod tests {
         assert!(json.get("report").is_none());
         assert!(json.get("focus").unwrap().is_array());
         assert!(json.get("scan").unwrap().is_object());
+    }
+
+    #[test]
+    fn position_links_decomposed_paths_and_keeps_unsafe_paths_as_text() {
+        let report = report(None);
+        assert!(
+            position(&report, "src/テ\u{3099}ータ.py", 1)
+                .contains("/src/%E3%83%86%E3%82%99%E3%83%BC%E3%82%BF.py#L1")
+        );
+        for path in ["src/.GiT/file.py", "src/a\u{200d}b.py"] {
+            assert_eq!(position(&report, path, 1), format!("{path}, riga 1"));
+        }
     }
 
     #[tokio::test]
