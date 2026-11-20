@@ -24,7 +24,7 @@ For private repositories, set `JIDOKA_GITHUB_TOKEN` to a GitHub token with read 
 
 Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the provider before submitting. The service listens on the loopback interface for one trusted user. The `reviews` volume stores the SQLite history and supports reports from the Python pilot. Existing reports retain their original text.
 
-Running `docker compose stop` stops the service from accepting HTTP requests and lets the active review finish. Queued reviews resume on the next startup. Each model call can take up to five minutes. The engine can request one targeted recheck for an unresolved assessment. Compose allows up to sixteen minutes for shutdown so the worker can finish the active review.
+Running `docker compose stop` stops the service from accepting HTTP requests and lets the active review finish. Queued reviews resume on the next startup. Each model call can take up to five minutes. The engine can request one targeted recheck for an unresolved assessment. Compose allows up to seventeen minutes for shutdown so the worker can finish the active review.
 
 ## Development
 

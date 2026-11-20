@@ -28,8 +28,9 @@ const REQUESTS: usize = 48;
 const DOWNLOAD: usize = 6_000_000;
 const RESPONSE: usize = 2_000_000;
 const PULL_BYTES: usize = 128_000;
-const DEADLINE: Duration = Duration::from_secs(30);
+const DEADLINE: Duration = Duration::from_secs(45);
 const REQUEST_TIME: Duration = Duration::from_secs(5);
+const INVENTORY_TIME: Duration = Duration::from_secs(15);
 const COMMITS_PER_PAGE: usize = 20;
 const COMMIT_PAGES: usize = 3;
 // GitHub's pinned comparison lists at most 300 changed files.
@@ -37,7 +38,8 @@ const CHANGED_FILES: usize = 300;
 const CONTEXT_FILES: usize = 8;
 const CONTEXT_PROBES: usize = 12;
 const WIDER_PROBES: usize = 3;
-const INVENTORY_BYTES: usize = 700_000;
+const INVENTORY_BYTES: usize = 12_000_000;
+const CONTEXT_TEXT_BYTES: usize = 16_000;
 const INTENT_BYTES: usize = 8_000;
 const BLOB_BYTES: usize = 24_000;
 const WINDOW_BLOB_BYTES: usize = 256 * 1024;
@@ -168,8 +170,16 @@ struct GitHub<T> {
     deadline: Instant,
     requests: usize,
     remaining: usize,
+    inventory_remaining: usize,
     rate_limited: bool,
     blobs: HashMap<String, (usize, Option<String>)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Request {
+    Regular,
+    Inventory,
+    Final,
 }
 
 impl<T: Transport> GitHub<T> {
@@ -179,6 +189,7 @@ impl<T: Transport> GitHub<T> {
             deadline: Instant::now() + DEADLINE,
             requests: REQUESTS,
             remaining: DOWNLOAD,
+            inventory_remaining: INVENTORY_BYTES,
             rate_limited: false,
             blobs: HashMap::new(),
         }
@@ -190,12 +201,37 @@ impl<T: Transport> GitHub<T> {
         cap: usize,
         final_check: bool,
     ) -> Result<R> {
+        let request = if final_check {
+            Request::Final
+        } else {
+            Request::Regular
+        };
+        self.request(route, cap, request)
+    }
+
+    fn request<R: DeserializeOwned>(
+        &mut self,
+        route: &str,
+        cap: usize,
+        request: Request,
+    ) -> Result<R> {
         if self.rate_limited {
             return Err(GitHubRateLimit.into());
         }
         // Reserve one request, its bytes, and time for the last PR metadata check.
+        let final_check = request == Request::Final;
         let reserve = usize::from(!final_check);
-        let budget = cap.min(self.remaining.saturating_sub(reserve * PULL_BYTES));
+        let (available, max_time) = if request == Request::Inventory {
+            (&mut self.inventory_remaining, INVENTORY_TIME)
+        } else {
+            (&mut self.remaining, REQUEST_TIME)
+        };
+        let reserve_bytes = if request == Request::Inventory {
+            0
+        } else {
+            reserve * PULL_BYTES
+        };
+        let budget = cap.min(available.saturating_sub(reserve_bytes));
         let timeout = self
             .deadline
             .saturating_duration_since(Instant::now())
@@ -204,7 +240,7 @@ impl<T: Transport> GitHub<T> {
             } else {
                 REQUEST_TIME
             })
-            .min(REQUEST_TIME);
+            .min(max_time);
         ensure!(
             self.requests > reserve && budget > 0 && !timeout.is_zero(),
             "GitHub collection budget exhausted."
@@ -219,7 +255,7 @@ impl<T: Transport> GitHub<T> {
             .take((budget + 1) as u64);
         let mut bytes = Vec::new();
         let read = response.read_to_end(&mut bytes);
-        self.remaining = self.remaining.saturating_sub(bytes.len());
+        *available = available.saturating_sub(bytes.len());
         ensure!(
             read.is_ok() && bytes.len() <= budget,
             "GitHub response was incomplete or too large."
@@ -474,10 +510,10 @@ impl<'a> Tree<'a> {
     ) -> Vec<Entry> {
         let repo = self.repo;
         let recursive = self.root(hub).and_then(|root| {
-            let data: TreeData = hub.get(
+            let data: TreeData = hub.request(
                 &format!("{repo}/git/trees/{root}?recursive=1"),
                 INVENTORY_BYTES,
-                false,
+                Request::Inventory,
             )?;
             ensure!(data.sha == root, "Unexpected Git tree listing.");
             Ok(data)
@@ -1035,16 +1071,192 @@ fn nearby(path: &str, changed: &str) -> bool {
                 .is_some_and(|rest| rest.starts_with('/')))
 }
 
+fn labels(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .flat_map(|mut part| {
+            std::iter::from_fn(move || {
+                if part.is_empty() {
+                    return None;
+                }
+                let end = part
+                    .as_bytes()
+                    .windows(2)
+                    .position(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+                    .map_or(part.len(), |index| index + 1);
+                let (label, rest) = part.split_at(end);
+                part = rest;
+                Some(label)
+            })
+        })
+}
+
+fn role(label: &str) -> Option<&'static str> {
+    match label.trim_end_matches('s') {
+        "admin" | "administrator" | "backoffice" => Some("admin"),
+        "write" | "writer" | "edit" | "editor" | "save" | "persist" | "update" | "action"
+        | "mutation" => Some("write"),
+        "config" | "configuration" | "setting" | "preference" => Some("config"),
+        "resource" | "controller" | "handler" | "api" | "route" | "endpoint" => Some("resource"),
+        _ => None,
+    }
+}
+
+fn path_parts(path: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(stem(path)).chain(parent(path).0.rsplit('/').take(4))
+}
+
+fn module_basename(path: &str) -> &str {
+    let filename = parent(path).1;
+    filename
+        .split_once('.')
+        .map_or(filename, |(module, _)| module)
+}
+
+fn feature_key(part: &str) -> String {
+    labels(part)
+        .map(str::to_ascii_lowercase)
+        .filter(|label| {
+            label.len() >= 3
+                && role(label).is_none()
+                && !matches!(
+                    label.as_str(),
+                    "app"
+                        | "apps"
+                        | "packages"
+                        | "src"
+                        | "lib"
+                        | "feature"
+                        | "features"
+                        | "test"
+                        | "tests"
+                        | "spec"
+                        | "specs"
+                        | "generated"
+                        | "client"
+                        | "server"
+                        | "frontend"
+                        | "backend"
+                        | "ui"
+                        | "index"
+                        | "main"
+                        | "view"
+                        | "views"
+                )
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn package<'a>(path: &'a str, roots: &HashSet<String>) -> &'a str {
+    let (mut directory, _) = parent(path);
+    while !directory.is_empty() {
+        if roots.contains(directory) {
+            return directory;
+        }
+        directory = parent(directory).0;
+    }
+    let Some((top, rest)) = path.split_once('/') else {
+        return "";
+    };
+    if matches!(
+        top,
+        "apps" | "packages" | "services" | "modules" | "crates" | "libs"
+    ) && let Some((name, _)) = rest.split_once('/')
+    {
+        return &path[..top.len() + 1 + name.len()];
+    }
+    top
+}
+
+struct ContextQuery<'a> {
+    changed: &'a [SourceFile],
+    terms: HashSet<String>,
+    modules: HashSet<String>,
+    stems: HashSet<String>,
+    features: HashSet<String>,
+    roles: HashSet<&'static str>,
+    roots: HashSet<String>,
+    packages: HashSet<&'a str>,
+}
+
+impl<'a> ContextQuery<'a> {
+    fn new(changed: &'a [SourceFile], intent: &[String], entries: &[Entry]) -> Self {
+        let roots = entries
+            .iter()
+            .filter(|entry| entry.is_regular() && safe_path(&entry.path))
+            .map(|entry| parent(&entry.path))
+            .filter(|(dir, name)| {
+                !dir.is_empty()
+                    && matches!(
+                        *name,
+                        "package.json"
+                            | "composer.json"
+                            | "Cargo.toml"
+                            | "pyproject.toml"
+                            | "go.mod"
+                    )
+            })
+            .map(|(dir, _)| dir.to_owned())
+            .collect();
+        let packages = changed
+            .iter()
+            .map(|file| package(&file.path, &roots))
+            .collect();
+        let modules = changed
+            .iter()
+            .flat_map(|file| {
+                let root = package(&file.path, &roots);
+                let directories =
+                    std::iter::successors(Some(parent(&file.path).0), |dir| Some(parent(dir).0))
+                        .take_while(move |dir| !dir.is_empty() && *dir != root)
+                        .take(4)
+                        .map(|dir| parent(dir).1);
+                std::iter::once(module_basename(&file.path)).chain(directories)
+            })
+            .filter(|name| !feature_key(name).is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let stems: HashSet<_> = changed
+            .iter()
+            .flat_map(|file| path_parts(&file.path))
+            .map(feature_key)
+            .filter(|name| !name.is_empty())
+            .collect();
+        let features = stems
+            .iter()
+            .flat_map(|name| name.split('-'))
+            .map(str::to_owned)
+            .collect();
+        let roles = intent
+            .iter()
+            .flat_map(|text| labels(text))
+            .filter_map(|label| role(&label.to_ascii_lowercase()))
+            .collect();
+        Self {
+            changed,
+            terms: search_terms(changed),
+            modules,
+            stems,
+            features,
+            roles,
+            roots,
+            packages,
+        }
+    }
+}
+
 struct Candidate {
     entry: Entry,
     size: usize,
     score: u32,
+    module_rank: u8,
     nearby: bool,
     plausible: bool,
+    preferred: bool,
 }
 
 impl Candidate {
-    fn new(entry: Entry, changed: &[SourceFile], terms: &HashSet<String>) -> Option<Self> {
+    fn new(entry: Entry, query: &ContextQuery<'_>) -> Option<Self> {
         let size = entry.file_size()?;
         if size == 0 || size > BLOB_BYTES || !safe_path(&entry.path) {
             return None;
@@ -1076,79 +1288,154 @@ impl Candidate {
         {
             return None;
         }
-        let is_nearby = changed.iter().any(|file| nearby(&entry.path, &file.path));
+        let is_nearby = query
+            .changed
+            .iter()
+            .any(|file| nearby(&entry.path, &file.path));
         let related =
-            file_terms(&entry.path).any(|term| terms.contains(&term.to_ascii_lowercase()));
+            file_terms(&entry.path).any(|term| query.terms.contains(&term.to_ascii_lowercase()));
         let guidance = contract(&entry.path);
         let test = test_path(&entry.path);
         let root = !entry.path.contains('/');
-        let score = u32::from(related) * 30
+        let keys: Vec<_> = path_parts(&entry.path)
+            .map(feature_key)
+            .filter(|key| !key.is_empty())
+            .collect();
+        let exact = keys.iter().any(|key| query.stems.contains(key));
+        let features: HashSet<_> = keys
+            .iter()
+            .flat_map(|key| key.split('-'))
+            .filter(|term| query.features.contains(*term))
+            .collect();
+        let matches_feature = exact || !features.is_empty();
+        let roles: HashSet<_> = path_parts(&entry.path)
+            .flat_map(labels)
+            .filter_map(|label| role(&label.to_ascii_lowercase()))
+            .collect();
+        let intent_roles = roles.intersection(&query.roles).count() as u32;
+        let implementation = !test
+            && !generated_path(&entry.path)
+            && !entry
+                .path
+                .split('/')
+                .any(|part| matches!(part, "locales" | "i18n" | "l10n" | "translations"));
+        let external = !query.packages.contains(package(&entry.path, &query.roots));
+        let literal_module = query
+            .modules
+            .contains(&module_basename(&entry.path).to_ascii_lowercase());
+        let literal_directory = parent(&entry.path)
+            .0
+            .rsplit('/')
+            .take(4)
+            .any(|dir| query.modules.contains(&dir.to_ascii_lowercase()));
+        // Keep literal module matches ahead of lexical and content matches after inspecting blobs.
+        let module_rank = match (literal_module, literal_directory, implementation, external) {
+            (true, _, true, true) => 3,
+            (true, _, true, false) => 2,
+            (false, true, true, true) => 1,
+            _ => 0,
+        };
+        let score = (u32::from(related) * 30
             + u32::from(guidance) * 36
             + u32::from(test) * 12
             + u32::from(is_nearby) * 16
             + u32::from(root) * 3
-            + u32::from(test && related) * 12;
+            + u32::from(test && related) * 12
+            + u32::from(exact) * 56
+            + (features.len().min(3) as u32) * 16
+            + u32::from(matches_feature && implementation) * (22 + intent_roles * 22))
+            .saturating_sub(if implementation { 0 } else { 18 });
+        let preferred = implementation && external && (matches_feature || module_rank > 0);
         Some(Self {
             entry,
             size,
             score,
+            module_rank,
             nearby: is_nearby,
-            plausible: related || guidance || is_nearby,
+            plausible: related || guidance || is_nearby || matches_feature || module_rank > 0,
+            preferred,
         })
     }
 }
 
-fn probe_indices(candidates: &[Candidate]) -> Vec<usize> {
+fn probe_indices(candidates: &[Candidate], roots: &HashSet<String>) -> (Vec<usize>, usize) {
+    let rank = candidates
+        .first()
+        .map_or(0, |candidate| candidate.module_rank);
+    let best = candidates
+        .iter()
+        .find(|candidate| candidate.preferred && candidate.module_rank == rank)
+        .map_or(0, |candidate| candidate.score);
+    let mut packages = HashSet::new();
+    let mut picked: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate.preferred
+                && candidate.module_rank == rank
+                && candidate.score >= best.saturating_sub(45)
+                && packages.insert(package(&candidate.entry.path, roots))
+        })
+        .take(WIDER_PROBES)
+        .map(|(index, _)| index)
+        .collect();
+    let priority = picked.len();
     let primary = (CONTEXT_PROBES - WIDER_PROBES).min(candidates.len());
-    let mut picked: Vec<_> = (0..primary).collect();
-    // Leave a few reads for tests or possible callers in other implementation stacks.
-    picked.extend(
-        candidates
-            .iter()
-            .enumerate()
-            .skip(primary)
-            .filter(|(_, candidate)| !candidate.nearby)
-            .take(WIDER_PROBES)
-            .map(|(index, _)| index),
-    );
-    for index in primary..candidates.len() {
-        if picked.len() == CONTEXT_PROBES {
+    for (index, candidate) in candidates.iter().enumerate() {
+        if picked.len() == CONTEXT_PROBES || (picked.len() >= primary && candidate.module_rank == 0)
+        {
             break;
         }
         if !picked.contains(&index) {
             picked.push(index);
         }
     }
-    picked
+    // Leave a few reads for tests or possible callers in other implementation stacks.
+    for wider in [true, false] {
+        for (index, candidate) in candidates.iter().enumerate() {
+            if picked.len() == CONTEXT_PROBES {
+                break;
+            }
+            if (!wider || !candidate.nearby) && !picked.contains(&index) {
+                picked.push(index);
+            }
+        }
+    }
+    (picked, priority)
 }
 
-fn append_context<T: Transport>(
+fn collect_context<T: Transport>(
     hub: &mut GitHub<T>,
-    base: &mut Tree<'_>,
     head: &mut Tree<'_>,
     excluded: &HashSet<&str>,
-    files: &mut Vec<SourceFile>,
+    changed: &[SourceFile],
+    intent: &[String],
     remaining: &mut usize,
-) {
-    if files.is_empty() || *remaining == 0 {
-        return;
+) -> Vec<SourceFile> {
+    if changed.is_empty() || *remaining == 0 {
+        return Vec::new();
     }
-    let entries = head.inventory(hub, files);
-    let terms = search_terms(files);
+    let entries = head.inventory(hub, changed);
+    let query = ContextQuery::new(changed, intent, &entries);
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
     for entry in entries {
         if !excluded.contains(entry.path.as_str())
             && seen.insert(entry.path.clone())
-            && let Some(candidate) = Candidate::new(entry, files, &terms)
+            && let Some(candidate) = Candidate::new(entry, &query)
         {
             candidates.push(candidate);
         }
     }
-    candidates.sort_by(|a, b| b.score.cmp(&a.score).then(a.entry.path.cmp(&b.entry.path)));
-    let picked = probe_indices(&candidates);
+    candidates.sort_by(|a, b| {
+        b.module_rank
+            .cmp(&a.module_rank)
+            .then(b.score.cmp(&a.score))
+            .then(a.entry.path.cmp(&b.entry.path))
+    });
+    let (picked, priority) = probe_indices(&candidates, &query.roots);
     let mut ranked = Vec::new();
-    for index in picked {
+    for (position, index) in picked.into_iter().enumerate() {
         let candidate = &candidates[index];
         let entry = &candidate.entry;
         if candidate.size > *remaining {
@@ -1159,33 +1446,49 @@ fn append_context<T: Transport>(
         };
         let matches: HashSet<_> = words(&text)
             .map(str::to_ascii_lowercase)
-            .filter(|word| terms.contains(word))
+            .filter(|word| query.terms.contains(word))
             .collect();
-        let references_path = files
+        let references_path = changed
             .iter()
             .any(|file| file.path.contains('/') && text.contains(&file.path));
         if candidate.plausible || !matches.is_empty() || references_path {
             let score = candidate.score
                 + u32::from(references_path) * 80
                 + matches.len().min(4) as u32 * 48;
-            ranked.push((score, &entry.path, text));
+            ranked.push((
+                candidate.module_rank,
+                position < priority,
+                score,
+                &entry.path,
+                text,
+            ));
         }
     }
-    ranked.sort_by(|(x, a, _), (y, b, _)| y.cmp(x).then(a.cmp(b)));
+    ranked.sort_by(|(rank_a, wide_a, x, a, _), (rank_b, wide_b, y, b, _)| {
+        rank_b
+            .cmp(rank_a)
+            .then(wide_b.cmp(wide_a))
+            .then(y.cmp(x))
+            .then(a.cmp(b))
+    });
     // Optional context may be limited without losing any of the retained patches.
-    for (_, path, after) in ranked.into_iter().take(CONTEXT_FILES) {
+    let mut files = Vec::new();
+    for (_, _, _, path, after) in ranked {
+        if files.len() == CONTEXT_FILES {
+            break;
+        }
         if after.len() > *remaining {
             continue;
         }
         *remaining -= after.len();
-        let before = read_source(hub, base, path, remaining);
         files.push(SourceFile {
             path: path.clone(),
             patch: String::new(),
-            before,
+            before: String::new(),
             after,
         });
     }
+    files
 }
 
 fn pinned<T: Transport>(
@@ -1297,6 +1600,22 @@ fn pinned<T: Transport>(
             || change.review_patchless(hub, &mut before, &mut after, previous, &mut limits)
     });
 
+    // Reserve source for supporting heads before full changed bodies and their base copies.
+    let context_allotment = remaining.min(CONTEXT_TEXT_BYTES);
+    let mut context_budget = context_allotment;
+    let mut supporting = collect_context(
+        hub,
+        &mut after,
+        &excluded,
+        &files,
+        &intent,
+        &mut context_budget,
+    );
+    remaining -= context_allotment - context_budget;
+    let excluded = excluded
+        .into_iter()
+        .chain(supporting.iter().map(|file| file.path.as_str()))
+        .collect();
     // Patches and any checks for missing ones take priority over full source bodies.
     let mut dependency_budget = local_dependencies::TEXT_BYTES.min(remaining / 2);
     remaining -= dependency_budget;
@@ -1318,19 +1637,9 @@ fn pinned<T: Transport>(
     remaining += dependency_budget;
     let mut head_context = collect_head_context(hub, &mut after, &files, &mut window_budget);
     remaining += window_budget;
-    let changed_count = files.len();
-    let excluded = excluded
-        .into_iter()
-        .chain(dependencies.iter().map(|file| file.path.as_str()))
-        .collect();
-    append_context(
-        hub,
-        &mut before,
-        &mut after,
-        &excluded,
-        &mut files,
-        &mut remaining,
-    );
+    for file in &mut supporting {
+        file.before = read_source(hub, &mut before, &file.path, &mut remaining);
+    }
     let mut metadata_paths = HashSet::new();
     for (index, change, previous) in selected {
         if change.status != "added" {
@@ -1351,7 +1660,8 @@ fn pinned<T: Transport>(
         }
     }
     head_context.retain(|window| !metadata_paths.contains(window.path.as_str()));
-    files.splice(changed_count..changed_count, dependencies);
+    files.extend(dependencies);
+    files.extend(supporting);
     let mut final_pull: Pull = hub.get(&pull_route, PULL_BYTES, true)?;
     final_pull.validate(&repo, number, allowed)?;
     if !pull.same_revisions(&final_pull) {
@@ -1551,7 +1861,12 @@ mod tests {
     impl Transport for Fixture {
         fn open(&mut self, route: &str, timeout: Duration) -> Result<Box<dyn Read>> {
             assert!(!route.starts_with('/') && !route.contains("://"));
-            assert!(!timeout.is_zero() && timeout <= REQUEST_TIME);
+            let cap = if route.ends_with("?recursive=1") {
+                INVENTORY_TIME
+            } else {
+                REQUEST_TIME
+            };
+            assert!(!timeout.is_zero() && timeout <= cap);
             self.requests.push(route.to_owned());
             if self.quota_on.as_deref() == Some(route)
                 && (route != PULL || self.requests.iter().filter(|r| *r == PULL).count() > 1)
@@ -2090,9 +2405,11 @@ mod tests {
         ]);
         let root = fixture.revision(FORK, HEAD, &head_files);
         let inventory = format!("{FORK}/git/trees/{root}?recursive=1");
+        let inventory_cap = 700_000;
         fixture.responses.get_mut(&inventory).unwrap()["padding"] =
-            json!("x".repeat(INVENTORY_BYTES));
+            json!("x".repeat(inventory_cap));
         let mut hub = GitHub::new(fixture);
+        hub.inventory_remaining = inventory_cap;
 
         let view = snapshot(&mut hub).unwrap();
         assert!(view.limits.is_empty(), "{:?}", view.limits);
@@ -2288,6 +2605,144 @@ mod tests {
                 "Patch is missing or incomplete for missing.ts.",
             ]
         );
+    }
+
+    #[test]
+    fn preserves_exact_cross_package_writers_in_a_large_monorepo() {
+        let paths = [
+            "apps/console/src/views/config-delivery-window.form.ts",
+            "apps/console/src/views/calendar.ts",
+            "apps/console/src/views/filter.ts",
+            "apps/console/src/views/timeline.ts",
+        ];
+        let resource = "packages/office-api/src/resources/config-delivery-window.resource.ts";
+        let actions = "packages/office-api/src/actions/config-delivery-window.actions.ts";
+        let writer = "packages/storage/src/config-delivery-window.writer.ts";
+        let weak = "packages/analytics/src/delivery-window.controller.ts";
+        let guidance = "packages/office-api/AGENTS.md";
+        let edit = "const duration = editWindow;";
+        let changed_text = format!(
+            "{edit}\n{}",
+            "// Synthetic supporting source.\n".repeat(710)
+        );
+        let reference = format!("{}\nconst duration = editWindow;\n", paths[0]);
+        let weak_text = reference.repeat(85);
+        let guidance_text = format!("{weak_text}{}", "Read this guide.\n".repeat(120));
+        assert!(guidance_text.len() > 8_000);
+        let support_padding = "// Synthetic package source.\n".repeat(140);
+        let resource_text = format!("export const storesEdits = true;\n{support_padding}");
+        let action_text = format!("export const appliesEdits = true;\n{support_padding}");
+        let writer_text = format!("export const persistsEdits = true;\n{support_padding}");
+        let locale = format!("{{\"label\":\"{}\"}}\n", "l".repeat(16_740));
+        let mut fixture = Fixture::new(
+            paths
+                .iter()
+                .map(|path| {
+                    let mut entry = change(path);
+                    entry["patch"] = json!(format!(
+                        "@@ -1 +1 @@\n-const duration = defaultWindow;\n+{edit}"
+                    ));
+                    entry
+                })
+                .collect(),
+        );
+        for pull in &mut fixture.pulls {
+            pull["title"] = json!("Keep resource settings when admins edit the delivery window");
+        }
+        fixture.revision(REPO, BASE, &[]);
+        let mut head_files: Vec<_> = paths
+            .iter()
+            .map(|path| (*path, File::Text(&changed_text)))
+            .collect();
+        head_files.extend([
+            (resource, File::Text(&resource_text)),
+            (actions, File::Text(&action_text)),
+            (writer, File::Text(&writer_text)),
+            (weak, File::Text(&weak_text)),
+            (guidance, File::Text(&guidance_text)),
+            (
+                "apps/console/src/views/config-delivery-window.controller.ts",
+                File::Text(&weak_text),
+            ),
+            (
+                "apps/console/src/views/locales/en.json",
+                File::Text(&locale),
+            ),
+            (
+                "apps/console/src/views/locales/fr.json",
+                File::Text(&locale),
+            ),
+            (
+                "packages/office-api/generated/config-delivery-window.spec.ts",
+                File::Text(&weak_text),
+            ),
+        ]);
+        let root = fixture.revision(FORK, HEAD, &head_files);
+        let inventory_route = format!("{FORK}/git/trees/{root}?recursive=1");
+        let inventory = fixture.responses.get_mut(&inventory_route).unwrap();
+        let tree = inventory["tree"].as_array_mut().unwrap();
+        let filler = "component-segment-".repeat(7);
+        let blob_url = format!("https://api.github.com/repos/{FORK}/git/blobs/{MOVED}");
+        for index in 0..28_000 {
+            tree.push(json!({
+                "path": format!("packages/archive/generated/{filler}/{index:05}.ts"),
+                "mode": "100644", "type": "blob", "sha": MOVED, "size": 50, "url": blob_url,
+            }));
+        }
+        let inventory_bytes = serde_json::to_vec(inventory).unwrap().len();
+        assert!(
+            (8_000_000..INVENTORY_BYTES).contains(&inventory_bytes),
+            "{inventory_bytes}"
+        );
+
+        let mut hub = GitHub::new(fixture);
+        let view = snapshot(&mut hub).unwrap();
+        assert!(view.limits.is_empty(), "{:?}", view.limits);
+        assert!(
+            view.files[..paths.len()]
+                .iter()
+                .all(|file| !file.patch.is_empty())
+        );
+        assert!(
+            view.files[..paths.len()]
+                .iter()
+                .any(|file| file.after.is_empty())
+        );
+        let supporting = &view.files[paths.len()..];
+        let strongest: HashMap<_, _> = supporting
+            .iter()
+            .take(3)
+            .map(|file| (file.path.as_str(), file.after.as_str()))
+            .collect();
+        assert_eq!(
+            strongest,
+            HashMap::from([
+                (resource, resource_text.as_str()),
+                (writer, writer_text.as_str()),
+                (actions, action_text.as_str()),
+            ])
+        );
+        assert_eq!(supporting[1].path, writer);
+        assert_eq!(supporting[1].after, writer_text);
+        assert!(
+            !supporting
+                .iter()
+                .any(|file| file.path == guidance || file.path.contains("/locales/"))
+        );
+        assert_eq!(hub.inventory_remaining, INVENTORY_BYTES - inventory_bytes);
+        assert!(hub.remaining > DOWNLOAD / 2);
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+        let source_bytes = view
+            .files
+            .iter()
+            .map(|file| file.patch.len() + file.before.len() + file.after.len())
+            .sum::<usize>()
+            + view
+                .head_context
+                .iter()
+                .map(|window| window.text.len())
+                .sum::<usize>();
+        assert!(source_bytes <= SNAPSHOT_TEXT_BYTES);
     }
 
     #[test]

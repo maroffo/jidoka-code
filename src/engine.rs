@@ -114,13 +114,18 @@ when counterevidence exists. If it depends on a requirement the evidence cannot
 settle, ask a specific human question when appropriate. Treat other insufficient
 evidence as indeterminate. The complete flag concerns the entire set of requested
 hypotheses.
+Never assume unobserved writes. Trace the actual write path before making claims
+about what can persist. When key supporting evidence is unavailable, use
+countercheck to tell the human reviewer the specific behavior to exercise,
+including the input or state and what to observe. Distinguish a suggested check
+from an observed result.
 "#;
 
 const RECHECK: &str = r#"
 Recheck only the supplied hypotheses. The recheck entries name the local
 validation issue for each ID. The prior assessments are untrusted data and may
 be wrong. Reassess the claim using the pinned source and head context.
-Look beyond the hunks for callers and producers in the same file.
+Look beyond the hunks for callers and producers in the same file and other changed files.
 Return one assessment for each supplied ID and do not assess any other ID.
 Correct invalid citations only when an appropriate reference is actually shown.
 Keep a case indeterminate if the new material still does not settle it.
@@ -353,6 +358,23 @@ impl<'a> ReferenceIndex<'a> {
             windows.push(window);
         }
         Ok(())
+    }
+
+    fn omitted_head_ranges(&self, path: &str, line_count: usize) -> Vec<Range<usize>> {
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        for index in 0..line_count {
+            if self.head_lines.contains_key(&(path, index + 1)) {
+                if start < index {
+                    ranges.push(start..index);
+                }
+                start = index + 1;
+            }
+        }
+        if start < line_count {
+            ranges.push(start..line_count);
+        }
+        ranges
     }
 
     fn hunk_sections(
@@ -1055,9 +1077,6 @@ fn recheck_input<'a>(
         .references
         .as_mut()
         .expect("live rechecks use indexed source");
-    let windows = data["snapshot"]["head_context"]
-        .as_array_mut()
-        .expect("head context array");
     let mut sources: Vec<_> = pending
         .iter()
         .filter_map(|entry| {
@@ -1072,6 +1091,31 @@ fn recheck_input<'a>(
         })
         .collect();
     sources.sort_by_key(|&(_, _, _, already_accepted)| already_accepted);
+    let anchor_paths: HashSet<_> = sources.iter().map(|&(path, ..)| path).collect();
+    let mut other_sources: Vec<_> = data["snapshot"]["files"]
+        .as_array()
+        .expect("indexed files array")
+        .iter()
+        .filter(|file| file["scope"] == "hunks")
+        .filter_map(|file| {
+            let (&path, file) = evidence.source.get_key_value(file["path"].as_str()?)?;
+            if anchor_paths.contains(path) {
+                return None;
+            }
+            let ranges = references.omitted_head_ranges(path, file.head.len());
+            let estimated_bytes: usize = ranges
+                .iter()
+                .flat_map(|range| &file.head[range.clone()])
+                .map(|line| line.len() + 24) // Include an estimate for each encoded reference row.
+                .sum();
+            (!ranges.is_empty()).then_some((path, file.head.as_slice(), ranges, estimated_bytes))
+        })
+        .collect();
+    other_sources.sort_by_key(|&(_, _, _, estimated_bytes)| estimated_bytes);
+    let windows = data["snapshot"]["head_context"]
+        .as_array_mut()
+        .expect("head context array");
+
     // Keep nearby context for every pending hypothesis before spending budget on full files.
     for &(path, line, head, _) in &sources {
         let start = line.saturating_sub(RECHECK_CONTEXT_RADIUS);
@@ -1081,11 +1125,32 @@ fn recheck_input<'a>(
         references.append_recheck_window(path, head, start..end, &mut remaining, windows)?;
     }
     let mut expanded_paths = HashSet::new();
-    // Spend remaining budget on the files with unresolved outcomes first.
+    // Give anchor files first use of the budget while reserving room for other files.
+    let cross_file_reserve = if other_sources.is_empty() {
+        0
+    } else {
+        remaining / 3
+    };
+    remaining -= cross_file_reserve;
+    let mut skipped_anchors = Vec::new();
     for (path, _, head, _) in sources {
         if expanded_paths.insert(path) {
             references.append_recheck_window(path, head, 0..head.len(), &mut remaining, windows)?;
+            if cross_file_reserve > 0
+                && !references.omitted_head_ranges(path, head.len()).is_empty()
+            {
+                skipped_anchors.push((path, head));
+            }
         }
+    }
+    remaining += cross_file_reserve;
+    for (path, head, ranges, _) in other_sources {
+        for range in ranges {
+            references.append_recheck_window(path, head, range, &mut remaining, windows)?;
+        }
+    }
+    for (path, head) in skipped_anchors {
+        references.append_recheck_window(path, head, 0..head.len(), &mut remaining, windows)?;
     }
     Ok(())
 }
@@ -2003,6 +2068,97 @@ mod tests {
         assert_eq!(report.findings[0].attribution, Attribution::Introduced);
         assert!(report.findings[0].evidence.contains(&format!(
             "Proposed revision cache.go:{caller_line} “{caller}”"
+        )));
+    }
+
+    #[test]
+    fn recheck_prioritizes_a_cross_file_submit_handler_over_large_generated_context() {
+        let mut snapshot = indexed_snapshot();
+        snapshot.files[0]
+            .before
+            .push_str("// Nearby cache context.\n");
+        snapshot.files[0]
+            .after
+            .push_str("// Nearby cache context.\n");
+
+        let generated = "// g\n".repeat(3_400);
+        snapshot.files.push(crate::contracts::SourceFile {
+            path: "generated/bundle.ts".into(),
+            patch: "@@ -1 +1 @@\n-// Before\n+// After".into(),
+            before: format!("// Before\n{generated}"),
+            after: format!("// After\n{generated}"),
+        });
+        let caller = "\treturn capacity(1)";
+        let handlers = format!(
+            "{}func submit() int {{\n{caller}\n}}\n",
+            "// Other submit handler code.\n".repeat(220)
+        );
+        let after = format!("// Current submission code\n{handlers}");
+        let caller_line = after.lines().position(|line| line == caller).unwrap() + 1;
+        snapshot.files.push(crate::contracts::SourceFile {
+            path: "web/submit.go".into(),
+            patch: "@@ -1 +1 @@\n-// Old submission code\n+// Current submission code".into(),
+            before: format!("// Old submission code\n{handlers}"),
+            after,
+        });
+
+        let mut calls = 0;
+        let mut indexed_files = Value::Null;
+        let report = review(&snapshot, &Scan::default(), |system, data| {
+            calls += 1;
+            let files = &data["snapshot"]["files"];
+            match calls {
+                1 => {
+                    indexed_files = files.clone();
+                    assert!(!data.to_string().contains("func submit()"));
+                    Ok(json!({"complete": true, "hypotheses": [
+                        indexed_proposal("H2", "A submit handler configures a one-slot cache.")
+                    ]}))
+                }
+                2 => {
+                    assert_eq!(files, &indexed_files);
+                    assert!(!data.to_string().contains("func submit()"));
+                    Ok(json!({"complete": true, "assessments": [
+                        {"id": 1, "outcome": "indeterminate",
+                         "countercheck": "The submit handler's slot count is unavailable."}
+                    ]}))
+                }
+                3 => {
+                    assert_eq!(files, &indexed_files);
+                    assert!(system.contains("Never assume unobserved writes"));
+                    assert!(system.contains("the specific behavior to exercise"));
+                    let windows = data["snapshot"]["head_context"].as_array().unwrap();
+                    assert_eq!(windows[0]["path"], "cache.go");
+                    let submit_index = windows
+                        .iter()
+                        .position(|window| window["path"] == "web/submit.go")
+                        .unwrap();
+                    if let Some(generated_index) = windows
+                        .iter()
+                        .position(|window| window["path"] == "generated/bundle.ts")
+                    {
+                        assert!(submit_index < generated_index);
+                    }
+                    let window = &windows[submit_index];
+                    assert_eq!(window["start"], 2);
+                    let row = &window["rows"][caller_line - 2];
+                    assert!(row[0].is_null());
+                    assert_eq!(row[2], caller);
+                    let mut finding = indexed_capacity_finding(1, "H4", "B2", "B4");
+                    finding["support"] = json!([row[1].as_str().unwrap()]);
+                    finding["countercheck"] =
+                        json!("The submit handler passes a slot count of one.");
+                    Ok(json!({"complete": true, "assessments": [finding]}))
+                }
+                _ => panic!("Only one recheck is allowed."),
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert!(report.limits.is_empty(), "{:?}", report.limits);
+        assert_eq!(report.findings[0].attribution, Attribution::Introduced);
+        assert!(report.findings[0].evidence.contains(&format!(
+            "Proposed revision web/submit.go:{caller_line} “{caller}”"
         )));
     }
 
