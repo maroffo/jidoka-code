@@ -62,7 +62,7 @@ async fn check_service_restart(scan_limited: bool) {
         });
     }
     let file_count = snapshot.files.len();
-    let submitted_url = snapshot.url.clone();
+    let submitted_name = format!("{} <b>#{}</b>", snapshot.repo, snapshot.number);
     let allowed = HashSet::from([snapshot.repo.clone()]);
     let focus_action = case["expected"]["focus"][0]["action"].as_str().unwrap();
     let finding_title = case["expected"]["findings"][0]["title"].as_str().unwrap();
@@ -198,9 +198,12 @@ async fn check_service_restart(scan_limited: bool) {
     let (stop_ui, ui) = serve(TcpListener::bind(address).await.unwrap(), restarted);
     let history = get_html(&client, &base).await;
     assert!(history.contains("Review history"));
-    assert!(history.contains(&format!(
-        r#"<a href="{location}">{submitted_url}</a> · {expected_status}"#
-    )));
+    let (_, row) = history
+        .split_once(&format!(r#"class="history-row" href="{location}">"#))
+        .unwrap();
+    let (row, _) = row.split_once("</a>").unwrap();
+    assert!(row.contains(&submitted_name));
+    assert!(row.contains(expected_status));
     assert_eq!(get_html(&client, &permalink).await, html);
     stop_ui.send(()).unwrap();
     ui.await.unwrap();

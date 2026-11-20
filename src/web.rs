@@ -522,29 +522,37 @@ fn escape(value: &str) -> String {
 
 fn page(title: &str, body: &str) -> String {
     format!(
-        r#"<!doctype html>
-<html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{} · Jidoka Code</title>
-<style>
-  :root {{ color-scheme: light dark }}
-  body {{ font: 1rem/1.55 system-ui, sans-serif; margin: 1.5rem auto; padding: 0 1rem;
-          max-width: 48rem; overflow-wrap: anywhere }}
-  input, button {{ font: inherit }}
-  input[type="url"] {{ box-sizing: border-box; width: 100%; padding: .5rem }}
-  button {{ padding: .4rem .9rem }}
-  section {{ margin-block: 2rem }}
-  li + li {{ margin-top: .65rem }}
-  dd {{ margin: 0 0 .4rem }}
-  .error {{ border-inline-start: .25rem solid currentColor; padding-inline-start: .75rem }}
-  .evidence {{ white-space: pre-wrap }}
-</style>
-<header><a href="/">Jidoka Code</a></header>
-<main>{body}</main>
-</html>"#,
-        escape(title)
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{} · Jidoka Code</title><style>{}</style></head>
+<body><a class="skip" href="#main">Skip to content</a>
+<header class="mast"><nav class="wrap nav" aria-label="Main navigation">
+<a class="brand" href="/"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>Jidoka<span class="brand-code">Code</span></a>
+<a class="nav-history" href="/#history">Review history</a><a class="nav-new" href="/#new-review"><span aria-hidden="true">+</span> New review</a>
+</nav></header><main class="wrap" id="main">{body}</main></body></html>"##,
+        escape(title),
+        include_str!("review.css")
     )
+}
+
+fn status_badge(status: &str) -> String {
+    let tone = match status {
+        "completed" => "done",
+        "partial" => "partial",
+        "running" | "queued" => "active",
+        _ => "failed",
+    };
+    format!(
+        r#"<span class="status {tone}">{}</span>"#,
+        status_label(status)
+    )
+}
+
+fn provider_name(label: &str) -> &str {
+    label
+        .strip_suffix(')')
+        .and_then(|s| s.rsplit_once(" ("))
+        .map_or(label, |(_, name)| name)
 }
 
 fn error_page(status: StatusCode, message: &str) -> Response {
@@ -569,22 +577,38 @@ async fn home_page(
     error: &str,
 ) -> Result<String, StorageError> {
     let history = with_db(state, |connection| {
-        let mut stmt = connection
-            .prepare("SELECT id, url, status, created_at FROM reviews ORDER BY id DESC")?;
+        let mut stmt = connection.prepare(
+            "SELECT id, url, status, created_at, CASE WHEN json_valid(report)
+                THEN json_array_length(report, '$.findings') END
+             FROM reviews ORDER BY id DESC",
+        )?;
         let mut rows = stmt.query([])?;
         let mut items = String::new();
         while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let url: String = row.get(1)?;
+            let status: String = row.get(2)?;
+            let created: String = row.get(3)?;
+            let findings = match row.get::<_, Option<usize>>(4)? {
+                Some(1) => " · 1 finding".to_owned(),
+                Some(n) => format!(" · {n} findings"),
+                None => String::new(),
+            };
+            let name = parse_pull_url(&url).map_or_else(|| escape(&url), |(repo, number)| {
+                format!("{} <b>#{number}</b>", escape(repo))
+            });
             write!(
                 items,
-                r#"<li><a href="/reviews/{}">{}</a> · {} · {} UTC</li>"#,
-                row.get::<_, i64>(0)?,
-                escape(&row.get::<_, String>(1)?),
-                status_label(&row.get::<_, String>(2)?),
-                escape(&row.get::<_, String>(3)?),
-            )
-            .unwrap();
+                r#"<li><a class="history-row" href="/reviews/{id}"><span><strong>{name}</strong>
+                <small>Review {id}{findings} · {} UTC</small></span>{}<span class="arrow" aria-hidden="true">→</span></a></li>"#,
+                escape(&created), status_badge(&status)
+            ).unwrap();
         }
-        Ok(html_list("ul", &items, "No reviews yet."))
+        Ok(if items.is_empty() {
+            "<p>No reviews yet.</p>".to_owned()
+        } else {
+            format!(r#"<ul class="history-list">{items}</ul>"#)
+        })
     })
     .await?;
     let error = if error.is_empty() {
@@ -595,19 +619,19 @@ async fn home_page(
     Ok(page(
         "New review",
         &format!(
-            r#"<h1>New review</h1>
-{error}
+            r#"<div class="hero"><h1>Pull request reviews</h1></div>
+<div class="workspace home">
+<section class="panel history" id="history"><div class="panel-head"><h2>Review history</h2></div>{history}</section>
+<section class="panel compose" id="new-review"><div class="panel-head"><h2>New review</h2></div>{error}
 <form action="/" method="post">
-  <input type="hidden" name="csrf_token" value="{token}">
-  <label for="url">GitHub pull request URL</label>
-  <input id="url" name="url" type="url" value="{}" required>
-  <p>The code will be sent to <strong>{}</strong> for review.</p>
-  <p><label><input name="consent" type="checkbox" value="yes" required>
-    I agree to send the code to this provider.</label></p>
-  <button type="submit">Start review</button>
-</form>
-<section><h2>Review history</h2>{history}</section>"#,
+<input type="hidden" name="csrf_token" value="{token}">
+<label for="url">GitHub pull request URL</label>
+<input id="url" name="url" type="url" placeholder="https://github.com/owner/repo/pull/123" value="{}" required>
+<label class="consent"><input name="consent" type="checkbox" value="yes" required><span>Send this pull request’s code to <strong>{}</strong> for review.</span></label>
+<details class="destination"><summary>Provider details</summary><code>{}</code></details>
+<button type="submit">Start review <span aria-hidden="true">→</span></button></form></section></div>"#,
             escape(value),
+            escape(provider_name(&state.provider)),
             escape(&state.provider),
         ),
     ))
@@ -629,8 +653,11 @@ fn text_list<'a>(values: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 fn position(report: &PublishedReport, path: &str, line: usize) -> String {
+    source_link(report, &report.head, path, line)
+}
+
+fn source_link(report: &PublishedReport, head: &str, path: &str, line: usize) -> String {
     let label = format!("{}, line {line}", escape(path));
-    let head = &report.head;
     if line == 0
         || !valid_repo(&report.repo)
         || head.len() != 40
@@ -715,51 +742,136 @@ fn scanner_html(report: &PublishedReport, scan: Option<&Scan>) -> String {
     )
 }
 
+fn attribution_label(value: &Attribution) -> &'static str {
+    match value {
+        Attribution::Introduced => "Introduced by the pull request",
+        Attribution::Preexisting => "Pre-existing",
+        Attribution::Unknown => "Uncertain attribution",
+    }
+}
+
+fn evidence_html(report: &PublishedReport, evidence: &str) -> String {
+    let mut html = String::new();
+    let mut prose = Vec::new();
+    for line in evidence.lines() {
+        let citation = ["Proposed revision ", "Base revision "]
+            .iter()
+            .find_map(|prefix| {
+                let (location, quote) = line.strip_prefix(prefix)?.split_once(" “")?;
+                let (path, number) = location.rsplit_once(':')?;
+                let n = number.parse::<usize>().ok()?;
+                let quote = quote.strip_suffix('”')?;
+                Some((prefix.starts_with("Base"), path, n, quote))
+            });
+        if let Some((base, path, n, quote)) = citation {
+            if !prose.is_empty() {
+                write!(
+                    html,
+                    r#"<p class="verbatim">{}</p>"#,
+                    escape(&prose.join("\n"))
+                )
+                .unwrap();
+                prose.clear();
+            }
+            let revision = if base { &report.base } else { &report.head };
+            let label = if base { "Base" } else { "Head" };
+            write!(html, r#"<figure><figcaption><b>{label}</b> {}</figcaption><pre><code>{}</code></pre></figure>"#,
+                source_link(report, revision, path, n), escape(quote)).unwrap();
+        } else {
+            prose.push(line);
+        }
+    }
+    if !prose.is_empty() {
+        write!(
+            html,
+            r#"<p class="verbatim">{}</p>"#,
+            escape(&prose.join("\n"))
+        )
+        .unwrap();
+    }
+    html
+}
+
+fn finding_card(
+    report: &PublishedReport,
+    item: &Finding,
+    focus: Option<&crate::contracts::Focus>,
+) -> String {
+    let action = focus.map_or_else(String::new, |f| {
+        format!(
+            r#"<div class="action"><b>Reviewer action</b><p>{}</p></div>"#,
+            escape(&f.action)
+        )
+    });
+    let check = focus.map_or_else(String::new, |f| format!("<p>{}</p>", escape(&f.checked)));
+    format!(
+        r#"<article class="card"><span class="kind"><i></i>Verified finding</span><h3>{}</h3>
+        <div class="location">{}</div><p>{}</p>{action}
+        <details class="proof"><summary>View evidence</summary><div class="detail-body"><b>{}</b>{check}{}</div></details></article>"#,
+        escape(&item.title),
+        position(report, &item.path, item.line),
+        escape(&item.impact),
+        attribution_label(&item.attribution),
+        evidence_html(report, &item.evidence)
+    )
+}
+
 fn report_html(report: &PublishedReport, is_partial: bool) -> String {
     let mut focus = String::new();
+    let mut paired = HashSet::new();
     for item in report.report.focus.iter().take(3) {
-        write!(
-            focus,
-            "<li><p>{}</p><dl><dt>Check</dt><dd>{}</dd><dt>Outcome</dt><dd>{}</dd>\
-            <dt>Action</dt><dd>{}</dd></dl></li>",
-            position(report, &item.path, item.line),
-            escape(&item.checked),
-            escape(&item.outcome),
-            escape(&item.action),
-        )
-        .unwrap();
+        if let Some((i, finding)) = report.report.findings.iter().enumerate().find(|(i, f)| {
+            !paired.contains(i)
+                && f.path == item.path
+                && f.line == item.line
+                && f.impact == item.outcome
+        }) {
+            paired.insert(i);
+            focus.push_str(&finding_card(report, finding, Some(item)));
+        } else {
+            write!(focus,r#"<article class="card manual"><span class="kind"><i></i>Manual check</span><h3>{}</h3><div class="location">{}</div><p>{}</p>
+                <details class="proof"><summary>What Jidoka checked</summary><div class="detail-body">{}</div></details></article>"#,
+                escape(&item.action),position(report,&item.path,item.line),escape(&item.outcome),evidence_html(report,&item.checked)).unwrap();
+        }
     }
-    let focus = html_list("ol", &focus, "No focus areas identified.");
-    let mut findings = String::new();
-    for item in &report.report.findings {
-        let attribution = match item.attribution {
-            Attribution::Introduced => "Introduced by the pull request",
-            Attribution::Preexisting => "Pre-existing",
-            Attribution::Unknown => "Uncertain attribution",
+    let mut content = format!(
+        "<section><h2>Where to focus</h2>{}</section>",
+        if focus.is_empty() {
+            "<p class=empty>No focus areas identified.</p>".into()
+        } else {
+            focus
+        }
+    );
+    let mut extra = String::new();
+    for (i, item) in report.report.findings.iter().enumerate() {
+        if !paired.contains(&i) {
+            extra.push_str(&finding_card(report, item, None));
+        }
+    }
+    if report.report.findings.is_empty() {
+        let empty = if is_partial {
+            "No verified findings in the material reviewed."
+        } else {
+            "No verified findings."
         };
         write!(
-            findings,
-            r#"<li><h3>{}</h3><p>{} · {attribution}</p>
-            <dl><dt>Impact</dt><dd>{}</dd><dt>Evidence</dt><dd class="evidence">{}</dd></dl></li>"#,
-            escape(&item.title),
-            position(report, &item.path, item.line),
-            escape(&item.impact),
-            escape(&item.evidence),
+            content,
+            "<section><h2>Verified findings</h2><p class=empty>{empty}</p></section>"
+        )
+        .unwrap();
+    } else if !extra.is_empty() {
+        write!(
+            content,
+            "<section><h2>Verified findings</h2>{extra}</section>"
         )
         .unwrap();
     }
-    let empty = if is_partial {
-        "No verified findings in the material reviewed."
-    } else {
-        "No verified findings."
-    };
-    let findings = html_list("ul", &findings, empty);
     let patches = report
         .patch_files
         .as_ref()
         .map_or_else(String::new, |files| {
             format!(
-                "<details><summary>Files supplied with a patch ({})</summary><p>Surrounding source is sampled within the review budget.</p>{}</details>",
+                "<details><summary>Files supplied with a patch ({})</summary>{}</details>",
                 files.len(),
                 html_list("ul", &text_list(files), "No patches were supplied.")
             )
@@ -768,31 +880,40 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
         !report
             .scan
             .as_ref()
-            .is_some_and(|scan| scan.limits.contains(limit))
+            .is_some_and(|s| s.limits.contains(limit))
     }));
-    let general_limits = if report
-        .scan
-        .as_ref()
-        .is_some_and(|scan| !scan.limits.is_empty())
-    {
-        "The recorded limits apply to Semgrep."
+    let warnings = if is_partial {
+        format!(
+            r##"<div class="warning"><b>Partial coverage</b>{}<a href="#coverage">See coverage details ↓</a></div>"##,
+            if limits.is_empty() {
+                "<p>Some scanner checks were unavailable.</p>".into()
+            } else {
+                format!("<ul>{limits}</ul>")
+            }
+        )
     } else {
-        "No limits reported."
+        String::new()
     };
-    let limits = html_list("ul", &limits, general_limits);
-    let scan = scanner_html(report, report.scan.as_ref());
+    let files = report.patch_files.as_ref().map_or_else(String::new, |v| {
+        format!("<div><dt>Files with patches</dt><dd>{}</dd></div>", v.len())
+    });
     format!(
-        "<section><h2>Where to focus</h2>{focus}</section>
-<dl>
-  <dt>Repository</dt><dd>{}</dd>
-  <dt>Base revision</dt><dd><code>{}</code></dd>
-  <dt>Reviewed revision</dt><dd><code>{}</code></dd>
-</dl>
-<section><h2>Verified findings</h2>{findings}</section>
-<section><h2>Coverage limits</h2>{patches}{limits}<h3>Semgrep scan</h3>{scan}</section>",
-        escape(&report.repo),
-        escape(&report.base),
+        r##"<div class="workspace"><div>{warnings}{content}</div>
+        <aside><section class="panel inspect"><div class="panel-head"><h2>Review summary</h2></div><dl>
+        <div><dt>Verified findings</dt><dd>{}</dd></div><div><dt>Review priorities</dt><dd>{}</dd></div>{files}</dl>
+        <details><summary>Git revisions</summary><div class="detail-body"><b>Reviewed revision</b><code>{}</code><b>Base revision</b><code>{}</code></div></details></section>
+        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Review coverage</h2></div>{patches}
+        <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section></aside></div>"##,
+        report.report.findings.len(),
+        report.report.focus.len().min(3),
         escape(&report.head),
+        escape(&report.base),
+        scanner_html(report, report.scan.as_ref()),
+        scan_open = if report.scan.as_ref().is_some_and(|s| !s.limits.is_empty()) {
+            " open"
+        } else {
+            ""
+        }
     )
 }
 
@@ -805,11 +926,19 @@ fn review_page(
     raw_report: Option<&str>,
     failure: Option<&str>,
 ) -> String {
-    let label = escape(url);
-    let url = parse_pull_url(url).map_or(label.clone(), |(repo, number)| {
-        let url = canonical_pull_url(repo, number);
-        format!(r#"<a href="{url}">{label}</a>"#)
-    });
+    let (heading, link) = parse_pull_url(url).map_or_else(
+        || (format!("Review {id}"), escape(url)),
+        |(repo, number)| {
+            (
+                format!("Pull request <span>#{number}</span>"),
+                format!(
+                    r#"<a href="{}">{} ↗</a>"#,
+                    canonical_pull_url(repo, number),
+                    escape(repo)
+                ),
+            )
+        },
+    );
     let (status, details) = match status {
         "queued" | "running" => (
             status,
@@ -826,15 +955,12 @@ fn review_page(
     page(
         &format!("Review {id}"),
         &format!(
-            r#"<h1>Review {id}</h1>
-<p><strong>{}</strong></p>
-<p>{url}</p>
-<p>{} UTC · Provider <strong>{}</strong></p>
-{details}
-<p><a href="/">Back to review history</a></p>"#,
-            status_label(status),
+            r##"<div class="hero"><div class="trail"><a href="/#history">Review history</a><span>/</span>Review {id}</div>
+<div class="title-line"><h1>{heading}</h1>{}</div>
+<div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div></div>{details}"##,
+            status_badge(status),
             escape(created),
-            escape(provider),
+            escape(provider_name(provider)),
         ),
     )
 }
@@ -878,6 +1004,41 @@ mod tests {
     const PROVIDER: &str = "synthetic provider <model>";
     const RATE_LIMIT_MESSAGE: &str =
         "GitHub API rate limit reached. Try again after the limit resets.";
+
+    fn assert_history_row(html: &str, link: &str, repo: &str, number: &str, status: &str) {
+        let (_, row) = html
+            .split_once(&format!(r#"class="history-row" href="{link}">"#))
+            .unwrap();
+        let (row, _) = row.split_once("</a>").unwrap();
+        assert!(row.contains(&format!("{repo} <b>#{number}</b>")));
+        assert!(row.contains(&format!(">{status}</span>")));
+    }
+
+    #[test]
+    fn priority_and_matching_finding_share_a_card_with_pinned_evidence() {
+        let mut report = report(None);
+        let path = "src/task.rs";
+        report.report.findings.push(Finding {
+            title: "An update drops pending work".into(),
+            path: path.into(),
+            line: 2,
+            impact: "A job can be lost.".into(),
+            evidence: format!("Base revision {path}:9 “queue.wait();”"),
+            attribution: Attribution::Introduced,
+        });
+        report.report.focus.push(Focus {
+            path: path.into(),
+            line: 2,
+            outcome: "A job can be lost.".into(),
+            checked: "Checked pending jobs.".into(),
+            action: "Repeat the update with a pending job.".into(),
+        });
+        let html = report_html(&report, false);
+        assert_eq!(html.matches("<article").count(), 1);
+        assert!(html.contains("Repeat the update with a pending job."));
+        assert!(html.contains(&format!("/blob/{}/{path}#L9", report.base)));
+        assert!(html.contains("<code>queue.wait();</code>"));
+    }
 
     struct Fixture {
         _tmp: TempDir,
@@ -1277,8 +1438,8 @@ mod tests {
         assert!(!run_one(&fixture.db, |_| panic!("empty queue cannot dispatch")).unwrap());
         fixture.app = router(&fixture.db, PROVIDER, &allowed_repos()).unwrap();
         let history = fixture.get("/").await;
-        assert!(history.contains(&format!(r#"href="{first}">{URL}</a> · Completed"#)));
-        assert!(history.contains(&format!(r#"href="{second}">{SECOND_URL}</a> · Partial"#)));
+        assert_history_row(&history, &first, "test/demo", "7", "Completed");
+        assert_history_row(&history, &second, "test/demo", "8", "Partial");
     }
 
     #[tokio::test]
@@ -1366,7 +1527,7 @@ mod tests {
         assert!(html.contains("No Semgrep coverage data for this review."));
         assert!(!html.contains("No Semgrep rules apply"));
         let history = fixture.get("/").await;
-        assert!(history.contains(&format!(r#"href="/reviews/9">{URL}</a> · Partial"#)));
+        assert_history_row(&history, "/reviews/9", "test/demo", "7", "Partial");
         let stored: (String, String) = original
             .query_row(
                 "SELECT report, provider FROM reviews WHERE id = 9",
@@ -1435,7 +1596,7 @@ mod tests {
         assert!(run_one(&fixture.db, |_| Ok(report)).unwrap());
         let html = fixture.get(&location).await;
         assert!(html.find("Where to focus").unwrap() < html.find("Verified findings").unwrap());
-        assert!(html.find("Verified findings").unwrap() < html.find("Coverage limits").unwrap());
+        assert!(html.find("Verified findings").unwrap() < html.find("Review coverage").unwrap());
         let link = format!(
             "https://github.com/test/demo/blob/{}/src/sample%20%23%22%3C.py",
             "b".repeat(40)
