@@ -8,7 +8,7 @@
       "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "intent": [
-        "Preservare la capacità disponibile"
+        "Preserve available capacity"
       ],
       "limits": [],
       "files": [
@@ -48,9 +48,9 @@
               "line": 2,
               "quote": "    return slots - 1"
             },
-            "expected": "Mantenere la capacità configurata.",
-            "scenario": "Il chiamante configura un solo slot.",
-            "consequence": "La cache indica zero slot disponibili."
+            "expected": "Preserve the configured capacity.",
+            "scenario": "The caller configures a single slot.",
+            "consequence": "The cache reports zero available slots."
           }
         ]
       },
@@ -60,7 +60,7 @@
           {
             "id": 1,
             "outcome": "confirmed",
-            "countercheck": "La funzione non applica un minimo prima di restituire il conteggio.",
+            "countercheck": "The function does not enforce a minimum before returning the count.",
             "kind": "contract",
             "basis": {
               "path": "db/schema.sql",
@@ -75,10 +75,10 @@
               }
             ],
             "severity": "high",
-            "title": "La capacità perde uno slot configurato",
-            "impact": "Una cache con un solo slot indica capacità zero.",
-            "reason": "Il valore restituito è inferiore di uno al conteggio configurato.",
-            "action": "Verifica se una cache con un solo slot può accettare una voce prima del merge.",
+            "title": "Capacity is reduced by one slot",
+            "impact": "A one-slot cache reports zero capacity.",
+            "reason": "The return value is one less than the configured count.",
+            "action": "Check whether a one-slot cache can accept an entry before merging.",
             "comparison": {
               "behavior": {
                 "path": "api/capacity.go",
@@ -101,18 +101,18 @@
         {
           "path": "api/capacity.go",
           "line": 2,
-          "checked": "Comportamento documentato in db/schema.sql:1. La funzione non applica un minimo prima di restituire il conteggio.",
-          "outcome": "Una cache con un solo slot indica capacità zero.",
-          "action": "Verifica se una cache con un solo slot può accettare una voce prima del merge."
+          "checked": "Documented behavior in db/schema.sql:1. The function does not enforce a minimum before returning the count.",
+          "outcome": "A one-slot cache reports zero capacity.",
+          "action": "Check whether a one-slot cache can accept an entry before merging."
         }
       ],
       "findings": [
         {
           "path": "api/capacity.go",
           "line": 2,
-          "title": "La capacità perde uno slot configurato",
-          "impact": "Una cache con un solo slot indica capacità zero.",
-          "evidence": "Analisi statica del codice. Il valore restituito è inferiore di uno al conteggio configurato.\nVerifica mirata. La funzione non applica un minimo prima di restituire il conteggio.\nRevisione proposta api/capacity.go:2 «    return slots - 1»\nRevisione proposta db/schema.sql:1 «SELECT slots AS usable_capacity FROM quotas;»\nRevisione proposta client/capacity.ts:1 «export const isFull = (usable_capacity: number) => usable_capacity === 0;»\nRevisione base api/capacity.go:2 «    return slots»\nRevisione base db/schema.sql:1 «SELECT slots AS usable_capacity FROM quotas;»",
+          "title": "Capacity is reduced by one slot",
+          "impact": "A one-slot cache reports zero capacity.",
+          "evidence": "Static analysis. The return value is one less than the configured count.\nTargeted check. The function does not enforce a minimum before returning the count.\nProposed revision api/capacity.go:2 “    return slots - 1”\nProposed revision db/schema.sql:1 “SELECT slots AS usable_capacity FROM quotas;”\nProposed revision client/capacity.ts:1 “export const isFull = (usable_capacity: number) => usable_capacity === 0;”\nBase revision api/capacity.go:2 “    return slots”\nBase revision db/schema.sql:1 “SELECT slots AS usable_capacity FROM quotas;”",
           "attribution": "introduced"
         }
       ],
@@ -128,7 +128,7 @@
       "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "intent": [
-        "Preservare la capacità disponibile"
+        "Preserve available capacity"
       ],
       "limits": [],
       "files": [
@@ -168,9 +168,9 @@
               "line": 2,
               "quote": "    return slots - 1"
             },
-            "expected": "Mantenere la capacità configurata.",
-            "scenario": "Il chiamante configura un solo slot.",
-            "consequence": "La cache indica zero slot disponibili."
+            "expected": "Preserve the configured capacity.",
+            "scenario": "The caller configures a single slot.",
+            "consequence": "The cache reports zero available slots."
           }
         ]
       },
@@ -180,7 +180,7 @@
           {
             "id": 1,
             "outcome": "confirmed",
-            "countercheck": "La funzione non applica un minimo prima di restituire il conteggio.",
+            "countercheck": "The function does not enforce a minimum before returning the count.",
             "kind": "contract",
             "basis": {
               "path": "db/schema.sql",
@@ -195,10 +195,10 @@
               }
             ],
             "severity": "high",
-            "title": "La capacità perde uno slot configurato",
-            "impact": "Una cache con un solo slot indica capacità zero.",
-            "reason": "Il valore restituito è inferiore di uno al conteggio configurato.",
-            "action": "Verifica se una cache con un solo slot può accettare una voce prima del merge.",
+            "title": "Capacity is reduced by one slot",
+            "impact": "A one-slot cache reports zero capacity.",
+            "reason": "The return value is one less than the configured count.",
+            "action": "Check whether a one-slot cache can accept an entry before merging.",
             "comparison": {
               "behavior": {
                 "path": "api/capacity.go",
@@ -220,8 +220,8 @@
       "focus": [],
       "findings": [],
       "limits": [
-        "Alcune verifiche contengono dettagli o citazioni non validi.",
-        "Per alcune ipotesi manca una verifica valida."
+        "Some assessments contain invalid details or citations.",
+        "Some hypotheses have no valid assessment."
       ]
     }
   },
@@ -234,7 +234,7 @@
       "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "intent": [
-        "Preservare la capacità disponibile"
+        "Preserve available capacity"
       ],
       "limits": [],
       "files": [
@@ -277,10 +277,10 @@
       "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "intent": [
-        "Chiarire chi può vedere le bozze nel feed."
+        "Clarify who can see drafts in the feed."
       ],
       "limits": [
-        "Parte del contesto non è stata acquisita."
+        "Some context was not collected."
       ],
       "files": [
         {
@@ -307,8 +307,8 @@
       "covered": [],
       "signals": [],
       "limits": [
-        "Parte del contesto non è stata acquisita.",
-        "Scanner non disponibile."
+        "Some context was not collected.",
+        "Scanner unavailable."
       ],
       "version": ""
     },
@@ -322,9 +322,9 @@
               "line": 2,
               "quote": "const visible = entries.filter(entry => entry.published);"
             },
-            "expected": "La visibilità delle bozze dipende dai requisiti di prodotto.",
-            "scenario": "Un moderatore apre il feed कि✈️.",
-            "consequence": "Il filtro esclude anche le bozze dei moderatori."
+            "expected": "Whether drafts are visible depends on product requirements.",
+            "scenario": "A moderator opens the कि✈️ feed.",
+            "consequence": "The filter hides drafts from moderators too."
           },
           {
             "anchor": {
@@ -332,9 +332,9 @@
               "line": 2,
               "quote": "\treturn slots"
             },
-            "expected": "La capacità deve mantenere il valore configurato.",
-            "scenario": "Il chiamante configura un solo slot.",
-            "consequence": "Un conteggio errato mostrerebbe zero slot."
+            "expected": "Capacity must match the configured value.",
+            "scenario": "The caller configures a single slot.",
+            "consequence": "An incorrect count would show zero slots."
           },
           {
             "anchor": {
@@ -342,9 +342,9 @@
               "line": 1,
               "quote": "SELECT SUM(amount_cents) AS order_total"
             },
-            "expected": "Il totale deve essere sempre numerico.",
-            "scenario": "La tabella degli ordini è vuota.",
-            "consequence": "Il client riceve NULL anziché zero."
+            "expected": "The total must always be numeric.",
+            "scenario": "The orders table is empty.",
+            "consequence": "The client receives NULL instead of zero."
           }
         ]
       },
@@ -360,12 +360,12 @@
               "quote": "render(\"कि✈️\", visible);"
             },
             "severity": "medium",
-            "countercheck": "La pagina usa soltanto le voci già filtrate.",
-            "reason": "Il filtro rimuove le bozze prima del rendering di कि✈️.",
-            "question": "I moderatori devono vedere le bozze nel feed कि✈️?",
+            "countercheck": "The page only uses entries that passed the filter.",
+            "reason": "The filter removes drafts before rendering कि✈️.",
+            "question": "Should moderators see drafts in the कि✈️ feed?",
             "alternatives": [
-              "Mostrare le bozze ai moderatori",
-              "Mostrare solo le voci pubblicate"
+              "Show drafts to moderators",
+              "Show published entries only"
             ]
           },
           {
@@ -376,7 +376,7 @@
               "line": 2,
               "quote": "\treturn slots"
             },
-            "countercheck": "Con uno slot, la funzione restituisce uno direttamente."
+            "countercheck": "With one slot, the function returns one directly."
           },
           {
             "id": 3,
@@ -395,11 +395,11 @@
               }
             ],
             "severity": "medium",
-            "countercheck": "Nessun COALESCE converte il valore restituito da SUM.",
-            "title": "Il totale è nullo senza ordini",
-            "impact": "Il client riceve NULL anziché zero.",
-            "reason": "SUM restituisce NULL su una tabella vuota.",
-            "action": "Verifica il totale con una tabella senza ordini.",
+            "countercheck": "The query does not use COALESCE to replace the SUM result.",
+            "title": "The total is NULL when there are no orders",
+            "impact": "The client receives NULL instead of zero.",
+            "reason": "SUM returns NULL on an empty table.",
+            "action": "Check the total when the orders table is empty.",
             "comparison": {
               "behavior": {
                 "path": "db/orders.sql",
@@ -422,32 +422,32 @@
         {
           "path": "db/orders.sql",
           "line": 1,
-          "checked": "Comportamento documentato in client/データ.ts:1. Nessun COALESCE converte il valore restituito da SUM.",
-          "outcome": "Il client riceve NULL anziché zero.",
-          "action": "Verifica il totale con una tabella senza ordini."
+          "checked": "Documented behavior in client/データ.ts:1. The query does not use COALESCE to replace the SUM result.",
+          "outcome": "The client receives NULL instead of zero.",
+          "action": "Check the total when the orders table is empty."
         },
         {
           "path": "client/データ.ts",
           "line": 2,
-          "checked": "Analisi statica del codice. Revisione proposta client/データ.ts:2 «const visible = entries.filter(entry => entry.published);»\nRevisione proposta client/データ.ts:3 «render(\"कि✈️\", visible);»",
-          "outcome": "Il filtro rimuove le bozze prima del rendering di कि✈️.",
-          "action": "I moderatori devono vedere le bozze nel feed कि✈️? Le opzioni sono «Mostrare le bozze ai moderatori» e «Mostrare solo le voci pubblicate»."
+          "checked": "Static analysis. Proposed revision client/データ.ts:2 “const visible = entries.filter(entry => entry.published);”\nProposed revision client/データ.ts:3 “render(\"कि✈️\", visible);”",
+          "outcome": "The filter removes drafts before rendering कि✈️.",
+          "action": "Should moderators see drafts in the कि✈️ feed? The options are “Show drafts to moderators” and “Show published entries only”."
         }
       ],
       "findings": [
         {
           "path": "db/orders.sql",
           "line": 1,
-          "title": "Il totale è nullo senza ordini",
-          "impact": "Il client riceve NULL anziché zero.",
-          "evidence": "Analisi statica del codice. SUM restituisce NULL su una tabella vuota.\nVerifica mirata. Nessun COALESCE converte il valore restituito da SUM.\nRevisione proposta db/orders.sql:1 «SELECT SUM(amount_cents) AS order_total»\nRevisione proposta client/データ.ts:1 «// order_total is always numeric, even when there are no orders.»\nRevisione proposta db/orders.sql:2 «FROM orders;»\nRevisione base db/orders.sql:1 «SELECT SUM(amount_cents) AS order_total»\nRevisione base client/データ.ts:1 «// order_total is always numeric, even when there are no orders.»",
+          "title": "The total is NULL when there are no orders",
+          "impact": "The client receives NULL instead of zero.",
+          "evidence": "Static analysis. SUM returns NULL on an empty table.\nTargeted check. The query does not use COALESCE to replace the SUM result.\nProposed revision db/orders.sql:1 “SELECT SUM(amount_cents) AS order_total”\nProposed revision client/データ.ts:1 “// order_total is always numeric, even when there are no orders.”\nProposed revision db/orders.sql:2 “FROM orders;”\nBase revision db/orders.sql:1 “SELECT SUM(amount_cents) AS order_total”\nBase revision client/データ.ts:1 “// order_total is always numeric, even when there are no orders.”",
           "attribution": "preexisting"
         }
       ],
       "limits": [
-        "Parte del contesto non è stata acquisita.",
-        "Scanner non disponibile.",
-        "Risposta incompleta del provider durante la verifica delle ipotesi."
+        "Some context was not collected.",
+        "Scanner unavailable.",
+        "The provider returned an incomplete response while checking hypotheses."
       ]
     }
   }

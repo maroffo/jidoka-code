@@ -15,7 +15,7 @@ use tokio::{
 };
 
 fn required(name: &str) -> Result<String> {
-    env::var(name).with_context(|| format!("Configurare {name}"))
+    env::var(name).with_context(|| format!("Set {name}"))
 }
 
 fn main() -> Result<()> {
@@ -32,7 +32,7 @@ fn main() -> Result<()> {
         .collect();
     ensure!(
         !repositories.is_empty(),
-        "Specificare almeno un repository pubblico"
+        "Specify at least one public repository"
     );
     let db = PathBuf::from(env::var("JIDOKA_DB").unwrap_or_else(|_| "data/reviews.sqlite3".into()));
     if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -84,20 +84,20 @@ async fn supervise(
             // An unexpected worker exit must take the listener out of service.
             server.abort();
             let _ = server.await;
-            result.context("Worker di review terminato in modo anomalo")?;
-            anyhow::bail!("Worker di review terminato prima dell'arresto");
+            result.context("Review worker exited unexpectedly")?;
+            anyhow::bail!("Review worker exited before shutdown");
         }
         result = &mut server => {
             drop(worker_stop);
-            worker.await.context("Worker di review terminato in modo anomalo")?;
+            worker.await.context("Review worker exited unexpectedly")?;
             result??;
-            anyhow::bail!("Server HTTP terminato prima dell'arresto");
+            anyhow::bail!("HTTP server exited before shutdown");
         }
     }
     drop(worker_stop);
     drop(server_stop);
     let (worker, server) = tokio::join!(worker, server);
-    worker.context("Worker di review terminato in modo anomalo")?;
+    worker.context("Review worker exited unexpectedly")?;
     server??;
     Ok(())
 }
@@ -109,7 +109,7 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
             review_snapshot(snapshot, |system, data| provider.ask(system, data))
         });
         if result.is_err() {
-            eprintln!("Impossibile aggiornare la coda di review");
+            eprintln!("Could not update the review queue");
         }
         if stop.recv_timeout(Duration::from_millis(500)) != Err(mpsc::RecvTimeoutError::Timeout) {
             break;

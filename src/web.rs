@@ -1,4 +1,4 @@
-//! Italian review pages and the persistent, single-user work queue.
+//! Review pages and the persistent, single-user work queue.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -28,13 +28,13 @@ use crate::{
     source::safe_path,
 };
 
-const FAILED: &str = "L’analisi non è riuscita. Puoi inviare di nuovo la PR dalla pagina iniziale.";
-const INTERRUPTED: &str =
-    "L’analisi è stata interrotta prima della fine. Invia di nuovo la PR per riprovare.";
+const FAILED: &str =
+    "The review failed. Resubmit the pull request from the home page to try again.";
+const INTERRUPTED: &str = "The review was interrupted. Resubmit the pull request to try again.";
 const PROVIDER_CHANGED: &str =
-    "Il provider è cambiato. Invia di nuovo la PR per confermare il destinatario.";
-const FORBIDDEN: &str = "Invio del modulo non autorizzato. Riapri la pagina iniziale e riprova.";
-const BAD_FORM: &str = "Impossibile leggere il modulo.";
+    "The provider changed. Resubmit the pull request to confirm the provider.";
+const FORBIDDEN: &str = "Form submission was blocked. Open the home page and try again.";
+const BAD_FORM: &str = "Could not read the form.";
 const FORM_LIMIT: usize = 8192;
 const CSRF_COOKIE: &str = "jidoka_csrf";
 type TokenMac = Hmac<Sha256>;
@@ -144,7 +144,7 @@ pub fn router(db: &Path, provider: &str, allowed_repos: &HashSet<String>) -> Res
         .route("/reviews/{id}", get(review))
         .fallback(|| async { not_found() })
         .method_not_allowed_fallback(|| async {
-            error_page(StatusCode::METHOD_NOT_ALLOWED, "Metodo non consentito.")
+            error_page(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.")
         })
         .with_state(state)
         .layer(middleware::from_fn(local_only)))
@@ -196,7 +196,7 @@ async fn local_only(request: Request, next: Next) -> Response {
     {
         next.run(request).await
     } else {
-        error_page(StatusCode::FORBIDDEN, "Apri Jidoka usando localhost.")
+        error_page(StatusCode::FORBIDDEN, "Open Jidoka using localhost.")
     };
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -328,7 +328,7 @@ impl IntoResponse for StorageError {
     fn into_response(self) -> Response {
         error_page(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Impossibile accedere alle review. Riprova.",
+            "Could not access reviews. Try again.",
         )
     }
 }
@@ -408,10 +408,10 @@ async fn submit(
     let value = fields.get("url").map_or("", |value| value.as_ref());
     let consent = fields.get("consent").is_some_and(|value| value == "yes");
     let message = match (consent, parse_pull_url(value)) {
-        (false, _) => "Conferma l’invio del codice al provider prima di avviare la review.",
-        (true, None) => "Inserisci l’URL HTTPS di una pull request su github.com.",
+        (false, _) => "Confirm that the provider may receive the code before starting the review.",
+        (true, None) => "Enter the HTTPS URL of a pull request on github.com.",
         (true, Some((repo, _))) if !state.allowed_repos.contains(&repo.to_ascii_lowercase()) => {
-            "Il repository non è nell’elenco autorizzato."
+            "This repository is not approved for review."
         }
         (true, Some((repo, number))) => {
             let url = canonical_pull_url(repo, number);
@@ -426,8 +426,8 @@ async fn submit(
             .await?;
             let location = format!("/reviews/{id}");
             let html = page(
-                "Review in coda",
-                &format!(r#"<p><a href="{location}">Apri la review</a></p>"#),
+                "Review queued",
+                &format!(r#"<p><a href="{location}">Open the review</a></p>"#),
             );
             return Ok((
                 StatusCode::SEE_OTHER,
@@ -470,11 +470,11 @@ async fn review(
 
 fn status_label(status: &str) -> &str {
     match status {
-        "queued" => "In coda",
-        "running" => "In corso",
-        "completed" => "Completata",
-        "partial" => "Parziale",
-        _ => "Fallita",
+        "queued" => "Queued",
+        "running" => "In progress",
+        "completed" => "Completed",
+        "partial" => "Partial",
+        _ => "Failed",
     }
 }
 
@@ -496,7 +496,7 @@ fn escape(value: &str) -> String {
 fn page(title: &str, body: &str) -> String {
     format!(
         r#"<!doctype html>
-<html lang="it">
+<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{} · Jidoka Code</title>
@@ -522,9 +522,9 @@ fn page(title: &str, body: &str) -> String {
 
 fn error_page(status: StatusCode, message: &str) -> Response {
     let html = page(
-        "Errore",
+        "Error",
         &format!(
-            r#"<h1>{}</h1><p><a href="/">Torna alla pagina iniziale</a></p>"#,
+            r#"<h1>{}</h1><p><a href="/">Back to the home page</a></p>"#,
             escape(message),
         ),
     );
@@ -532,7 +532,7 @@ fn error_page(status: StatusCode, message: &str) -> Response {
 }
 
 fn not_found() -> Response {
-    error_page(StatusCode::NOT_FOUND, "Pagina non trovata.")
+    error_page(StatusCode::NOT_FOUND, "Page not found.")
 }
 
 async fn home_page(
@@ -557,7 +557,7 @@ async fn home_page(
             )
             .unwrap();
         }
-        Ok(html_list("ul", &items, "Nessuna review registrata."))
+        Ok(html_list("ul", &items, "No reviews yet."))
     })
     .await?;
     let error = if error.is_empty() {
@@ -566,20 +566,20 @@ async fn home_page(
         format!(r#"<p class="error" role="alert">{}</p>"#, escape(error))
     };
     Ok(page(
-        "Nuova review",
+        "New review",
         &format!(
-            r#"<h1>Nuova review</h1>
+            r#"<h1>New review</h1>
 {error}
 <form action="/" method="post">
   <input type="hidden" name="csrf_token" value="{token}">
-  <label for="url">URL della pull request GitHub</label>
+  <label for="url">GitHub pull request URL</label>
   <input id="url" name="url" type="url" value="{}" required>
-  <p>Il codice da analizzare verrà inviato a <strong>{}</strong>.</p>
+  <p>The code will be sent to <strong>{}</strong> for review.</p>
   <p><label><input name="consent" type="checkbox" value="yes" required>
-    Acconsento all’invio del codice a questo provider.</label></p>
-  <button type="submit">Avvia la review</button>
+    I agree to send the code to this provider.</label></p>
+  <button type="submit">Start review</button>
 </form>
-<section><h2>Cronologia</h2>{history}</section>"#,
+<section><h2>Review history</h2>{history}</section>"#,
             escape(value),
             escape(&state.provider),
         ),
@@ -602,7 +602,7 @@ fn text_list<'a>(values: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 fn position(report: &PublishedReport, path: &str, line: usize) -> String {
-    let label = format!("{}, riga {line}", escape(path));
+    let label = format!("{}, line {line}", escape(path));
     let head = &report.head;
     if line == 0
         || !valid_repo(&report.repo)
@@ -636,17 +636,17 @@ fn partial(report: &PublishedReport) -> bool {
 
 fn scanner_html(report: &PublishedReport, scan: Option<&Scan>) -> String {
     let Some(scan) = scan else {
-        return "<p>Dati di copertura Semgrep assenti per questa review.</p>".to_owned();
+        return "<p>No Semgrep coverage data for this review.</p>".to_owned();
     };
     let version = if scan.version.is_empty() {
-        "non registrata"
+        "not recorded"
     } else {
         &scan.version
     };
     let files = html_list(
         "ul",
         &text_list(&scan.covered),
-        "Nessun file risulta esaminato da Semgrep.",
+        "No files recorded as scanned by Semgrep.",
     );
     let mut signals = String::new();
     for signal in &scan.signals {
@@ -659,31 +659,31 @@ fn scanner_html(report: &PublishedReport, scan: Option<&Scan>) -> String {
         )
         .unwrap();
     }
-    let signals = html_list("ul", &signals, "Nessuna segnalazione Semgrep registrata.");
+    let signals = html_list("ul", &signals, "No Semgrep signals recorded.");
     let coverage = if scan.version.is_empty()
         && scan.covered.is_empty()
         && scan.signals.is_empty()
         && scan.limits.is_empty()
     {
-        "<p>Nessuna regola Semgrep applicabile ai file disponibili.</p>"
+        "<p>No Semgrep rules apply to the available files.</p>"
     } else if scan.limits.is_empty() {
         ""
     } else {
-        "<p>La scansione Semgrep ha limiti di copertura.</p>"
+        "<p>Semgrep coverage was limited.</p>"
     };
     let limits = if scan.limits.is_empty() {
         String::new()
     } else {
         format!(
-            "<h4>Limiti Semgrep</h4><ul>{}</ul>",
+            "<h4>Semgrep limits</h4><ul>{}</ul>",
             text_list(&scan.limits)
         )
     };
     format!(
-        "<p>Le regole Semgrep in dotazione coprono i file Python. L’elenco riporta i file effettivamente esaminati.</p>
-        <p>Versione Semgrep <code>{}</code></p>{coverage}
-        <h4>File esaminati</h4>{files}
-        <h4>Segnalazioni da verificare</h4>{signals}{limits}",
+        "<p>The bundled Semgrep rules cover Python files. Only files that Semgrep scanned are listed.</p>
+        <p>Semgrep version <code>{}</code></p>{coverage}
+        <h4>Files scanned</h4>{files}
+        <h4>Signals to verify</h4>{signals}{limits}",
         escape(version),
     )
 }
@@ -693,8 +693,8 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
     for item in report.report.focus.iter().take(3) {
         write!(
             focus,
-            "<li><p>{}</p><dl><dt>Controllo</dt><dd>{}</dd><dt>Esito</dt><dd>{}</dd>\
-            <dt>Azione</dt><dd>{}</dd></dl></li>",
+            "<li><p>{}</p><dl><dt>Check</dt><dd>{}</dd><dt>Outcome</dt><dd>{}</dd>\
+            <dt>Action</dt><dd>{}</dd></dl></li>",
             position(report, &item.path, item.line),
             escape(&item.checked),
             escape(&item.outcome),
@@ -702,18 +702,18 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
         )
         .unwrap();
     }
-    let focus = html_list("ol", &focus, "Nessuna indicazione prioritaria.");
+    let focus = html_list("ol", &focus, "No focus areas identified.");
     let mut findings = String::new();
     for item in &report.report.findings {
         let attribution = match item.attribution {
-            Attribution::Introduced => "Introdotto dalla PR",
-            Attribution::Preexisting => "Preesistente",
-            Attribution::Unknown => "Attribuzione incerta",
+            Attribution::Introduced => "Introduced by the pull request",
+            Attribution::Preexisting => "Pre-existing",
+            Attribution::Unknown => "Uncertain attribution",
         };
         write!(
             findings,
             r#"<li><h3>{}</h3><p>{} · {attribution}</p>
-            <dl><dt>Impatto</dt><dd>{}</dd><dt>Prova</dt><dd class="evidence">{}</dd></dl></li>"#,
+            <dl><dt>Impact</dt><dd>{}</dd><dt>Evidence</dt><dd class="evidence">{}</dd></dl></li>"#,
             escape(&item.title),
             position(report, &item.path, item.line),
             escape(&item.impact),
@@ -722,9 +722,9 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
         .unwrap();
     }
     let empty = if is_partial {
-        "Nessun problema verificato nel materiale esaminato."
+        "No verified findings in the material reviewed."
     } else {
-        "Nessun problema verificato."
+        "No verified findings."
     };
     let findings = html_list("ul", &findings, empty);
     let limits = text_list(report.report.limits.iter().filter(|limit| {
@@ -738,21 +738,21 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
         .as_ref()
         .is_some_and(|scan| !scan.limits.is_empty())
     {
-        "I limiti registrati riguardano la scansione Semgrep."
+        "The recorded limits apply to Semgrep."
     } else {
-        "Nessun limite segnalato."
+        "No limits reported."
     };
     let limits = html_list("ul", &limits, general_limits);
     let scan = scanner_html(report, report.scan.as_ref());
     format!(
-        "<section><h2>Dove concentrarti</h2>{focus}</section>
+        "<section><h2>Where to focus</h2>{focus}</section>
 <dl>
   <dt>Repository</dt><dd>{}</dd>
-  <dt>Revisione base</dt><dd><code>{}</code></dd>
-  <dt>Revisione esaminata</dt><dd><code>{}</code></dd>
+  <dt>Base revision</dt><dd><code>{}</code></dd>
+  <dt>Reviewed revision</dt><dd><code>{}</code></dd>
 </dl>
-<section><h2>Problemi verificati</h2>{findings}</section>
-<section><h2>Limiti di copertura</h2>{limits}<h3>Scansione Semgrep</h3>{scan}</section>",
+<section><h2>Verified findings</h2>{findings}</section>
+<section><h2>Coverage limits</h2>{limits}<h3>Semgrep scan</h3>{scan}</section>",
         escape(&report.repo),
         escape(&report.base),
         escape(&report.head),
@@ -776,15 +776,15 @@ fn review_page(
     let (status, details) = match status {
         "queued" | "running" => (
             status,
-            format!(r#"<p><a href="/reviews/{id}">Aggiorna lo stato</a></p>"#),
+            format!(r#"<p><a href="/reviews/{id}">Refresh status</a></p>"#),
         ),
         "completed" | "partial" => {
             match raw_report.and_then(|raw| serde_json::from_str::<PublishedReport>(raw).ok()) {
                 Some(report) => (status, report_html(&report, status == "partial")),
-                None => ("failed", failure_html(FAILED)),
+                None => ("failed", failure_html(None)),
             }
         }
-        _ => ("failed", failure_html(failure.unwrap_or(FAILED))),
+        _ => ("failed", failure_html(failure)),
     };
     page(
         &format!("Review {id}"),
@@ -794,7 +794,7 @@ fn review_page(
 <p>{url}</p>
 <p>{} UTC · Provider <strong>{}</strong></p>
 {details}
-<p><a href="/">Torna alla cronologia</a></p>"#,
+<p><a href="/">Back to review history</a></p>"#,
             status_label(status),
             escape(created),
             escape(provider),
@@ -802,8 +802,23 @@ fn review_page(
     )
 }
 
-fn failure_html(failure: &str) -> String {
-    format!(r#"<p class="error" role="alert">{}</p>"#, escape(failure))
+fn failure_html(stored: Option<&str>) -> String {
+    // Localize known service messages on read. The database may contain older Italian text.
+    let rate_limit = GitHubRateLimit.to_string();
+    let message = match stored {
+        Some(
+            INTERRUPTED
+            | "L’analisi è stata interrotta prima della fine. Invia di nuovo la PR per riprovare.",
+        ) => INTERRUPTED,
+        Some(
+            PROVIDER_CHANGED
+            | "Il provider è cambiato. Invia di nuovo la PR per confermare il destinatario.",
+        ) => PROVIDER_CHANGED,
+        Some("Quota GitHub esaurita. Riprova dopo il rinnovo della quota.") => &rate_limit,
+        Some(message) if message == rate_limit => &rate_limit,
+        _ => FAILED,
+    };
+    format!(r#"<p class="error" role="alert">{}</p>"#, escape(message))
 }
 
 #[cfg(test)]
@@ -823,7 +838,9 @@ mod tests {
     const ORIGIN: &str = "http://127.0.0.1:8080";
     const URL: &str = "https://github.com/test/demo/pull/7";
     const SECOND_URL: &str = "https://github.com/test/demo/pull/8";
-    const PROVIDER: &str = "provider sintetico <modello>";
+    const PROVIDER: &str = "synthetic provider <model>";
+    const RATE_LIMIT_MESSAGE: &str =
+        "GitHub API rate limit reached. Try again after the limit resets.";
 
     struct Fixture {
         _tmp: TempDir,
@@ -973,7 +990,7 @@ mod tests {
                 .await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{host}");
             assert_eq!(headers[header::CACHE_CONTROL], "no-store");
-            assert!(example.contains("Apri Jidoka usando localhost."));
+            assert!(example.contains("Open Jidoka using localhost."));
         }
         let response = fixture
             .app
@@ -1010,7 +1027,7 @@ mod tests {
         ] {
             let (status, _, html) = fixture.post(&cookie, body.clone(), headers).await;
             assert_eq!(status, StatusCode::FORBIDDEN);
-            assert!(html.contains("Invio del modulo non autorizzato"));
+            assert!(html.contains("Form submission was blocked"));
         }
         let (other_cookie, _) = fixture.form().await;
         for cookie in ["", &other_cookie] {
@@ -1038,15 +1055,15 @@ mod tests {
     async fn validates_form_consent_body_and_pr_url() {
         let fixture = Fixture::new();
         let html = fixture.get("/").await;
-        assert!(html.contains(r#"lang="it""#));
-        assert!(html.contains("provider sintetico &lt;modello&gt;"));
+        assert!(html.contains(r#"lang="en""#));
+        assert!(html.contains("synthetic provider &lt;model&gt;"));
         assert!(html.contains(r#"name="consent" type="checkbox" value="yes" required"#));
         let (cookie, token) = fixture.form().await;
         let (status, _, html) = fixture
             .post(&cookie, form_body(&token, URL, None), vec![])
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(html.contains("Conferma l’invio"));
+        assert!(html.contains("Confirm that the provider may receive the code"));
         for url in [
             "http://github.com/test/demo/pull/7",
             "https://github.com.example/test/demo/pull/7",
@@ -1060,7 +1077,7 @@ mod tests {
                 .post(&cookie, form_body(&token, url, Some("yes")), vec![])
                 .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{url}");
-            assert!(html.contains("Inserisci l’URL HTTPS"));
+            assert!(html.contains("Enter the HTTPS URL"));
             assert!(!html.contains("<script>"));
         }
         let valid = form_body(&token, URL, Some("yes"));
@@ -1098,10 +1115,10 @@ mod tests {
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(headers.get(header::LOCATION).is_none());
-        assert!(html.contains("Il repository non è nell’elenco autorizzato."));
+        assert!(html.contains("This repository is not approved for review."));
         assert!(html.contains(unlisted));
         let history = fixture.get("/").await;
-        assert!(history.contains("Nessuna review registrata."));
+        assert!(history.contains("No reviews yet."));
         assert!(!history.contains(unlisted));
         assert!(!run_one(&fixture.db, |_| panic!("unlisted review cannot dispatch")).unwrap());
 
@@ -1117,7 +1134,7 @@ mod tests {
             .enqueue(&format!("{URL}?synthetic=1#discussion"))
             .await;
         let second = fixture.enqueue(SECOND_URL).await;
-        assert!(fixture.get(&first).await.contains("In coda"));
+        assert!(fixture.get(&first).await.contains("Queued"));
         fixture.app = router(&fixture.db, PROVIDER, &allowed_repos()).unwrap();
         recover(&fixture.db, PROVIDER).unwrap();
         assert!(
@@ -1133,31 +1150,31 @@ mod tests {
             .unwrap()
         );
         let html = fixture.get(&first).await;
-        assert!(html.contains("Completata"));
-        assert!(html.contains("Nessun problema verificato."));
-        assert!(html.contains("Nessuna regola Semgrep applicabile"));
-        assert!(html.contains("Nessun file risulta esaminato da Semgrep."));
-        assert!(fixture.get(&second).await.contains("In coda"));
+        assert!(html.contains("Completed"));
+        assert!(html.contains("No verified findings."));
+        assert!(html.contains("No Semgrep rules apply"));
+        assert!(html.contains("No files recorded as scanned by Semgrep."));
+        assert!(fixture.get(&second).await.contains("Queued"));
         assert!(
             run_one(&fixture.db, |url| {
                 assert_eq!(url, SECOND_URL);
                 Ok(report(Some(Scan {
-                    limits: vec!["Scanner assente".into()],
+                    limits: vec!["Scanner unavailable".into()],
                     ..Scan::default()
                 })))
             })
             .unwrap()
         );
         let html = fixture.get(&second).await;
-        assert!(html.contains("Parziale"));
-        assert!(html.contains("Nessun problema verificato nel materiale esaminato."));
-        assert!(html.contains("Scanner assente"));
-        assert!(!html.contains("Nessuna regola Semgrep applicabile"));
+        assert!(html.contains("Partial"));
+        assert!(html.contains("No verified findings in the material reviewed."));
+        assert!(html.contains("Scanner unavailable"));
+        assert!(!html.contains("No Semgrep rules apply"));
         assert!(!run_one(&fixture.db, |_| panic!("empty queue cannot dispatch")).unwrap());
         fixture.app = router(&fixture.db, PROVIDER, &allowed_repos()).unwrap();
         let history = fixture.get("/").await;
-        assert!(history.contains(&format!(r#"href="{first}">{URL}</a> · Completata"#)));
-        assert!(history.contains(&format!(r#"href="{second}">{SECOND_URL}</a> · Parziale"#)));
+        assert!(history.contains(&format!(r#"href="{first}">{URL}</a> · Completed"#)));
+        assert!(history.contains(&format!(r#"href="{second}">{SECOND_URL}</a> · Partial"#)));
     }
 
     #[tokio::test]
@@ -1170,14 +1187,14 @@ mod tests {
             .unwrap()
             .execute("UPDATE reviews SET status = 'running' WHERE id = 1", [])
             .unwrap();
-        assert!(fixture.get(&running).await.contains("In corso"));
+        assert!(fixture.get(&running).await.contains("In progress"));
 
-        fixture.app = router(&fixture.db, "altro provider", &allowed_repos()).unwrap();
-        recover(&fixture.db, "altro provider").unwrap();
-        recover(&fixture.db, "altro provider").unwrap();
+        fixture.app = router(&fixture.db, "another provider", &allowed_repos()).unwrap();
+        recover(&fixture.db, "another provider").unwrap();
+        recover(&fixture.db, "another provider").unwrap();
         assert!(fixture.get(&running).await.contains(INTERRUPTED));
         let html = fixture.get(&old_job).await;
-        assert!(html.contains("Fallita"));
+        assert!(html.contains("Failed"));
         assert!(html.contains(PROVIDER_CHANGED));
         assert!(
             !run_one(&fixture.db, |_| panic!(
@@ -1198,8 +1215,8 @@ mod tests {
             .unwrap()
         );
         let html = fixture.get(&new_job).await;
-        assert!(html.contains("altro provider"));
-        assert!(html.contains("Completata"));
+        assert!(html.contains("another provider"));
+        assert!(html.contains("Completed"));
     }
 
     #[tokio::test]
@@ -1217,26 +1234,43 @@ mod tests {
             .unwrap();
         let legacy_report = serde_json::json!({
             "repo": "test/demo", "base": "a".repeat(40), "head": "b".repeat(40),
-            "focus": [], "limits": [],
+            "focus": [], "limits": ["Copertura originale"],
             "findings": [{
-                "path": "test.py", "line": 2, "title": "Esito Python", "impact": "Impatto",
-                "evidence": "Testo sintetico", "attribution": "preexisting"
+                "path": "test.py", "line": 2, "title": "Python finding", "impact": "Impact",
+                "evidence": "Risultato originale <esempio>", "attribution": "preexisting"
             }]
         })
         .to_string();
+        let legacy_provider = "Modello storico <test>";
         original.execute(
-            "INSERT INTO reviews (id, url, provider, status, created_at, report) VALUES (9, ?1, ?2, 'completed', '2026-11-20 10:00:00', ?3)",
-            params![URL, PROVIDER, legacy_report],
+            "INSERT INTO reviews (id, url, provider, status, created_at, report) VALUES (9, ?1, ?2, 'partial', '2026-11-20 10:00:00', ?3)",
+            params![URL, legacy_provider, legacy_report],
         ).unwrap();
         let app = router(&db, PROVIDER, &allowed_repos()).unwrap();
         recover(&db, PROVIDER).unwrap();
         let fixture = Fixture { _tmp: tmp, db, app };
         let html = fixture.get("/reviews/9").await;
-        assert!(html.contains("Esito Python"));
-        assert!(html.contains("Preesistente"));
+        assert!(html.contains(r#"<html lang="en">"#));
+        assert!(html.contains("Where to focus"));
+        assert!(html.contains("Python finding"));
+        assert!(html.contains("Pre-existing"));
+        assert!(html.contains("Risultato originale &lt;esempio&gt;"));
+        assert!(html.contains("Modello storico &lt;test&gt;"));
+        assert!(html.contains("Copertura originale"));
+        assert!(html.contains("Partial"));
         assert!(html.contains("2026-11-20 10:00:00 UTC"));
-        assert!(html.contains("Dati di copertura Semgrep assenti per questa review."));
-        assert!(!html.contains("Nessuna regola Semgrep applicabile"));
+        assert!(html.contains("No Semgrep coverage data for this review."));
+        assert!(!html.contains("No Semgrep rules apply"));
+        let history = fixture.get("/").await;
+        assert!(history.contains(&format!(r#"href="/reviews/9">{URL}</a> · Partial"#)));
+        let stored: (String, String) = original
+            .query_row(
+                "SELECT report, provider FROM reviews WHERE id = 9",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (legacy_report, legacy_provider.to_owned()));
         let job = fixture.enqueue(SECOND_URL).await;
         assert_eq!(job, "/reviews/10");
         assert!(run_one(&fixture.db, |_| Ok(report(Some(Scan::default())))).unwrap());
@@ -1257,7 +1291,7 @@ mod tests {
                 .contains("/src/%E3%83%86%E3%82%99%E3%83%BC%E3%82%BF.py#L1")
         );
         for path in ["src/.GiT/file.py", "src/a\u{200d}b.py"] {
-            assert_eq!(position(&report, path, 1), format!("{path}, riga 1"));
+            assert_eq!(position(&report, path, 1), format!("{path}, line 1"));
         }
     }
 
@@ -1265,15 +1299,15 @@ mod tests {
     async fn escapes_report_and_uses_links_at_head_for_findings_and_scanner_leads() {
         let fixture = Fixture::new();
         let location = fixture.enqueue(URL).await;
-        let path = r#"src/prova #"<.py"#;
+        let path = r#"src/sample #"<.py"#;
         let mut report = report(Some(Scan {
             version: "1.2.3 <b>".into(),
             covered: vec![path.into()],
             signals: vec![Signal {
-                rule: "<regola>".into(),
+                rule: "<rule>".into(),
                 path: path.into(),
                 line: 28,
-                message: "<messaggio>".into(),
+                message: "<message>".into(),
             }],
             limits: vec![],
         }));
@@ -1281,57 +1315,53 @@ mod tests {
             .map(|line| Focus {
                 path: path.into(),
                 line,
-                checked: "Controllo".into(),
-                outcome: "<esito>".into(),
-                action: "Verifica che l’importazione sia completa.".into(),
+                checked: "Check".into(),
+                outcome: "<outcome>".into(),
+                action: "Check that the import completed.".into(),
             })
             .collect();
         report.report.findings = vec![Finding {
-            path: "../altro".into(),
+            path: "../other".into(),
             line: 2,
-            title: "<script>titolo</script>".into(),
-            impact: "Risultato incompleto".into(),
-            evidence: "Riga 2\n<prova>".into(),
+            title: "<script>title</script>".into(),
+            impact: "Incomplete result".into(),
+            evidence: "Line 2\n<evidence>".into(),
             attribution: Attribution::Unknown,
         }];
         assert!(run_one(&fixture.db, |_| Ok(report)).unwrap());
         let html = fixture.get(&location).await;
-        assert!(
-            html.find("Dove concentrarti").unwrap() < html.find("Problemi verificati").unwrap()
-        );
-        assert!(
-            html.find("Problemi verificati").unwrap() < html.find("Limiti di copertura").unwrap()
-        );
+        assert!(html.find("Where to focus").unwrap() < html.find("Verified findings").unwrap());
+        assert!(html.find("Verified findings").unwrap() < html.find("Coverage limits").unwrap());
         let link = format!(
-            "https://github.com/test/demo/blob/{}/src/prova%20%23%22%3C.py",
+            "https://github.com/test/demo/blob/{}/src/sample%20%23%22%3C.py",
             "b".repeat(40)
         );
         for line in [12, 13, 14, 28] {
             assert!(html.contains(&format!(r#"href="{link}#L{line}""#)));
         }
         assert!(!html.contains("#L15"));
-        assert!(!html.contains("/../altro#L2"));
+        assert!(!html.contains("/../other#L2"));
         assert!(!html.contains("<script>"));
-        assert!(html.contains("Riga 2\n&lt;prova&gt;"));
-        assert!(html.contains("Attribuzione incerta"));
+        assert!(html.contains("Line 2\n&lt;evidence&gt;"));
+        assert!(html.contains("Uncertain attribution"));
         assert!(html.contains("1.2.3 &lt;b&gt;"));
-        assert!(html.contains("Segnalazioni da verificare"));
-        assert!(html.contains("&lt;regola&gt;"));
-        assert!(html.contains("&lt;messaggio&gt;"));
-        assert!(!html.contains("Nessuna regola Semgrep applicabile"));
+        assert!(html.contains("Signals to verify"));
+        assert!(html.contains("&lt;rule&gt;"));
+        assert!(html.contains("&lt;message&gt;"));
+        assert!(!html.contains("No Semgrep rules apply"));
     }
 
     #[tokio::test]
     async fn masks_processor_errors_and_shows_missing_pages() {
         let fixture = Fixture::new();
         let location = fixture.enqueue(URL).await;
-        assert!(run_one(&fixture.db, |_| Err(anyhow!("segreto sintetico"))).unwrap());
+        assert!(run_one(&fixture.db, |_| Err(anyhow!("synthetic secret"))).unwrap());
         let html = fixture.get(&location).await;
-        assert!(html.contains("Fallita"));
+        assert!(html.contains("Failed"));
         assert!(html.contains(FAILED));
-        assert!(!html.contains("segreto sintetico"));
-        assert!(!html.contains("Nessun problema verificato"));
-        for url in ["/altro", "/reviews/99", "/reviews/9223372036854775808"] {
+        assert!(!html.contains("synthetic secret"));
+        assert!(!html.contains("No verified findings"));
+        for url in ["/other", "/reviews/99", "/reviews/9223372036854775808"] {
             assert_eq!(
                 fixture.request(Method::GET, url, &[], "").await.0,
                 StatusCode::NOT_FOUND
@@ -1345,19 +1375,64 @@ mod tests {
 
     #[tokio::test]
     async fn renders_only_the_safe_reason_for_github_rate_limits() {
+        assert_eq!(GitHubRateLimit.to_string(), RATE_LIMIT_MESSAGE);
         let fixture = Fixture::new();
         let location = fixture.enqueue(URL).await;
         assert!(
             run_one(&fixture.db, |_| {
-                Err(anyhow!(GitHubRateLimit).context("dettaglio riservato del trasporto"))
+                Err(anyhow!(GitHubRateLimit).context("private transport detail"))
             })
             .unwrap()
         );
         let html = fixture.get(&location).await;
-        assert!(html.contains("Fallita"));
-        assert!(html.contains("Quota GitHub esaurita. Riprova dopo il rinnovo della quota."));
-        assert!(!html.contains("dettaglio riservato del trasporto"));
+        assert!(html.contains("Failed"));
+        assert!(html.contains(RATE_LIMIT_MESSAGE));
+        assert!(!html.contains("private transport detail"));
         assert!(!html.contains(FAILED));
+    }
+
+    #[tokio::test]
+    async fn localizes_legacy_service_failures_without_rewriting_stored_errors() {
+        let fixture = Fixture::new();
+        let cases = [
+            (
+                "L’analisi non è riuscita. Puoi inviare di nuovo la PR dalla pagina iniziale.",
+                FAILED,
+            ),
+            (
+                "L’analisi è stata interrotta prima della fine. Invia di nuovo la PR per riprovare.",
+                INTERRUPTED,
+            ),
+            (
+                "Il provider è cambiato. Invia di nuovo la PR per confermare il destinatario.",
+                PROVIDER_CHANGED,
+            ),
+            (
+                "Quota GitHub esaurita. Riprova dopo il rinnovo della quota.",
+                RATE_LIMIT_MESSAGE,
+            ),
+            ("<script>private stored detail</script>", FAILED),
+        ];
+        let connection = connect(&fixture.db).unwrap();
+        for (original, expected) in cases {
+            connection.execute(
+                "INSERT INTO reviews (url, provider, status, error) VALUES (?1, ?2, 'failed', ?3)",
+                params![URL, PROVIDER, original],
+            ).unwrap();
+            let id = connection.last_insert_rowid();
+            let html = fixture.get(&format!("/reviews/{id}")).await;
+            assert!(
+                html.contains(expected),
+                "Expected {expected:?} for {original:?}"
+            );
+            assert!(!html.contains(&escape(original)));
+            let stored: String = connection
+                .query_row("SELECT error FROM reviews WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(stored, original);
+        }
     }
 
     #[tokio::test]
@@ -1388,6 +1463,6 @@ mod tests {
             );
         });
         assert_eq!(processed.load(Ordering::Relaxed), 1);
-        assert!(fixture.get(&job).await.contains("Completata"));
+        assert!(fixture.get(&job).await.contains("Completed"));
     }
 }

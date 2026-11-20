@@ -1,17 +1,17 @@
 # Jidoka Code
 
-Servizio web personale in Rust per revisionare pull request pubbliche su GitHub. La guida **Dove concentrarti** mette in evidenza il codice da leggere, il controllo già svolto e le decisioni che richiedono un maintainer.
+Jidoka Code is a single-user Rust web service for reviewing public GitHub pull requests. Each report opens with **Where to focus**, a short guide to the lines worth reading, what the reviewer already checked, and which decisions need a maintainer.
 
-Il motore legge modifiche testuali di qualsiasi stack. In due passaggi formula ipotesi e cerca nel codice elementi che le smentiscano. Verifica percorsi, righe e citazioni sulle revisioni esaminate. Semgrep fornisce indizi aggiuntivi quando esiste una regola applicabile. Il pilota include una regola per Python. La review generale funziona anche su un repository senza Python e su PR che attraversano più linguaggi.
+The engine reviews text changes across languages and frameworks. It makes two passes. The first proposes findings. The second looks for evidence in the code that could disprove them. Jidoka checks file paths, line numbers, and quotations against the revisions under review. Semgrep supplies additional leads when a bundled rule applies. The pilot includes one Python rule. Pull requests in other languages and changes that span multiple stacks go through the same review.
 
-## Avvio
+## Getting started
 
-Crea un file locale `.env` con i repository pubblici ammessi e il provider autorizzato a ricevere il codice. Il provider deve accettare Chat Completions con output JSON. Inserisci il suo URL completo. Jidoka si collega direttamente a quell’indirizzo anche quando la shell configura un proxy.
+Create a local `.env` file listing the public repositories to review and the provider authorized to receive their code. Use the full URL of a Chat Completions endpoint that supports JSON output. Jidoka connects directly to that endpoint even when a proxy is configured in the shell.
 
 ```dotenv
-JIDOKA_REPOS=organizzazione/progetto
+JIDOKA_REPOS=organization/project
 JIDOKA_PROVIDER_URL=https://provider.example/v1/chat/completions
-JIDOKA_MODEL=modello-abilitato
+JIDOKA_MODEL=your-model
 JIDOKA_API_KEY=
 ```
 
@@ -19,13 +19,15 @@ JIDOKA_API_KEY=
 docker compose up --build
 ```
 
-Apri [Jidoka](http://localhost:8080), inserisci la PR e conferma il destinatario. La cronologia rimane nel volume SQLite `reviews`, compatibile con il pilota precedente. Il servizio è destinato a un solo utente su loopback.
+Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the provider before submitting. The service listens on the loopback interface for one trusted user. The `reviews` volume stores the SQLite history and supports reports from the Python pilot. Existing reports retain their original text.
 
-Con `docker compose stop` il servizio chiude l’ingresso HTTP e attende la review in corso. Le richieste ancora in coda saranno elaborate al riavvio. Compose concede fino a tre minuti e mezzo per completare l’arresto.
+Running `docker compose stop` stops the service from accepting HTTP requests and lets the active review finish. Queued reviews resume on the next startup. Compose allows up to three and a half minutes for shutdown.
 
-## Sviluppo
+## Development
 
-Il pilota è verificato con Rust 1.100. Per compilare e avviare il binario, esporta nella shell le variabili sopra ed esegui `cargo run --locked`. Per eseguire lo scanner in locale serve anche Semgrep CE sul PATH. L’immagine Docker lo include. La raccolta da GitHub usa le API pubbliche senza token e limita file, byte, richieste e tempo. Il rapporto espone eventuali lacune.
+Use English for documentation, code comments, interface text, and review guidance. Keep quoted source code and file paths exactly as they appear in the repository under review.
+
+The pilot has been tested with Rust 1.100. Export the environment variables above and run `cargo run --locked` to build and start the service. To run the scanner locally, install Semgrep CE on your PATH. The Docker image includes it. Jidoka uses the public GitHub API without a token and limits the number of files, bytes, requests, and time spent collecting source. The report lists gaps in coverage.
 
 ```sh
 cargo fmt --check
@@ -33,6 +35,6 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Con Semgrep installato, `cargo test --locked -- --include-ignored` esegue anche la regola reale sui file di controllo.
+With Semgrep installed, run `cargo test --locked -- --include-ignored` to exercise the bundled rule against positive and negative fixtures.
 
-[Specifiche](docs/specifiche.md) · [Piano di implementazione](docs/piano.md)
+[Product specifications](docs/specifications.md) · [Implementation plan](docs/implementation-plan.md)

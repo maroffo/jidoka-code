@@ -50,7 +50,7 @@ async fn check_service_restart(scan_limited: bool) {
         .find(|case| case["name"] == "go-sql-typescript")
         .unwrap();
     let mut snapshot: Snapshot = serde_json::from_value(case["snapshot"].clone()).unwrap();
-    let scanner_limit = "File fuori dai limiti di scansione: fixtures/oversized.py.";
+    let scanner_limit = "File fixtures/oversized.py exceeds scan limits.";
     if scan_limited {
         // The scanner rejects this input before looking for an installed executable.
         snapshot.files.push(SourceFile {
@@ -63,6 +63,8 @@ async fn check_service_restart(scan_limited: bool) {
     let file_count = snapshot.files.len();
     let submitted_url = snapshot.url.clone();
     let allowed = HashSet::from([snapshot.repo.clone()]);
+    let focus_action = case["expected"]["focus"][0]["action"].as_str().unwrap();
+    let finding_title = case["expected"]["findings"][0]["title"].as_str().unwrap();
     let replies = Arc::new(Mutex::new(
         case["replies"].as_array().unwrap().clone().into_iter(),
     ));
@@ -113,6 +115,8 @@ async fn check_service_restart(scan_limited: bool) {
         .unwrap()
         .to_owned();
     let html = form.text().await.unwrap();
+    assert!(html.contains(r#"<html lang="en">"#));
+    assert!(html.contains("New review"));
     let token = html
         .split_once("name=\"csrf_token\"")
         .unwrap()
@@ -155,24 +159,25 @@ async fn check_service_restart(scan_limited: bool) {
     .unwrap();
     let permalink = format!("{base}{location}");
     let html = get_html(&client, &permalink).await;
-    let expected_status = if scan_limited {
-        "Parziale"
-    } else {
-        "Completata"
-    };
+    let expected_status = if scan_limited { "Partial" } else { "Completed" };
     for text in [
-        "Dove concentrarti",
+        "Where to focus",
         "api/capacity.go",
-        "Problemi verificati",
+        focus_action,
+        "Verified findings",
+        finding_title,
         expected_status,
     ] {
         assert!(html.contains(text), "missing {text}: {html}");
     }
     if scan_limited {
-        assert!(html.contains("Limiti Semgrep"));
-        assert!(html.contains(scanner_limit));
+        assert!(html.contains("Semgrep limits"));
+        assert!(
+            html.contains(scanner_limit),
+            "Missing scanner limit {scanner_limit:?}: {html}"
+        );
     } else {
-        assert!(html.contains("Nessuna regola Semgrep applicabile"));
+        assert!(html.contains("No Semgrep rules apply"));
     }
     assert!(replies.lock().unwrap().next().is_none());
     stop_ui.send(()).unwrap();
@@ -181,7 +186,7 @@ async fn check_service_restart(scan_limited: bool) {
     web::recover(&db, &label).unwrap();
     let (stop_ui, ui) = serve(TcpListener::bind(address).await.unwrap(), restarted);
     let history = get_html(&client, &base).await;
-    assert!(history.contains("Cronologia"));
+    assert!(history.contains("Review history"));
     assert!(history.contains(&format!(
         r#"<a href="{location}">{submitted_url}</a> · {expected_status}"#
     )));
