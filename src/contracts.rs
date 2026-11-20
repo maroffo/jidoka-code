@@ -12,6 +12,13 @@ pub struct SourceFile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRead {
+    pub path: String,
+    pub term: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceWindow {
     pub path: String,
     /// The 1-based head line at which this exact source text starts.

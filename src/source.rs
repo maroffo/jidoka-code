@@ -2,6 +2,9 @@
 
 mod callers;
 mod local_dependencies;
+mod reads;
+
+pub use reads::read_context;
 
 use crate::contracts::{GitHubRateLimit, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -1684,6 +1687,10 @@ fn pinned<T: Transport>(
 
 pub fn collect(url: &str, allowed: &HashSet<String>) -> Result<Snapshot> {
     let (repo, number) = pull_url(url, allowed)?;
+    pinned(&mut github()?, repo, number, allowed)
+}
+
+fn github() -> Result<GitHub<Http>> {
     let mut headers = HeaderMap::new();
     if let Some(token) = std::env::var_os("JIDOKA_GITHUB_TOKEN").filter(|value| !value.is_empty()) {
         let token = token.to_str().context("Invalid GitHub token")?;
@@ -1700,7 +1707,7 @@ pub fn collect(url: &str, allowed: &HashSet<String>) -> Result<Snapshot> {
         .connect_timeout(REQUEST_TIME)
         .user_agent("jidoka-review")
         .build()?;
-    pinned(&mut GitHub::new(Http(client)), repo, number, allowed)
+    Ok(GitHub::new(Http(client)))
 }
 
 #[cfg(test)]
@@ -1886,6 +1893,215 @@ mod tests {
 
     fn snapshot(hub: &mut GitHub<Fixture>) -> Result<Snapshot> {
         pinned(hub, REPO.into(), 3, &HashSet::from([REPO.to_owned()]))
+    }
+
+    fn context_snapshot(changed: &str) -> Snapshot {
+        Snapshot {
+            url: format!("https://github.com/{REPO}/pull/3"),
+            repo: REPO.into(),
+            number: 3,
+            base: BASE.into(),
+            head: HEAD.into(),
+            intent: Vec::new(),
+            files: vec![SourceFile {
+                path: changed.into(),
+                patch: "@@ -1 +1 @@\n-old\n+new".into(),
+                before: String::new(),
+                after: String::new(),
+            }],
+            head_context: Vec::new(),
+            limits: Vec::new(),
+        }
+    }
+
+    fn context_read(path: &str, term: &str) -> crate::contracts::ContextRead {
+        crate::contracts::ContextRead {
+            path: path.into(),
+            term: term.into(),
+        }
+    }
+
+    #[test]
+    fn contextual_stem_prefers_qualified_implementation_and_finds_later_uses() {
+        let sample = "ui/widget/widget.component.tsx";
+        let declaration = "export interface Options { minLength: number }\r\n";
+        let padding = "// Fixture padding.\r\n".repeat(26);
+        let text = format!(
+            "{declaration}{padding}const valid = value.length >= minLength;\r\n{padding}return <input minLength={{minLength}} />;"
+        );
+        let mut fixture = Fixture::new(Vec::new());
+        for pull in &mut fixture.pulls {
+            pull["head"]["repo"]["private"] = json!(true);
+        }
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                (sample, File::Text(&text)),
+                ("ui/widget.test.tsx", File::Text(declaration)),
+                ("ui/widget.types.ts", File::Text(declaration)),
+                ("ui/widget.stories.tsx", File::Text(declaration)),
+                ("ui/widget.mdx", File::Text(declaration)),
+                ("ui/widget/index.ts", File::Text(declaration)),
+                (
+                    "archive/widget/widget.component.tsx",
+                    File::Text(declaration),
+                ),
+            ],
+        );
+        let mut hub = GitHub::new(fixture);
+        let windows = reads::read_with(
+            &mut hub,
+            &context_snapshot("ui/panel.tsx"),
+            &HashSet::from([REPO.into(), FORK.into()]),
+            &[context_read("Widget", "minLength")],
+        )
+        .unwrap();
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|window| window.path == sample));
+        assert!(windows[0].text.contains("return <input"));
+        assert!(windows[1].text.contains("value.length >= minLength"));
+        let lines: Vec<_> = text.split_inclusive('\n').collect();
+        for window in windows {
+            let start = window.start - 1;
+            assert_eq!(
+                window.text,
+                lines[start..start + window.text.lines().count()].concat()
+            );
+        }
+        assert_eq!(hub.transport.requests.first().unwrap(), PULL);
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+        assert!(
+            hub.transport.requests[1..hub.transport.requests.len() - 1]
+                .iter()
+                .all(|route| route.starts_with(FORK))
+        );
+    }
+
+    #[test]
+    fn contextual_reads_keep_two_tied_paths_and_bound_each_batch() {
+        let text = format!(
+            "first token\n{}last token\n",
+            ("Fixture line for budget testing. ".repeat(4) + "\n").repeat(30)
+        );
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                ("packages/alpha/widget.ts", File::Text(&text)),
+                ("packages/beta/widget.component.tsx", File::Text(&text)),
+                ("packages/gamma/widget.ts", File::Text(&text)),
+                ("docs/config.txt", File::Text(&text)),
+                ("docs/options.txt", File::Text(&text)),
+                ("docs/unrequested.txt", File::Text(&text)),
+            ],
+        );
+        let windows = reads::read_with(
+            &mut GitHub::new(fixture),
+            &context_snapshot("packages/ui/main.ts"),
+            &HashSet::from([REPO.into()]),
+            &[
+                context_read("widget", "token"),
+                context_read("docs/config.txt", "token"),
+                context_read("docs/options.txt", "token"),
+                context_read("docs/unrequested.txt", "token"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(windows.len(), 6);
+        assert_eq!(windows[0].path, "packages/alpha/widget.ts");
+        assert_eq!(windows[1].path, "packages/beta/widget.component.tsx");
+        assert!(
+            windows[2..4]
+                .iter()
+                .all(|window| window.path == "docs/config.txt")
+        );
+        assert!(
+            windows[4..6]
+                .iter()
+                .all(|window| window.path == "docs/options.txt")
+        );
+        assert!(
+            windows
+                .iter()
+                .map(|window| window.text.len())
+                .sum::<usize>()
+                <= 12_000
+        );
+    }
+
+    #[test]
+    fn contextual_reads_validate_the_snapshot_and_fork_before_reading_blobs() {
+        let view = context_snapshot("ui/panel.tsx");
+        let allowed = HashSet::from([REPO.into()]);
+        let request = [context_read("ui/helper.ts", "const")];
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.pulls[0] = pull(MOVED, 0);
+        let mut hub = GitHub::new(fixture);
+        assert!(reads::read_with(&mut hub, &view, &allowed, &request).is_err());
+        assert_eq!(hub.transport.requests, [PULL]);
+
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.pulls[0]["head"]["repo"]["private"] = json!(true);
+        let mut hub = GitHub::new(fixture);
+        assert!(reads::read_with(&mut hub, &view, &allowed, &request).is_err());
+        assert_eq!(hub.transport.requests, [PULL]);
+
+        let mut hub = GitHub::new(Fixture::new(Vec::new()));
+        let mut wrong = view;
+        wrong.number = 4;
+        assert!(reads::read_with(&mut hub, &wrong, &allowed, &request).is_err());
+        assert!(hub.transport.requests.is_empty());
+    }
+
+    #[test]
+    fn contextual_reads_skip_unsafe_paths_unverified_blobs_and_nonliteral_hits() {
+        let mut fixture = Fixture::new(Vec::new());
+        let file = "ui/helper.ts";
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                (file, File::Text("const option = true;\n")),
+                ("ui/link.ts", File::Symlink),
+                ("ui/literal.ts", File::Text("const value = 'ab';\n")),
+            ],
+        );
+        let blob = id(b"blob 21\0const option = true;\n");
+        let corrupt = format!("{FORK}/git/blobs/{blob}");
+        fixture.responses.get_mut(&corrupt).unwrap()["content"] =
+            json!(STANDARD.encode("const option = fake;\n"));
+        let mut hub = GitHub::new(fixture);
+        let view = context_snapshot("ui/panel.tsx");
+        let allowed = HashSet::from([REPO.into()]);
+        let invalid = [
+            context_read("../ui/helper.ts", "const"),
+            context_read("ui/literal.ts", " "),
+        ];
+        assert!(
+            reads::read_with(&mut hub, &view, &allowed, &invalid)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(hub.transport.requests.is_empty());
+        let rejected = [
+            context_read(file, "const"),
+            context_read("ui/link.ts", "const"),
+            context_read("ui/literal.ts", "a.b"),
+        ];
+        assert!(
+            reads::read_with(&mut hub, &view, &allowed, &rejected)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(hub.transport.requests.contains(&corrupt));
+        assert!(
+            hub.transport
+                .requests
+                .iter()
+                .all(|route| !route.ends_with(MOVED))
+        );
     }
 
     #[test]

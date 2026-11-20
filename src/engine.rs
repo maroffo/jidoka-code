@@ -1,7 +1,7 @@
 //! Review pinned source and challenge each hypothesis, with one targeted recheck if needed.
 
 use crate::{
-    contracts::{Attribution, Finding, Focus, Report, Scan, Snapshot},
+    contracts::{Attribution, ContextRead, Finding, Focus, Report, Scan, Snapshot, SourceWindow},
     hunks,
     source::{printable, safe_path},
 };
@@ -13,12 +13,15 @@ use std::{
 };
 
 const MAX_HYPOTHESES: usize = 3;
+const MAX_HISTORY_HYPOTHESES: usize = 2;
 const MAX_REPLAY_HYPOTHESES: usize = 12;
 const MAX_SUPPORT: usize = 4;
 const MAX_TEXT: usize = 400;
 const MAX_QUOTE: usize = 1_000;
 const MAX_INPUT_BYTES: usize = 900_000;
 const MAX_PRIOR_ASSESSMENT_BYTES: usize = 4_096;
+const MAX_CONTEXT_READS: usize = 3;
+const MAX_READ_TERM_BYTES: usize = 128;
 const MAX_RECHECK_CONTEXT_BYTES: usize = 96_000;
 const RECHECK_CONTEXT_RADIUS: usize = 6;
 
@@ -67,7 +70,9 @@ Quotes may contain at most 1000 characters.
 const PROPOSE: &str = r#"
 Read the pinned diff, intent and supplied context, including callers, safeguards,
 rules and tests. Select the highest-value distinct hypotheses tied to this
-change, in impact order. Each must name the expected behavior, a concrete
+change, in impact order. When the patch changes a public interface, compare the
+published contract, the implementation and what existing callers can still send.
+Each hypothesis must name the expected behavior, a concrete
 scenario and its consequence. Include a product decision only if it would
 change what the maintainer does. Use an empty list if nothing merits a check.
 Return {"complete": bool, "hypotheses": [{"anchor": head citation,
@@ -85,8 +90,8 @@ found. Add only the fields for the selected outcome:
   check that passed, you may also give "severity" (high, medium or low) and
   "action" (a concrete manual regression step with a specific input or condition
   and an observable expected result). Omit both if there is no useful manual step.
-- indeterminate: no additional fields. Use this for missing evidence, runtime-only
-  questions and anything requiring an unavailable source or result.
+- indeterminate: use this for missing evidence. Add fields only as allowed by
+  the live review instructions, if supplied.
 - confirmed: "kind" (contract, convention or performance), "basis" (head citation),
   "support" (list of up to 4 other head citations), "severity" (high,
   medium or low), "title", "impact", "reason", "action" (all strings), and "comparison".
@@ -119,6 +124,20 @@ about what can persist. When key supporting evidence is unavailable, use
 countercheck to tell the human reviewer the specific behavior to exercise,
 including the input or state and what to observe. Distinguish a suggested check
 from an observed result.
+An origin of prior_review marks an untrusted lead from an earlier review of this
+revision. Independently try to refute it and require fresh evidence for any
+finding. The previous title and impact are claims to assess.
+- manual_test: use this for a legitimate runtime check when the source shows how
+  to exercise it and what to observe. Add "basis" (head citation), "action"
+  (specific input and steps), "expected" (observable expected behavior), and
+  "severity" (high, medium, or low). It is a suggested test, not a verified finding.
+  A grounded manual test is a complete assessment. Keep its execution status explicit.
+- indeterminate: use this when necessary material is unavailable. During the
+  challenge, you may add "reads": [{"path": str, "term": str}] to request useful
+  pinned context for the recheck. Use a pinned path or exact source file stem
+  (such as Field) and a literal symbol or property to look up. The whole review
+  can request at most three reads. If you can also suggest a specific manual
+  check, add the same four fields as manual_test. The outcome stays unverified.
 "#;
 
 const RECHECK: &str = r#"
@@ -129,6 +148,7 @@ Look beyond the hunks for callers and producers in the same file and other chang
 Return one assessment for each supplied ID and do not assess any other ID.
 Correct invalid citations only when an appropriate reference is actually shown.
 Keep a case indeterminate if the new material still does not settle it.
+Use the returned head context. Omit reads from this final response.
 For a coverage recheck, independently verify each previously accepted outcome.
 "#;
 
@@ -337,17 +357,34 @@ impl<'a> ReferenceIndex<'a> {
         remaining: &mut usize,
         windows: &mut Vec<Value>,
     ) -> Result<()> {
-        if *remaining == 0
-            || range
-                .clone()
-                .all(|index| self.head_lines.contains_key(&(path, index + 1)))
-        {
+        self.append_context_window(
+            path,
+            range.start + 1,
+            &head[range],
+            head,
+            remaining,
+            windows,
+        )
+    }
+
+    fn append_context_window(
+        &mut self,
+        path: &'a str,
+        start: usize,
+        lines: &[&'a str],
+        full_head: &[&str],
+        remaining: &mut usize,
+        windows: &mut Vec<Value>,
+    ) -> Result<()> {
+        let Some(end) = start.checked_add(lines.len()) else {
+            return Ok(());
+        };
+        if *remaining == 0 || (start..end).all(|line| self.head_lines.contains_key(&(path, line))) {
             return Ok(());
         }
         // Only make new IDs available to the validator if their window is sent.
-        let start = range.start + 1;
         let mut expanded = self.clone();
-        let Some(window) = expanded.context_rows(path, start, &head[range], head) else {
+        let Some(window) = expanded.context_rows(path, start, lines, full_head) else {
             return Ok(());
         };
         // The encoded window includes outer quotes, which also cover the array comma.
@@ -666,6 +703,72 @@ fn proposal<'a>(item: &Value, id: usize, evidence: &Evidence<'a>) -> Option<(Cit
     Some((anchor, validated))
 }
 
+fn retain_history<'a>(
+    mut fresh: Vec<(Citation<'a>, Value)>,
+    prior: &[Finding],
+    first_history_id: usize,
+    evidence: &Evidence<'a>,
+) -> Vec<(Citation<'a>, Value)> {
+    let Some(references) = evidence.references.as_ref().filter(|_| !prior.is_empty()) else {
+        return fresh;
+    };
+    // Reserve the highest-ranked fresh proposal. A fresh proposal can also cover a prior anchor.
+    let mut keep_fresh: HashSet<_> = fresh
+        .first()
+        .map(|(anchor, _)| *anchor)
+        .into_iter()
+        .collect();
+    let mut selected = keep_fresh.clone();
+    let history_limit = selected.len() + MAX_HISTORY_HYPOTHESES;
+    let mut injected = Vec::new();
+    for finding in prior {
+        if selected.len() == history_limit {
+            break;
+        }
+        let Some((_, Some(number))) = references
+            .head_lines
+            .get(&(finding.path.as_str(), finding.line))
+        else {
+            continue;
+        };
+        let anchor = references.head[*number - 1];
+        if selected.contains(&anchor) {
+            continue;
+        }
+        if fresh.iter().any(|(candidate, _)| *candidate == anchor) {
+            keep_fresh.insert(anchor);
+        } else {
+            let item = json!({
+                "anchor": format!("H{number}"),
+                "expected": "Check this concern against the pinned source and its contract.",
+                "scenario": finding.title,
+                "consequence": finding.impact,
+            });
+            let Some((anchor, mut validated)) =
+                proposal(&item, first_history_id + injected.len(), evidence)
+            else {
+                continue;
+            };
+            validated["origin"] = json!("prior_review");
+            injected.push((anchor, validated));
+        }
+        selected.insert(anchor);
+    }
+    let mut spare = MAX_HYPOTHESES - selected.len();
+    fresh.retain(|(anchor, _)| {
+        if keep_fresh.remove(anchor) {
+            return true;
+        }
+        if spare > 0 && selected.insert(*anchor) {
+            spare -= 1;
+            return true;
+        }
+        false
+    });
+    fresh.extend(injected);
+    fresh
+}
+
 fn neighbors<'a>(lines: &[&'a str], line: usize) -> (Option<&'a str>, Option<&'a str>) {
     let previous = line.checked_sub(2).map(|index| lines[index]);
     (previous, lines.get(line).copied())
@@ -754,6 +857,7 @@ struct Assessment<'a> {
     finding: Option<RankedFinding<'a>>,
     priority: Option<(u8, u8, Focus)>,
     undecided: Option<String>,
+    reads: Vec<ContextRead>,
 }
 
 fn confirmed<'a>(
@@ -815,7 +919,7 @@ fn confirmed<'a>(
             finding,
         }),
         priority: Some((severity, 0, focus)),
-        undecided: None,
+        ..Assessment::default()
     })
 }
 
@@ -863,11 +967,67 @@ fn severity(item: &Value) -> Option<u8> {
     }
 }
 
+const MANUAL_FIELDS: &[&str] = &["basis", "action", "expected", "severity"];
+
+fn manual_focus(item: &Value, anchor: Citation<'_>, basis: Citation<'_>) -> Option<Focus> {
+    let checked = if basis == anchor {
+        format!("Source for manual check. {}", anchor.render(Revision::Head))
+    } else {
+        format!(
+            "Source for manual check. {}\n{}",
+            anchor.render(Revision::Head),
+            basis.render(Revision::Head)
+        )
+    };
+    Some(Focus {
+        path: anchor.path.into(),
+        line: anchor.line,
+        checked,
+        outcome: format!(
+            "Expected result (not verified). {}",
+            text(&item["expected"])?
+        ),
+        action: text(&item["action"])?.into(),
+    })
+}
+
+fn context_reads(value: &Value) -> Option<Vec<ContextRead>> {
+    let items = value
+        .as_array()
+        .filter(|items| items.len() <= MAX_CONTEXT_READS)?;
+    items
+        .iter()
+        .map(|item| {
+            let read: ContextRead = serde_json::from_value(item.clone()).ok()?;
+            let term = read.term.as_str();
+            (safe_path(&read.path)
+                && !term.is_empty()
+                && term.len() <= MAX_READ_TERM_BYTES
+                && printable(term)
+                && !term.chars().any(char::is_whitespace))
+            .then_some(read)
+        })
+        .collect()
+}
+
 fn assessment_fields(
     object: &Map<String, Value>,
     outcome: &str,
+    indexed: bool,
 ) -> Option<&'static [&'static str]> {
     Some(match outcome {
+        "manual_test" if indexed => MANUAL_FIELDS,
+        "indeterminate" if indexed => {
+            let manual = MANUAL_FIELDS
+                .iter()
+                .any(|field| object.contains_key(*field));
+            match (manual, object.contains_key("reads")) {
+                (true, true) => &["basis", "action", "expected", "severity", "reads"],
+                (true, false) => MANUAL_FIELDS,
+                (false, true) => &["reads"],
+                (false, false) => &[],
+            }
+        }
         "indeterminate" => &[],
         "refuted" if object.contains_key("action") || object.contains_key("severity") => {
             &["basis", "severity", "action"]
@@ -892,14 +1052,30 @@ fn assessment_fields(
 fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Option<Assessment<'a>> {
     let object = item.as_object()?;
     let outcome = text(&item["outcome"])?;
-    let fields = assessment_fields(object, outcome)?;
+    let fields = assessment_fields(object, outcome, source.references.is_some())?;
     if object.len() != fields.len() + 3 || fields.iter().any(|field| !object.contains_key(*field)) {
         return None;
     }
     let countercheck = text(&item["countercheck"])?;
-    if outcome == "indeterminate" {
+    if matches!(outcome, "indeterminate" | "manual_test") {
+        let priority = if object.contains_key("action") {
+            let basis = source.citation(&item["basis"], Revision::Head)?;
+            Some((
+                severity(item)?,
+                if outcome == "manual_test" { 3 } else { 4 },
+                manual_focus(item, anchor, basis)?,
+            ))
+        } else {
+            None
+        };
+        let reads = match object.get("reads") {
+            Some(value) => context_reads(value)?,
+            None => Vec::new(),
+        };
         return Some(Assessment {
-            undecided: Some(countercheck.to_owned()),
+            priority,
+            reads,
+            undecided: (outcome == "indeterminate").then(|| countercheck.to_owned()),
             ..Assessment::default()
         });
     }
@@ -935,8 +1111,9 @@ fn validation_feedback(item: &Value, anchor: Citation<'_>, evidence: &Evidence<'
     let Some(outcome) = text(&item["outcome"]) else {
         return "The outcome field must name an allowed outcome.".into();
     };
-    let Some(fields) = assessment_fields(object, outcome) else {
-        return "Choose confirmed, refuted, human, or indeterminate for outcome.".into();
+    let Some(fields) = assessment_fields(object, outcome, evidence.references.is_some()) else {
+        return "Choose confirmed, refuted, human, manual_test, or indeterminate for outcome."
+            .into();
     };
     let expected: Vec<_> = ["id", "outcome", "countercheck"]
         .into_iter()
@@ -948,7 +1125,14 @@ fn validation_feedback(item: &Value, anchor: Citation<'_>, evidence: &Evidence<'
             expected.join(", ")
         );
     }
-    for field in ["countercheck", "title", "impact", "reason", "action"] {
+    for field in [
+        "countercheck",
+        "title",
+        "impact",
+        "reason",
+        "action",
+        "expected",
+    ] {
         if object.contains_key(field) && text(&item[field]).is_none() {
             return format!(
                 "{field} must be nonempty single-line prose of at most {MAX_TEXT} characters."
@@ -960,6 +1144,14 @@ fn validation_feedback(item: &Value, anchor: Citation<'_>, evidence: &Evidence<'
     }
     if object.contains_key("severity") && severity(item).is_none() {
         return "severity must be high, medium, or low.".into();
+    }
+    if object
+        .get("reads")
+        .is_some_and(|value| context_reads(value).is_none())
+    {
+        return format!(
+            "reads must contain at most {MAX_CONTEXT_READS} objects with a safe path or exact file stem and a literal symbol or property term."
+        );
     }
     if outcome == "human" {
         return "A human assessment requires a specific question ending in '?' and two distinct alternatives.".into();
@@ -1041,8 +1233,25 @@ struct Pending<'a, 'input> {
     anchor: Citation<'a>,
     hypothesis: &'input Value,
     feedback: String,
-    undecided: Option<String>,
+    undecided: Option<Assessment<'a>>,
     accepted_outcome: Option<String>,
+}
+
+struct RecheckReader<'a, F> {
+    read: F,
+    windows: &'a mut Vec<SourceWindow>,
+}
+
+fn pending_reads(pending: &[Pending<'_, '_>]) -> Vec<ContextRead> {
+    let mut seen = HashSet::new();
+    pending
+        .iter()
+        .filter_map(|entry| entry.undecided.as_ref())
+        .flat_map(|entry| &entry.reads)
+        .filter(|read| seen.insert((read.path.as_str(), read.term.as_str())))
+        .take(MAX_CONTEXT_READS)
+        .cloned()
+        .collect()
 }
 
 fn recheck_input<'a>(
@@ -1050,6 +1259,7 @@ fn recheck_input<'a>(
     pending: &[Pending<'a, '_>],
     previous: &[Value],
     evidence: &mut Evidence<'a>,
+    read_windows: &'a [SourceWindow],
 ) -> Result<()> {
     data["hypotheses"] = json!(
         pending
@@ -1116,6 +1326,24 @@ fn recheck_input<'a>(
         .as_array_mut()
         .expect("head context array");
 
+    // The source adapter resolves stems to pinned paths. Index its verified windows as returned.
+    for window in read_windows.iter().filter(|window| safe_path(&window.path)) {
+        let path = window.path.as_str();
+        let full_head = evidence
+            .source
+            .get(path)
+            .map_or(&[][..], |file| file.head.as_slice());
+        let lines: Vec<_> = window.text.lines().collect();
+        references.append_context_window(
+            path,
+            window.start,
+            &lines,
+            full_head,
+            &mut remaining,
+            windows,
+        )?;
+    }
+
     // Keep nearby context for every pending hypothesis before spending budget on full files.
     for &(path, line, head, _) in &sources {
         let start = line.saturating_sub(RECHECK_CONTEXT_RADIUS);
@@ -1161,6 +1389,7 @@ fn live_assessments<'a>(
     anchors: &HashMap<u64, Citation<'a>>,
     evidence: &mut Evidence<'a>,
     ask: &mut impl FnMut(&str, &Value) -> Result<Value>,
+    mut reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
     limits: &mut Vec<String>,
 ) -> Result<Vec<Assessment<'a>>> {
     let initial = request(
@@ -1211,29 +1440,27 @@ fn live_assessments<'a>(
             anchor,
             evidence,
         ) {
-            Ok((raw, item)) => match item.undecided {
-                Some(reason) => (
-                    "The prior result was indeterminate.".into(),
-                    Some(reason),
-                    None,
-                ),
-                None => {
-                    let order = initial
-                        .items
-                        .iter()
-                        .position(|item| item["id"].as_u64() == Some(id))
-                        .expect("accepted assessment order");
-                    accepted.push((order, id, item));
-                    if !recheck_all {
-                        continue;
-                    }
-                    (
+            Ok((_, item)) if item.undecided.is_some() => (
+                "The prior result was indeterminate.".into(),
+                Some(item),
+                None,
+            ),
+            Ok((raw, item)) => {
+                let order = initial
+                    .items
+                    .iter()
+                    .position(|item| item["id"].as_u64() == Some(id))
+                    .expect("accepted assessment order");
+                accepted.push((order, id, item));
+                if !recheck_all {
+                    continue;
+                }
+                (
                         "The earlier response was incomplete for an unspecified part of this set. Independently recheck this previously accepted outcome.".into(),
                         None,
                         Some(text(&raw["outcome"]).expect("accepted outcome").to_owned()),
                     )
-                }
-            },
+            }
             Err(feedback) => (initial_error.clone().unwrap_or(feedback), None, None),
         };
         pending.push(Pending {
@@ -1251,7 +1478,14 @@ fn live_assessments<'a>(
         return Ok(accepted.into_iter().map(|(_, _, item)| item).collect());
     }
 
-    recheck_input(data, &pending, &initial.items, evidence)?;
+    let reads = pending_reads(&pending);
+    if !reads.is_empty() {
+        match (reader.read)(&reads) {
+            Ok(windows) => *reader.windows = windows,
+            Err(_) => limits.push("Requested pinned source context could not be read.".into()),
+        }
+    }
+    recheck_input(data, &pending, &initial.items, evidence, reader.windows)?;
     let repaired = match request(Pass::Recheck, CitationProtocol::Indexed, data, ask, limits) {
         Ok(reply) => reply,
         Err(error) => {
@@ -1278,10 +1512,13 @@ fn live_assessments<'a>(
             None => Err(entry.feedback),
         };
         match outcome {
-            Ok((raw, item)) => {
+            Ok((raw, mut item)) => {
                 if let Some(reason) = &item.undecided {
                     recovered = false;
                     recorded_undecided(limits, entry.anchor, reason);
+                    if item.priority.is_none() {
+                        item.priority = entry.undecided.and_then(|prior| prior.priority);
+                    }
                 }
                 if let Some(accepted_outcome) = entry.accepted_outcome {
                     if item.undecided.is_none()
@@ -1300,8 +1537,11 @@ fn live_assessments<'a>(
             }
             Err(feedback) => {
                 recovered = false;
-                if let Some(reason) = entry.undecided {
-                    recorded_undecided(limits, entry.anchor, &reason);
+                if let Some(item) = entry.undecided {
+                    if let Some(reason) = &item.undecided {
+                        recorded_undecided(limits, entry.anchor, reason);
+                    }
+                    recovered_items.push(item);
                 }
                 limits.push(format!(
                     "No valid recheck at {}:{}. {feedback}",
@@ -1329,7 +1569,28 @@ pub fn review<F>(snapshot: &Snapshot, scan: &Scan, ask: F) -> Result<Report>
 where
     F: FnMut(&str, &Value) -> Result<Value>,
 {
-    review_with_protocol(snapshot, scan, ask, CitationProtocol::Indexed)
+    review_with_context(snapshot, scan, ask, |_| Ok(Vec::new()))
+}
+
+/// Review pinned source with one optional batch of context reads before the recheck.
+pub fn review_with_context(
+    snapshot: &Snapshot,
+    scan: &Scan,
+    ask: impl FnMut(&str, &Value) -> Result<Value>,
+    read: impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>,
+) -> Result<Report> {
+    review_with_history(snapshot, scan, ask, read, &[])
+}
+
+/// Revalidate prior leads supplied for the same immutable review revision.
+pub fn review_with_history(
+    snapshot: &Snapshot,
+    scan: &Scan,
+    ask: impl FnMut(&str, &Value) -> Result<Value>,
+    read: impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>,
+    prior: &[Finding],
+) -> Result<Report> {
+    review_with_protocol(snapshot, scan, ask, read, prior, CitationProtocol::Indexed)
 }
 
 /// Replay stored provider replies that encode citations as path, line and quote.
@@ -1337,7 +1598,14 @@ pub fn review_replay<F>(snapshot: &Snapshot, scan: &Scan, ask: F) -> Result<Repo
 where
     F: FnMut(&str, &Value) -> Result<Value>,
 {
-    review_with_protocol(snapshot, scan, ask, CitationProtocol::Verbatim)
+    review_with_protocol(
+        snapshot,
+        scan,
+        ask,
+        |_| Ok(Vec::new()),
+        &[],
+        CitationProtocol::Verbatim,
+    )
 }
 
 fn verbatim_input(snapshot: &Snapshot, scan: &Scan) -> Value {
@@ -1398,6 +1666,8 @@ fn review_with_protocol<F>(
     snapshot: &Snapshot,
     scan: &Scan,
     mut ask: F,
+    read: impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>,
+    prior: &[Finding],
     protocol: CitationProtocol,
 ) -> Result<Report>
 where
@@ -1415,6 +1685,7 @@ where
         ..Report::default()
     };
     let source = source_index(snapshot, &mut report.limits);
+    let mut read_windows = Vec::new();
     let (mut data, references) = match protocol {
         CitationProtocol::Indexed => {
             let (data, references) = indexed_input(snapshot, scan, &source, &mut report.limits);
@@ -1435,19 +1706,25 @@ where
     };
     proposed.report_incomplete(Pass::Proposal, &mut report.limits);
     let proposed = proposed.items;
-    let mut hypotheses = Vec::new();
-    let mut anchors = HashMap::new();
-    for (index, item) in proposed.iter().enumerate() {
-        let id = index + 1;
-        if let Some((anchor, validated)) = proposal(item, id, &evidence) {
-            anchors.insert(id as u64, anchor);
-            hypotheses.push(validated);
-        }
-    }
-    if hypotheses.len() != proposed.len() {
+    let fresh: Vec<_> = proposed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| proposal(item, index + 1, &evidence))
+        .collect();
+    if fresh.len() != proposed.len() {
         report
             .limits
             .push("Some hypotheses contain invalid details or citations.".into());
+    }
+    let candidates = retain_history(fresh, prior, proposed.len() + 1, &evidence);
+    let mut anchors = HashMap::new();
+    let mut hypotheses = Vec::new();
+    for (anchor, item) in candidates {
+        anchors.insert(
+            item["id"].as_u64().expect("validated hypothesis ID"),
+            anchor,
+        );
+        hypotheses.push(item);
     }
 
     data["hypotheses"] = json!(hypotheses);
@@ -1458,6 +1735,10 @@ where
             &anchors,
             &mut evidence,
             &mut ask,
+            RecheckReader {
+                read,
+                windows: &mut read_windows,
+            },
             &mut report.limits,
         )?,
         CitationProtocol::Verbatim => {
@@ -1629,6 +1910,17 @@ mod tests {
             "action": "Configure one slot and check that the cache reports one slot.",
             "comparison": {"behavior": behavior, "basis": rule, "affected": false},
         })
+    }
+
+    fn prior_finding(path: &str, line: usize, title: &str, impact: &str) -> Finding {
+        Finding {
+            path: path.into(),
+            line,
+            title: title.into(),
+            impact: impact.into(),
+            evidence: "Old evidence must never be forwarded.".into(),
+            attribution: Attribution::Preexisting,
+        }
     }
 
     fn review_indexed(
@@ -1882,6 +2174,322 @@ mod tests {
         assert!(report.limits.is_empty());
         assert!(report.findings.is_empty());
         assert!(report.focus.is_empty());
+    }
+
+    #[test]
+    fn empty_proposals_revalidate_prior_locations_and_drop_a_refuted_lead() {
+        let mut snapshot = indexed_snapshot();
+        let field = "ui/field/field.component.tsx";
+        snapshot.head_context.push(SourceWindow {
+            path: field.into(),
+            start: 120,
+            text: "function submit(slots: number) {\n  return sendSlots(Math.max(slots, 1));\n}"
+                .into(),
+        });
+        let prior = [
+            prior_finding(
+                "cache.go",
+                2,
+                "Possible slot undercount",
+                "One slot could be reported as zero.",
+            ),
+            prior_finding(
+                field,
+                121,
+                "Possible zero-slot submission",
+                "An empty cache configuration could be submitted.",
+            ),
+        ];
+        let mut calls = 0;
+        let report = review_with_history(&snapshot, &Scan::default(), |system, data| {
+            calls += 1;
+            assert!(!data.to_string().contains("Old evidence must never be forwarded."));
+            match calls {
+                1 => {
+                    assert!(data.get("hypotheses").is_none());
+                    Ok(json!({"complete": true, "hypotheses": []}))
+                }
+                2 => {
+                    assert!(system.contains("Independently try to refute it"));
+                    let hypotheses = data["hypotheses"].as_array().unwrap();
+                    let field_id = &data["snapshot"]["head_context"][0]["rows"][1][1];
+                    assert_eq!(hypotheses.len(), 2);
+                    assert_eq!(hypotheses[0]["anchor"], "H2");
+                    assert_eq!(hypotheses[1]["anchor"], *field_id);
+                    for (index, item) in hypotheses.iter().enumerate() {
+                        assert_eq!(item["id"], index + 1);
+                        assert_eq!(item["origin"], "prior_review");
+                        assert_eq!(item["scenario"], prior[index].title);
+                        assert_eq!(item["consequence"], prior[index].impact);
+                        assert!(item.get("outcome").is_none());
+                        assert!(item.get("attribution").is_none());
+                    }
+                    Ok(json!({"complete": true, "assessments": [
+                        indexed_capacity_finding(1, "H4", "B2", "B4"),
+                        {"id": 2, "outcome": "refuted", "basis": field_id,
+                         "countercheck": "The submit handler clamps the slot count to at least one."}
+                    ]}))
+                }
+                _ => panic!("Historical leads must use the existing challenge."),
+            }
+        }, |_| panic!("These assessments do not need reads."), &prior).unwrap();
+        assert_eq!(calls, 2);
+        assert!(report.limits.is_empty());
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].title, "Capacity is reduced by one slot");
+        assert_eq!(report.findings[0].attribution, Attribution::Introduced);
+    }
+
+    #[test]
+    fn history_keeps_a_fresh_slot_and_deduplicates_shared_anchors() {
+        let snapshot = indexed_snapshot();
+        let prior = [
+            prior_finding(
+                "cache.go",
+                200,
+                "Hidden location",
+                "This line is not in the index.",
+            ),
+            prior_finding(
+                "feed.ts",
+                2,
+                "Possible draft filtering",
+                "Drafts may be hidden from moderators.",
+            ),
+            prior_finding(
+                "feed.ts",
+                2,
+                "Duplicate location",
+                "Consider the same line.",
+            ),
+            prior_finding(
+                "orders.sql",
+                1,
+                "Possible null total",
+                "The client could receive null.",
+            ),
+            prior_finding(
+                "requirements.md",
+                1,
+                "Third history location",
+                "This exceeds the history limit.",
+            ),
+        ];
+        let mut calls = 0;
+        let report = review_with_history(
+            &snapshot,
+            &Scan::default(),
+            |_, data| {
+                calls += 1;
+                if calls == 1 {
+                    return Ok(json!({"complete": true, "hypotheses": [
+                        indexed_proposal("H2", "The caller configures one slot."),
+                        indexed_proposal("H6", "Orders are stored in the old table."),
+                        indexed_proposal("H8", "An editor opens the feed with drafts."),
+                    ]}));
+                }
+                assert_eq!(calls, 2);
+                let hypotheses = data["hypotheses"].as_array().unwrap();
+                assert_eq!(hypotheses.len(), MAX_HYPOTHESES);
+                let anchors: Vec<_> = hypotheses
+                    .iter()
+                    .map(|item| item["anchor"].as_str().unwrap())
+                    .collect();
+                assert_eq!(anchors, ["H2", "H8", "H5"]);
+                assert_eq!(
+                    hypotheses[1]["scenario"],
+                    "An editor opens the feed with drafts."
+                );
+                assert_eq!(hypotheses[2]["origin"], "prior_review");
+                let ids: HashSet<_> = hypotheses
+                    .iter()
+                    .map(|item| item["id"].as_u64().unwrap())
+                    .collect();
+                assert_eq!(ids.len(), MAX_HYPOTHESES);
+                let assessments: Vec<_> = hypotheses
+                    .iter()
+                    .map(|item| {
+                        json!({
+                            "id": item["id"], "outcome": "refuted", "basis": item["anchor"],
+                            "countercheck": "The cited path resolves the concern."
+                        })
+                    })
+                    .collect();
+                Ok(json!({"complete": true, "assessments": assessments}))
+            },
+            |_| panic!("These assessments do not need reads."),
+            &prior,
+        )
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(report.limits.is_empty());
+        assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn final_pass_cites_on_demand_context_from_another_file() {
+        use std::cell::Cell;
+
+        let snapshot = indexed_snapshot();
+        let calls = Cell::new(0);
+        let reads = Cell::new(0);
+        let caller = "  return fetchCapacity({ slots: 1 });";
+        let report = review_with_context(
+            &snapshot,
+            &Scan::default(),
+            |system, data| {
+                calls.set(calls.get() + 1);
+                assert_eq!(data["snapshot"]["files"][0]["sections"][0][2][1], "H2");
+                match calls.get() {
+                    1 => Ok(json!({"complete": true, "hypotheses": [
+                        indexed_proposal("H2", "The form requests a one-slot cache.")
+                    ]})),
+                    2 => {
+                        assert!(system.contains("literal symbol or property"));
+                        assert_eq!(reads.get(), 0);
+                        Ok(json!({"complete": true, "assessments": [{
+                            "id": 1, "outcome": "indeterminate",
+                            "countercheck": "The form submission path is missing.",
+                            "reads": [{"path": "Field", "term": "fetchCapacity"},
+                                      {"path": "Field", "term": "fetchCapacity"}]
+                        }]}))
+                    }
+                    3 => {
+                        assert_eq!(reads.get(), 1);
+                        let windows = data["snapshot"]["head_context"].as_array().unwrap();
+                        assert_eq!(windows.len(), 1);
+                        assert_eq!(windows[0]["path"], "ui/field/field.component.tsx");
+                        assert_eq!(windows[0]["start"], 120);
+                        let row = &windows[0]["rows"][1];
+                        assert_eq!(row[2], caller);
+                        let mut finding = indexed_capacity_finding(1, "H4", "B2", "B4");
+                        finding["support"] = json!([row[1]]);
+                        finding["countercheck"] = json!("The form submits a slot count of one.");
+                        Ok(json!({"complete": true, "assessments": [finding]}))
+                    }
+                    _ => panic!("A context read cannot add a model pass."),
+                }
+            },
+            |requests| {
+                assert_eq!(calls.get(), 2);
+                assert_eq!(reads.replace(1), 0);
+                assert_eq!(requests.len(), 1);
+                assert_eq!(
+                    (requests[0].path.as_str(), requests[0].term.as_str()),
+                    ("Field", "fetchCapacity")
+                );
+                Ok(vec![
+                    SourceWindow {
+                        path: "ui/field/field.component.tsx".into(),
+                        start: 120,
+                        text: format!("function submit() {{\n{caller}\n}}"),
+                    },
+                    SourceWindow {
+                        path: "cache.go".into(),
+                        start: 2,
+                        text: "\treturn slots * 2".into(),
+                    },
+                ])
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 3);
+        assert_eq!(reads.get(), 1);
+        assert!(report.limits.is_empty(), "{:?}", report.limits);
+        let finding = &report.findings[0];
+        assert_eq!(finding.attribution, Attribution::Unknown);
+        assert!(finding.evidence.contains(&format!(
+            "Proposed revision ui/field/field.component.tsx:121 “{caller}”"
+        )));
+    }
+
+    #[test]
+    fn manual_test_can_be_the_only_focus_without_a_finding_or_recheck() {
+        let snapshot = indexed_snapshot();
+        let mut call = 0;
+        let report = review_with_context(
+            &snapshot,
+            &Scan::default(),
+            |system, _| {
+                call += 1;
+                if call == 1 {
+                    return Ok(json!({"complete": true, "hypotheses": [
+                        indexed_proposal("H8", "Open the browser feed while a draft is present.")
+                    ]}));
+                }
+                assert_eq!(call, 2);
+                assert!(system.contains("manual_test"));
+                Ok(json!({"complete": true, "assessments": [{
+                    "id": 1, "outcome": "manual_test", "basis": "H9", "severity": "high",
+                    "countercheck": "Static analysis cannot show what the browser renders.",
+                    "action": "Open the browser feed with a draft and a published entry.",
+                    "expected": "The published entry appears and the draft remains hidden."
+                }]}))
+            },
+            |_| panic!("A complete manual check does not need context reads."),
+        )
+        .unwrap();
+        assert_eq!(call, 2);
+        assert!(report.findings.is_empty());
+        assert!(report.limits.is_empty());
+        let [focus] = report.focus.as_slice() else {
+            panic!("Expected one manual check")
+        };
+        assert!(focus.checked.contains("Proposed revision feed.ts:2"));
+        assert!(focus.checked.contains("Proposed revision feed.ts:3"));
+        assert_eq!(
+            focus.outcome,
+            "Expected result (not verified). The published entry appears and the draft remains hidden."
+        );
+        assert_eq!(
+            focus.action,
+            "Open the browser feed with a draft and a published entry."
+        );
+    }
+
+    #[test]
+    fn still_indeterminate_keeps_a_grounded_manual_action_and_the_limit() {
+        let snapshot = indexed_snapshot();
+        let mut replies = [
+            json!({"complete": true, "hypotheses": [
+                indexed_proposal("H8", "An imported draft is submitted.")
+            ]}),
+            json!({"complete": false, "assessments": [{
+                "id": 1, "outcome": "indeterminate", "basis": "H9", "severity": "medium",
+                "countercheck": "The import contract is unavailable.",
+                "action": "Import a draft, then reload the public feed.",
+                "expected": "The imported draft remains hidden."
+            }]}),
+            json!({"complete": false, "assessments": [{
+                "id": 1, "outcome": "indeterminate", "countercheck": "The import contract remains unavailable."
+            }]}),
+        ].into_iter();
+        let report = review(&snapshot, &Scan::default(), |_, _| {
+            Ok(replies.next().unwrap())
+        })
+        .unwrap();
+        assert!(replies.next().is_none());
+        assert!(report.findings.is_empty());
+        let [focus] = report.focus.as_slice() else {
+            panic!("Expected one unverified manual check")
+        };
+        assert!(focus.outcome.starts_with("Expected result (not verified)."));
+        assert_eq!(focus.action, "Import a draft, then reload the public feed.");
+        assert!(report.limits.iter().any(
+            |limit| limit == "Undecided at feed.ts:2. The import contract remains unavailable."
+        ));
+    }
+
+    #[test]
+    fn context_requests_reject_path_traversal_and_overlong_lists() {
+        assert!(context_reads(&json!([{"path": "../Field.tsx", "term": "submit"}])).is_none());
+        assert!(
+            context_reads(&json!(vec![
+                json!({"path": "Field", "term": "submit"});
+                MAX_CONTEXT_READS + 1
+            ]))
+            .is_none()
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::Sha256;
 
 use crate::{
-    contracts::{Attribution, GitHubRateLimit, PublishedReport, Scan},
+    contracts::{Attribution, Finding, GitHubRateLimit, PublishedReport, Scan, Snapshot},
     source::safe_path,
 };
 
@@ -81,6 +81,33 @@ pub fn recover(db: &Path, provider: &str) -> Result<()> {
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Retrieve leads from an earlier reviewed copy of this exact change.
+pub fn previous_findings(db: &Path, provider: &str, snapshot: &Snapshot) -> Result<Vec<Finding>> {
+    // Recheck leads only when the PR, both revisions and the selected provider still match.
+    let previous: Option<String> = connect(db)?
+        .query_row(
+            "SELECT json_extract(report, '$.findings') FROM reviews
+         WHERE url = ?1 COLLATE NOCASE AND provider = ?2 AND status IN ('partial','completed')
+           AND CASE WHEN json_valid(report) THEN
+               json_extract(report, '$.repo') = ?3 COLLATE NOCASE
+               AND json_extract(report, '$.base') = ?4 AND json_extract(report, '$.head') = ?5
+               AND json_array_length(report, '$.findings') > 0 END
+         ORDER BY id DESC LIMIT 1",
+            params![
+                snapshot.url,
+                provider,
+                snapshot.repo,
+                snapshot.base,
+                snapshot.head
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(previous
+        .and_then(|items| serde_json::from_str(&items).ok())
+        .unwrap_or_default())
 }
 
 /// Claim at most one review, in queue order, and save its result.
@@ -968,6 +995,72 @@ mod tests {
             patch_files: None,
             scan,
         }
+    }
+
+    #[test]
+    fn repeat_review_only_reads_findings_for_the_same_pr_revisions_and_provider() {
+        let fixture = Fixture::new();
+        let db = connect(&fixture.db).unwrap();
+        let snapshot = Snapshot {
+            repo: "test/demo".into(),
+            url: URL.into(),
+            number: 7,
+            base: "a".repeat(40),
+            head: "b".repeat(40),
+            intent: vec![],
+            files: vec![],
+            head_context: vec![],
+            limits: vec![],
+        };
+        for (url, provider, base, head, title) in [
+            (
+                URL,
+                PROVIDER,
+                &snapshot.base[..],
+                &snapshot.head[..],
+                "Existing concern",
+            ),
+            (
+                SECOND_URL,
+                PROVIDER,
+                &snapshot.base,
+                &snapshot.head,
+                "Other PR",
+            ),
+            (
+                URL,
+                "another provider",
+                &snapshot.base,
+                &snapshot.head,
+                "Other provider",
+            ),
+            (URL, PROVIDER, "other base", &snapshot.head, "Other base"),
+            (URL, PROVIDER, &snapshot.base, "other head", "Other head"),
+            (URL, PROVIDER, &snapshot.base, &snapshot.head, ""),
+        ] {
+            let mut old = report(None);
+            old.repo = snapshot.repo.clone();
+            old.base = base.into();
+            old.head = head.into();
+            if !title.is_empty() {
+                old.report.findings.push(Finding {
+                    path: "worker.rs".into(),
+                    line: 4,
+                    title: title.into(),
+                    impact: "A job can be lost.".into(),
+                    evidence: "Pinned code.".into(),
+                    attribution: Attribution::Unknown,
+                });
+            }
+            db.execute(
+                "INSERT INTO reviews (url,provider,status,report) VALUES (?1,?2,'partial',?3)",
+                params![url, provider, serde_json::to_string(&old).unwrap()],
+            )
+            .unwrap();
+        }
+        let prior = previous_findings(&fixture.db, PROVIDER, &snapshot).unwrap();
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].title, "Existing concern");
     }
 
     #[tokio::test]

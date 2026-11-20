@@ -2,7 +2,11 @@
 
 Jidoka Code is a single-user Rust web service for reviewing GitHub pull requests. Each report opens with **Where to focus**, a short guide to the lines worth reading, what the reviewer already checked, and which decisions need a maintainer.
 
-The engine reviews text changes across languages and frameworks. It proposes findings, then checks the code for evidence that could disprove each one. A missing or unusable assessment gets one targeted recheck. Jidoka collects changed lines before spending its budget on surrounding files. The model cites lines from the patch or its surrounding source, and Jidoka resolves those references to the pinned revision. The report lists the files supplied with patches and any gaps in coverage. Semgrep supplies additional leads when a bundled rule applies. The pilot includes one Python rule. Pull requests in other languages and changes that span multiple stacks go through the same review.
+The engine reviews text changes across languages and frameworks. It proposes findings, then checks the code for evidence that could disprove each one. When evidence is missing, the model can ask for a file and a search term. Jidoka reads matching lines at the reviewed commit for one targeted recheck. The report gives the reviewer a concrete manual test when a behavior needs to be observed at runtime.
+
+Jidoka collects changed lines before spending its budget on surrounding files. It verifies source references and lists the files supplied with patches and any gaps in coverage. Semgrep supplies additional leads when a bundled rule applies. The pilot includes one Python rule. Pull requests in other languages and changes that span multiple stacks go through the same review.
+
+When you repeat a review with the same provider and both Git revisions still match, Jidoka rechecks up to two previous findings against the current evidence.
 
 ## Getting started
 
