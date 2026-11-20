@@ -77,7 +77,7 @@ code { font-family: var(--mono) }
 .history-list { list-style: none; padding: 0 }.history-list li + li { border-top: 1px solid var(--line) }.history-row { display: grid; align-items: center; grid-template-columns: 1fr auto auto; gap: 14px; padding: 15px 18px; text-decoration: none }
 .history-row:hover { background: #f2f2e9 }.history-row strong,.history-row small { display: block }.history-row b { color: var(--sub); font-weight: 480 }.history-row small { margin-top: 3px; font-size: .72rem }
 .arrow { color: var(--sub) }.compose form { padding: 18px }.compose label { font-weight: 630; font-size: .85rem }
-input[type=url] { width: 100%; font: .85rem var(--mono); padding: 11px 10px; border-radius: 3px; border: 1px solid #8e9b95; background: #fff; color: #172d34; margin-top: 7px }
+input[type=url],#repository { width: 100%; font: .85rem var(--mono); padding: 11px 10px; border-radius: 3px; border: 1px solid #8e9b95; background: #fff; color: #172d34; margin-top: 7px }
 .consent { display: flex; align-items: baseline; gap: 8px; margin: 15px 0; color: var(--sub) }.compose .consent { font-weight: 400 }.consent input { accent-color: #245555 }
 button { border: 0; border-radius: 4px; background: #193e42; color: white; padding: 10px 14px; font-family: inherit; font-size: .9rem; font-weight: 650; cursor: pointer; width: 100%; text-align: left }
 button span { float: right }button:hover { background: #285458 }.error { padding: 12px; background: #f7dfd8; color: #81382d }
@@ -112,3 +112,9 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 .markdown-preview { margin: 10px 0 18px; padding: 14px 18px; border-left: 3px solid var(--line); background: var(--canvas) }
 .markdown-preview h2 { font-size: 1rem }.markdown-preview ul { padding-left: 20px }.markdown-preview p + p { margin-top: 8px }
 .markdown-preview pre { background: var(--surface); margin-bottom: 0 }
+.setup-help { max-width: 760px; margin: -10px 0 20px; color: var(--sub); font-size: .875rem }
+.setup-help summary { display: list-item; width: fit-content; color: inherit; font: inherit; padding: 4px 0 }
+.setup-help summary::-webkit-details-marker { display: inline }details.setup-help > summary::after { content: none }
+.setup-help p { margin-top: 4px }
+
+.settings-feedback { margin-bottom: 16px; font-size: .875rem; color: var(--sub) }

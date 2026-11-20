@@ -36,6 +36,7 @@ const INTERRUPTED: &str = "The review was interrupted. Resubmit the pull request
 const PROVIDER_CHANGED: &str =
     "The provider changed. Resubmit the pull request to confirm the provider.";
 const FORBIDDEN: &str = "Form submission was blocked. Open the home page and try again.";
+const UNAPPROVED: &str = "This repository is not approved for review.";
 const BAD_FORM: &str = "Could not read the form.";
 const FORM_LIMIT: usize = 8192;
 const CSRF_COOKIE: &str = "jidoka_csrf";
@@ -44,7 +45,7 @@ type TokenMac = Hmac<Sha256>;
 struct WebState {
     db: PathBuf,
     provider: String,
-    allowed_repos: HashSet<String>,
+    configured_repos: HashSet<String>,
     secret: [u8; 32],
 }
 
@@ -185,7 +186,7 @@ pub fn router(db: &Path, provider: &str, allowed_repos: &HashSet<String>) -> Res
     let state = Arc::new(WebState {
         db: db.to_owned(),
         provider: provider.to_owned(),
-        allowed_repos: allowed_repos
+        configured_repos: allowed_repos
             .iter()
             .map(|repo| repo.to_ascii_lowercase())
             .collect(),
@@ -209,6 +210,10 @@ pub fn router(db: &Path, provider: &str, allowed_repos: &HashSet<String>) -> Res
         .route(
             "/repositories",
             get(workflow::settings).post(workflow::save_settings),
+        )
+        .route(
+            "/repositories/authorize",
+            axum::routing::post(workflow::authorize),
         )
         .fallback(|| async { not_found() })
         .method_not_allowed_fallback(|| async {
@@ -418,6 +423,16 @@ async fn with_db<T: Send + 'static>(
         .map_err(|_| StorageError)
 }
 
+impl WebState {
+    async fn repositories(&self) -> Result<HashSet<String>, StorageError> {
+        let configured = self.configured_repos.clone();
+        with_db(self, move |conn| {
+            crate::automation::repositories(&conn, &configured)
+        })
+        .await
+    }
+}
+
 async fn home(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -508,8 +523,13 @@ async fn submit(
     let message = match (consent, parse_pull_url(value)) {
         (false, _) => "Confirm that the provider may receive the code before starting the review.",
         (true, None) => "Enter the HTTPS URL of a pull request on github.com.",
-        (true, Some((repo, _))) if !state.allowed_repos.contains(&repo.to_ascii_lowercase()) => {
-            "This repository is not approved for review."
+        (true, Some((repo, _)))
+            if !state
+                .repositories()
+                .await?
+                .contains(&repo.to_ascii_lowercase()) =>
+        {
+            UNAPPROVED
         }
         (true, Some((repo, number))) => {
             let url = canonical_pull_url(repo, number);
@@ -687,6 +707,10 @@ async fn home_page(
     .await?;
     let error = if error.is_empty() {
         String::new()
+    } else if error == UNAPPROVED {
+        format!(
+            r#"<p class="error" role="alert">{UNAPPROVED} <a href="/repositories#authorize">Authorize repository</a></p>"#
+        )
     } else {
         format!(r#"<p class="error" role="alert">{}</p>"#, escape(error))
     };
@@ -1300,6 +1324,104 @@ mod tests {
                 status
             );
         }
+    }
+
+    #[tokio::test]
+    async fn authorize_from_empty_install_and_use_repository_after_restart() {
+        let mut f = Fixture::new();
+        let empty = HashSet::new();
+        f.app = router(&f.db, PROVIDER, &empty).unwrap();
+        let (cookie, token) = f.form().await;
+        let headers = [
+            ("cookie", cookie.as_str()),
+            ("origin", ORIGIN),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ];
+        let path = "/repositories/authorize";
+        let body = format!("csrf_token={token}&repo=HTTPS://GitHub.com/Acme/Tools.GIT/");
+        assert_eq!(
+            f.request(Method::POST, path, &[], body.clone()).await.0,
+            StatusCode::FORBIDDEN
+        );
+        for invalid in [
+            "https://evil.example/acme/tools",
+            "acme/tools/pull/1",
+            "owner/..",
+            "acme/.git",
+            "acme/tools.git.git",
+        ] {
+            let (status, _, html) = f
+                .request(
+                    Method::POST,
+                    path,
+                    &headers,
+                    format!("csrf_token={token}&repo={invalid}"),
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(html.contains("Enter owner/repository"));
+        }
+        assert!(
+            crate::automation::repositories_at(&f.db, &empty)
+                .unwrap()
+                .is_empty()
+        );
+        let url = "https://github.com/acme/tools/pull/1";
+        let blocked = f
+            .post(
+                &cookie,
+                form_body(&token, url, Some("yes")),
+                vec![("origin", ORIGIN)],
+            )
+            .await;
+        assert_eq!(blocked.0, StatusCode::BAD_REQUEST);
+        assert!(blocked.2.contains("/repositories#authorize"));
+        let conn = connect(&f.db).unwrap();
+        conn.execute(
+            "INSERT INTO automation_settings (repo, mode) VALUES ('acme/tools','inline')",
+            [],
+        )
+        .unwrap();
+        let (status, redirect, _) = f.request(Method::POST, path, &headers, body.clone()).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(redirect[header::LOCATION], "/repositories#repo-acme/tools");
+        assert_eq!(
+            crate::automation::mode(&conn, "acme/tools").unwrap(),
+            "manual"
+        );
+        assert_eq!(f.enqueue(url).await, "/reviews/1");
+        assert!(
+            crate::automation::repositories_at(&f.db, &empty)
+                .unwrap()
+                .contains("acme/tools")
+        );
+        conn.execute(
+            "UPDATE automation_settings SET mode='summary' WHERE repo='acme/tools'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            f.request(
+                Method::POST,
+                path,
+                &headers,
+                format!("csrf_token={token}&repo=Acme/Tools.git")
+            )
+            .await
+            .0,
+            StatusCode::SEE_OTHER
+        );
+        f.app = router(&f.db, PROVIDER, &empty).unwrap();
+        assert_eq!(
+            crate::automation::repositories_at(&f.db, &empty)
+                .unwrap()
+                .len(),
+            1
+        );
+        let page = f.get("/repositories").await;
+        assert_eq!(page.matches("<h2>acme/tools</h2>").count(), 1);
+        assert!(page.contains(r#"value="summary" selected"#));
+        assert_eq!(f.enqueue(url).await, "/reviews/2");
     }
 
     #[test]

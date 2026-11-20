@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use jidoka_code::{provider::Provider, review_snapshot_with_context, source, web};
 use std::{
     collections::HashSet,
@@ -24,13 +24,13 @@ fn main() -> Result<()> {
         &required("JIDOKA_MODEL")?,
         env::var("JIDOKA_API_KEY").unwrap_or_default(),
     )?;
-    let repositories: HashSet<String> = required("JIDOKA_REPOS")?
+    let repositories: HashSet<String> = env::var("JIDOKA_REPOS")
+        .unwrap_or_default()
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase)
         .collect();
-    ensure!(!repositories.is_empty(), "Specify at least one repository");
     let db = PathBuf::from(env::var("JIDOKA_DB").unwrap_or_else(|_| "data/reviews.sqlite3".into()));
     if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
@@ -109,7 +109,8 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
             next_poll = Instant::now() + Duration::from_secs(60);
         }
         let result = web::run_one_pinned(db, |url, expected_head| {
-            let snapshot = source::collect_at(url, repositories, expected_head)?;
+            let allowed = jidoka_code::automation::repositories_at(db, repositories)?;
+            let snapshot = source::collect_at(url, &allowed, expected_head)?;
             let prior = web::previous_findings(db, provider.label(), &snapshot)?;
             let patches = snapshot
                 .files
@@ -145,7 +146,7 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
                     reply
                 },
                 |snapshot, requests| {
-                    let windows = source::read_context(snapshot, repositories, requests)?;
+                    let windows = source::read_context(snapshot, &allowed, requests)?;
                     eprintln!(
                         "Read {} pinned excerpts for {} requested source lookups",
                         windows.len(),

@@ -27,7 +27,10 @@ async fn target(state: &WebState, id: i64) -> Result<Target, PageError> {
     let (repo, number) = parse_pull_url(&url).ok_or_else(PageError::missing)?;
     let report: PublishedReport = serde_json::from_str(&raw).map_err(|_| PageError::missing())?;
     if !report.repo.eq_ignore_ascii_case(repo)
-        || !state.allowed_repos.contains(&repo.to_ascii_lowercase())
+        || !state
+            .repositories()
+            .await?
+            .contains(&repo.to_ascii_lowercase())
     {
         return Err(PageError::new(
             StatusCode::FORBIDDEN,
@@ -246,10 +249,19 @@ pub(super) async fn settings(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Result<Response, StorageError> {
-    let (token, cookie) = page_token(&state, &headers);
-    let mut repos: Vec<_> = state.allowed_repos.iter().cloned().collect();
+    settings_page(&state, &headers, false, None).await
+}
+
+async fn settings_page(
+    state: &WebState,
+    headers: &HeaderMap,
+    show_setup: bool,
+    invalid_repo: Option<&str>,
+) -> Result<Response, StorageError> {
+    let (token, cookie) = page_token(state, headers);
+    let mut repos: Vec<_> = state.repositories().await?.into_iter().collect();
     repos.sort();
-    let rows = with_db(&state, move |c| {
+    let rows = with_db(state, move |c| {
         repos
             .into_iter()
             .map(|repo| {
@@ -262,26 +274,40 @@ pub(super) async fn settings(
             .collect::<rusqlite::Result<Vec<_>>>()
     })
     .await?;
+    let validation = if invalid_repo.is_some() {
+        r#"<p class="error" role="alert">Enter owner/repository or its GitHub repository URL.</p>"#
+    } else {
+        ""
+    };
     let mut html = format!(
-        r#"<div class="hero"><h1>Repositories</h1></div><div class="settings-intro"><p>Automatic reviews send new PR changes to {} and post a GitHub review as the configured bot. Existing open PRs enter the queue on their next update.</p></div>"#,
+        r#"<div class="hero"><h1>Repositories</h1></div>
+<form id="authorize" class="panel workflow" method="post" action="/repositories/authorize">
+<input type="hidden" name="csrf_token" value="{token}"><label for="repository">GitHub repository</label>
+<input id="repository" type="text" name="repo" placeholder="owner/repository or https://github.com/owner/repository" value="{}" required>
+{validation}<button>Authorize repository</button></form><div class="settings-intro"><p>Automatic reviews send new PR changes to {} and post a GitHub review as the configured bot. Existing open PRs enter the queue on their next update.</p></div>"#,
+        escape(invalid_repo.unwrap_or_default()),
         escape(&state.provider)
     );
-    if std::env::var("JIDOKA_BOT_TOKEN")
-        .unwrap_or_default()
-        .trim()
-        .is_empty()
-    {
-        html.push_str(
-            "<p class=warning>Set JIDOKA_BOT_TOKEN on the service to enable automatic reviews.</p>",
-        );
+    let bot_configured = automation::bot_configured();
+    if !bot_configured {
+        if show_setup {
+            html.push_str(r#"<p class="settings-feedback" role="alert">Mode change could not be saved. Automatic reviews need a GitHub bot token.</p>"#);
+        }
+        let open = if show_setup { " open" } else { "" };
+        write!(html, r#"<details class="setup-help"{open}><summary>Set up automatic GitHub reviews</summary><p>Manual reviews are available. To let a bot post reviews automatically, set <code>JIDOKA_BOT_TOKEN</code> to its GitHub token with pull request write access and recreate the container.</p></details>"#).unwrap();
     }
     for (mode, error, repo) in rows {
-        write!(html,r#"<form class="panel workflow" method="post" action="/repositories"><input type="hidden" name="csrf_token" value="{token}"><input type="hidden" name="repo" value="{}"><h2>{}</h2><label>Review mode <select name="mode">"#,escape(&repo),escape(&repo)).unwrap();
+        write!(html,r#"<form id="repo-{}" class="panel workflow" method="post" action="/repositories"><input type="hidden" name="csrf_token" value="{token}"><input type="hidden" name="repo" value="{}"><h2>{}</h2><label>Review mode <select name="mode">"#,escape(&repo),escape(&repo),escape(&repo)).unwrap();
         for (value, label) in MODES {
             let selected = if mode == value { " selected" } else { "" };
+            let disabled = if !bot_configured && value != "manual" && mode != value {
+                " disabled"
+            } else {
+                ""
+            };
             write!(
                 html,
-                r#"<option value="{value}"{selected}>{label}</option>"#
+                r#"<option value="{value}"{selected}{disabled}>{label}</option>"#
             )
             .unwrap();
         }
@@ -294,14 +320,43 @@ pub(super) async fn settings(
     Ok(form_page(page("Repositories", &html), cookie))
 }
 
+pub(super) async fn authorize(
+    State(state): State<Arc<WebState>>,
+    request: Request,
+) -> Result<Response, PageError> {
+    let headers = request.headers().clone();
+    let fields = checked_form(&state, request, 2).await?;
+    let input = fields.get("repo").map(String::as_str).unwrap_or("").trim();
+    let canonical = input.to_ascii_lowercase();
+    let path = canonical
+        .strip_prefix("https://github.com/")
+        .unwrap_or(&canonical);
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let repo = path.strip_suffix(".git").unwrap_or(path).to_owned();
+    if repo.ends_with(".git") || !valid_repo(&repo) {
+        let mut response = settings_page(&state, &headers, false, Some(input)).await?;
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return Ok(response);
+    }
+    let preconfigured = state.configured_repos.contains(&repo);
+    let location = format!("/repositories#repo-{repo}");
+    with_db(&state, move |conn| {
+        automation::authorize(&conn, &repo, preconfigured)
+    })
+    .await?;
+    Ok(Redirect::to(&location).into_response())
+}
+
 pub(super) async fn save_settings(
     State(state): State<Arc<WebState>>,
     request: Request,
 ) -> Result<Response, PageError> {
+    let headers = request.headers().clone();
     let fields = checked_form(&state, request, 3).await?;
+    let allowed = state.repositories().await?;
     let repo = fields
         .get("repo")
-        .filter(|s| state.allowed_repos.contains(*s))
+        .filter(|s| allowed.contains(*s))
         .cloned()
         .ok_or_else(PageError::missing)?;
     let mode = fields
@@ -309,6 +364,11 @@ pub(super) async fn save_settings(
         .filter(|s| MODES.iter().any(|(v, _)| v == s))
         .cloned()
         .ok_or_else(|| PageError::new(StatusCode::BAD_REQUEST, BAD_FORM))?;
+    if mode != "manual" && !automation::bot_configured() {
+        let mut response = settings_page(&state, &headers, true, None).await?;
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return Ok(response);
+    }
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || automation::set_mode(&connect(&db)?, &repo, &mode))
         .await
@@ -327,7 +387,7 @@ pub(super) async fn load_diff(
     let target = target(&state, id).await?;
     if !crate::diff::available(&target.report) {
         let db = state.db.clone();
-        let repos = state.allowed_repos.clone();
+        let repos = state.repositories().await?;
         let loaded =
             tokio::task::spawn_blocking(move || store_archived_diff(&db, &repos, id, target))
                 .await
