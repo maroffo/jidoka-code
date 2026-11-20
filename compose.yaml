@@ -1,0 +1,14 @@
+services:
+  web:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      JIDOKA_REPOS: ${JIDOKA_REPOS:?specificare i repository pubblici consentiti}
+      JIDOKA_PROVIDER_URL: ${JIDOKA_PROVIDER_URL:?specificare URL completo del provider}
+      JIDOKA_MODEL: ${JIDOKA_MODEL:?specificare il modello}
+      JIDOKA_API_KEY: ${JIDOKA_API_KEY:-}
+    volumes:
+      - reviews:/data
+volumes:
+  reviews:
