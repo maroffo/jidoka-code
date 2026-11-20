@@ -1338,7 +1338,7 @@ mod tests {
             ("content-type", "application/x-www-form-urlencoded"),
         ];
         let path = "/repositories/authorize";
-        let body = format!("csrf_token={token}&repo=https://github.com/Acme/Tools/");
+        let body = format!("csrf_token={token}&repo=https://github.com/Acme/Tools.git/");
         assert_eq!(
             f.request(Method::POST, path, &[], body.clone()).await.0,
             StatusCode::FORBIDDEN

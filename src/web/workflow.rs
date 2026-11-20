@@ -327,8 +327,12 @@ pub(super) async fn authorize(
     let headers = request.headers().clone();
     let fields = checked_form(&state, request, 2).await?;
     let input = fields.get("repo").map(String::as_str).unwrap_or("").trim();
-    let name = input.strip_prefix("https://github.com/").unwrap_or(input);
-    let repo = name.strip_suffix('/').unwrap_or(name).to_ascii_lowercase();
+    let name = input.strip_suffix('/').unwrap_or(input);
+    let repo = match name.strip_prefix("https://github.com/") {
+        Some(path) => path.strip_suffix(".git").unwrap_or(path),
+        None => name,
+    }
+    .to_ascii_lowercase();
     if !valid_repo(&repo) {
         let mut response = settings_page(&state, &headers, false, Some(input)).await?;
         *response.status_mut() = StatusCode::BAD_REQUEST;
