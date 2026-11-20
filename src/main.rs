@@ -5,7 +5,7 @@ use std::{
     env,
     path::{Path, PathBuf},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     net::TcpListener,
@@ -103,7 +103,37 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
     while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
         let result = web::run_one(db, |url| {
             let snapshot = source::collect(url, repositories)?;
-            review_snapshot(snapshot, |system, data| provider.ask(system, data))
+            let patches = snapshot
+                .files
+                .iter()
+                .filter(|file| !file.patch.is_empty())
+                .count();
+            eprintln!(
+                "Collected {patches} file patches and {} surrounding source excerpts",
+                snapshot.head_context.len()
+            );
+            let mut pass = 0;
+            review_snapshot(snapshot, |system, data| {
+                pass += 1;
+                let started = Instant::now();
+                let reply = provider.ask(system, data);
+                let status = match &reply {
+                    Ok(_) => "received",
+                    Err(error)
+                        if error
+                            .downcast_ref::<reqwest::Error>()
+                            .is_some_and(|error| error.is_timeout()) =>
+                    {
+                        "timed out"
+                    }
+                    Err(_) => "failed",
+                };
+                eprintln!(
+                    "Model response {pass}: {status} after {}s",
+                    started.elapsed().as_secs()
+                );
+                reply
+            })
         });
         if result.is_err() {
             eprintln!("Could not update the review queue");

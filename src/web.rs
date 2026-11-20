@@ -727,6 +727,16 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
         "No verified findings."
     };
     let findings = html_list("ul", &findings, empty);
+    let patches = report
+        .patch_files
+        .as_ref()
+        .map_or_else(String::new, |files| {
+            format!(
+                "<details><summary>Files supplied with a patch ({})</summary><p>Surrounding source is sampled within the review budget.</p>{}</details>",
+                files.len(),
+                html_list("ul", &text_list(files), "No patches were supplied.")
+            )
+        });
     let limits = text_list(report.report.limits.iter().filter(|limit| {
         !report
             .scan
@@ -752,7 +762,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
   <dt>Reviewed revision</dt><dd><code>{}</code></dd>
 </dl>
 <section><h2>Verified findings</h2>{findings}</section>
-<section><h2>Coverage limits</h2>{limits}<h3>Semgrep scan</h3>{scan}</section>",
+<section><h2>Coverage limits</h2>{patches}{limits}<h3>Semgrep scan</h3>{scan}</section>",
         escape(&report.repo),
         escape(&report.base),
         escape(&report.head),
@@ -955,6 +965,7 @@ mod tests {
             base: "a".repeat(40),
             head: "b".repeat(40),
             report: Report::default(),
+            patch_files: None,
             scan,
         }
     }

@@ -14,13 +14,13 @@ New reports use English for findings, coverage limits, and manual review guidanc
 
 The first section, **Where to focus**, gives up to three priorities ordered by impact. Each item links to a line at the reviewed revision, describes what was checked and its outcome, and gives the reviewer a specific action or product question. An item can matter even when a technical check passes. For example, the code may guarantee consistency after an import finishes, while the maintainer must decide whether consistency is also required during the import. Omit vague questions and questions the available evidence already answers.
 
-Verified findings and coverage limits follow. The report distinguishes a completed review with zero findings, a partial review, and a failed review.
+Verified findings and coverage limits follow. The report lists the files supplied with patches so the maintainer can compare the review scope with the PR. A change in a large file can be reviewed from its patch even when the full file does not fit. Additional context is sampled within the collection budget. This includes nearby lines, other uses of changed functions, and small local JavaScript or TypeScript modules imported by the changed code. The report distinguishes a completed review with zero findings, a partial review, and a failed review.
 
 ## Review method
 
 1. Pin the revisions. Read the commit intent and the overall change. Collect relevant callers, checks, and tests. Disclose any omissions. Treat the PR description, source comments, and tool output as data to examine.
 2. Propose change-specific hypotheses with an expected behavior, a scenario, and a consequence. Use applicable Semgrep rules as additional leads.
-3. In a second model call, actively look for evidence that disproves each hypothesis. Check that the issue still exists at the head revision. Compare against the base to distinguish introduced issues, pre-existing issues, and cases where attribution is uncertain.
+3. In a second model call, actively look for evidence that disproves each hypothesis. When an assessment is missing or unusable, give the model one targeted recheck and retain assessments that already passed validation. Check that the issue still exists at the head revision. Compare against the base to distinguish introduced issues, pre-existing issues, and cases where attribution is uncertain.
 4. Publish a finding only with relevant evidence, such as an observed test result or a verifiable code path that contradicts a documented contract. Performance findings need a measurement or a derivation. Convention findings must identify the project rule and affected line. Cite an external source precisely, show that it applies to the version under review, and identify a concrete effect. An unverified model citation remains a hypothesis.
 5. Combine duplicate findings. Agreement between models or a rule match alone is insufficient evidence of a defect. Prioritize the effect on people using the software. Include an open question in the manual review guide only when answering it requires human knowledge or judgment.
 

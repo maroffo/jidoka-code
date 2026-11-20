@@ -1,5 +1,6 @@
 pub mod contracts;
 pub mod engine;
+pub(crate) mod hunks;
 pub mod provider;
 pub mod scanner;
 pub mod source;
@@ -22,5 +23,13 @@ pub fn review_snapshot(
         head: snapshot.head,
         report,
         scan: Some(scan),
+        patch_files: Some(
+            snapshot
+                .files
+                .into_iter()
+                .filter(|file| !file.patch.is_empty())
+                .map(|file| file.path)
+                .collect(),
+        ),
     })
 }
