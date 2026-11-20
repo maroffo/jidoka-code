@@ -90,13 +90,25 @@ fn has_analysis_attempts(conn: &Connection) -> rusqlite::Result<bool> {
     )
 }
 
-fn migrate_job_states(conn: &Connection) -> rusqlite::Result<()> {
-    let has_publications: bool = conn.query_row(
+fn has_publications(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'github_publications')",
         [],
         |row| row.get(0),
-    )?;
-    if has_publications {
+    )
+}
+
+fn automatic_scope(repo: &str, number: i64, head: &str) -> String {
+    // Match the persisted publication key used for automatic GitHub comments.
+    hex::encode(Sha256::digest(format!(
+        "{}:{number}:{}:true:COMMENT",
+        repo.to_ascii_lowercase(),
+        head.to_ascii_lowercase(),
+    )))
+}
+
+fn migrate_job_states(conn: &Connection) -> rusqlite::Result<()> {
+    if has_publications(conn)? {
         let mut query =
             conn.prepare("SELECT repo, number, head, review_id FROM automation_jobs")?;
         let jobs = query
@@ -115,13 +127,7 @@ fn migrate_job_states(conn: &Connection) -> rusqlite::Result<()> {
              )",
         )?;
         for (repo, number, head, id) in jobs {
-            // The d2a4684 publisher used this key for automatic COMMENT reviews.
-            let scope = hex::encode(Sha256::digest(format!(
-                "{}:{number}:{}:true:COMMENT",
-                repo.to_ascii_lowercase(),
-                head.to_ascii_lowercase(),
-            )));
-            mark_published.execute(params![id, scope])?;
+            mark_published.execute(params![id, automatic_scope(&repo, number, &head)])?;
         }
     }
     conn.execute(
@@ -537,6 +543,13 @@ fn enqueue(
     ).optional()?;
     if let Some((id, state)) = existing {
         if matches!(state.as_str(), "canceled" | "deferred") || (state == "stopped" && allow_new) {
+            if has_publications(conn)? && conn.execute(
+                "UPDATE automation_jobs SET state = 'published', retry_at = 0 WHERE review_id = ?1
+                 AND EXISTS (SELECT 1 FROM github_publications WHERE scope = ?2 AND review_id > 0)",
+                params![id, automatic_scope(repo, number, head)],
+            )? != 0 {
+                return Ok(());
+            }
             let url = pr_url(repo, number);
             let prior = conn.query_row(
                 "SELECT status, report FROM reviews WHERE id = ?1 AND provider = ?2 AND url = ?3",
@@ -767,7 +780,7 @@ fn finish_job(
     tx.execute(
         "UPDATE automation_jobs SET state = ?1, retry_at = COALESCE(unixepoch() + ?2, 0),
             analysis_attempts = analysis_attempts + ?3, publish_attempts = publish_attempts + ?4
-         WHERE review_id = ?5 AND state = 'pending'",
+         WHERE review_id = ?5 AND (state = 'pending' OR ?1 = 'published')",
         params![state, wait, analysis, publication, review_id],
     )?;
     if let Some(error) = error {
@@ -1078,11 +1091,14 @@ mod tests {
             |_| Ok(pulls(&[(1, OLD, true)])),
             |report, number, _| {
                 titles.push((number, report.head.clone()));
+                // A Settings change after the POST must not undo confirmed deduplication.
+                save_mode(&conn, REPO, "manual", None)?;
                 Ok(())
             },
         )
         .unwrap();
         assert_eq!(titles, [(1, OLD.to_owned())]);
+        save_mode(&conn, REPO, "summary", Some(TOKEN)).unwrap();
         snapshot(&conn, &[(1, NEW, true)]);
         snapshot(&conn, &[(1, OLD, true)]);
         save_mode(&conn, REPO, "manual", None).unwrap();
