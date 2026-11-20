@@ -6,7 +6,9 @@ mod reads;
 
 pub use reads::read_context;
 
-use crate::contracts::{GitHubRateLimit, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow};
+use crate::contracts::{
+    DiffFile, GitHubRateLimit, PinnedDiff, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow,
+};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use icu_properties::{
@@ -52,7 +54,7 @@ const WINDOWS_PER_FILE: usize = 3;
 const WINDOW_RADIUS: usize = 8;
 const WINDOW_BYTES: usize = 2_000;
 
-fn valid_repo(repo: &str) -> bool {
+pub(crate) fn valid_repo(repo: &str) -> bool {
     let Some((owner, name)) = repo.split_once('/') else {
         return false;
     };
@@ -1494,6 +1496,63 @@ fn collect_context<T: Transport>(
     files
 }
 
+fn stored_diff(changes: &[Change], files: &[SourceFile], total_files: u64) -> PinnedDiff {
+    let patches: HashMap<_, _> = files
+        .iter()
+        .filter(|file| !file.patch.is_empty())
+        .map(|file| (file.path.as_str(), file.patch.as_str()))
+        .collect();
+    let mut changed = HashSet::new();
+    let duplicates: HashSet<_> = changes
+        .iter()
+        .map(|change| change.filename.as_str())
+        .filter(|path| !changed.insert(*path))
+        .collect();
+    let mut seen = HashSet::new();
+    let diff_files = changes
+        .iter()
+        .take(CHANGED_FILES)
+        .filter_map(|change| {
+            let path = change.filename.as_str();
+            if !safe_path(path) || !seen.insert(path) {
+                return None;
+            }
+            let status = match change.status.as_str() {
+                status @ ("added" | "removed" | "modified" | "renamed" | "changed" | "copied") => {
+                    status
+                }
+                _ => "unsupported",
+            };
+            let patch = if duplicates.contains(path) {
+                None
+            } else {
+                patches.get(path).map(|text| (*text).to_owned())
+            };
+            Some(DiffFile {
+                path: path.to_owned(),
+                status: status.to_owned(),
+                previous_path: change
+                    .previous_filename
+                    .as_deref()
+                    .filter(|path| safe_path(path))
+                    .map(str::to_owned),
+                patch,
+            })
+        })
+        .collect();
+    let supporting_paths = files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| safe_path(path) && !changed.contains(path) && seen.insert(*path))
+        .map(str::to_owned)
+        .collect();
+    PinnedDiff {
+        total_files,
+        files: diff_files,
+        supporting_paths,
+    }
+}
+
 fn pinned<T: Transport>(
     hub: &mut GitHub<T>,
     repo: String,
@@ -1672,6 +1731,7 @@ fn pinned<T: Transport>(
     }
     let mut unique = HashSet::new();
     limits.retain(|limit| unique.insert(limit.clone()));
+    let diff = stored_diff(changes, &files, pull.changed_files);
     Ok(Snapshot {
         url: format!("https://github.com/{repo}/pull/{number}"),
         repo,
@@ -1682,6 +1742,7 @@ fn pinned<T: Transport>(
         files,
         head_context,
         limits,
+        diff: Some(diff),
     })
 }
 
@@ -1895,6 +1956,54 @@ mod tests {
         pinned(hub, REPO.into(), 3, &HashSet::from([REPO.to_owned()]))
     }
 
+    #[test]
+    fn persists_pinned_changes_separately_from_supporting_source() {
+        let mut fixture = Fixture::new(vec![
+            change("src/task.rs"),
+            json!({"filename": "assets/sample.bin", "status": "added", "changes": 0}),
+            change("../outside.rs"),
+        ]);
+        fixture.revision(REPO, BASE, &[("src/task.rs", File::Text("old\n"))]);
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[
+                ("src/task.rs", File::Text("new\n")),
+                ("assets/sample.bin", File::Bytes(&[0])),
+                ("README.md", File::Text("The repository contract.\n")),
+            ],
+        );
+        let mut hub = GitHub::new(fixture);
+        let snapshot = snapshot(&mut hub).unwrap();
+        let diff = snapshot.diff.as_ref().unwrap();
+        assert_eq!(diff.total_files, 3);
+        assert_eq!(diff.files.len(), 2);
+        assert_eq!(diff.files[0].path, "src/task.rs");
+        assert_eq!(
+            diff.files[0].patch.as_deref(),
+            Some("@@ -1 +1 @@\n-old\n+new")
+        );
+        assert_eq!(diff.files[1].path, "assets/sample.bin");
+        assert!(diff.files[1].patch.is_none());
+        assert_eq!(diff.supporting_paths, ["README.md"]);
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+
+        let report = crate::review_snapshot(snapshot, |_, data| {
+            assert!(data["snapshot"].get("diff").is_none());
+            if data.get("hypotheses").is_some() {
+                Ok(json!({"complete": true, "assessments": []}))
+            } else {
+                Ok(json!({"complete": true, "hypotheses": []}))
+            }
+        })
+        .unwrap();
+        let saved: crate::contracts::PublishedReport =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        assert!(saved.report.findings.is_empty());
+        assert!(crate::diff::anchor(&saved, "src/task.rs", 1).is_some());
+        assert!(crate::diff::render(&saved).contains("assets/sample.bin"));
+    }
+
     fn context_snapshot(changed: &str) -> Snapshot {
         Snapshot {
             url: format!("https://github.com/{REPO}/pull/3"),
@@ -1911,6 +2020,7 @@ mod tests {
             }],
             head_context: Vec::new(),
             limits: Vec::new(),
+            diff: None,
         }
     }
 

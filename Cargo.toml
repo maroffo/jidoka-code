@@ -21,6 +21,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros","rt-multi-thread","net","time","signal","sync"] }
 url = "2"
 libc = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

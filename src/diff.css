@@ -1,0 +1,40 @@
+.review-diff { margin-block: 28px }
+.review-diff > h2 { margin-bottom: 12px }
+.review-diff > p { margin-bottom: 12px; color: var(--sub) }
+.diff-layout { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 3fr); gap: 16px; align-items: start }
+.diff-nav, .diff-file { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface) }
+.diff-nav ul { list-style: none; padding: 5px }
+.diff-nav a { display: block; padding: 7px 9px; font-size: .8rem; overflow-wrap: anywhere }
+.diff-nav small { display: block; color: var(--sub); font-size: .72rem }
+.diff-content { min-width: 0 }
+.diff-scroll th { white-space: nowrap }
+@media (min-width: 721px) { .diff-nav { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto } }
+.diff-nav a:hover, .diff-nav a:focus-visible { background: color-mix(in srgb, var(--ink) 7%, var(--surface)) }
+.diff-file { scroll-margin-top: 14px }
+.diff-file + .diff-file { margin-top: 14px }
+.diff-file header { padding: 11px 14px; border-bottom: 1px solid var(--line) }
+.diff-file h3 { margin: 0; font-size: .96rem; font-weight: 650; overflow-wrap: anywhere; max-width: none }
+.diff-file header p, .diff-unavailable { color: var(--sub); font-size: .86rem }
+.diff-file header p { margin-top: 4px }
+.diff-unavailable { padding: 12px 14px }
+.diff-scroll { overflow-x: auto }
+.diff-scroll table { width: 100%; border-collapse: collapse; font-size: .8rem }
+.diff-scroll th, .diff-scroll td { padding: 3px 8px; text-align: left; vertical-align: top }
+.diff-scroll thead { background: color-mix(in srgb, var(--ink) 7%, var(--surface)); border-bottom: 1px solid var(--line) }
+.diff-scroll .diff-number { width: 1%; text-align: right; color: var(--sub); font-family: var(--mono); white-space: nowrap }
+.diff-scroll .diff-code { white-space: pre; overflow-wrap: normal }
+.diff-sign { display: inline-block; width: 1.5em; user-select: none; text-align: center; font-family: var(--mono) }
+.diff-added { background: color-mix(in srgb, #459963 17%, var(--surface)) }
+.diff-removed { background: color-mix(in srgb, #ce634d 17%, var(--surface)) }
+.diff-scroll tr:target { outline: 2px solid var(--accent); outline-offset: -2px }
+.diff-gap td { color: var(--sub); background: color-mix(in srgb, var(--ink) 7%, var(--surface)) }
+.diff-findings td { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border-inline-start: 3px solid var(--accent); white-space: normal }
+.diff-findings ul { padding: 6px 10px 6px 24px }
+.diff-findings li + li { margin-top: 6px }
+.diff-supporting { margin-top: 14px }
+.diff-supporting ul { padding: 6px 0 0 20px }
+.diff-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0 }
+@media (max-width: 720px) {
+  .diff-layout { grid-template-columns: 1fr }
+  .diff-nav ul { max-height: 15rem; overflow-y: auto }
+}

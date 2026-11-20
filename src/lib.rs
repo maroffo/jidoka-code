@@ -1,7 +1,10 @@
+pub mod automation;
 pub mod contracts;
+pub mod diff;
 pub mod engine;
 pub(crate) mod hunks;
 pub mod provider;
+pub mod publish;
 pub mod scanner;
 pub mod source;
 pub mod web;
@@ -38,6 +41,7 @@ pub fn review_snapshot_with_context(
         head: snapshot.head,
         report,
         scan: Some(scan),
+        diff: snapshot.diff,
         patch_files: Some(
             snapshot
                 .files

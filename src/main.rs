@@ -100,7 +100,14 @@ async fn supervise(
 }
 
 fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mpsc::Receiver<()>) {
+    let mut next_poll = Instant::now();
     while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+        if Instant::now() >= next_poll {
+            if jidoka_code::automation::tick(db, provider.label(), repositories).is_err() {
+                eprintln!("Could not complete repository polling");
+            }
+            next_poll = Instant::now() + Duration::from_secs(60);
+        }
         let result = web::run_one(db, |url| {
             let snapshot = source::collect(url, repositories)?;
             let prior = web::previous_findings(db, provider.label(), &snapshot)?;

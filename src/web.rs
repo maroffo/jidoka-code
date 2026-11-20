@@ -1,5 +1,7 @@
 //! Review pages and the persistent, single-user work queue.
 
+mod workflow;
+
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
@@ -25,7 +27,7 @@ use sha2::Sha256;
 
 use crate::{
     contracts::{Attribution, Finding, GitHubRateLimit, PublishedReport, Scan, Snapshot},
-    source::safe_path,
+    source::{safe_path, valid_repo},
 };
 
 const FAILED: &str =
@@ -156,7 +158,10 @@ where
 }
 
 pub fn router(db: &Path, provider: &str, allowed_repos: &HashSet<String>) -> Result<Router> {
-    init_db(&connect(db)?)?;
+    let connection = connect(db)?;
+    init_db(&connection)?;
+    crate::automation::init(&connection)?;
+    crate::automation::bind_provider(&connection, provider)?;
     let state = Arc::new(WebState {
         db: db.to_owned(),
         provider: provider.to_owned(),
@@ -169,6 +174,22 @@ pub fn router(db: &Path, provider: &str, allowed_repos: &HashSet<String>) -> Res
     Ok(Router::new()
         .route("/", get(home).post(submit))
         .route("/reviews/{id}", get(review))
+        .route(
+            "/reviews/{id}/diff",
+            axum::routing::post(workflow::load_diff),
+        )
+        .route(
+            "/reviews/{id}/submit",
+            get(workflow::compose).post(workflow::preview),
+        )
+        .route(
+            "/reviews/{id}/publish",
+            axum::routing::post(workflow::publish),
+        )
+        .route(
+            "/repositories",
+            get(workflow::settings).post(workflow::save_settings),
+        )
         .fallback(|| async { not_found() })
         .method_not_allowed_fallback(|| async {
             error_page(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.")
@@ -299,23 +320,6 @@ fn form_token(secret: &[u8; 32], cookie: &str) -> String {
     hex::encode(token_mac(secret, cookie).finalize().into_bytes())
 }
 
-fn valid_repo(repo: &str) -> bool {
-    let Some((owner, name)) = repo.split_once('/') else {
-        return false;
-    };
-    let owner = owner.as_bytes();
-    (1..=39).contains(&owner.len())
-        && owner[0].is_ascii_alphanumeric()
-        && owner
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
-        && (1..=100).contains(&name.len())
-        && !matches!(name, "." | "..")
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
-}
-
 fn parse_pull_url(value: &str) -> Option<(&str, &str)> {
     let value = value.trim();
     if value.len() > 2048
@@ -349,14 +353,37 @@ fn canonical_pull_url(repo: &str, number: &str) -> String {
     format!("https://github.com/{repo}/pull/{number}")
 }
 
+struct PageError(StatusCode, String);
+
+impl PageError {
+    fn new(status: StatusCode, message: &str) -> Self {
+        Self(status, message.to_owned())
+    }
+    fn missing() -> Self {
+        Self::new(StatusCode::NOT_FOUND, "Page not found.")
+    }
+}
+
+impl IntoResponse for PageError {
+    fn into_response(self) -> Response {
+        error_page(self.0, &self.1)
+    }
+}
+
+impl From<StorageError> for PageError {
+    fn from(_: StorageError) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not access reviews. Try again.",
+        )
+    }
+}
+
 struct StorageError;
 
 impl IntoResponse for StorageError {
     fn into_response(self) -> Response {
-        error_page(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not access reviews. Try again.",
-        )
+        PageError::from(self).into_response()
     }
 }
 
@@ -375,30 +402,38 @@ async fn home(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Result<Response, StorageError> {
-    let existing = csrf_cookie(&headers);
-    let cookie = match existing {
-        Some(cookie) => cookie.to_owned(),
-        None => URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>()),
-    };
-    let token = form_token(&state.secret, &cookie);
+    let (token, cookie) = page_token(&state, &headers);
     let html = home_page(&state, &token, "", "").await?;
-    let mut response = Html(html).into_response();
-    if existing.is_none() {
-        let cookie = format!("{CSRF_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict");
-        response
-            .headers_mut()
-            .insert(header::SET_COOKIE, cookie.parse().unwrap());
-    }
-    Ok(response)
+    Ok(form_page(html, cookie))
 }
 
-async fn submit(
-    State(state): State<Arc<WebState>>,
+fn page_token(state: &WebState, headers: &HeaderMap) -> (String, Option<String>) {
+    if let Some(cookie) = csrf_cookie(headers) {
+        return (form_token(&state.secret, cookie), None);
+    }
+    let cookie = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+    (form_token(&state.secret, &cookie), Some(cookie))
+}
+
+fn form_page(html: String, cookie: Option<String>) -> Response {
+    let mut response = Html(html).into_response();
+    if let Some(cookie) = cookie {
+        let value = format!("{CSRF_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict");
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, value.parse().unwrap());
+    }
+    response
+}
+
+async fn checked_form(
+    state: &WebState,
     request: Request,
-) -> Result<Response, StorageError> {
+    max_fields: usize,
+) -> Result<HashMap<String, String>, PageError> {
     let Some(cookie) = csrf_cookie(request.headers()).filter(|_| same_origin(request.headers()))
     else {
-        return Ok(error_page(StatusCode::FORBIDDEN, FORBIDDEN));
+        return Err(PageError::new(StatusCode::FORBIDDEN, FORBIDDEN));
     };
     let mac = token_mac(&state.secret, cookie);
     let content_type = single_header(request.headers(), "content-type")
@@ -412,26 +447,42 @@ async fn submit(
             .trim()
             .eq_ignore_ascii_case("application/x-www-form-urlencoded")
     }) {
-        return Ok(error_page(StatusCode::UNSUPPORTED_MEDIA_TYPE, BAD_FORM));
+        return Err(PageError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, BAD_FORM));
     }
     let Ok(body) = to_bytes(request.into_body(), FORM_LIMIT).await else {
-        return Ok(error_page(StatusCode::PAYLOAD_TOO_LARGE, BAD_FORM));
+        return Err(PageError::new(StatusCode::PAYLOAD_TOO_LARGE, BAD_FORM));
     };
     if std::str::from_utf8(&body).is_err() {
-        return Ok(error_page(StatusCode::BAD_REQUEST, BAD_FORM));
+        return Err(PageError::new(StatusCode::BAD_REQUEST, BAD_FORM));
     }
     let mut fields = HashMap::new();
     for (name, value) in url::form_urlencoded::parse(&body) {
-        if fields.len() == 8 || fields.insert(name, value).is_some() {
-            return Ok(error_page(StatusCode::BAD_REQUEST, BAD_FORM));
+        if fields.len() == max_fields
+            || fields
+                .insert(name.into_owned(), value.into_owned())
+                .is_some()
+        {
+            return Err(PageError::new(StatusCode::BAD_REQUEST, BAD_FORM));
         }
     }
     let token = fields.get("csrf_token").map_or("", |value| value.as_ref());
     let form_csrf = hex::decode(token).ok();
     if !form_csrf.is_some_and(|value| mac.verify_slice(&value).is_ok()) {
-        return Ok(error_page(StatusCode::FORBIDDEN, FORBIDDEN));
+        return Err(PageError::new(StatusCode::FORBIDDEN, FORBIDDEN));
     }
 
+    Ok(fields)
+}
+
+async fn submit(
+    State(state): State<Arc<WebState>>,
+    request: Request,
+) -> Result<Response, StorageError> {
+    let fields = match checked_form(&state, request, 8).await {
+        Ok(fields) => fields,
+        Err(error) => return Ok(error.into_response()),
+    };
+    let token = &fields["csrf_token"];
     let value = fields.get("url").map_or("", |value| value.as_ref());
     let consent = fields.get("consent").is_some_and(|value| value == "yes");
     let message = match (consent, parse_pull_url(value)) {
@@ -471,6 +522,7 @@ async fn submit(
 async fn review(
     State(state): State<Arc<WebState>>,
     RoutePath(id): RoutePath<String>,
+    headers: HeaderMap,
 ) -> Result<Response, StorageError> {
     let Ok(id) = id.parse::<i64>() else {
         return Ok(not_found());
@@ -478,6 +530,7 @@ async fn review(
     if id <= 0 {
         return Ok(not_found());
     }
+    let (token, cookie) = page_token(&state, &headers);
     let html = with_db(&state, move |connection| {
         connection.query_row(
             "SELECT url, provider, status, created_at, report, error FROM reviews WHERE id = ?1",
@@ -485,14 +538,14 @@ async fn review(
             |row| {
                 let raw_report: Option<String> = row.get(4)?;
                 let error: Option<String> = row.get(5)?;
-                Ok(review_page(id, &row.get::<_, String>(0)?, &row.get::<_, String>(1)?,
+                Ok(review_page((id, &token), &row.get::<_, String>(0)?, &row.get::<_, String>(1)?,
                     &row.get::<_, String>(2)?, &row.get::<_, String>(3)?,
                     raw_report.as_deref(), error.as_deref()))
             },
         ).optional()
     })
     .await?;
-    Ok(html.map_or_else(not_found, |page| Html(page).into_response()))
+    Ok(html.map_or_else(not_found, |html| form_page(html, cookie)))
 }
 
 fn status_label(status: &str) -> &str {
@@ -524,14 +577,15 @@ fn page(title: &str, body: &str) -> String {
     format!(
         r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{} · Jidoka Code</title><style>{}</style></head>
+<title>{} · Jidoka Code</title><style>{}{}</style></head>
 <body><a class="skip" href="#main">Skip to content</a>
 <header class="mast"><nav class="wrap nav" aria-label="Main navigation">
 <a class="brand" href="/"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>Jidoka<span class="brand-code">Code</span></a>
-<a class="nav-history" href="/#history">Review history</a><a class="nav-new" href="/#new-review"><span aria-hidden="true">+</span> New review</a>
+<a class="nav-history" href="/#history">Review history</a><a class="nav-settings" href="/repositories">Repositories</a><a class="nav-new" href="/#new-review"><span aria-hidden="true">+</span> New review</a>
 </nav></header><main class="wrap" id="main">{body}</main></body></html>"##,
         escape(title),
-        include_str!("review.css")
+        include_str!("review.css"),
+        include_str!("diff.css")
     )
 }
 
@@ -653,7 +707,14 @@ fn text_list<'a>(values: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 fn position(report: &PublishedReport, path: &str, line: usize) -> String {
-    source_link(report, &report.head, path, line)
+    match crate::diff::anchor(report, path, line) {
+        Some(anchor) => format!(
+            r##"<a href="#{}">{}, line {line}</a>"##,
+            escape(&anchor),
+            escape(path)
+        ),
+        None => source_link(report, &report.head, path, line),
+    }
 }
 
 fn source_link(report: &PublishedReport, head: &str, path: &str, line: usize) -> String {
@@ -918,7 +979,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
 }
 
 fn review_page(
-    id: i64,
+    (id, token): (i64, &str),
     url: &str,
     provider: &str,
     status: &str,
@@ -946,7 +1007,21 @@ fn review_page(
         ),
         "completed" | "partial" => {
             match raw_report.and_then(|raw| serde_json::from_str::<PublishedReport>(raw).ok()) {
-                Some(report) => (status, report_html(&report, status == "partial")),
+                Some(report) => {
+                    let load = if crate::diff::available(&report) {
+                        String::new()
+                    } else {
+                        format!(
+                            r#"<form method="post" class="archive" action="/reviews/{id}/diff"><input type="hidden" name="csrf_token" value="{token}"><button>Load reviewed diff from GitHub</button></form>"#
+                        )
+                    };
+                    let details = format!(
+                        r##"<nav class="review-tools" aria-label="Review actions"><a href="#review-diff">View diff</a><a class="primary-link" href="/reviews/{id}/submit">Submit review</a></nav>{}{}{load}"##,
+                        report_html(&report, status == "partial"),
+                        crate::diff::render(&report)
+                    );
+                    (status, details)
+                }
                 None => ("failed", failure_html(None)),
             }
         }
@@ -1133,6 +1208,80 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn github_review_preview_binds_the_event_and_selected_findings() {
+        let f = Fixture::new();
+        let path = f.enqueue(URL).await;
+        let mut r = report(None);
+        for title in ["First selected finding", "Second unselected finding"] {
+            r.report.findings.push(Finding {
+                title: title.into(),
+                path: "readme.md".into(),
+                line: 1,
+                impact: "An operation fails.".into(),
+                evidence: "A fixture confirms the failure.".into(),
+                attribution: Attribution::Introduced,
+            });
+        }
+        run_one(&f.db, |_| Ok(r)).unwrap();
+        let edit = format!("{path}/submit");
+        assert!(f.get(&edit).await.contains("Preview review"));
+        let (cookie, token) = f.form().await;
+        let headers = [
+            ("cookie", cookie.as_str()),
+            ("origin", ORIGIN),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ];
+        let body = format!("csrf_token={token}&event=COMMENT&finding-0=yes");
+        let (status, _, preview) = f.request(Method::POST, &edit, &headers, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert!(preview.contains("First selected finding"));
+        assert!(!preview.contains("Second unselected finding"));
+        let signature = preview
+            .split_once("name=\"preview\" value=\"")
+            .unwrap()
+            .1
+            .split('"')
+            .next()
+            .unwrap();
+        let publish = format!("{path}/publish");
+        for fields in [
+            body.clone(),
+            format!("csrf_token={token}&event=APPROVE&finding-0=yes&preview={signature}"),
+            format!("{body}&finding-1=yes&preview={signature}"),
+        ] {
+            let (status, _, _) = f.request(Method::POST, &publish, &headers, fields).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+        }
+        let (status, _, _) = f.request(Method::POST, &publish, &[], body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn repository_forms_default_to_manual_and_enforce_the_allowlist() {
+        let f = Fixture::new();
+        let (cookie, token) = f.form().await;
+        let html = f.get("/repositories").await;
+        assert!(html.contains("value=\"manual\" selected"));
+        let headers = [
+            ("cookie", cookie.as_str()),
+            ("origin", ORIGIN),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ];
+        for (repo, status) in [
+            ("test/demo", StatusCode::SEE_OTHER),
+            ("outside/other", StatusCode::NOT_FOUND),
+        ] {
+            let body = format!("csrf_token={token}&repo={repo}&mode=manual");
+            assert_eq!(
+                f.request(Method::POST, "/repositories", &headers, body)
+                    .await
+                    .0,
+                status
+            );
+        }
+    }
+
     fn form_body(token: &str, url: &str, consent: Option<&str>) -> String {
         let mut body = url::form_urlencoded::Serializer::new(String::new());
         body.append_pair("csrf_token", token)
@@ -1154,6 +1303,7 @@ mod tests {
             head: "b".repeat(40),
             report: Report::default(),
             patch_files: None,
+            diff: None,
             scan,
         }
     }
@@ -1172,6 +1322,7 @@ mod tests {
             files: vec![],
             head_context: vec![],
             limits: vec![],
+            diff: None,
         };
         for (url, provider, base, head, title) in [
             (

@@ -1,6 +1,6 @@
 use axum::{Json, Router, routing::post};
 use jidoka_code::{
-    contracts::{Snapshot, SourceFile},
+    contracts::{DiffFile, PinnedDiff, Snapshot, SourceFile},
     provider::Provider,
     review_snapshot, web,
 };
@@ -51,6 +51,17 @@ async fn check_service_restart(scan_limited: bool) {
         .unwrap();
     let mut snapshot: Snapshot = serde_json::from_value(case["snapshot"].clone()).unwrap();
     snapshot.files[0].patch.insert_str(0, "@@ -2 +2 @@\n");
+    let changed = &snapshot.files[0];
+    snapshot.diff = Some(PinnedDiff {
+        total_files: 1,
+        files: vec![DiffFile {
+            path: changed.path.clone(),
+            status: "modified".into(),
+            previous_path: None,
+            patch: Some(changed.patch.clone()),
+        }],
+        supporting_paths: vec![],
+    });
     let scanner_limit = "File fixtures/oversized.py exceeds scan limits.";
     if scan_limited {
         // The scanner rejects this input before looking for an installed executable.
@@ -172,6 +183,7 @@ async fn check_service_restart(scan_limited: bool) {
     let expected_status = if scan_limited { "Partial" } else { "Completed" };
     for text in [
         "Where to focus",
+        "diff-file-1-head-2",
         "Files supplied with a patch (1)",
         "api/capacity.go",
         focus_action,

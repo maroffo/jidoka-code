@@ -27,6 +27,24 @@ pub struct SourceWindow {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiffFile {
+    pub path: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PinnedDiff {
+    pub total_files: u64,
+    pub files: Vec<DiffFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supporting_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub url: String,
     pub repo: String,
@@ -38,6 +56,8 @@ pub struct Snapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub head_context: Vec<SourceWindow>,
     pub limits: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<PinnedDiff>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Signal {
@@ -94,6 +114,8 @@ pub struct PublishedReport {
     pub scan: Option<Scan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<PinnedDiff>,
 }
 
 /// Safe, operator-facing reason when GitHub's public API quota is exhausted.

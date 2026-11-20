@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A maintainer submits a GitHub pull request and uses the report to decide which lines to read before merging. The pilot runs locally in Docker for one maintainer and keeps reviews on a volume. It reads the code without changing the PR or posting comments.
+A maintainer submits a GitHub pull request and uses the report to decide which lines to read before merging. The pilot runs locally in Docker for one maintainer and keeps reviews on a volume. The operator can inspect the diff, preview a review and submit it to GitHub. Repositories start in manual mode.
 
 ## Reviewer experience
 
@@ -15,6 +15,8 @@ New reports use English for findings, coverage limits, and manual review guidanc
 The first section, **Where to focus**, gives up to three priorities ordered by impact. Each item links to a line at the reviewed revision, describes what was checked and its outcome, and gives the reviewer a specific action or product question. An item can matter even when a technical check passes. For example, the code may guarantee consistency after an import finishes, while the maintainer must decide whether consistency is also required during the import. Omit vague questions and questions the available evidence already answers.
 
 Each verified finding that matches a review priority appears with its impact, reviewer action and expandable evidence. Other findings follow. The review summary links to coverage details, and the history shows the finding count for each saved report. The report lists the files supplied with patches so the maintainer can compare the review scope with the PR. A change in a large file can be reviewed from its patch even when the full file does not fit. Additional context is sampled within the collection budget. This includes nearby lines, other uses of changed functions, and small local JavaScript or TypeScript modules imported by the changed code. The report distinguishes a completed review with zero findings, a partial review, and a failed review.
+
+The diff retains the reviewed revisions. A reviewer can select verified findings and submit one comment, approval, or change request. The preview shows the exact summary and inline comments. Findings outside the available diff go in the summary. Per-repository automation can post summaries with optional inline comments on changes to ready pull requests. Only an operator can approve or request changes.
 
 ## Review method
 
@@ -38,4 +40,4 @@ The engine reviews text changes in any language or framework and follows contrac
 - Test the web flow from submission through reporting. Cover reviews with zero findings, partial reviews, invalid input, invented evidence, a missing secret, and a restart. Identify checks that use controlled services and those that use real services.
 - Evaluate ten authorized historical PRs, five with known regressions and five controls. Exclude later fixes and discussions from the inputs. Compare with the same model reviewing only the diff. Track confirmed issues, false alarms, time, cost, and manual review prompts that change a decision. Use the sample to guide the pilot. It is too small to estimate general accuracy.
 
-Report signing, merge scores, automated fixes, execution of untrusted code, publishing to GitHub, and multi-user access are outside the pilot's scope.
+Report signing, merge scores, automated fixes, execution of untrusted code, and multi-user access are outside the pilot's scope.
