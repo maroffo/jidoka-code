@@ -218,8 +218,7 @@ pub fn last_error(conn: &Connection, repo: &str) -> rusqlite::Result<Option<Stri
 }
 
 pub fn set_mode(conn: &Connection, repo: &str, mode: &str) -> Result<()> {
-    let token = env::var("JIDOKA_BOT_TOKEN").ok();
-    save_mode(conn, repo, mode, token.as_deref().map(str::trim))
+    save_mode(conn, repo, mode, bot_token().as_deref())
 }
 
 fn save_mode(conn: &Connection, repo: &str, mode: &str, token: Option<&str>) -> Result<()> {
@@ -291,12 +290,19 @@ fn valid_token(token: &str) -> bool {
     !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-fn github_client() -> Result<Client> {
-    let token = env::var("JIDOKA_BOT_TOKEN")
+fn bot_token() -> Option<String> {
+    env::var("JIDOKA_BOT_TOKEN")
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|token| valid_token(token))
-        .context(BOT_TOKEN_REQUIRED)?;
+}
+
+pub(crate) fn bot_configured() -> bool {
+    bot_token().is_some()
+}
+
+fn github_client() -> Result<Client> {
+    let token = bot_token().context(BOT_TOKEN_REQUIRED)?;
     let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
         .context("JIDOKA_BOT_TOKEN is not valid for GitHub requests.")?;
     auth.set_sensitive(true);

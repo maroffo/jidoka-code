@@ -112,3 +112,7 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 .markdown-preview { margin: 10px 0 18px; padding: 14px 18px; border-left: 3px solid var(--line); background: var(--canvas) }
 .markdown-preview h2 { font-size: 1rem }.markdown-preview ul { padding-left: 20px }.markdown-preview p + p { margin-top: 8px }
 .markdown-preview pre { background: var(--surface); margin-bottom: 0 }
+.setup-help { max-width: 760px; margin: -10px 0 20px; color: var(--sub); font-size: .875rem }
+.setup-help summary { display: list-item; width: fit-content; color: inherit; font: inherit; padding: 4px 0 }
+.setup-help summary::-webkit-details-marker { display: inline }.setup-help summary::after { content: none }
+.setup-help p { margin-top: 4px }

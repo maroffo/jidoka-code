@@ -246,10 +246,18 @@ pub(super) async fn settings(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
 ) -> Result<Response, StorageError> {
-    let (token, cookie) = page_token(&state, &headers);
+    settings_page(&state, &headers, false).await
+}
+
+async fn settings_page(
+    state: &WebState,
+    headers: &HeaderMap,
+    show_setup: bool,
+) -> Result<Response, StorageError> {
+    let (token, cookie) = page_token(state, headers);
     let mut repos: Vec<_> = state.allowed_repos.iter().cloned().collect();
     repos.sort();
-    let rows = with_db(&state, move |c| {
+    let rows = with_db(state, move |c| {
         repos
             .into_iter()
             .map(|repo| {
@@ -266,22 +274,23 @@ pub(super) async fn settings(
         r#"<div class="hero"><h1>Repositories</h1></div><div class="settings-intro"><p>Automatic reviews send new PR changes to {} and post a GitHub review as the configured bot. Existing open PRs enter the queue on their next update.</p></div>"#,
         escape(&state.provider)
     );
-    if std::env::var("JIDOKA_BOT_TOKEN")
-        .unwrap_or_default()
-        .trim()
-        .is_empty()
-    {
-        html.push_str(
-            "<p class=warning>Set JIDOKA_BOT_TOKEN on the service to enable automatic reviews.</p>",
-        );
+    let bot_configured = automation::bot_configured();
+    if !bot_configured {
+        let open = if show_setup { " open" } else { "" };
+        write!(html, r#"<details class="setup-help"{open}><summary>Set up automatic GitHub reviews</summary><p>Manual reviews are available. To let a bot post reviews automatically, set <code>JIDOKA_BOT_TOKEN</code> to its GitHub token with pull request write access and recreate the container.</p></details>"#).unwrap();
     }
     for (mode, error, repo) in rows {
         write!(html,r#"<form class="panel workflow" method="post" action="/repositories"><input type="hidden" name="csrf_token" value="{token}"><input type="hidden" name="repo" value="{}"><h2>{}</h2><label>Review mode <select name="mode">"#,escape(&repo),escape(&repo)).unwrap();
         for (value, label) in MODES {
             let selected = if mode == value { " selected" } else { "" };
+            let disabled = if !bot_configured && value != "manual" && mode != value {
+                " disabled"
+            } else {
+                ""
+            };
             write!(
                 html,
-                r#"<option value="{value}"{selected}>{label}</option>"#
+                r#"<option value="{value}"{selected}{disabled}>{label}</option>"#
             )
             .unwrap();
         }
@@ -298,6 +307,7 @@ pub(super) async fn save_settings(
     State(state): State<Arc<WebState>>,
     request: Request,
 ) -> Result<Response, PageError> {
+    let headers = request.headers().clone();
     let fields = checked_form(&state, request, 3).await?;
     let repo = fields
         .get("repo")
@@ -309,6 +319,11 @@ pub(super) async fn save_settings(
         .filter(|s| MODES.iter().any(|(v, _)| v == s))
         .cloned()
         .ok_or_else(|| PageError::new(StatusCode::BAD_REQUEST, BAD_FORM))?;
+    if mode != "manual" && !automation::bot_configured() {
+        let mut response = settings_page(&state, &headers, true).await?;
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return Ok(response);
+    }
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || automation::set_mode(&connect(&db)?, &repo, &mode))
         .await
