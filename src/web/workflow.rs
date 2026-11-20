@@ -276,6 +276,9 @@ async fn settings_page(
     );
     let bot_configured = automation::bot_configured();
     if !bot_configured {
+        if show_setup {
+            html.push_str(r#"<p class="settings-feedback" role="alert">Mode change could not be saved. Automatic reviews need a GitHub bot token.</p>"#);
+        }
         let open = if show_setup { " open" } else { "" };
         write!(html, r#"<details class="setup-help"{open}><summary>Set up automatic GitHub reviews</summary><p>Manual reviews are available. To let a bot post reviews automatically, set <code>JIDOKA_BOT_TOKEN</code> to its GitHub token with pull request write access and recreate the container.</p></details>"#).unwrap();
     }
