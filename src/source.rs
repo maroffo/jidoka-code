@@ -7,7 +7,12 @@ use icu_properties::{
     CodePointMapData,
     props::{GeneralCategory, GeneralCategoryGroup},
 };
-use reqwest::{StatusCode, blocking::Client, header::HeaderValue, redirect::Policy};
+use reqwest::{
+    StatusCode,
+    blocking::Client,
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+    redirect::Policy,
+};
 use serde::{Deserialize, de::DeserializeOwned};
 use sha1::{Digest, Sha1};
 use std::{
@@ -266,11 +271,15 @@ struct Revision {
 }
 
 impl Revision {
-    fn validate(&mut self) -> Result<()> {
+    fn validate(&mut self, allowed: &HashSet<String>) -> Result<()> {
         sha(&self.sha)?;
+        ensure!(valid_repo(&self.repo.full_name), "Invalid repository name.");
         ensure!(
-            !self.repo.private && valid_repo(&self.repo.full_name),
-            "The repository must be public."
+            !self.repo.private
+                || allowed
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&self.repo.full_name)),
+            "Private repository is not on the allowlist."
         );
         self.repo.full_name.make_ascii_lowercase();
         Ok(())
@@ -288,9 +297,9 @@ struct Pull {
 }
 
 impl Pull {
-    fn validate(&mut self, repo: &str, number: u64) -> Result<()> {
-        self.base.validate()?;
-        self.head.validate()?;
+    fn validate(&mut self, repo: &str, number: u64, allowed: &HashSet<String>) -> Result<()> {
+        self.base.validate(allowed)?;
+        self.head.validate(allowed)?;
         ensure!(
             self.number == number && self.base.repo.full_name == repo,
             "Unexpected pull request."
@@ -931,10 +940,15 @@ fn append_context<T: Transport>(
     }
 }
 
-fn pinned<T: Transport>(hub: &mut GitHub<T>, repo: String, number: u64) -> Result<Snapshot> {
+fn pinned<T: Transport>(
+    hub: &mut GitHub<T>,
+    repo: String,
+    number: u64,
+    allowed: &HashSet<String>,
+) -> Result<Snapshot> {
     let pull_route = format!("{repo}/pulls/{number}");
     let mut pull: Pull = hub.get(&pull_route, PULL_BYTES, false)?;
-    pull.validate(&repo, number)?;
+    pull.validate(&repo, number, allowed)?;
     let head_ref = if pull.head.repo.full_name == repo {
         pull.head.sha.clone()
     } else {
@@ -1031,7 +1045,7 @@ fn pinned<T: Transport>(hub: &mut GitHub<T>, repo: String, number: u64) -> Resul
         &mut limits,
     );
     let mut final_pull: Pull = hub.get(&pull_route, PULL_BYTES, true)?;
-    final_pull.validate(&repo, number)?;
+    final_pull.validate(&repo, number, allowed)?;
     if !pull.same_revisions(&final_pull) {
         bail!("The pull request changed during collection. Submit it again.");
     }
@@ -1051,14 +1065,23 @@ fn pinned<T: Transport>(hub: &mut GitHub<T>, repo: String, number: u64) -> Resul
 
 pub fn collect(url: &str, allowed: &HashSet<String>) -> Result<Snapshot> {
     let (repo, number) = pull_url(url, allowed)?;
+    let mut headers = HeaderMap::new();
+    if let Some(token) = std::env::var_os("JIDOKA_GITHUB_TOKEN").filter(|value| !value.is_empty()) {
+        let token = token.to_str().context("Invalid GitHub token")?;
+        let mut value =
+            HeaderValue::from_str(&format!("Bearer {token}")).context("Invalid GitHub token")?;
+        value.set_sensitive(true);
+        headers.insert(AUTHORIZATION, value);
+    }
     let client = Client::builder()
+        .default_headers(headers)
         .redirect(Policy::none())
         .no_proxy()
         .https_only(true)
         .connect_timeout(REQUEST_TIME)
         .user_agent("jidoka-review")
         .build()?;
-    pinned(&mut GitHub::new(Http(client)), repo, number)
+    pinned(&mut GitHub::new(Http(client)), repo, number, allowed)
 }
 
 #[cfg(test)]
@@ -1230,7 +1253,7 @@ mod tests {
     }
 
     fn snapshot(hub: &mut GitHub<Fixture>) -> Result<Snapshot> {
-        pinned(hub, REPO.into(), 3)
+        pinned(hub, REPO.into(), 3, &HashSet::from([REPO.to_owned()]))
     }
 
     #[test]
@@ -1476,6 +1499,19 @@ mod tests {
         let mut hub = GitHub::new(fixture);
         assert!(snapshot(&mut hub).is_err());
         assert_eq!(hub.transport.requests, [PULL]);
+    }
+
+    #[test]
+    fn accepts_private_revisions_only_for_approved_repositories() {
+        let allowed = HashSet::from([REPO.to_owned(), FORK.to_ascii_uppercase()]);
+        for head in [REPO, FORK] {
+            let mut data = pull(HEAD, 1);
+            data["base"]["repo"]["private"] = json!(true);
+            data["head"]["repo"] = json!({"full_name": head, "private":true});
+            let mut pr: Pull = serde_json::from_value(data).unwrap();
+            pr.validate(REPO, 3, &allowed).unwrap();
+            assert!(pr.validate(REPO, 3, &HashSet::new()).is_err());
+        }
     }
 
     #[test]

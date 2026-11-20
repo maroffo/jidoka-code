@@ -2,11 +2,11 @@
 
 ## Purpose
 
-A maintainer submits a public GitHub pull request and uses the report to decide which lines to read before merging. The pilot runs locally in Docker for one maintainer and keeps reviews on a volume. It reads the code without changing the PR or posting comments.
+A maintainer submits a GitHub pull request and uses the report to decide which lines to read before merging. The pilot runs locally in Docker for one maintainer and keeps reviews on a volume. It reads the code without changing the PR or posting comments.
 
 ## Reviewer experience
 
-The home page accepts a PR URL and shows the review history. Before submission, it identifies the provider that will receive the code and asks the reviewer to confirm. The operator configures the provider and the allowed public repositories. The service listens on the loopback interface for one trusted user.
+The home page accepts a PR URL and shows the review history. Before submission, it identifies the provider that will receive the code and asks the reviewer to confirm. The operator configures the provider and the allowed repositories. For private repositories the service reads GitHub with a separately configured token. The service listens on the loopback interface for one trusted user.
 
 Each review has a stable URL and a visible state (queued, running, complete, partial, or failed). The report identifies the base and head revisions actually reviewed. A new review is needed after the PR changes. History remains available after a restart.
 

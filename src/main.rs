@@ -30,10 +30,7 @@ fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase)
         .collect();
-    ensure!(
-        !repositories.is_empty(),
-        "Specify at least one public repository"
-    );
+    ensure!(!repositories.is_empty(), "Specify at least one repository");
     let db = PathBuf::from(env::var("JIDOKA_DB").unwrap_or_else(|_| "data/reviews.sqlite3".into()));
     if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
