@@ -1,0 +1,263 @@
+[
+  {
+    "name": "go-sql-typescript",
+    "snapshot": {
+      "url": "https://github.com/example/demo/pull/1",
+      "repo": "example/demo",
+      "number": 1,
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "intent": [
+        "Preservare la capacità disponibile"
+      ],
+      "limits": [],
+      "files": [
+        {
+          "path": "api/capacity.go",
+          "before": "func Capacity(slots int) int {\n    return slots\n}",
+          "after": "func Capacity(slots int) int {\n    return slots - 1\n}",
+          "patch": "-    return slots\n+    return slots - 1"
+        },
+        {
+          "path": "db/schema.sql",
+          "before": "SELECT slots AS usable_capacity FROM quotas;",
+          "after": "SELECT slots AS usable_capacity FROM quotas;",
+          "patch": ""
+        },
+        {
+          "path": "client/capacity.ts",
+          "before": "export const isFull = (usable_capacity: number) => usable_capacity === 0;",
+          "after": "export const isFull = (usable_capacity: number) => usable_capacity === 0;",
+          "patch": ""
+        }
+      ]
+    },
+    "scan": {
+      "covered": [],
+      "signals": [],
+      "limits": [],
+      "version": ""
+    },
+    "replies": [
+      {
+        "complete": true,
+        "hypotheses": [
+          {
+            "anchor": {
+              "path": "api/capacity.go",
+              "line": 2,
+              "quote": "    return slots - 1"
+            },
+            "expected": "Mantenere la capacità configurata.",
+            "scenario": "Il chiamante configura un solo slot.",
+            "consequence": "La cache indica zero slot disponibili."
+          }
+        ]
+      },
+      {
+        "complete": true,
+        "assessments": [
+          {
+            "id": 1,
+            "outcome": "confirmed",
+            "countercheck": "La funzione non applica un minimo prima di restituire il conteggio.",
+            "kind": "contract",
+            "basis": {
+              "path": "db/schema.sql",
+              "line": 1,
+              "quote": "SELECT slots AS usable_capacity FROM quotas;"
+            },
+            "support": [
+              {
+                "path": "client/capacity.ts",
+                "line": 1,
+                "quote": "export const isFull = (usable_capacity: number) => usable_capacity === 0;"
+              }
+            ],
+            "severity": "high",
+            "title": "La capacità perde uno slot configurato",
+            "impact": "Una cache con un solo slot indica capacità zero.",
+            "reason": "Il valore restituito è inferiore di uno al conteggio configurato.",
+            "action": "Verifica se una cache con un solo slot può accettare una voce prima del merge.",
+            "comparison": {
+              "behavior": {
+                "path": "api/capacity.go",
+                "line": 2,
+                "quote": "    return slots"
+              },
+              "basis": {
+                "path": "db/schema.sql",
+                "line": 1,
+                "quote": "SELECT slots AS usable_capacity FROM quotas;"
+              },
+              "affected": false
+            }
+          }
+        ]
+      }
+    ],
+    "expected": {
+      "findings": [
+        [
+          "api/capacity.go",
+          2,
+          "introduced"
+        ]
+      ],
+      "focus": [
+        [
+          "api/capacity.go",
+          2,
+          "Verifica se una cache con un solo slot può accettare una voce prima del merge."
+        ]
+      ],
+      "partial": false
+    }
+  },
+  {
+    "name": "invented-citation",
+    "snapshot": {
+      "url": "https://github.com/example/demo/pull/1",
+      "repo": "example/demo",
+      "number": 1,
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "intent": [
+        "Preservare la capacità disponibile"
+      ],
+      "limits": [],
+      "files": [
+        {
+          "path": "api/capacity.go",
+          "before": "func Capacity(slots int) int {\n    return slots\n}",
+          "after": "func Capacity(slots int) int {\n    return slots - 1\n}",
+          "patch": "-    return slots\n+    return slots - 1"
+        },
+        {
+          "path": "db/schema.sql",
+          "before": "SELECT slots AS usable_capacity FROM quotas;",
+          "after": "SELECT slots AS usable_capacity FROM quotas;",
+          "patch": ""
+        },
+        {
+          "path": "client/capacity.ts",
+          "before": "export const isFull = (usable_capacity: number) => usable_capacity === 0;",
+          "after": "export const isFull = (usable_capacity: number) => usable_capacity === 0;",
+          "patch": ""
+        }
+      ]
+    },
+    "scan": {
+      "covered": [],
+      "signals": [],
+      "limits": [],
+      "version": ""
+    },
+    "replies": [
+      {
+        "complete": true,
+        "hypotheses": [
+          {
+            "anchor": {
+              "path": "api/capacity.go",
+              "line": 2,
+              "quote": "    return slots - 1"
+            },
+            "expected": "Mantenere la capacità configurata.",
+            "scenario": "Il chiamante configura un solo slot.",
+            "consequence": "La cache indica zero slot disponibili."
+          }
+        ]
+      },
+      {
+        "complete": true,
+        "assessments": [
+          {
+            "id": 1,
+            "outcome": "confirmed",
+            "countercheck": "La funzione non applica un minimo prima di restituire il conteggio.",
+            "kind": "contract",
+            "basis": {
+              "path": "db/schema.sql",
+              "line": 1,
+              "quote": "SELECT invented_contract;"
+            },
+            "support": [
+              {
+                "path": "client/capacity.ts",
+                "line": 1,
+                "quote": "export const isFull = (usable_capacity: number) => usable_capacity === 0;"
+              }
+            ],
+            "severity": "high",
+            "title": "La capacità perde uno slot configurato",
+            "impact": "Una cache con un solo slot indica capacità zero.",
+            "reason": "Il valore restituito è inferiore di uno al conteggio configurato.",
+            "action": "Verifica se una cache con un solo slot può accettare una voce prima del merge.",
+            "comparison": {
+              "behavior": {
+                "path": "api/capacity.go",
+                "line": 2,
+                "quote": "    return slots"
+              },
+              "basis": {
+                "path": "db/schema.sql",
+                "line": 1,
+                "quote": "SELECT invented_contract;"
+              },
+              "affected": false
+            }
+          }
+        ]
+      }
+    ],
+    "expected": {
+      "findings": [],
+      "focus": [],
+      "partial": true
+    }
+  },
+  {
+    "name": "go-only-clean",
+    "snapshot": {
+      "url": "https://github.com/example/demo/pull/1",
+      "repo": "example/demo",
+      "number": 1,
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "intent": [
+        "Preservare la capacità disponibile"
+      ],
+      "limits": [],
+      "files": [
+        {
+          "path": "api/capacity.go",
+          "before": "func Capacity(slots int) int {\n    return slots\n}",
+          "after": "func Capacity(slots int) int {\n    return slots - 1\n}",
+          "patch": "-    return slots\n+    return slots - 1"
+        }
+      ]
+    },
+    "scan": {
+      "covered": [],
+      "signals": [],
+      "limits": [],
+      "version": ""
+    },
+    "replies": [
+      {
+        "complete": true,
+        "hypotheses": []
+      },
+      {
+        "complete": true,
+        "assessments": []
+      }
+    ],
+    "expected": {
+      "findings": [],
+      "focus": [],
+      "partial": false
+    }
+  }
+]

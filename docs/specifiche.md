@@ -26,12 +26,13 @@ Il servizio valida sul materiale acquisito percorsi, numeri di riga e citazioni 
 
 ## Analisi statica
 
-Eseguire Semgrep CE con regole locali selezionate per il linguaggio del pilota, sulla copia dei file supportati. Registrare regola, posizione, versione dello scanner, file coperti ed eventuali errori. Correlare gli avvisi alla modifica e verificarne l'applicabilità. Mostrare copertura parziale se l'eseguibile manca, il linguaggio è scoperto o la scansione si interrompe. Le vulnerabilità pubblicate di una dipendenza richiedono versione risolta e avviso applicabile. L'integrazione di questi avvisi è una fase successiva, distinta dalla scansione CE.
+Il motore esamina ogni modifica testuale indipendentemente da linguaggio e framework. Per una modifica trasversale segue il contratto fra i componenti coinvolti. Semgrep CE analizza solo i file a cui si applicano le regole distribuite. Una PR senza regole applicabili riceve comunque la review completa del materiale acquisito. Registrare regola, posizione, versione dello scanner, file coperti ed eventuali errori. Correlare gli avvisi alla modifica e verificarne l'applicabilità. Indicare i file coperti e distinguere l’assenza di regole applicabili da una scansione prevista che fallisce. Le vulnerabilità pubblicate di una dipendenza richiedono versione risolta e avviso applicabile. L'integrazione di questi avvisi è una fase successiva, distinta dalla scansione CE.
 
 ## Perimetro e criteri di accettazione
 
 - Conservare credenziali lato servizio. Limitare l'input ai repository configurati su github.com. Trattare i percorsi Git e i link come dati non fidati. Limitare richieste, byte, tempo e durata delle chiamate. Il processo di analisi non esegue script provenienti dalla PR.
 - Il primo utilizzo deve riuscire con un comando Docker documentato e una configurazione esplicita di provider e repository. Nessuna configurazione implicita trasmette codice.
+- Verificare il motore su una PR senza Python e su un contratto tra più tecnologie anche a scanner inattivo.
 - Verificare con prove automatiche l'intero flusso web, comprese review vuota e parziale, input non valido, prova inventata, segreto assente e riavvio. Rendere distinguibili test con servizi controllati e prova con servizi reali.
 - Valutare su dieci PR storiche autorizzate (cinque con regressione nota e cinque di controllo). Escludere fix e discussioni successive dal materiale. Confrontare con una review dello stesso modello sul solo diff. Contare problemi confermati, falsi allarmi, tempo, costo e indicazioni manuali che cambiano una decisione. Il campione orienta il pilota, senza promettere un tasso generale di accuratezza.
 

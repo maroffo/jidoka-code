@@ -1,10 +1,12 @@
 # Jidoka Code
 
-Servizio web personale per la review di pull request pubbliche. Mostra dove concentrare una review manuale, i problemi verificati al commit esaminato e i limiti dell’analisi.
+Servizio web personale in Rust per revisionare pull request pubbliche su GitHub. La guida **Dove concentrarti** mette in evidenza il codice da leggere, il controllo già svolto e le decisioni che richiedono un maintainer.
+
+Il motore legge modifiche testuali di qualsiasi stack. In due passaggi formula ipotesi e cerca nel codice elementi che le smentiscano. Verifica percorsi, righe e citazioni sulle revisioni esaminate. Semgrep fornisce indizi aggiuntivi quando esiste una regola applicabile. Il pilota include una regola per Python. La review generale funziona anche su un repository senza Python e su PR che attraversano più linguaggi.
 
 ## Avvio
 
-Serve Docker Compose. In un file locale `.env` configura il repository autorizzato e il servizio che può riceverne il codice. Il provider deve accettare Chat Completions con output JSON. Usa il suo URL completo.
+Crea un file locale `.env` con i repository pubblici ammessi e il provider autorizzato a ricevere il codice. Il provider deve accettare Chat Completions con output JSON. Inserisci il suo URL completo.
 
 ```dotenv
 JIDOKA_REPOS=organizzazione/progetto
@@ -17,16 +19,18 @@ JIDOKA_API_KEY=
 docker compose up --build
 ```
 
-Apri [Jidoka sul tuo computer](http://localhost:8080), incolla la PR e verifica il destinatario prima di inviare. SQLite conserva la cronologia nel volume Docker `reviews`. Il pilota è pensato per un solo utente su loopback. La scansione locale applica le regole distribuite con il progetto. Un controllo incompleto compare nei limiti della review.
+Apri [Jidoka](http://localhost:8080), inserisci la PR e conferma il destinatario. La cronologia rimane nel volume SQLite `reviews`, compatibile con il pilota precedente. Il servizio è destinato a un solo utente su loopback.
 
 ## Sviluppo
 
-Con Python 3.12 o successivo, esporta le stesse variabili nella shell ed esegui `python -m jidoka.app`. Semgrep CE deve essere disponibile sul PATH per usare lo scanner. L’immagine Docker lo include. Per i test offline:
+Il pilota è verificato con Rust 1.100. Per compilare e avviare il binario, esporta nella shell le variabili sopra ed esegui `cargo run --locked`. Per eseguire lo scanner in locale serve anche Semgrep CE sul PATH. L’immagine Docker lo include. La raccolta da GitHub usa le API pubbliche senza token e limita file, byte, richieste e tempo. Il rapporto espone eventuali lacune.
 
 ```sh
-uv run --no-project python -m unittest discover -s tests -v
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 ```
 
-[Specifiche](docs/specifiche.md) · [Piano di implementazione](docs/piano.md)
+Con Semgrep installato, `cargo test --locked -- --include-ignored` esegue anche la regola reale sui file di controllo.
 
-Il pilota include una regola Semgrep per le chiamate Python a subprocess con shell abilitata. Segnala il punto da verificare e mostra i limiti per gli altri linguaggi. Il collector usa le API pubbliche di GitHub senza token e limita il numero di file, le richieste e i byte per review. PR ampie o la quota GitHub esaurita possono dare un esito parziale o fallito.
+[Specifiche](docs/specifiche.md) · [Piano di implementazione](docs/piano.md)

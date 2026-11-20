@@ -1,8 +1,7 @@
 *
-!Dockerfile
-!jidoka/
-!jidoka/*.py
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
 !rules/
 !rules/**
-**/__pycache__
-**/*.pyc
