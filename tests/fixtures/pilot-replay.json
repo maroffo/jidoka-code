@@ -97,15 +97,7 @@
       }
     ],
     "expected": {
-      "focus": [
-        {
-          "path": "api/capacity.go",
-          "line": 2,
-          "checked": "Documented behavior in db/schema.sql:1. The function does not enforce a minimum before returning the count.",
-          "outcome": "A one-slot cache reports zero capacity.",
-          "action": "Check whether a one-slot cache can accept an entry before merging."
-        }
-      ],
+      "focus": [],
       "findings": [
         {
           "path": "api/capacity.go",
@@ -420,16 +412,9 @@
     "expected": {
       "focus": [
         {
-          "path": "db/orders.sql",
-          "line": 1,
-          "checked": "Documented behavior in client/データ.ts:1. The query does not use COALESCE to replace the SUM result.",
-          "outcome": "The client receives NULL instead of zero.",
-          "action": "Check the total when the orders table is empty."
-        },
-        {
           "path": "client/データ.ts",
           "line": 2,
-          "checked": "Static analysis. Proposed revision client/データ.ts:2 “const visible = entries.filter(entry => entry.published);”\nProposed revision client/データ.ts:3 “render(\"कि✈️\", visible);”",
+          "checked": "Static analysis. The page only uses entries that passed the filter.\nProposed revision client/データ.ts:2 “const visible = entries.filter(entry => entry.published);”\nProposed revision client/データ.ts:3 “render(\"कि✈️\", visible);”",
           "outcome": "The filter removes drafts before rendering कि✈️.",
           "action": "Should moderators see drafts in the कि✈️ feed? The options are “Show drafts to moderators” and “Show published entries only”."
         }

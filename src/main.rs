@@ -110,7 +110,22 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
         }
         let result = web::run_one_pinned(db, |url, expected_head| {
             let allowed = jidoka_code::automation::repositories_at(db, repositories)?;
-            let snapshot = source::collect_at(url, &allowed, expected_head)?;
+            let previous = web::latest_review(db, provider.label(), url)?;
+            let paths = previous
+                .iter()
+                .flat_map(|report| &report.report.findings)
+                .map(|finding| finding.path.clone())
+                .collect::<Vec<_>>();
+            let mut snapshot = source::collect_with_previous(
+                url,
+                &allowed,
+                expected_head,
+                previous.as_ref().map(|r| r.head.as_str()),
+                &paths,
+            )?;
+            if let Some(report) = &previous {
+                web::add_previous_questions(report, &mut snapshot);
+            }
             let prior = web::previous_findings(db, provider.label(), &snapshot)?;
             let patches = snapshot
                 .files

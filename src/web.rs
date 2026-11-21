@@ -88,6 +88,47 @@ pub fn recover(db: &Path, provider: &str) -> Result<()> {
     Ok(())
 }
 
+/// Latest reviewed head for the same PR and provider, including clean reviews.
+pub fn latest_review(db: &Path, provider: &str, url: &str) -> Result<Option<PublishedReport>> {
+    let Some((repo, _)) = parse_pull_url(url) else {
+        return Ok(None);
+    };
+    let raw: Option<String> = connect(db)?
+        .query_row(
+            "SELECT report FROM reviews WHERE url = ?1 COLLATE NOCASE AND provider = ?2
+         AND status IN ('completed','partial') AND CASE WHEN json_valid(report) THEN
+         json_extract(report,'$.repo') = ?3 COLLATE NOCASE END ORDER BY id DESC LIMIT 1",
+            params![url, provider, repo],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw.and_then(|raw| serde_json::from_str(&raw).ok()))
+}
+
+/// On a later revision the previous line may have moved or disappeared entirely.
+/// Give discovery the old question without presenting its line or evidence as current.
+pub fn add_previous_questions(previous: &PublishedReport, current: &mut Snapshot) {
+    if previous.head == current.head
+        || previous.base != current.base
+        || !previous.repo.eq_ignore_ascii_case(&current.repo)
+    {
+        return;
+    }
+    for finding in previous
+        .report
+        .findings
+        .iter()
+        .filter(|finding| safe_path(&finding.path))
+        .take(2)
+    {
+        let title: String = finding.title.chars().take(400).collect();
+        current.intent.push(format!(
+            "Earlier review question for {}: does the current revision still support the concern “{}”? Check the changed code and tests, including any fix. Cite only the current evidence.",
+            finding.path, title
+        ));
+    }
+}
+
 /// Retrieve leads from an earlier reviewed copy of this exact change.
 pub fn previous_findings(db: &Path, provider: &str, snapshot: &Snapshot) -> Result<Vec<Finding>> {
     // Recheck leads only when the PR, both revisions and the selected provider still match.
@@ -153,8 +194,10 @@ where
 
     let outcome = process(&url, expected_head.as_deref()).and_then(|report| {
         anyhow::ensure!(
-            expected_head.is_none_or(|head| report.head.eq_ignore_ascii_case(&head)),
-            "The pull request changed before review."
+            expected_head
+                .as_deref()
+                .is_none_or(|head| report.head.eq_ignore_ascii_case(head)),
+            "The report does not match the requested revision."
         );
         let status = if partial(&report) {
             "partial"
@@ -165,6 +208,9 @@ where
     });
     let (status, report, error) = match outcome {
         Ok((status, report)) => (status, Some(report), None),
+        Err(error) if expected_head.is_some() && error.is::<crate::source::HeadChanged>() => {
+            ("superseded", None, None)
+        }
         Err(error) => {
             let reason = error
                 .downcast_ref::<GitHubRateLimit>()
@@ -172,10 +218,16 @@ where
             ("failed", None, Some(reason))
         }
     };
-    connection.execute(
+    let tx = connection.transaction()?;
+    let updated = tx.execute(
         "UPDATE reviews SET status = ?1, report = ?2, error = ?3 WHERE id = ?4 AND status = 'running'",
         params![status, report, error, id],
     )?;
+    if updated != 0 && status == "superseded" {
+        tx.execute("UPDATE automation_jobs SET state='canceled', retry_at=0 WHERE review_id=?1 AND state='pending'", [id])?;
+        tx.execute("UPDATE automation_settings SET review_error=NULL, review_error_job=NULL WHERE review_error_job=?1", [id])?;
+    }
+    tx.commit()?;
     Ok(true)
 }
 
@@ -559,6 +611,39 @@ async fn submit(
     Ok((StatusCode::BAD_REQUEST, Html(html)).into_response())
 }
 
+// A legacy stale error also covered closed and draft PRs. Only call it superseded
+// when automation has a review for another revision of the same pull request.
+fn replacement_review(connection: &Connection, id: i64) -> rusqlite::Result<Option<i64>> {
+    connection.query_row(
+        "SELECT next.review_id FROM automation_jobs old
+         JOIN automation_jobs next ON next.repo = old.repo AND next.number = old.number AND next.head <> old.head
+         LEFT JOIN automation_seen seen ON seen.repo = next.repo AND seen.number = next.number
+         WHERE old.review_id = ?1 AND (next.review_id > old.review_id OR next.head = seen.head)
+         ORDER BY (next.head = seen.head) DESC, next.review_id DESC LIMIT 1",
+        [id], |row| row.get(0),
+    ).optional()
+}
+
+fn displayed_status<'a>(
+    connection: &Connection,
+    id: i64,
+    status: &'a str,
+    error: Option<&str>,
+) -> rusqlite::Result<(&'a str, Option<i64>)> {
+    if status == "superseded" || (status == "failed" && error == Some(crate::automation::STALE)) {
+        let replacement = replacement_review(connection, id)?;
+        return Ok((
+            if replacement.is_some() || status == "superseded" {
+                "superseded"
+            } else {
+                "canceled"
+            },
+            replacement,
+        ));
+    }
+    Ok((status, None))
+}
+
 async fn review(
     State(state): State<Arc<WebState>>,
     RoutePath(id): RoutePath<String>,
@@ -578,8 +663,10 @@ async fn review(
             |row| {
                 let raw_report: Option<String> = row.get(4)?;
                 let error: Option<String> = row.get(5)?;
-                Ok(review_page((id, &token), &row.get::<_, String>(0)?, &row.get::<_, String>(1)?,
-                    &row.get::<_, String>(2)?, &row.get::<_, String>(3)?,
+                let stored: String = row.get(2)?;
+                let (status, replacement) = displayed_status(&connection, id, &stored, error.as_deref())?;
+                Ok(review_page((id, &token, replacement), &row.get::<_, String>(0)?, &row.get::<_, String>(1)?,
+                    status, &row.get::<_, String>(3)?,
                     raw_report.as_deref(), error.as_deref()))
             },
         ).optional()
@@ -594,6 +681,8 @@ fn status_label(status: &str) -> &str {
         "running" => "In progress",
         "completed" => "Completed",
         "partial" => "Partial",
+        "superseded" => "Superseded",
+        "canceled" => "Canceled",
         _ => "Failed",
     }
 }
@@ -633,6 +722,7 @@ fn status_badge(status: &str) -> String {
     let tone = match status {
         "completed" => "done",
         "partial" => "partial",
+        "canceled" | "superseded" => "inactive",
         "running" | "queued" => "active",
         _ => "failed",
     };
@@ -673,7 +763,7 @@ async fn home_page(
     let history = with_db(state, |connection| {
         let mut stmt = connection.prepare(
             "SELECT id, url, status, created_at, CASE WHEN json_valid(report)
-                THEN json_array_length(report, '$.findings') END
+                THEN json_array_length(report, '$.findings') END, error
              FROM reviews ORDER BY id DESC",
         )?;
         let mut rows = stmt.query([])?;
@@ -681,7 +771,9 @@ async fn home_page(
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
             let url: String = row.get(1)?;
-            let status: String = row.get(2)?;
+            let stored: String = row.get(2)?;
+            let error: Option<String> = row.get(5)?;
+            let (status, _) = displayed_status(&connection, id, &stored, error.as_deref())?;
             let created: String = row.get(3)?;
             let findings = match row.get::<_, Option<usize>>(4)? {
                 Some(1) => " · 1 finding".to_owned(),
@@ -695,7 +787,7 @@ async fn home_page(
                 items,
                 r#"<li><a class="history-row" href="/reviews/{id}"><span><strong>{name}</strong>
                 <small>Review {id}{findings} · {} UTC</small></span>{}<span class="arrow" aria-hidden="true">→</span></a></li>"#,
-                escape(&created), status_badge(&status)
+                escape(&created), status_badge(status)
             ).unwrap();
         }
         Ok(if items.is_empty() {
@@ -922,36 +1014,28 @@ fn finding_card(
 }
 
 fn report_html(report: &PublishedReport, is_partial: bool) -> String {
+    let manual: Vec<_> = report.human_focus().take(3).collect();
     let mut focus = String::new();
-    let mut paired = HashSet::new();
-    for item in report.report.focus.iter().take(3) {
-        if let Some((i, finding)) = report.report.findings.iter().enumerate().find(|(i, f)| {
-            !paired.contains(i)
-                && f.path == item.path
-                && f.line == item.line
-                && f.impact == item.outcome
-        }) {
-            paired.insert(i);
-            focus.push_str(&finding_card(report, finding, Some(item)));
-        } else {
-            write!(focus,r#"<article class="card manual"><span class="kind"><i></i>Manual check</span><h3>{}</h3><div class="location">{}</div><p>{}</p>
-                <details class="proof"><summary>What Jidoka checked</summary><div class="detail-body">{}</div></details></article>"#,
-                escape(&item.action),position(report,&item.path,item.line),escape(&item.outcome),evidence_html(report,&item.checked)).unwrap();
-        }
+    for item in &manual {
+        write!(focus,r#"<article class="card manual"><span class="kind"><i></i>Manual check</span><h3>{}</h3><div class="location">{}</div><p>{}</p>
+            <details class="proof"><summary>What Jidoka checked</summary><div class="detail-body">{}</div></details></article>"#,
+            escape(&item.action),position(report,&item.path,item.line),escape(&item.outcome),evidence_html(report,&item.checked)).unwrap();
     }
     let mut content = format!(
         "<section><h2>Where to focus</h2>{}</section>",
         if focus.is_empty() {
-            "<p class=empty>No focus areas identified.</p>".into()
+            "<p class=empty>No additional manual checks.</p>".into()
         } else {
             focus
         }
     );
     let mut extra = String::new();
-    for (i, item) in report.report.findings.iter().enumerate() {
-        if !paired.contains(&i) {
-            extra.push_str(&finding_card(report, item, None));
-        }
+    for item in &report.report.findings {
+        // Earlier reports stored the suggested action for a finding in its focus row.
+        let suggestion = report.report.focus.iter().find(|focus| {
+            focus.path == item.path && focus.line == item.line && focus.outcome == item.impact
+        });
+        extra.push_str(&finding_card(report, item, suggestion));
     }
     if report.report.findings.is_empty() {
         let empty = if is_partial {
@@ -987,15 +1071,13 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
             .as_ref()
             .is_some_and(|s| s.limits.contains(limit))
     }));
+    let coverage_limits = if limits.is_empty() {
+        String::new()
+    } else {
+        format!("<details><summary>Review limits</summary><ul>{limits}</ul></details>")
+    };
     let warnings = if is_partial {
-        format!(
-            r##"<div class="warning"><b>Partial coverage</b>{}<a href="#coverage">See coverage details ↓</a></div>"##,
-            if limits.is_empty() {
-                "<p>Some scanner checks were unavailable.</p>".into()
-            } else {
-                format!("<ul>{limits}</ul>")
-            }
-        )
+        r##"<div class="warning"><b>Partial coverage</b><a href="#coverage">See coverage details ↓</a></div>"##.to_owned()
     } else {
         String::new()
     };
@@ -1005,12 +1087,12 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
     format!(
         r##"<div class="workspace"><div>{warnings}{content}</div>
         <aside><section class="panel inspect"><div class="panel-head"><h2>Review summary</h2></div><dl>
-        <div><dt>Verified findings</dt><dd>{}</dd></div><div><dt>Review priorities</dt><dd>{}</dd></div>{files}</dl>
+        <div><dt>Verified findings</dt><dd>{}</dd></div><div><dt>Manual checks</dt><dd>{}</dd></div>{files}</dl>
         <details><summary>Git revisions</summary><div class="detail-body"><b>Reviewed revision</b><code>{}</code><b>Base revision</b><code>{}</code></div></details></section>
-        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Review coverage</h2></div>{patches}
+        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Review coverage</h2></div>{coverage_limits}{patches}
         <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section></aside></div>"##,
         report.report.findings.len(),
-        report.report.focus.len().min(3),
+        manual.len(),
         escape(&report.head),
         escape(&report.base),
         scanner_html(report, report.scan.as_ref()),
@@ -1023,7 +1105,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
 }
 
 fn review_page(
-    (id, token): (i64, &str),
+    (id, token, replacement): (i64, &str, Option<i64>),
     url: &str,
     provider: &str,
     status: &str,
@@ -1049,6 +1131,12 @@ fn review_page(
             status,
             format!(r#"<p><a href="/reviews/{id}">Refresh status</a></p>"#),
         ),
+        "superseded" => (
+            status,
+            replacement.map_or_else(|| "<p>A newer revision replaced this review.</p>".into(),
+                |next| format!(r#"<p>A newer revision replaced this review. <a href="/reviews/{next}">View replacement review #{next}</a></p>"#)),
+        ),
+        "canceled" => (status, "<p>This pull request was no longer eligible for automatic review.</p>".into()),
         "completed" | "partial" => {
             match raw_report.and_then(|raw| serde_json::from_str::<PublishedReport>(raw).ok()) {
                 Some(report) => {
@@ -1561,6 +1649,111 @@ mod tests {
         let prior = previous_findings(&fixture.db, PROVIDER, &snapshot).unwrap();
         assert_eq!(prior.len(), 1);
         assert_eq!(prior[0].title, "Existing concern");
+    }
+
+    #[tokio::test]
+    async fn moved_head_before_poll_finishes_without_a_retry_or_repository_error() {
+        let fixture = Fixture::new();
+        let db = connect(&fixture.db).unwrap();
+        let url = fixture.enqueue(URL).await;
+        let id: i64 = url.rsplit('/').next().unwrap().parse().unwrap();
+        db.execute("INSERT INTO automation_jobs(repo,number,head,review_id,state) VALUES ('test/demo',7,'old',?1,'pending')", [id]).unwrap();
+        db.execute("INSERT INTO automation_settings(repo,mode,review_error_job,review_error) VALUES ('test/demo','summary',?1,'Earlier retry')", [id]).unwrap();
+        assert!(
+            run_one_pinned(&fixture.db, |_, head| {
+                assert_eq!(head, Some("old"));
+                Err(crate::source::HeadChanged("Head moved").into())
+            })
+            .unwrap()
+        );
+        let state: String = db
+            .query_row(
+                "SELECT state FROM automation_jobs WHERE review_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "canceled");
+        assert!(fixture.get(&url).await.contains("Superseded"));
+        assert!(
+            crate::automation::last_error(&db, "test/demo")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_stale_reviews_link_to_the_replacement_for_that_pr_only() {
+        let fixture = Fixture::new();
+        let db = connect(&fixture.db).unwrap();
+        for (id, number, head, state) in [
+            (20, 7, "a", "canceled"),
+            (21, 7, "b", "pending"),
+            (22, 8, "c", "canceled"),
+        ] {
+            db.execute(
+                "INSERT INTO reviews (id,url,provider,status,error) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    id,
+                    canonical_pull_url("test/demo", &number.to_string()),
+                    PROVIDER,
+                    if state == "canceled" {
+                        "failed"
+                    } else {
+                        "queued"
+                    },
+                    crate::automation::STALE
+                ],
+            )
+            .unwrap();
+            db.execute("INSERT INTO automation_jobs(repo,number,head,review_id,state) VALUES ('test/demo',?1,?2,?3,?4)",
+                params![number,head,id,state]).unwrap();
+        }
+        let old = fixture.get("/reviews/20").await;
+        assert!(old.contains("Superseded") && old.contains(r#"href="/reviews/21""#));
+        assert!(!old.contains("Failed"));
+        let closed = fixture.get("/reviews/22").await;
+        assert!(closed.contains("Canceled") && !closed.contains(r#"href="/reviews/21""#));
+        assert_history_row(
+            &fixture.get("/").await,
+            "/reviews/20",
+            "test/demo",
+            "7",
+            "Superseded",
+        );
+    }
+
+    #[test]
+    fn an_earlier_finding_without_a_surviving_line_is_only_a_question() {
+        let mut old = report(None);
+        old.report.findings.push(Finding {
+            path: "check.yml".into(),
+            line: 117,
+            title: "A test is omitted".into(),
+            impact: "Example".into(),
+            evidence: "Obsolete proof".into(),
+            attribution: Attribution::Unknown,
+        });
+        let mut current = Snapshot {
+            repo: old.repo.clone(),
+            base: old.base.clone(),
+            head: "c".repeat(40),
+            url: URL.into(),
+            number: 7,
+            intent: vec![],
+            limits: vec![],
+            head_context: vec![],
+            diff: None,
+            files: vec![],
+        };
+        add_previous_questions(&old, &mut current);
+        assert_eq!(current.intent.len(), 1);
+        let hint = &current.intent[0];
+        assert!(hint.contains("A test is omitted") && hint.contains("check.yml"));
+        assert!(!hint.contains("117") && !hint.contains("Obsolete proof"));
+        current.base = "d".repeat(40);
+        add_previous_questions(&old, &mut current);
+        assert_eq!(current.intent.len(), 1);
     }
 
     #[tokio::test]

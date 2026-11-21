@@ -30,7 +30,7 @@ const FIRST_RETRY_SECONDS: i64 = 60;
 const PROVIDER_CHANGED: &str =
     "The provider changed. Enable automation again to confirm the new provider.";
 const DISABLED: &str = "Automation was turned off before the review started.";
-const STALE: &str = "The pull request no longer matches this automatic review.";
+pub(crate) const STALE: &str = "The pull request no longer matches this automatic review.";
 const BOT_TOKEN_REQUIRED: &str = "Set JIDOKA_BOT_TOKEN to enable automatic reviews.";
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
@@ -546,8 +546,26 @@ fn apply_poll(
         params![repo, provider],
     )?;
     if canceled != 0 {
+        // The worker must not overwrite a superseded running review as completed or failed.
+        tx.execute(
+            "UPDATE reviews SET status = 'superseded', error = NULL
+             WHERE status IN ('queued', 'running') AND id IN (
+                SELECT job.review_id FROM automation_jobs job
+                JOIN automation_seen seen ON seen.repo = job.repo AND seen.number = job.number
+                WHERE job.repo = ?1 AND job.state = 'canceled' AND seen.head <> job.head AND seen.ready
+             )",
+            [repo],
+        )?;
         cancel_queued(&tx, Some(repo), STALE)?;
     }
+    // Discard only errors owned by jobs that this repo can no longer retry.
+    tx.execute(
+        "UPDATE automation_settings SET review_error=NULL, review_error_job=NULL
+         WHERE repo=?1 AND review_error_job IN (
+             SELECT review_id FROM automation_jobs WHERE repo=?1 AND state='canceled'
+         )",
+        [repo],
+    )?;
     tx.execute(
         "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
          WHERE status = 'failed' AND id IN (
@@ -603,13 +621,15 @@ fn enqueue(
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             ).optional()?;
             let reusable = prior.as_ref().is_some_and(|(status, raw)| {
-                matches!(status.as_str(), "queued" | "running" | "failed")
-                    || matching_report(status, raw.as_deref(), repo, head).is_some()
+                matches!(
+                    status.as_str(),
+                    "queued" | "running" | "failed" | "superseded"
+                ) || matching_report(status, raw.as_deref(), repo, head).is_some()
             });
             let review_id = if reusable {
                 conn.execute(
                     "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
-                     WHERE id = ?1 AND status = 'failed'",
+                     WHERE id = ?1 AND status IN ('failed', 'superseded')",
                     [id],
                 )?;
                 id
@@ -1123,6 +1143,26 @@ mod tests {
             (provider.as_str(), status.as_str()),
             ("another provider", "queued")
         );
+    }
+
+    #[test]
+    fn a_push_supersedes_unfinished_work_and_a_returning_head_can_be_reviewed() {
+        let conn = fixture("summary");
+        snapshot(&conn, &[]);
+        snapshot(&conn, &[(1, OLD, true)]);
+        conn.execute("UPDATE reviews SET status = 'running'", [])
+            .unwrap();
+        conn.execute("UPDATE automation_settings SET review_error = 'Old retry', review_error_job = (SELECT review_id FROM automation_jobs WHERE head=?1)", [OLD]).unwrap();
+        snapshot(&conn, &[(1, NEW, true)]);
+        let status = |head| {
+            conn.query_row("SELECT r.status FROM automation_jobs j JOIN reviews r ON r.id=j.review_id WHERE j.head=?1", [head], |row| row.get::<_, String>(0)).unwrap()
+        };
+        assert!(last_error(&conn, REPO).unwrap().is_none());
+        assert_eq!(status(OLD), "superseded");
+        assert_eq!(status(NEW), "queued");
+        snapshot(&conn, &[(1, OLD, true)]);
+        assert_eq!(status(OLD), "queued");
+        assert_eq!(status(NEW), "superseded");
     }
 
     #[test]

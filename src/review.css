@@ -46,7 +46,7 @@ h3 { font-size: clamp(1.16rem, 2vw, 1.52rem); line-height: 1.23; letter-spacing:
 .title-line { gap: 18px }.meta { margin-top: 15px }.meta a { color: var(--ink); font-weight: 600 }
 .status { display: inline-flex; align-items: center; gap: 7px; width: max-content; font-size: .77rem; font-weight: 660; line-height: 1.4; border-radius: 20px; padding: 4px 10px }
 .status::before { content: ""; background: currentColor; width: 7px; height: 7px; border-radius: 50% }
-.done { color: #2d5c45; background: #deecdd }.partial { color: #794718; background: #f5e4bd }.active { color: #285c78; background: #dcebf0 }.failed { color: #873a31; background: #f7dfd8 }
+.done { color: #2d5c45; background: #deecdd }.partial { color: #794718; background: #f5e4bd }.active { color: #285c78; background: #dcebf0 }.inactive { color: var(--sub); background: var(--surface) }.failed { color: #873a31; background: #f7dfd8 }
 .workspace { display: grid; grid-template-columns: minmax(0, 2.25fr) minmax(245px, 1fr); gap: clamp(20px, 3vw, 38px); align-items: start }
 .workspace > *, aside { min-width: 0 }
 .workspace:not(.home) section + section, .card + .card { margin-top: 17px }
@@ -61,7 +61,7 @@ h3 { font-size: clamp(1.16rem, 2vw, 1.52rem); line-height: 1.23; letter-spacing:
 .card > p { color: var(--sub); font-size: .95rem; max-width: 74ch }
 .action,.warning { border-left: 3px solid #cf855b; background: #faf0e1; padding: 11px 14px; margin-top: 16px }
 .action b,.detail-body>b,.warning b { font-size: .76rem; font-weight: 720 }.action p { margin-top: 2px; font-size: .93rem }
-.warning { margin: 0 0 22px }.warning ul { padding-left: 20px }.warning a { font-weight: 600; font-size: .85rem }
+.warning { margin: 0 0 22px }.warning ul { padding-left: 20px }.warning a { display: block; font-weight: 600; font-size: .85rem }
 summary { cursor: pointer; color: var(--ink); font-size: .88rem; font-weight: 620; display: flex; gap: 12px; align-items: baseline; justify-content: space-between; padding: 12px 0 }
 summary::after { content:"+"; font: 1rem var(--mono); color: var(--sub) }details[open]>summary::after { content:"−" }summary::-webkit-details-marker { display: none }
 summary:hover { color: var(--accent) }.proof { margin-top: 18px; border-top: 1px solid var(--line) }.detail-body { padding-bottom: 15px; font-size: .88rem }

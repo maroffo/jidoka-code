@@ -75,13 +75,13 @@ async fn check_service_restart(scan_limited: bool) {
     let file_count = snapshot.files.len();
     let submitted_name = format!("{} <b>#{}</b>", snapshot.repo, snapshot.number);
     let allowed = HashSet::from([snapshot.repo.clone()]);
-    let focus_action = case["expected"]["focus"][0]["action"].as_str().unwrap();
     let finding_title = case["expected"]["findings"][0]["title"].as_str().unwrap();
     let mut scripted = case["replies"].as_array().unwrap().clone();
     scripted[0]["hypotheses"][0]["anchor"] = json!("H1");
     let finding = &mut scripted[1]["assessments"][0];
     finding["basis"] = json!("H2");
     finding["support"] = json!(["H3"]);
+    finding["counterevidence"] = json!({"references":["H2"],"absence_paths":[]});
     finding["comparison"]["behavior"] = json!("B1");
     finding["comparison"]["basis"] = json!("B2");
     let replies = Arc::new(Mutex::new(scripted.into_iter()));
@@ -186,7 +186,7 @@ async fn check_service_restart(scan_limited: bool) {
         "diff-file-1-head-2",
         "Files supplied with a patch (1)",
         "api/capacity.go",
-        focus_action,
+        "No additional manual checks.",
         "Verified findings",
         finding_title,
         expected_status,
