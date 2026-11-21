@@ -122,12 +122,15 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
                 snapshot.head_context.len()
             );
             let mut pass = 0;
+            let mut model_time_left = Duration::from_secs(15 * 60);
             review_snapshot_with_context(
                 snapshot,
                 |system, data| {
                     pass += 1;
                     let started = Instant::now();
-                    let reply = provider.ask(system, data);
+                    let timeout = model_time_left.min(Duration::from_secs(10 * 60));
+                    let reply = provider.ask_with_timeout(system, data, timeout);
+                    model_time_left = model_time_left.saturating_sub(started.elapsed());
                     let status = match &reply {
                         Ok(_) => "received",
                         Err(error)
