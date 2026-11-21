@@ -83,7 +83,9 @@ const DISCOVER: &str = r#"
 Your first job is to identify what deserves review, before deciding whether it
 passes. Select concrete verification questions across the materially different
 changes. Include checks of likely-correct behavior if a mistaken assumption
-would matter to the maintainer. Leave their verdicts to the next pass. A blank
+would matter to the maintainer. When usage guidance is the concern, anchor the
+guidance and trace the exact steps it prescribes. Keep one observable consequence
+per hypothesis. Leave the verdicts to the next pass. A blank
 list is appropriate for a purely mechanical change with no meaningful check.
 Review each distinct change intent from the perspective of the people who must use
 or ship it. Trace the documented steps separately for each participant. Compare
@@ -146,6 +148,17 @@ Assess impact for users of the software. Report only the scoped behavior you che
 "#;
 
 const LIVE_CHECKS: &str = r#"
+Try the exact path a reader of the changed instructions would take. A different
+path that works is a workaround, not counterevidence for the documented path.
+Separate what the code does from what its author might have intended. If a
+documented instruction changes a caller-visible result, identify which result
+the caller gets. Use human for a consequential choice the guidance leaves
+unresolved, even if the implementation is intentional. Refute it when the
+guidance already explains which path preserves which result. For a version or
+policy discrepancy, check the declared requirements before suggesting a runtime
+experiment. Discard speculative parts of a hypothesis and assess the supported
+part on its own. Avoid inventing outages or release failures.
+
 If a claim depends on unusual persisted state or caller inputs,
 trace a reachable producer or cite a contract that permits that state or input. Refute the claim
 when counterevidence exists. If it depends on a requirement the evidence cannot
