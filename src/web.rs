@@ -197,7 +197,7 @@ where
             expected_head
                 .as_deref()
                 .is_none_or(|head| report.head.eq_ignore_ascii_case(head)),
-            crate::source::RevisionChanged("The pull request changed before review.")
+            crate::source::HeadChanged("The pull request changed before review.")
         );
         let status = if partial(&report) {
             "partial"
@@ -208,8 +208,8 @@ where
     });
     let (status, report, error) = match outcome {
         Ok((status, report)) => (status, Some(report), None),
-        Err(error) if expected_head.is_some() && error.is::<crate::source::RevisionChanged>() => {
-            ("failed", None, Some(crate::automation::STALE.to_owned()))
+        Err(error) if expected_head.is_some() && error.is::<crate::source::HeadChanged>() => {
+            ("superseded", None, None)
         }
         Err(error) => {
             let reason = error
@@ -218,10 +218,16 @@ where
             ("failed", None, Some(reason))
         }
     };
-    connection.execute(
+    let tx = connection.transaction()?;
+    let updated = tx.execute(
         "UPDATE reviews SET status = ?1, report = ?2, error = ?3 WHERE id = ?4 AND status = 'running'",
         params![status, report, error, id],
     )?;
+    if updated != 0 && status == "superseded" {
+        tx.execute("UPDATE automation_jobs SET state='canceled', retry_at=0 WHERE review_id=?1 AND state='pending'", [id])?;
+        tx.execute("UPDATE automation_settings SET review_error=NULL, review_error_job=NULL WHERE review_error_job=?1", [id])?;
+    }
+    tx.commit()?;
     Ok(true)
 }
 
@@ -1643,6 +1649,37 @@ mod tests {
         let prior = previous_findings(&fixture.db, PROVIDER, &snapshot).unwrap();
         assert_eq!(prior.len(), 1);
         assert_eq!(prior[0].title, "Existing concern");
+    }
+
+    #[tokio::test]
+    async fn moved_head_before_poll_finishes_without_a_retry_or_repository_error() {
+        let fixture = Fixture::new();
+        let db = connect(&fixture.db).unwrap();
+        let url = fixture.enqueue(URL).await;
+        let id: i64 = url.rsplit('/').next().unwrap().parse().unwrap();
+        db.execute("INSERT INTO automation_jobs(repo,number,head,review_id,state) VALUES ('test/demo',7,'old',?1,'pending')", [id]).unwrap();
+        db.execute("INSERT INTO automation_settings(repo,mode,review_error_job,review_error) VALUES ('test/demo','summary',?1,'Earlier retry')", [id]).unwrap();
+        assert!(
+            run_one_pinned(&fixture.db, |_, head| {
+                assert_eq!(head, Some("old"));
+                Err(crate::source::HeadChanged("Head moved").into())
+            })
+            .unwrap()
+        );
+        let state: String = db
+            .query_row(
+                "SELECT state FROM automation_jobs WHERE review_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "canceled");
+        assert!(fixture.get(&url).await.contains("Superseded"));
+        assert!(
+            crate::automation::last_error(&db, "test/demo")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

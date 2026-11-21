@@ -28,7 +28,7 @@ pub(super) fn candidates<'a, T: Transport>(
     let mut seen = HashSet::new();
     let pages = total_files.min(CHANGED_FILES as u64) as usize;
     for page in 1..=pages.div_ceil(FILES_PER_PAGE) {
-        if patches.len() == needed.len() {
+        if seen.len() == needed.len() {
             break;
         }
         let route = format!("{pull_route}/files?per_page={FILES_PER_PAGE}&page={page}");

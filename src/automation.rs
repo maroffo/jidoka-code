@@ -558,6 +558,14 @@ fn apply_poll(
         )?;
         cancel_queued(&tx, Some(repo), STALE)?;
     }
+    // Discard only errors owned by jobs that this repo can no longer retry.
+    tx.execute(
+        "UPDATE automation_settings SET review_error=NULL, review_error_job=NULL
+         WHERE repo=?1 AND review_error_job IN (
+             SELECT review_id FROM automation_jobs WHERE repo=?1 AND state='canceled'
+         )",
+        [repo],
+    )?;
     tx.execute(
         "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
          WHERE status = 'failed' AND id IN (
@@ -1144,10 +1152,12 @@ mod tests {
         snapshot(&conn, &[(1, OLD, true)]);
         conn.execute("UPDATE reviews SET status = 'running'", [])
             .unwrap();
+        conn.execute("UPDATE automation_settings SET review_error = 'Old retry', review_error_job = (SELECT review_id FROM automation_jobs WHERE head=?1)", [OLD]).unwrap();
         snapshot(&conn, &[(1, NEW, true)]);
         let status = |head| {
             conn.query_row("SELECT r.status FROM automation_jobs j JOIN reviews r ON r.id=j.review_id WHERE j.head=?1", [head], |row| row.get::<_, String>(0)).unwrap()
         };
+        assert!(last_error(&conn, REPO).unwrap().is_none());
         assert_eq!(status(OLD), "superseded");
         assert_eq!(status(NEW), "queued");
         snapshot(&conn, &[(1, OLD, true)]);

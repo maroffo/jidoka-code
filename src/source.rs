@@ -8,15 +8,15 @@ mod reads;
 pub use reads::read_context;
 
 #[derive(Debug)]
-pub struct RevisionChanged(pub(crate) &'static str);
+pub struct HeadChanged(pub(crate) &'static str);
 
-impl std::fmt::Display for RevisionChanged {
+impl std::fmt::Display for HeadChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)
     }
 }
 
-impl std::error::Error for RevisionChanged {}
+impl std::error::Error for HeadChanged {}
 
 use crate::contracts::{
     DiffFile, GitHubRateLimit, PinnedDiff, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow,
@@ -1809,7 +1809,7 @@ fn pinned<T: Transport>(
     pull.validate(&repo, number, allowed)?;
     ensure!(
         expected_head.is_none_or(|head| head.eq_ignore_ascii_case(&pull.head.sha)),
-        RevisionChanged("The pull request changed before review.")
+        HeadChanged("The pull request changed before review.")
     );
     let head_ref = if pull.head.repo.full_name == repo {
         pull.head.sha.clone()
@@ -2012,9 +2012,11 @@ fn pinned<T: Transport>(
     let mut final_pull: Pull = hub.get(&pull_route, PULL_BYTES, true)?;
     final_pull.validate(&repo, number, allowed)?;
     if !pull.same_revisions(&final_pull) {
-        bail!(RevisionChanged(
-            "The pull request changed during collection. Submit it again."
-        ));
+        let message = "The pull request changed during collection. Submit it again.";
+        if pull.head.sha != final_pull.head.sha {
+            bail!(HeadChanged(message));
+        }
+        bail!(message);
     }
     let mut unique = HashSet::new();
     limits.retain(|limit| unique.insert(limit.clone()));
@@ -3193,6 +3195,21 @@ mod tests {
     }
 
     #[test]
+    fn fallback_stops_when_the_only_missing_path_was_seen_without_a_patch() {
+        let mut file = change("image.bin");
+        file["patch"] = Value::Null;
+        file["sha"] = json!(HEAD);
+        let changes: Vec<Change> = vec![serde_json::from_value(file.clone()).unwrap()];
+        let mut page = vec![file];
+        page.extend((1..30).map(|n| change(&format!("other-{n}"))));
+        let mut fixture = Fixture::default();
+        fixture.responses.insert(pull_files_page(1), json!(page));
+        let mut hub = GitHub::new(fixture);
+        assert!(pull_files::candidates(&mut hub, PULL, 300, &changes).is_empty());
+        assert_eq!(hub.transport.requests, [pull_files_page(1)]);
+    }
+
+    #[test]
     fn recovers_missing_and_invalid_patches_across_pinned_pull_file_pages() {
         let edited = "service/handler.rs";
         let added = "web/entry.ts";
@@ -3367,10 +3384,9 @@ mod tests {
             fixture.revision(FORK, HEAD, &[(path, File::Text("new\n"))]);
             fixture.pulls[1][revision]["sha"] = json!(MOVED);
             let mut hub = GitHub::new(fixture);
-            assert!(
-                snapshot(&mut hub).unwrap_err().is::<RevisionChanged>(),
-                "{revision}"
-            );
+            let error = snapshot(&mut hub).unwrap_err();
+            assert!(error.to_string().contains("changed during collection"));
+            assert_eq!(error.is::<HeadChanged>(), revision == "head");
             assert!(hub.transport.requests.contains(&pull_files_page(1)));
             assert_eq!(hub.transport.requests.last().unwrap(), PULL);
         }
