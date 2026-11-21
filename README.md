@@ -6,7 +6,7 @@ The engine reviews text changes across languages and frameworks. It proposes fin
 
 Jidoka collects changed lines before spending its budget on surrounding files. It verifies source references and lists the files supplied with patches and any gaps in coverage. Semgrep supplies additional leads when a bundled rule applies. The pilot includes one Python rule. Pull requests in other languages and changes that span multiple stacks go through the same review.
 
-When you repeat a review with the same provider and both Git revisions still match, Jidoka rechecks up to two previous findings against the current evidence.
+On a new push, Jidoka prioritizes files changed since the last review by the same provider. Earlier findings are leads for a fresh check against the current code. A superseded automatic review links to its replacement. GitHub comments summarize coverage and highlight specific decisions or tests for a human reviewer. The full list of coverage limits stays in Jidoka.
 
 ## Getting started
 

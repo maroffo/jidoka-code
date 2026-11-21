@@ -16,6 +16,7 @@ const MAX_HYPOTHESES: usize = 3;
 const MAX_HISTORY_HYPOTHESES: usize = 2;
 const MAX_REPLAY_HYPOTHESES: usize = 12;
 const MAX_SUPPORT: usize = 4;
+const MAX_COUNTEREVIDENCE: usize = 6;
 const MAX_TEXT: usize = 400;
 const MAX_QUOTE: usize = 1_000;
 const MAX_INPUT_BYTES: usize = 900_000;
@@ -50,6 +51,8 @@ Separate sections may have gaps. Files with scope "file" show available pinned
 text, and a row with one ID there does not imply a change.
 Each head_context window contains head-only rows for additional pinned context.
 Those rows do not imply a change. An ID reused across sections names the same line.
+Only complete_head_paths lists files whose entire proposed contents are shown
+in this request. A hunk, a window, or a search with no result cannot show absence.
 Every citation in your reply must be a single reference string copied from the
 appropriate slot of a row. Use head references except where base is explicitly
 requested. Cite across files when a caller, contract, or safeguard is relevant.
@@ -73,7 +76,8 @@ rules and tests. Select the highest-value distinct hypotheses tied to this
 change, in impact order. When the patch changes a public interface, compare the
 published contract, the implementation and what existing callers can still send.
 Each hypothesis must name the expected behavior, a concrete
-scenario and its consequence. Include a product decision only if it would
+scenario and its consequence. Keep one independently checkable assertion per
+hypothesis. Include a product decision only if it would
 change what the maintainer does. Use an empty list if nothing merits a check.
 Return {"complete": bool, "hypotheses": [{"anchor": head citation,
 "expected": str, "scenario": str, "consequence": str}]}.
@@ -113,7 +117,14 @@ a check. Keep assessments limited to the supplied IDs.
 
 const CHALLENGE: &str = r#"
 Challenge every hypothesis against the final revision. Look for callers, guards,
-tests and existing behavior that would defeat it. Return
+tests and existing behavior that would defeat it. Follow the actual entry point
+through all relevant sections and conditions. For CI, trace the job conditions,
+actual command, and test selection, including later steps, scripts or dynamic
+arguments that can add or skip tests. A test definition alone does not show that
+CI runs it, and an early list does not show what a later step runs.
+Check only one assertion for each ID. If evidence supports only part of a
+hypothesis, narrow the finding to that part. A separate assertion needs its own
+hypothesis and assessment. Return
 {"complete": bool, "assessments": [...]} with exactly one assessment per input
 id. Every assessment starts with {"id": int, "outcome": str, "countercheck": str}.
 Use countercheck to describe the concrete condition you checked and what you
@@ -126,12 +137,11 @@ found. Add only the fields for the selected outcome:
   the live review instructions, if supplied.
 - confirmed: "kind" (contract, convention or performance), "basis" (head citation),
   "support" (list of up to 4 other head citations), "severity" (high,
-  medium or low), "title", "impact", "reason", "action" (all strings), and "comparison".
+  medium or low), "title", "impact", "reason" (all strings), and "comparison".
   The anchor and support must show the code path. For contract cite the documented
   expectation in basis. For convention cite the applicable project rule. For
   performance cite the inputs to a concrete static derivation and give that
   derivation in reason. Explain how the evidence survives your countercheck.
-  Give a concrete reviewer action specific to the behavior and its consequence.
   For comparison use null if uncertain, otherwise {"behavior": base citation,
   "basis": base citation, "affected": bool} for the equivalent path and rule at base.
   Set affected only when the same scenario already fails at base.
@@ -148,6 +158,22 @@ Assess impact for users of the software. Report only the scoped behavior you che
 "#;
 
 const LIVE_CHECKS: &str = r#"
+For confirmed, add "counterevidence": {"references": [head citation, ...],
+"absence_paths": [path, ...]}. Cite one to six lines showing where you looked
+for the concrete counterexample, including the relevant conditions and later
+steps. If the finding or its countercheck depends on something being absent,
+list every file needed to establish the absence, with at least one checked
+reference in each. Use only paths in complete_head_paths. An empty absence_paths
+is for a result that follows from observed code without an absence assertion.
+Never infer absence from an unseen section, or across the repository. If you
+cannot close the scope with the supplied source, use indeterminate, or narrow
+the assertion to behavior directly demonstrated by the evidence.
+
+Give manual guidance only for a distinct decision or test that a human can act
+on. Describe what the source check already established in countercheck, and
+give the specific decision or test in question or action. Do not restate a
+confirmed impact as guidance or repeat the same decision or test for another ID.
+
 Try the exact path a reader of the changed instructions would take. A different
 path that works is a workaround, not counterevidence for the documented path.
 Separate what the code does from what its author might have intended. If a
@@ -460,6 +486,21 @@ impl<'a> ReferenceIndex<'a> {
         ranges
     }
 
+    fn has_complete_head(&self, path: &str, file: &FileLines<'_>) -> bool {
+        // An empty blob field also represents a missing blob. Windows have no EOF marker.
+        !file.head.is_empty()
+            && (1..=file.head.len()).all(|line| self.head_lines.contains_key(&(path, line)))
+    }
+
+    fn complete_head_paths(&self, source: &Source<'a>) -> Vec<&'a str> {
+        let mut paths: Vec<_> = source
+            .iter()
+            .filter_map(|(&path, file)| self.has_complete_head(path, file).then_some(path))
+            .collect();
+        paths.sort_unstable();
+        paths
+    }
+
     fn hunk_sections(
         &mut self,
         path: &'a str,
@@ -617,6 +658,7 @@ fn indexed_input<'a>(
             "url": snapshot.url, "repo": snapshot.repo, "number": snapshot.number,
             "base": snapshot.base, "head": snapshot.head, "intent": snapshot.intent,
             "limits": snapshot.limits, "files": files, "head_context": head_context,
+            "complete_head_paths": references.complete_head_paths(source),
         },
         "scan": scan,
     });
@@ -628,12 +670,75 @@ struct Evidence<'a> {
     references: Option<ReferenceIndex<'a>>,
 }
 
+#[derive(Default)]
+struct Counterevidence<'a> {
+    citations: Vec<Citation<'a>>,
+    absence_paths: Vec<&'a str>,
+}
+
 impl<'a> Evidence<'a> {
     fn citation(&self, value: &Value, revision: Revision) -> Option<Citation<'a>> {
         match &self.references {
             Some(references) => references.resolve(value, revision),
             None => verbatim_citation(value, &self.source, revision),
         }
+    }
+
+    fn counterevidence(&self, item: &Value) -> std::result::Result<Counterevidence<'a>, String> {
+        let Some(index) = &self.references else {
+            // Archived verbatim replies predate the structured countercheck.
+            return Ok(Counterevidence::default());
+        };
+        let check = &item["counterevidence"];
+        if !check
+            .as_object()
+            .is_some_and(|object| exact_keys(object, &["references", "absence_paths"]))
+        {
+            return Err("counterevidence must contain references and absence_paths.".into());
+        }
+        let citations = check["references"]
+            .as_array()
+            .filter(|items| (1..=MAX_COUNTEREVIDENCE).contains(&items.len()))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .map(|value| index.resolve(value, Revision::Head))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| {
+                format!("counterevidence.references must contain one to {MAX_COUNTEREVIDENCE} listed head references.")
+            })?;
+        let mut absence_paths = Vec::new();
+        let absence = check["absence_paths"]
+            .as_array()
+            .filter(|paths| paths.len() <= MAX_COUNTEREVIDENCE)
+            .ok_or_else(|| "absence_paths must be an array of checked file paths.".to_owned())?;
+        for value in absence {
+            let path = value
+                .as_str()
+                .and_then(|path| citations.iter().find(|cite| cite.path == path))
+                .map(|cite| cite.path)
+                .ok_or_else(|| {
+                    "Every absence path must have a counterevidence reference in that file."
+                        .to_owned()
+                })?;
+            if !self
+                .source
+                .get(path)
+                .is_some_and(|file| index.has_complete_head(path, file))
+            {
+                return Err(format!(
+                    "Cannot verify absence in {path} without the complete proposed file. Check the expanded context or use indeterminate."
+                ));
+            }
+            if !absence_paths.contains(&path) {
+                absence_paths.push(path);
+            }
+        }
+        Ok(Counterevidence {
+            citations,
+            absence_paths,
+        })
     }
 }
 
@@ -700,7 +805,9 @@ fn request(
                 CitationProtocol::Indexed => {
                     format!("{CHALLENGE}{LIVE_CHECKS}{CHALLENGE_DISCOVERY}")
                 }
-                CitationProtocol::Verbatim => CHALLENGE.to_owned(),
+                CitationProtocol::Verbatim => {
+                    format!("{CHALLENGE}\nFor confirmed, also give an action string.")
+                }
             },
         ),
         Pass::Recheck => ("assessments", format!("{RECHECK}{CHALLENGE}{LIVE_CHECKS}")),
@@ -936,10 +1043,10 @@ fn confirmed<'a>(
     countercheck: &str,
     severity: u8,
 ) -> Option<Assessment<'a>> {
-    let (kind, label) = match text(&item["kind"])? {
-        "contract" if basis != anchor => ("contract", "Documented behavior"),
-        "convention" if basis != anchor => ("convention", "Project rule"),
-        "performance" => ("performance", "Static performance analysis"),
+    let kind = match text(&item["kind"])? {
+        "contract" if basis != anchor => "contract",
+        "convention" if basis != anchor => "convention",
+        "performance" => "performance",
         _ => return None,
     };
     let support = item["support"].as_array()?;
@@ -953,13 +1060,23 @@ fn confirmed<'a>(
     let (attribution, base) = attribution(&item["comparison"], anchor, basis, &support, source)?;
     let reason = text(&item["reason"])?;
     let impact = text(&item["impact"])?;
+    let checked = source.counterevidence(item).ok()?;
     let mut evidence = vec![
         format!("Static analysis. {reason}"),
         format!("Targeted check. {countercheck}"),
     ];
+    if !checked.absence_paths.is_empty() {
+        evidence.push(format!(
+            "Absence checked in complete proposed files. {}",
+            checked.absence_paths.join(", ")
+        ));
+    }
     add_citations(
         &mut evidence,
-        [anchor, basis].into_iter().chain(support),
+        [anchor, basis]
+            .into_iter()
+            .chain(support)
+            .chain(checked.citations),
         Revision::Head,
     );
     add_citations(&mut evidence, base, Revision::Base);
@@ -971,13 +1088,6 @@ fn confirmed<'a>(
         evidence: evidence.join("\n"),
         attribution,
     };
-    let focus = Focus {
-        path: anchor.path.into(),
-        line: anchor.line,
-        checked: format!("{label} in {}:{}. {countercheck}", basis.path, basis.line),
-        outcome: impact.into(),
-        action: text(&item["action"])?.into(),
-    };
     Some(Assessment {
         finding: Some(RankedFinding {
             severity,
@@ -986,7 +1096,6 @@ fn confirmed<'a>(
             kind,
             finding,
         }),
-        priority: Some((severity, 0, focus)),
         ..Assessment::default()
     })
 }
@@ -1004,7 +1113,12 @@ fn fold_for_comparison(value: &str) -> String {
     folded
 }
 
-fn human(item: &Value, anchor: Citation<'_>, basis: Citation<'_>) -> Option<Focus> {
+fn human(
+    item: &Value,
+    anchor: Citation<'_>,
+    basis: Citation<'_>,
+    countercheck: &str,
+) -> Option<Focus> {
     let question = text(&item["question"])?;
     let [first, second] = item["alternatives"].as_array()?.as_slice() else {
         return None;
@@ -1016,11 +1130,7 @@ fn human(item: &Value, anchor: Citation<'_>, basis: Citation<'_>) -> Option<Focu
     Some(Focus {
         path: anchor.path.into(),
         line: anchor.line,
-        checked: format!(
-            "Static analysis. {}\n{}",
-            anchor.render(Revision::Head),
-            basis.render(Revision::Head),
-        ),
+        checked: checked_source("Static analysis", countercheck, anchor, basis),
         outcome: text(&item["reason"])?.into(),
         action: format!("{question} The options are “{first}” and “{second}”."),
     })
@@ -1037,20 +1147,27 @@ fn severity(item: &Value) -> Option<u8> {
 
 const MANUAL_FIELDS: &[&str] = &["basis", "action", "expected", "severity"];
 
-fn manual_focus(item: &Value, anchor: Citation<'_>, basis: Citation<'_>) -> Option<Focus> {
-    let checked = if basis == anchor {
-        format!("Source for manual check. {}", anchor.render(Revision::Head))
-    } else {
-        format!(
-            "Source for manual check. {}\n{}",
-            anchor.render(Revision::Head),
-            basis.render(Revision::Head)
-        )
-    };
+fn checked_source(
+    label: &str,
+    countercheck: &str,
+    anchor: Citation<'_>,
+    basis: Citation<'_>,
+) -> String {
+    let mut checked = vec![format!("{label}. {countercheck}")];
+    add_citations(&mut checked, [anchor, basis], Revision::Head);
+    checked.join("\n")
+}
+
+fn manual_focus(
+    item: &Value,
+    anchor: Citation<'_>,
+    basis: Citation<'_>,
+    countercheck: &str,
+) -> Option<Focus> {
     Some(Focus {
         path: anchor.path.into(),
         line: anchor.line,
-        checked,
+        checked: checked_source("Source for manual check", countercheck, anchor, basis),
         outcome: format!(
             "Expected result (not verified). {}",
             text(&item["expected"])?
@@ -1083,6 +1200,18 @@ fn assessment_fields(
     outcome: &str,
     indexed: bool,
 ) -> Option<&'static [&'static str]> {
+    const CONFIRMED_FIELDS: &[&str] = &[
+        "kind",
+        "basis",
+        "support",
+        "severity",
+        "title",
+        "impact",
+        "reason",
+        "comparison",
+        "counterevidence",
+        "action",
+    ];
     Some(match outcome {
         "manual_test" if indexed => MANUAL_FIELDS,
         "indeterminate" if indexed => {
@@ -1101,6 +1230,9 @@ fn assessment_fields(
             &["basis", "severity", "action"]
         }
         "refuted" => &["basis"],
+        // Accept the old action field on live replies, with no focus derived from it.
+        "confirmed" if indexed && object.contains_key("action") => CONFIRMED_FIELDS,
+        "confirmed" if indexed => &CONFIRMED_FIELDS[..CONFIRMED_FIELDS.len() - 1],
         "confirmed" => &[
             "kind",
             "basis",
@@ -1131,7 +1263,7 @@ fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Opti
             Some((
                 severity(item)?,
                 if outcome == "manual_test" { 3 } else { 4 },
-                manual_focus(item, anchor, basis)?,
+                manual_focus(item, anchor, basis, countercheck)?,
             ))
         } else {
             None
@@ -1149,9 +1281,18 @@ fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Opti
     }
     let basis = source.citation(&item["basis"], Revision::Head)?;
     match outcome {
-        "confirmed" => confirmed(item, anchor, basis, source, countercheck, severity(item)?),
+        "confirmed" => {
+            if let Some(action) = object.get("action") {
+                text(action)?;
+            }
+            confirmed(item, anchor, basis, source, countercheck, severity(item)?)
+        }
         "human" => Some(Assessment {
-            priority: Some((severity(item)?, 1, human(item, anchor, basis)?)),
+            priority: Some((
+                severity(item)?,
+                1,
+                human(item, anchor, basis, countercheck)?,
+            )),
             ..Assessment::default()
         }),
         "refuted" if object.contains_key("action") => Some(Assessment {
@@ -1161,8 +1302,8 @@ fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Opti
                 Focus {
                     path: anchor.path.into(),
                     line: anchor.line,
-                    checked: format!("Verified counterevidence. {}", basis.render(Revision::Head)),
-                    outcome: format!("Static check passed. {countercheck}"),
+                    checked: checked_source("Verified counterevidence", countercheck, basis, basis),
+                    outcome: "Static check passed.".into(),
                     action: text(&item["action"])?.into(),
                 },
             )),
@@ -1242,6 +1383,9 @@ fn validation_feedback(item: &Value, anchor: Citation<'_>, evidence: &Evidence<'
         .position(|reference| evidence.citation(reference, Revision::Head).is_none())
     {
         return format!("support[{index}] must be a listed head reference (H ID).");
+    }
+    if let Err(feedback) = evidence.counterevidence(item) {
+        return feedback;
     }
     let comparison = &item["comparison"];
     if !comparison
@@ -1448,6 +1592,8 @@ fn recheck_input<'a>(
     for (path, head) in skipped_anchors {
         references.append_recheck_window(path, head, 0..head.len(), &mut remaining, windows)?;
     }
+    data["snapshot"]["complete_head_paths"] =
+        json!(references.complete_head_paths(&evidence.source));
     Ok(())
 }
 
@@ -1624,9 +1770,7 @@ fn live_assessments<'a>(
                     }
                 }
                 if let Some(accepted_outcome) = entry.accepted_outcome {
-                    if item.undecided.is_none()
-                        && text(&raw["outcome"]) != Some(accepted_outcome.as_str())
-                    {
+                    if text(&raw["outcome"]) != Some(accepted_outcome.as_str()) {
                         recovered = false;
                         accepted.retain(|(_, id, _)| *id != entry.id);
                         limits.push(format!(
@@ -1864,8 +2008,17 @@ where
     }
     priorities.sort_by_key(|&(severity, kind, _)| (severity, kind));
     let mut locations = HashSet::new();
+    let mut actions = HashSet::new();
     for (_, _, focus) in priorities {
-        if locations.insert((focus.path.clone(), focus.line)) {
+        let action = focus
+            .action
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let action = fold_for_comparison(action.trim_end_matches(['.', '!', '?']));
+        let location = (focus.path.clone(), focus.line);
+        if !locations.contains(&location) && actions.insert(action) {
+            locations.insert(location);
             report.focus.push(focus);
         }
         if report.focus.len() == 3 {
@@ -1959,16 +2112,8 @@ mod tests {
        "evidence":"Static analysis. SUM returns NULL when the orders table is empty.\nTargeted check. The query does not apply COALESCE to the SUM result.\nProposed revision orders.sql:1 “SELECT SUM(total_cents) AS total_cents”\nProposed revision feed.ts:1 “// total_cents is always a number, even for zero orders.”\nProposed revision orders.sql:2 “FROM orders;”\nBase revision orders.sql:1 “SELECT SUM(total_cents) AS total_cents”\nBase revision feed.ts:1 “// total_cents is always a number, even for zero orders.”"}
     ],
     "focus":[
-      {"path":"cache.go", "line":2,
-       "checked":"Documented behavior in requirements.md:1. The function does not enforce a minimum count.",
-       "outcome":"A one-slot cache reports zero capacity.",
-       "action":"Check whether a one-slot cache can accept an entry."},
-      {"path":"orders.sql", "line":1,
-       "checked":"Documented behavior in feed.ts:1. The query does not apply COALESCE to the SUM result.",
-       "outcome":"The UI receives NULL instead of zero.",
-       "action":"Check the total when the orders table is empty."},
       {"path":"feed.ts", "line":2,
-       "checked":"Static analysis. Proposed revision feed.ts:2 “const visible = entries.filter(entry => entry.published);”\nProposed revision feed.ts:3 “render(\"feed\", visible);”",
+       "checked":"Static analysis. The renderer only uses entries that passed the filter.\nProposed revision feed.ts:2 “const visible = entries.filter(entry => entry.published);”\nProposed revision feed.ts:3 “render(\"feed\", visible);”",
        "outcome":"The filter removes drafts before displaying the feed.",
        "action":"Should moderators see drafts in the feed? The options are “Show drafts to moderators” and “Show published entries only”."}
     ]
@@ -2008,9 +2153,9 @@ mod tests {
             "id": id, "outcome": "confirmed", "kind": "contract", "severity": "high",
             "basis": basis, "support": [], "title": "Capacity is reduced by one slot",
             "impact": "A one-slot cache reports zero capacity.",
-            "countercheck": "The function does not enforce a minimum count.",
+            "countercheck": "The return expression subtracts one from slots directly.",
             "reason": "The return value is one less than the configured count.",
-            "action": "Configure one slot and check that the cache reports one slot.",
+            "counterevidence": {"references": ["H2"], "absence_paths": []},
             "comparison": {"behavior": behavior, "basis": rule, "affected": false},
         })
     }
@@ -2136,10 +2281,12 @@ mod tests {
         capacity.patch = "@@ -5000 +5000 @@\n-\treturn slots\n+\treturn slots - 1".into();
         capacity.before.clear();
         capacity.after.clear();
+        let mut finding = indexed_capacity_finding(1, "H2", "B1", "B2");
+        finding["counterevidence"]["references"] = json!(["H1"]);
         let report = review_indexed(
             &snapshot,
             vec![indexed_proposal("H1", "The caller configures one slot.")],
-            vec![indexed_capacity_finding(1, "H2", "B1", "B2")],
+            vec![finding],
         );
         assert!(report.limits.is_empty(), "{:?}", report.limits);
         let finding = &report.findings[0];
@@ -2620,6 +2767,11 @@ mod tests {
         };
         assert!(focus.checked.contains("Proposed revision feed.ts:2"));
         assert!(focus.checked.contains("Proposed revision feed.ts:3"));
+        assert!(
+            focus
+                .checked
+                .contains("Static analysis cannot show what the browser renders.")
+        );
         assert_eq!(
             focus.outcome,
             "Expected result (not verified). The published entry appears and the draft remains hidden."
@@ -2676,7 +2828,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refuted_check_can_offer_lower_ranked_manual_regression_guidance() {
+    fn a_refuted_check_can_offer_a_distinct_manual_regression_test() {
         let snapshot = indexed_snapshot();
         let proposal = indexed_proposal("H8", "An operator requests a public feed with a draft.");
         let mut checked = json!({
@@ -2703,9 +2855,9 @@ mod tests {
         );
         assert!(report.limits.is_empty());
         assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.focus.len(), 2);
-        assert_eq!(report.focus[0].path, "cache.go");
-        let focus = &report.focus[1];
+        let [focus] = report.focus.as_slice() else {
+            panic!("Expected only the distinct manual regression test")
+        };
         assert_eq!((focus.path.as_str(), focus.line), ("feed.ts", 2));
         assert!(focus.checked.contains("Proposed revision feed.ts:2"));
         assert!(focus.outcome.starts_with("Static check passed."));
@@ -2790,12 +2942,173 @@ mod tests {
         );
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].title, accepted["title"]);
-        assert_eq!(report.focus.len(), 2);
+        let [focus] = report.focus.as_slice() else {
+            panic!("Expected only the human decision")
+        };
+        assert!(focus.checked.contains("Proposed revision feed.ts:5"));
+        assert!(focus.checked.contains("The code checks the role"));
+    }
+
+    #[test]
+    fn absence_findings_require_checked_references_in_each_complete_file() {
+        let snapshot = indexed_snapshot();
+        let proposal = indexed_proposal("H2", "The caller configures one slot.");
+        let mut finding = indexed_capacity_finding(1, "H4", "B2", "B4");
+        finding["countercheck"] = json!("The function has no minimum count guard.");
+        finding["counterevidence"] = json!({
+            "references": ["H1", "H2", "H3"], "absence_paths": ["cache.go"],
+        });
+        let report = review_indexed(&snapshot, vec![proposal.clone()], vec![finding.clone()]);
+        assert!(report.limits.is_empty());
+        let [confirmed] = report.findings.as_slice() else {
+            panic!("Expected one grounded finding")
+        };
         assert!(
-            report.focus[1]
-                .checked
-                .contains("Proposed revision feed.ts:5")
+            confirmed
+                .evidence
+                .contains("Absence checked in complete proposed files. cache.go")
         );
+        assert!(confirmed.evidence.contains("Proposed revision cache.go:1"));
+
+        for bad_check in [
+            json!({"references": ["H2"], "absence_paths": ["requirements.md"]}),
+            json!({"references": ["B2"], "absence_paths": ["cache.go"]}),
+            json!({"references": [], "absence_paths": []}),
+        ] {
+            finding["counterevidence"] = bad_check;
+            let report = failed_indexed_recheck(&snapshot, proposal.clone(), finding.clone());
+            assert!(report.findings.is_empty());
+            assert!(
+                report
+                    .limits
+                    .iter()
+                    .any(|limit| limit.starts_with("No valid recheck at cache.go:2."))
+            );
+        }
+    }
+
+    #[test]
+    fn recheck_follows_the_later_conditional_ci_test_selection() {
+        let workflow = ".github/workflows/test.yml";
+        let append_test = "            tests=\"$tests smoke\"";
+        let run = "          for test in $tests; do cargo test --test \"$test\"; done";
+        let mut snapshot = indexed_snapshot();
+        snapshot.files = vec![
+            crate::contracts::SourceFile {
+                path: workflow.into(),
+                before: String::new(),
+                after: format!(
+                    "jobs:\n  check:\n    steps:\n      - name: Run tests\n        run: |\n          tests=\"unit\"\n          if [ \"$RUN_SMOKE\" = 1 ]; then\n{append_test}\n          fi\n{run}\n"
+                ),
+                patch: format!(
+                    "@@ -6 +6 @@\n-          tests=\"unit smoke\"\n+          tests=\"unit\"\n@@ -10 +10 @@\n-          cargo test\n+{run}"
+                ),
+            },
+            crate::contracts::SourceFile {
+                path: "CONTRIBUTING.md".into(),
+                before: String::new(),
+                after: "CI must run smoke tests when RUN_SMOKE is 1.".into(),
+                patch: String::new(),
+            },
+        ];
+        let absence_finding = json!({
+            "id": 1, "outcome": "confirmed", "kind": "contract", "severity": "high",
+            "title": "CI drops the smoke test when RUN_SMOKE is 1",
+            "impact": "A smoke failure no longer blocks the job in smoke mode.",
+            "reason": "The visible test list contains only unit tests.",
+            "basis": "H3", "support": ["H2"], "comparison": null,
+            "countercheck": "CI never adds the smoke test before invoking the runner.",
+            "counterevidence": {"references": ["H1", "H2"], "absence_paths": [workflow]}
+        });
+
+        for complete_head_available in [true, false] {
+            let mut snapshot = snapshot.clone();
+            if !complete_head_available {
+                snapshot.files[0].after.clear();
+            }
+            let mut calls = 0;
+            let report = review(&snapshot, &Scan::default(), |system, data| {
+                calls += 1;
+                let snapshot = &data["snapshot"];
+                let complete = snapshot["complete_head_paths"].as_array().unwrap();
+                match calls {
+                    1 => Ok(json!({"complete": true, "hypotheses": [
+                        {"anchor": "H1", "expected": "CI runs smoke tests when RUN_SMOKE is 1.",
+                         "scenario": "The CI job runs with RUN_SMOKE=1.",
+                         "consequence": "A smoke failure might no longer block the job."}
+                    ]})),
+                    2 => {
+                        assert!(system.contains("later steps, scripts or dynamic"));
+                        assert!(system.contains("one assertion for each ID"));
+                        let sections = snapshot["files"][0]["sections"].as_array().unwrap();
+                        assert_eq!(sections.len(), 2);
+                        assert_eq!(sections[1][1][2], run);
+                        assert!(!complete.contains(&json!(workflow)));
+                        assert_eq!(snapshot["head_context"], json!([]));
+                        Ok(json!({"complete": true, "assessments": [absence_finding]}))
+                    }
+                    3 => {
+                        assert!(data["recheck"][0]["feedback"].as_str().unwrap().contains(
+                            "without the complete proposed file"
+                        ));
+                        assert_eq!(complete.contains(&json!(workflow)), complete_head_available);
+                        if !complete_head_available {
+                            return Ok(json!({"complete": true, "assessments": [absence_finding]}));
+                        }
+                        let smoke_ref = snapshot["head_context"].as_array().unwrap().iter()
+                            .flat_map(|window| window["rows"].as_array().unwrap())
+                            .find(|row| row[2] == append_test).unwrap()[1].clone();
+                        Ok(json!({"complete": true, "assessments": [{
+                            "id": 1, "outcome": "refuted", "basis": smoke_ref,
+                            "countercheck": "The shell appends smoke when RUN_SMOKE is 1, then invokes cargo test for each test in the list."
+                        }]}))
+                    }
+                    _ => panic!("Only one recheck is allowed."),
+                }
+            }).unwrap();
+            assert_eq!(calls, 3);
+            assert!(report.findings.is_empty());
+            assert!(report.focus.is_empty());
+            assert_eq!(report.limits.is_empty(), complete_head_available);
+        }
+    }
+
+    #[test]
+    fn publishes_one_copy_of_manual_guidance_across_locations() {
+        let mut confirmed = indexed_capacity_finding(1, "H4", "B2", "B4");
+        confirmed["action"] = json!("Check whether a one-slot cache can accept an entry.");
+        let report = review_indexed(
+            &indexed_snapshot(),
+            vec![
+                indexed_proposal("H2", "A caller configures one slot."),
+                indexed_proposal("H8", "Open a public feed with mixed visibility."),
+                indexed_proposal("H9", "Render a public feed with mixed visibility."),
+            ],
+            vec![
+                confirmed,
+                json!({"id": 2, "outcome": "manual_test", "basis": "H8", "severity": "low",
+                       "countercheck": "The filter keeps published entries.",
+                       "action": "Open the feed with a draft and a published entry.",
+                       "expected": "Only the published entry appears."}),
+                json!({"id": 3, "outcome": "manual_test", "basis": "H8", "severity": "high",
+                       "countercheck": "The renderer receives the filtered list.",
+                       "action": "OPEN the feed with a draft and a published entry",
+                       "expected": "Only the published entry appears."}),
+            ],
+        );
+        assert!(report.limits.is_empty());
+        assert_eq!(report.findings.len(), 1);
+        let [focus] = report.focus.as_slice() else {
+            panic!("Expected exactly one manual test")
+        };
+        assert_eq!((focus.path.as_str(), focus.line), ("feed.ts", 3));
+        assert!(
+            focus
+                .checked
+                .contains("The renderer receives the filtered list.")
+        );
+        assert!(focus.checked.contains("Proposed revision feed.ts:2"));
+        assert!(focus.outcome.contains("Only the published entry appears."));
     }
 
     #[test]
@@ -3005,7 +3318,7 @@ mod tests {
         }).unwrap();
         assert_eq!(calls, 3);
         assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.focus.len(), 1);
+        assert!(report.focus.is_empty());
         assert!(
             report
                 .limits
@@ -3056,7 +3369,7 @@ mod tests {
         assert!(replies.next().is_none());
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].title, "Capacity is reduced by one slot");
-        assert_eq!(report.focus.len(), 1);
+        assert!(report.focus.is_empty());
         assert_eq!(
             report.limits,
             [
@@ -3142,23 +3455,30 @@ mod tests {
     #[test]
     fn a_contradicted_assessment_is_not_published_as_verified() {
         let snapshot = indexed_snapshot();
-        let mut replies = [
-            json!({"complete":true,"hypotheses":[indexed_proposal("H2", "The caller configures one slot.")]}),
-            json!({"complete":false,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]}),
-            json!({"complete":true,"assessments":[{"id":1,"outcome":"refuted","basis":"H4","countercheck":"The caller already caps this value."}]}),
-        ].into_iter();
-        let report = review(&snapshot, &Scan::default(), |_, _| {
-            Ok(replies.next().unwrap())
-        })
-        .unwrap();
-        assert!(report.findings.is_empty());
-        assert!(report.focus.is_empty());
-        assert!(
-            report
-                .limits
-                .iter()
-                .any(|line| line.contains("did not confirm"))
-        );
+        for rechecked in [
+            json!({"id": 1, "outcome": "refuted", "basis": "H4",
+                   "countercheck": "The caller already caps this value."}),
+            json!({"id": 1, "outcome": "indeterminate",
+                   "countercheck": "The production caller that could cap this value is unavailable."}),
+        ] {
+            let mut replies = [
+                json!({"complete": true, "hypotheses": [indexed_proposal("H2", "The caller configures one slot.")]}),
+                json!({"complete": false, "assessments": [indexed_capacity_finding(1, "H4", "B2", "B4")]}),
+                json!({"complete": true, "assessments": [rechecked]}),
+            ].into_iter();
+            let report = review(&snapshot, &Scan::default(), |_, _| {
+                Ok(replies.next().unwrap())
+            })
+            .unwrap();
+            assert!(report.findings.is_empty());
+            assert!(report.focus.is_empty());
+            assert!(
+                report
+                    .limits
+                    .iter()
+                    .any(|line| line.contains("did not confirm"))
+            );
+        }
     }
 
     #[test]
@@ -3190,7 +3510,7 @@ mod tests {
         assert_eq!(calls, 3);
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].title, accepted["title"]);
-        assert_eq!(report.focus.len(), 1);
+        assert!(report.focus.is_empty());
         assert!(report.limits.is_empty(), "{:?}", report.limits);
     }
 
@@ -3263,7 +3583,7 @@ mod tests {
             let report = replay(&altered);
             assert_eq!(report.findings.len(), 1, "field {field}");
             assert_eq!(report.findings[0].path, "orders.sql");
-            assert_eq!(report.focus.len(), 2);
+            assert_eq!(report.focus.len(), 1);
             assert_eq!(
                 report.limits,
                 [
@@ -3402,7 +3722,7 @@ mod tests {
     }
 
     #[test]
-    fn deduplicates_findings_and_prioritizes_only_three_distinct_locations() {
+    fn deduplicates_findings_without_copying_them_into_focus() {
         let mut fixture = fixture();
         let go = fixture["replies"][1]["assessments"][2].clone();
         let proposals = fixture["replies"][0]["hypotheses"].as_array_mut().unwrap();

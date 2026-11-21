@@ -2,9 +2,21 @@
 
 mod callers;
 mod local_dependencies;
+mod pull_files;
 mod reads;
 
 pub use reads::read_context;
+
+#[derive(Debug)]
+pub struct RevisionChanged(pub(crate) &'static str);
+
+impl std::fmt::Display for RevisionChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for RevisionChanged {}
 
 use crate::contracts::{
     DiffFile, GitHubRateLimit, PinnedDiff, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow,
@@ -24,6 +36,7 @@ use reqwest::{
 use serde::{Deserialize, de::DeserializeOwned};
 use sha1::{Digest, Sha1};
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::Read,
     time::{Duration, Instant},
@@ -581,6 +594,7 @@ struct CommitMessage {
 struct Change {
     filename: String,
     status: String,
+    sha: Option<String>,
     previous_filename: Option<String>,
     patch: Option<String>,
     additions: Option<usize>,
@@ -589,9 +603,16 @@ struct Change {
 }
 
 impl Change {
+    fn text_status(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "added" | "removed" | "modified" | "renamed" | "changed"
+        )
+    }
+
     fn previous(&self) -> Option<&str> {
         if self.status == "renamed" {
-            self.previous_filename.as_deref()
+            safe_previous_path(&self.filename, self.previous_filename.as_deref())
         } else {
             Some(&self.filename)
         }
@@ -1335,10 +1356,12 @@ impl Candidate {
         let intent_roles = roles.intersection(&query.roles).count() as u32;
         let implementation = !test
             && !generated_path(&entry.path)
-            && !entry
-                .path
-                .split('/')
-                .any(|part| matches!(part, "locales" | "i18n" | "l10n" | "translations"));
+            && !entry.path.split('/').any(|part| {
+                matches!(
+                    part,
+                    "locales" | "i18n" | "l10n" | "translations" | "testdata"
+                )
+            });
         let external = !query.packages.contains(package(&entry.path, &query.roots));
         let literal_module = query
             .modules
@@ -1594,19 +1617,199 @@ fn stored_diff(
     diff
 }
 
+#[derive(Deserialize)]
+struct PushComparison {
+    #[serde(flatten)]
+    comparison: DiffComparison,
+    status: String,
+    behind_by: u64,
+}
+
+fn pushed_paths<T: Transport>(
+    hub: &mut GitHub<T>,
+    head: &Revision,
+    previous_head: Option<&str>,
+) -> HashSet<String> {
+    let Some(previous) = previous_head.filter(|id| *id != head.sha && sha(id).is_ok()) else {
+        return HashSet::new();
+    };
+    let route = format!(
+        "{}/compare/{previous}...{}?per_page=1&page=1",
+        head.repo.full_name, head.sha,
+    );
+    let Ok(push) = hub.get::<PushComparison>(&route, RESPONSE, false) else {
+        return HashSet::new();
+    };
+    let comparison = push.comparison;
+    if push.status != "ahead"
+        || push.behind_by != 0
+        || comparison.base_commit.sha != previous
+        || comparison.merge_base_commit.sha != previous
+    {
+        return HashSet::new();
+    }
+    let mut paths = HashSet::new();
+    for change in comparison
+        .files
+        .unwrap_or_default()
+        .into_iter()
+        .take(CHANGED_FILES)
+    {
+        if safe_path(&change.filename)
+            && let Some(previous) = change.previous()
+        {
+            paths.insert(previous.to_owned());
+            paths.insert(change.filename);
+        }
+    }
+    paths
+}
+
+fn ancillary_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let (directory, name) = parent(&lower);
+    generated_path(path)
+        || test_path(path)
+        || directory.split('/').any(|part| {
+            matches!(
+                part,
+                "docs"
+                    | "documentation"
+                    | "examples"
+                    | "fixtures"
+                    | "snapshots"
+                    | "__snapshots__"
+                    | "locales"
+                    | "i18n"
+                    | "l10n"
+                    | "translations"
+                    | "testdata"
+            )
+        })
+        || matches!(
+            stem(name),
+            "readme" | "changelog" | "license" | "contributing"
+        )
+}
+
+fn rank_changes(
+    changes: &mut [(&Change, &str)],
+    intent: &[String],
+    pushed: &HashSet<String>,
+    prior_paths: &[String],
+    fallback: &HashMap<&str, Change>,
+) {
+    let bytes = |change: &Change| {
+        fallback
+            .get(change.filename.as_str())
+            .unwrap_or(change)
+            .patch
+            .as_ref()
+            .map_or(0, String::len)
+    };
+    let oversubscribed = changes
+        .iter()
+        .map(|(change, _)| bytes(change))
+        .sum::<usize>()
+        > SNAPSHOT_TEXT_BYTES;
+    if !oversubscribed && pushed.is_empty() && prior_paths.is_empty() {
+        return;
+    }
+    let title = intent.first().map_or("", String::as_str);
+    let title_names: HashSet<_> = title
+        .split(|ch: char| !ch.is_alphanumeric() && !"_-/.".contains(ch))
+        .filter(|word| word.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let title_terms: HashSet<_> = labels(title)
+        .filter(|term| term.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .collect();
+
+    let prior: HashSet<_> = prior_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| safe_path(path))
+        .collect();
+    let terms: HashSet<_> = intent
+        .iter()
+        .flat_map(|text| labels(text))
+        .map(str::to_ascii_lowercase)
+        .filter(|term| {
+            term.len() >= 3
+                && !matches!(
+                    term.as_str(),
+                    "the"
+                        | "and"
+                        | "for"
+                        | "with"
+                        | "from"
+                        | "this"
+                        | "that"
+                        | "into"
+                        | "use"
+                        | "add"
+                        | "fix"
+                        | "file"
+                        | "files"
+                        | "change"
+                        | "changes"
+                )
+        })
+        .collect();
+    let literals: HashSet<_> = intent
+        .iter()
+        .flat_map(|text| {
+            text.split(|ch: char| !ch.is_alphanumeric() && !"/._-".contains(ch))
+                .map(|word| word.trim_end_matches('.'))
+        })
+        .collect();
+    let matches = |part: &str| {
+        labels(part)
+            .filter(|term| terms.contains(&term.to_ascii_lowercase()))
+            .count()
+    };
+    changes.sort_by_cached_key(|(change, previous)| {
+        let path = change.filename.as_str();
+        let explicit = literals.contains(path) || literals.contains(previous);
+        let name = stem(path);
+        let title_matches = labels(name)
+            .filter(|label| title_terms.contains(&label.to_ascii_lowercase()))
+            .count();
+        // After the named implementation, collect small related changes before
+        // a second large patch can consume the remaining evidence budget.
+        let ancillary = ancillary_path(path);
+        let compact_related =
+            !ancillary && title_matches > 0 && (1..=WINDOW_BYTES).contains(&bytes(change));
+        (
+            !(pushed.contains(path) || pushed.contains(*previous)),
+            !(prior.contains(path) || prior.contains(previous)),
+            ancillary || !title_names.contains(&name.to_ascii_lowercase()),
+            !compact_related,
+            !explicit,
+            ancillary,
+            Reverse(title_matches),
+            Reverse(matches(stem(path)).max(matches(stem(previous)))),
+            Reverse(path_parts(path).skip(1).map(matches).max().unwrap_or(0)),
+        )
+    });
+}
+
 fn pinned<T: Transport>(
     hub: &mut GitHub<T>,
     repo: String,
     number: u64,
     allowed: &HashSet<String>,
     expected_head: Option<&str>,
+    previous_head: Option<&str>,
+    prior_paths: &[String],
 ) -> Result<Snapshot> {
     let pull_route = format!("{repo}/pulls/{number}");
     let mut pull: Pull = hub.get(&pull_route, PULL_BYTES, false)?;
     pull.validate(&repo, number, allowed)?;
     ensure!(
         expected_head.is_none_or(|head| head.eq_ignore_ascii_case(&pull.head.sha)),
-        "The pull request changed before review."
+        RevisionChanged("The pull request changed before review.")
     );
     let head_ref = if pull.head.repo.full_name == repo {
         pull.head.sha.clone()
@@ -1643,17 +1846,13 @@ fn pinned<T: Transport>(
         ));
     }
 
-    let mut files = Vec::new();
-    let mut selected = Vec::new();
-    let mut remaining = SNAPSHOT_TEXT_BYTES;
     let mut seen = HashSet::new();
-    let mut before = Tree::new(&repo, base);
-    let mut after = Tree::new(&pull.head.repo.full_name, &pull.head.sha);
     let excluded = changes
         .iter()
         .flat_map(|change| [Some(change.filename.as_str()), change.previous()])
         .flatten()
         .collect();
+    let mut ranked = Vec::new();
     for change in changes.iter().take(CHANGED_FILES) {
         let path = &change.filename;
         let Some(previous) = change.previous().filter(|previous| safe_path(previous)) else {
@@ -1664,24 +1863,52 @@ fn pinned<T: Transport>(
             limits.push("Some changes have invalid or duplicate paths.".into());
             continue;
         }
-        if !matches!(
-            change.status.as_str(),
-            "added" | "removed" | "modified" | "renamed" | "changed"
-        ) {
+        if !change.text_status() {
             limits.push(format!("Unsupported change type for {path}."));
             continue;
         }
-        if change
-            .patch
-            .as_ref()
-            .is_some_and(|patch| patch.len() > remaining)
+        ranked.push((change, previous));
+    }
+    let intent = intent(hub, &pull, &route, &first, &mut limits);
+    let pushed = pushed_paths(hub, &pull.head, previous_head);
+    let fallback = pull_files::candidates(hub, &pull_route, pull.changed_files, changes);
+    rank_changes(&mut ranked, &intent, &pushed, prior_paths, &fallback);
+
+    let mut files = Vec::new();
+    let mut selected = Vec::new();
+    let mut remaining = SNAPSHOT_TEXT_BYTES;
+    let prior_names: HashSet<_> = prior_paths.iter().map(String::as_str).collect();
+    let reserve_prior_head = !pushed.is_empty() && !prior_names.is_empty();
+    let mut before = Tree::new(&repo, base);
+    let mut after = Tree::new(&pull.head.repo.full_name, &pull.head.sha);
+    for (change, previous) in ranked {
+        let path = &change.filename;
+        let candidate = fallback.get(path.as_str());
+        let patch = change.complete_patch();
+        // Keep the latest push first. Spend some of the remaining allowance on
+        // reading the whole file behind an earlier concern before unrelated patches.
+        let patch_budget = if reserve_prior_head
+            && !pushed.contains(path)
+            && !prior_names.contains(path.as_str())
+            && !prior_names.contains(previous)
+        {
+            remaining.saturating_sub(HEAD_CONTEXT_BYTES)
+        } else {
+            remaining
+        };
+        if patch
+            .or_else(|| candidate.and_then(|file| file.patch.as_deref()))
+            .or(change.patch.as_deref())
+            .is_some_and(|patch| patch.len() > patch_budget)
         {
             limits.push(format!(
                 "Patch for {path} exceeds the remaining review text limit."
             ));
             continue;
         }
-        let patch = change.complete_patch().unwrap_or_default();
+        let patch = patch
+            .or_else(|| pull_files::verify(hub, &mut before, &mut after, candidate?, previous))
+            .unwrap_or_default();
         if !inspect_patch_modes(
             change,
             patch,
@@ -1702,12 +1929,24 @@ fn pinned<T: Transport>(
             after: String::new(),
         });
     }
-    let intent = intent(hub, &pull, &route, &first, &mut limits);
     selected.retain(|&(index, change, previous)| {
         !files[index].patch.is_empty()
             || change.review_patchless(hub, &mut before, &mut after, previous, &mut limits)
     });
 
+    if reserve_prior_head {
+        let available = remaining.min(HEAD_CONTEXT_BYTES);
+        let mut budget = available;
+        for &(index, change, previous) in &selected {
+            if change.status != "removed"
+                && (prior_names.contains(change.filename.as_str())
+                    || prior_names.contains(previous))
+            {
+                files[index].after = read_source(hub, &mut after, &change.filename, &mut budget);
+            }
+        }
+        remaining -= available - budget;
+    }
     // Reserve source for supporting heads before full changed bodies and their base copies.
     let context_allotment = remaining.min(CONTEXT_TEXT_BYTES);
     let mut context_budget = context_allotment;
@@ -1730,7 +1969,7 @@ fn pinned<T: Transport>(
     let mut window_budget = remaining.min(HEAD_CONTEXT_BYTES);
     remaining -= window_budget;
     for &(index, change, _) in &selected {
-        if change.status != "removed" {
+        if change.status != "removed" && files[index].after.is_empty() {
             files[index].after = read_source(hub, &mut after, &change.filename, &mut remaining);
         }
     }
@@ -1773,7 +2012,9 @@ fn pinned<T: Transport>(
     let mut final_pull: Pull = hub.get(&pull_route, PULL_BYTES, true)?;
     final_pull.validate(&repo, number, allowed)?;
     if !pull.same_revisions(&final_pull) {
-        bail!("The pull request changed during collection. Submit it again.");
+        bail!(RevisionChanged(
+            "The pull request changed during collection. Submit it again."
+        ));
     }
     let mut unique = HashSet::new();
     limits.retain(|limit| unique.insert(limit.clone()));
@@ -1801,8 +2042,27 @@ pub fn collect_at(
     allowed: &HashSet<String>,
     expected_head: Option<&str>,
 ) -> Result<Snapshot> {
+    collect_with_previous(url, allowed, expected_head, None, &[])
+}
+
+/// Collect pinned PR source, prioritizing paths from a fast-forward push and prior findings.
+pub fn collect_with_previous(
+    url: &str,
+    allowed: &HashSet<String>,
+    expected_head: Option<&str>,
+    previous_head: Option<&str>,
+    prior_paths: &[String],
+) -> Result<Snapshot> {
     let (repo, number) = pull_url(url, allowed)?;
-    pinned(&mut github()?, repo, number, allowed, expected_head)
+    pinned(
+        &mut github()?,
+        repo,
+        number,
+        allowed,
+        expected_head,
+        previous_head,
+        prior_paths,
+    )
 }
 
 #[derive(Deserialize)]
@@ -1973,6 +2233,14 @@ mod tests {
         hex::encode(Sha1::digest(text))
     }
 
+    fn blob_id(text: &[u8]) -> String {
+        id(&[format!("blob {}\0", text.len()).as_bytes(), text].concat())
+    }
+
+    fn pull_files_page(page: usize) -> String {
+        format!("{PULL}/files?per_page=30&page={page}")
+    }
+
     impl Fixture {
         fn new(changes: Vec<Value>) -> Self {
             let mut fixture = Self {
@@ -2017,8 +2285,7 @@ mod tests {
                             File::Bytes(bytes) => bytes,
                             File::Symlink | File::Gitlink(_) => unreachable!(),
                         };
-                        let hash =
-                            id(&[format!("blob {}\0", bytes.len()).as_bytes(), bytes].concat());
+                        let hash = blob_id(bytes);
                         self.responses.insert(
                             format!("{repo}/git/blobs/{hash}"),
                             json!({
@@ -2101,7 +2368,23 @@ mod tests {
     }
 
     fn snapshot(hub: &mut GitHub<Fixture>) -> Result<Snapshot> {
-        pinned(hub, REPO.into(), 3, &HashSet::from([REPO.to_owned()]), None)
+        snapshot_since(hub, None, &[])
+    }
+
+    fn snapshot_since(
+        hub: &mut GitHub<Fixture>,
+        previous_head: Option<&str>,
+        prior_paths: &[String],
+    ) -> Result<Snapshot> {
+        pinned(
+            hub,
+            REPO.into(),
+            3,
+            &HashSet::from([REPO.to_owned()]),
+            None,
+            previous_head,
+            prior_paths,
+        )
     }
 
     #[test]
@@ -2113,6 +2396,8 @@ mod tests {
             3,
             &HashSet::from([REPO.to_owned()]),
             Some(BASE),
+            None,
+            &[],
         )
         .unwrap_err();
         assert!(error.to_string().contains("changed before review"));
@@ -2904,6 +3189,282 @@ mod tests {
         for invalid in [missing_count, mismatched_total, entry] {
             let change: Change = serde_json::from_value(invalid).unwrap();
             assert!(change.complete_patch().is_none());
+        }
+    }
+
+    #[test]
+    fn recovers_missing_and_invalid_patches_across_pinned_pull_file_pages() {
+        let edited = "service/handler.rs";
+        let added = "web/entry.ts";
+        let before = "kept\r\nold";
+        let after = "kept\r\nnew";
+        let mut edited_file = change(edited);
+        edited_file["sha"] = json!(blob_id(after.as_bytes()));
+        edited_file["patch"] = json!(
+            "@@ -1,2 +1,2 @@\n kept\r\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file"
+        );
+        let mut invalid = edited_file.clone();
+        invalid["patch"] = json!("@@ -1,2 +1,2 @@\n-old\n+new");
+        let added_file = json!({
+            "filename": added, "status": "added", "sha": blob_id(b"entry\n"),
+            "additions": 1, "deletions": 0, "changes": 1, "patch": "@@ -0,0 +1 @@\n+entry",
+        });
+        let mut omitted = added_file.clone();
+        omitted["patch"] = Value::Null;
+        omitted["additions"] = json!(0);
+        omitted["changes"] = json!(0);
+        let mut first_page: Vec<_> = (0..29)
+            .map(|index| change(&format!("docs/sample_{index}.md")))
+            .collect();
+        let mut comparisons = first_page.clone();
+        comparisons.extend([invalid, omitted]);
+        let mut fixture = Fixture::new(comparisons);
+        first_page.push(edited_file.clone());
+        fixture
+            .responses
+            .insert(pull_files_page(1), json!(first_page));
+        fixture
+            .responses
+            .insert(pull_files_page(2), json!([added_file.clone()]));
+        fixture.revision(REPO, BASE, &[(edited, File::Text(before))]);
+        fixture.revision(
+            FORK,
+            HEAD,
+            &[(edited, File::Text(after)), (added, File::Text("entry\n"))],
+        );
+        let mut hub = GitHub::new(fixture);
+        let view = snapshot(&mut hub).unwrap();
+        for (path, expected) in [(edited, edited_file), (added, added_file)] {
+            let expected = expected["patch"].as_str().unwrap();
+            assert_eq!(
+                view.files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .unwrap()
+                    .patch,
+                expected
+            );
+            let diff = view.diff.as_ref().unwrap();
+            assert_eq!(
+                diff.files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .unwrap()
+                    .patch
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        assert!(view.limits.is_empty(), "{:?}", view.limits);
+        assert!(hub.transport.requests.starts_with(&[
+            PULL.to_owned(),
+            comparison(1),
+            pull_files_page(1),
+            pull_files_page(2),
+        ]));
+        assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+    }
+
+    #[test]
+    fn rejects_pull_file_metadata_and_patch_text_from_a_different_revision() {
+        let path = "app/file.txt";
+        let previous = "app/old.txt";
+        let mut file = change(path);
+        file["status"] = json!("renamed");
+        file["previous_filename"] = json!(previous);
+        file["sha"] = json!(blob_id(b"new\n"));
+        let mut missing = file.clone();
+        missing["patch"] = Value::Null;
+
+        for (field, changed) in [
+            ("sha", json!(MOVED)),
+            ("status", json!("modified")),
+            ("previous_filename", json!("app/elsewhere.txt")),
+            ("patch", json!("@@ -1 +1 @@\n-wrong base\n+new")),
+            ("patch", json!("@@ -1 +1 @@\n-old\n+wrong head")),
+        ] {
+            let mut candidate = file.clone();
+            candidate[field] = changed;
+            let mut fixture = Fixture::new(vec![missing.clone()]);
+            fixture.responses.insert(
+                pull_files_page(1),
+                json!([candidate, change("unlisted.rs")]),
+            );
+            fixture.revision(REPO, BASE, &[(previous, File::Text("old\n"))]);
+            fixture.revision(FORK, HEAD, &[(path, File::Text("new\n"))]);
+            let mut hub = GitHub::new(fixture);
+            let view = snapshot(&mut hub).unwrap();
+            assert_eq!(view.files.len(), 1, "{field}");
+            assert!(view.files[0].patch.is_empty(), "{field}");
+            assert_eq!(
+                view.limits,
+                [format!("Patch is missing or incomplete for {path}.")]
+            );
+            assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+        }
+    }
+
+    #[test]
+    fn rejects_a_complete_pull_file_patch_when_comparison_counts_disagree() {
+        let path = "app/file.txt";
+        let mut file = change(path);
+        file["sha"] = json!(blob_id(b"new\n"));
+        let mut missing = file.clone();
+        missing["patch"] = Value::Null;
+        missing["additions"] = json!(2);
+        missing["changes"] = json!(3);
+        let mut fixture = Fixture::new(vec![missing]);
+        fixture.responses.insert(pull_files_page(1), json!([file]));
+        fixture.revision(REPO, BASE, &[(path, File::Text("old\n"))]);
+        fixture.revision(FORK, HEAD, &[(path, File::Text("new\n"))]);
+        let view = snapshot(&mut GitHub::new(fixture)).unwrap();
+        assert!(view.files[0].patch.is_empty());
+        assert_eq!(
+            view.limits,
+            [format!("Patch is missing or incomplete for {path}.")]
+        );
+    }
+
+    #[test]
+    fn pull_file_fallback_reserves_the_final_metadata_request() {
+        let path = "script.sh";
+        let mut file = change(path);
+        file["sha"] = json!(blob_id(b"new\n"));
+        let mut missing = file.clone();
+        missing["patch"] = Value::Null;
+        let mut fixture = Fixture::new(vec![missing]);
+        fixture.responses.insert(pull_files_page(1), json!([file]));
+        fixture.revision(REPO, BASE, &[(path, File::Text("old\n"))]);
+        fixture.revision(FORK, HEAD, &[(path, File::Text("new\n"))]);
+        let mut hub = GitHub::new(fixture);
+        hub.requests = 4;
+        let view = snapshot(&mut hub).unwrap();
+        assert!(view.files[0].patch.is_empty());
+        assert_eq!(
+            hub.transport.requests,
+            [
+                PULL.to_owned(),
+                comparison(1),
+                pull_files_page(1),
+                PULL.to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn discards_pull_file_fallback_if_either_pr_revision_moves() {
+        let path = "feature.rb";
+        let mut file = change(path);
+        file["sha"] = json!(blob_id(b"new\n"));
+        let mut missing = file.clone();
+        missing["patch"] = Value::Null;
+        for revision in ["base", "head"] {
+            let mut fixture = Fixture::new(vec![missing.clone()]);
+            fixture
+                .responses
+                .insert(pull_files_page(1), json!([file.clone()]));
+            fixture.revision(REPO, BASE, &[(path, File::Text("old\n"))]);
+            fixture.revision(FORK, HEAD, &[(path, File::Text("new\n"))]);
+            fixture.pulls[1][revision]["sha"] = json!(MOVED);
+            let mut hub = GitHub::new(fixture);
+            assert!(
+                snapshot(&mut hub).unwrap_err().is::<RevisionChanged>(),
+                "{revision}"
+            );
+            assert!(hub.transport.requests.contains(&pull_files_page(1)));
+            assert_eq!(hub.transport.requests.last().unwrap(), PULL);
+        }
+    }
+
+    #[test]
+    fn intent_keeps_core_files_ahead_of_tests_and_localization_under_budget() {
+        let paths = [
+            "tests/payment/settlement.test.js",
+            "locales/settlement.json",
+            "docs/settlement.md",
+            "src/unrelated.rb",
+            "server/payment/SettlementHandler.kt",
+        ];
+        let mut fixture = Fixture::new(paths.map(|path| large_change(path, 55_000)).to_vec());
+        for pull in &mut fixture.pulls {
+            pull["title"] = json!("Fix payment settlement after retry");
+        }
+        let view = snapshot(&mut GitHub::new(fixture)).unwrap();
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].path, paths[4]);
+        assert_eq!(view.limits.len(), 4);
+    }
+
+    fn large_change(path: &str, bytes: usize) -> Value {
+        let mut file = change(path);
+        file["patch"] = json!(format!("@@ -1 +1 @@\n-old\n+{}", "x".repeat(bytes)));
+        file
+    }
+
+    #[test]
+    fn prioritizes_fast_forward_and_previous_finding_paths_without_changing_review_base() {
+        let unchanged = "app/first.go";
+        let pushed = "app/second.py";
+        let prior = "app/finding.java";
+        let prior_name = "legacy/finding.java";
+        let route = format!("{FORK}/compare/{MOVED}...{HEAD}?per_page=1&page=1");
+        let mut renamed = large_change(prior, 41_000);
+        renamed["status"] = json!("renamed");
+        renamed["previous_filename"] = json!(prior_name);
+        let paths = [prior_name.to_owned()];
+
+        for (status, behind_by, merge_base, expected) in [
+            ("ahead", 0, MOVED, [pushed, prior]),
+            ("diverged", 1, BASE, [prior, unchanged]),
+            ("ahead", 0, BASE, [prior, unchanged]),
+        ] {
+            let mut fixture = Fixture::new(vec![
+                large_change(unchanged, 51_000),
+                large_change(pushed, 51_000),
+                renamed.clone(),
+            ]);
+            let mut delta = change(pushed);
+            delta["patch"] = json!("@@ -1 +1 @@\n-last push\n+new push");
+            fixture.responses.insert(
+                route.clone(),
+                json!({
+                    "status": status, "behind_by": behind_by,
+                    "base_commit": {"sha": MOVED}, "merge_base_commit": {"sha": merge_base},
+                    "files": [delta],
+                }),
+            );
+            let mut hub = GitHub::new(fixture);
+            let view = snapshot_since(&mut hub, Some(MOVED), &paths).unwrap();
+            assert_eq!((view.base.as_str(), view.head.as_str()), (BASE, HEAD));
+            assert_eq!(
+                view.files
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(
+                view.files
+                    .iter()
+                    .all(|file| !file.patch.contains("last push"))
+            );
+            assert!(hub.transport.requests.contains(&route));
+        }
+    }
+
+    #[test]
+    fn skips_the_incremental_request_without_a_distinct_valid_previous_head() {
+        for previous in [None, Some(HEAD), Some("invalid/ref")] {
+            let mut hub = GitHub::new(Fixture::new(vec![change("app.rs")]));
+            snapshot_since(&mut hub, previous, &[]).unwrap();
+            assert_eq!(
+                hub.transport
+                    .requests
+                    .iter()
+                    .filter(|route| route.contains("/compare/"))
+                    .count(),
+                1
+            );
         }
     }
 

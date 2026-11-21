@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum combined size of patches and optional source text in a snapshot.
@@ -73,7 +75,7 @@ pub struct Scan {
     pub version: String,
     pub covered: Vec<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Focus {
     pub path: String,
     pub line: usize,
@@ -81,7 +83,7 @@ pub struct Focus {
     pub outcome: String,
     pub action: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Finding {
     pub path: String,
     pub line: usize,
@@ -90,7 +92,7 @@ pub struct Finding {
     pub evidence: String,
     pub attribution: Attribution,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Attribution {
     Introduced,
@@ -118,6 +120,34 @@ pub struct PublishedReport {
     pub diff: Option<PinnedDiff>,
 }
 
+impl PublishedReport {
+    /// Return distinct human follow-ups in report order, including for older saved reports.
+    pub fn human_focus(&self) -> impl Iterator<Item = &Focus> {
+        let mut seen = HashSet::new();
+        self.report.focus.iter().filter(move |focus| {
+            !focus.action.trim().is_empty()
+                && !focus.checked.trim().is_empty()
+                && !self.report.findings.iter().any(|finding| {
+                    finding.path == focus.path
+                        && finding.line == focus.line
+                        && finding.impact.trim() == focus.outcome.trim()
+                })
+                // Older engines also kept confirmed priorities whose finding was deduplicated.
+                && ![
+                    "Documented behavior in ",
+                    "Project rule in ",
+                    "Static performance analysis in ",
+                    "Comportamento documentato in ",
+                    "Regola di progetto in ",
+                    "Analisi statica delle prestazioni in ",
+                ]
+                .iter()
+                .any(|prefix| focus.checked.trim_start().starts_with(prefix))
+                && seen.insert(*focus)
+        })
+    }
+}
+
 /// Safe, operator-facing reason when GitHub's public API quota is exhausted.
 #[derive(Debug)]
 pub struct GitHubRateLimit;
@@ -128,3 +158,48 @@ impl std::fmt::Display for GitHubRateLimit {
     }
 }
 impl std::error::Error for GitHubRateLimit {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_focus_omits_finding_actions_and_exact_duplicates_only() {
+        let follow_up = json!({
+            "path": "client.ts", "line": 4, "checked": "Read the retry handler.",
+            "outcome": "Retry timing needs a runtime check.", "action": "Run a timeout test."
+        });
+        let mut another = follow_up.clone();
+        another["action"] = json!("Run an interrupted connection test.");
+        let report: PublishedReport = serde_json::from_value(json!({
+            "repo": "team/example", "base": "base", "head": "head", "limits": [],
+            "findings": [{
+                "path": "client.ts", "line": 4, "title": "Missing error handler",
+                "impact": "The failure is swallowed.", "evidence": "Source evidence.",
+                "attribution": "introduced"
+            }],
+            "focus": [
+                {
+                    "path": "client.ts", "line": 4, "checked": "Read the error handler.",
+                    "outcome": "The failure is swallowed. ", "action": "Propagate the error."
+                },
+                {
+                    "path": "client.ts", "line": 12, "checked": "Project rule in docs.md:1.",
+                    "outcome": "The fallback hides a crash.", "action": "Fix the fallback."
+                },
+                follow_up.clone(), follow_up, another
+            ]
+        }))
+        .unwrap();
+        let actions: Vec<_> = report
+            .human_focus()
+            .map(|item| item.action.as_str())
+            .collect();
+        assert_eq!(
+            actions,
+            ["Run a timeout test.", "Run an interrupted connection test."]
+        );
+        assert_eq!(report.report.focus.len(), 5);
+    }
+}

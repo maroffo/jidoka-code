@@ -1,6 +1,13 @@
 //! Prepare and submit pinned GitHub reviews with durable duplicate prevention.
 
-use std::{collections::BTreeSet, env, fmt::Write, io::Read, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    env,
+    fmt::Write,
+    io::Read,
+    path::Path,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{StatusCode, blocking::Client, header::HeaderValue, redirect::Policy};
@@ -20,6 +27,9 @@ const WEB: &str = "https://github.com";
 const MARKER: &str = "<!-- jidoka-review:";
 const REVIEW_BODY_BYTES: usize = 65_000;
 const MAX_COMMENTS: usize = 100;
+const MAX_LIMIT_DETAILS: usize = 5;
+const MAX_FOCUS: usize = 3;
+const SUMMARY_CHARS: usize = 220;
 const PAGE_SIZE: usize = 100;
 const MAX_PAGES: usize = 10;
 const RESPONSE_BYTES: u64 = 8_000_000;
@@ -34,6 +44,8 @@ const UNREACHABLE: &str = "Could not reach GitHub.";
 pub struct Prepared {
     pub body: String,
     pub comments: Vec<Inline>,
+    selected: Vec<usize>,
+    inline: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,16 +56,50 @@ pub struct Inline {
 }
 
 pub fn prepare(report: &PublishedReport, selected: &[usize], inline: bool) -> Prepared {
+    let selected: Vec<_> = selected
+        .iter()
+        .copied()
+        .filter(|&index| index < report.report.findings.len())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut prepared = prepare_findings(report, &selected, inline, true);
+    let mut focus = report.human_focus().take(MAX_FOCUS).peekable();
+    if focus.peek().is_some() {
+        prepared.body.push_str("\n### Human follow-up\n\n");
+        for item in focus {
+            writeln!(
+                prepared.body,
+                "- **{}** ({})\n  What Jidoka checked: {}",
+                markdown(&item.action),
+                location(report, &item.path, item.line),
+                summary_text(&item.checked),
+            )
+            .unwrap();
+        }
+    }
+    coverage(&mut prepared.body, report);
+    prepared
+}
+
+fn prepare_findings(
+    report: &PublishedReport,
+    selected: &[usize],
+    inline: bool,
+    compact: bool,
+) -> Prepared {
     let mut prepared = Prepared {
         body: String::from("## Jidoka Code review\n"),
         comments: Vec::new(),
+        selected: selected.to_vec(),
+        inline,
     };
+    let mut seen = HashSet::new();
+    let mut inline_evidence = HashSet::new();
     let mut findings = selected
         .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter_map(|index| report.report.findings.get(index))
+        .filter_map(|&index| report.report.findings.get(index))
+        .filter(|&finding| !compact || seen.insert(finding))
         .peekable();
     if findings.peek().is_none() {
         let text = if report.report.findings.is_empty() {
@@ -65,7 +111,12 @@ pub fn prepare(report: &PublishedReport, selected: &[usize], inline: bool) -> Pr
     }
     for finding in findings {
         let title = markdown(&finding.title);
-        let location = location(report, finding);
+        let location = location(report, &finding.path, finding.line);
+        let evidence = (
+            finding.path.as_str(),
+            finding.line,
+            finding.evidence.as_str(),
+        );
         let existing = prepared
             .comments
             .iter_mut()
@@ -73,7 +124,11 @@ pub fn prepare(report: &PublishedReport, selected: &[usize], inline: bool) -> Pr
         if let Some(comment) = existing {
             writeln!(prepared.body, "\n- **{title}** ({location}, inline)").unwrap();
             writeln!(comment.body, "\n**{title}**").unwrap();
-            details(&mut comment.body, finding);
+            details(
+                &mut comment.body,
+                finding,
+                !compact || inline_evidence.insert(evidence),
+            );
         } else if inline
             && prepared.comments.len() < MAX_COMMENTS
             && finding.line > 0
@@ -82,7 +137,8 @@ pub fn prepare(report: &PublishedReport, selected: &[usize], inline: bool) -> Pr
         {
             writeln!(prepared.body, "\n- **{title}** ({location}, inline)").unwrap();
             let mut body = format!("**{title}**\n");
-            details(&mut body, finding);
+            inline_evidence.insert(evidence);
+            details(&mut body, finding, true);
             prepared.comments.push(Inline {
                 path: finding.path.clone(),
                 line: finding.line,
@@ -90,33 +146,259 @@ pub fn prepare(report: &PublishedReport, selected: &[usize], inline: bool) -> Pr
             });
         } else {
             writeln!(prepared.body, "\n**{title}** ({location})").unwrap();
-            details(&mut prepared.body, finding);
+            details(&mut prepared.body, finding, true);
         }
     }
 
-    let limits = report
+    prepared
+}
+
+fn limits(report: &PublishedReport) -> impl Iterator<Item = &str> {
+    report
         .report
         .limits
         .iter()
         .chain(report.scan.iter().flat_map(|scan| &scan.limits))
-        .collect::<BTreeSet<_>>();
-    if !limits.is_empty() {
-        prepared.body.push_str("\n### Partial coverage\n\n");
-        for limit in limits {
-            writeln!(prepared.body, "- {}", markdown(limit)).unwrap();
-        }
-    }
-    prepared
+        .map(String::as_str)
 }
 
-fn details(body: &mut String, finding: &Finding) {
+// Reproduce the previous payload only to look up an existing receipt, never for a new submission.
+fn previous_preview(report: &PublishedReport, prepared: &Prepared) -> Prepared {
+    let mut previous = prepare_findings(report, &prepared.selected, prepared.inline, false);
+    let limits: BTreeSet<_> = limits(report).collect();
+    if !limits.is_empty() {
+        previous.body.push_str("\n### Partial coverage\n\n");
+        for limit in limits {
+            writeln!(previous.body, "- {}", markdown(limit)).unwrap();
+        }
+    }
+    previous
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FileLimit {
+    PatchUnavailable,
+    PatchUnverified,
+    ChangeUnsupported,
+    TextUnavailable,
+    ScanIncomplete,
+}
+
+fn file_limit(text: &str) -> Option<(FileLimit, &str)> {
+    use FileLimit::*;
+    [
+        (PatchUnavailable, "Patch is missing or incomplete for ", "."),
+        (
+            PatchUnavailable,
+            "Patch is missing, incomplete, or too large for ",
+            ".",
+        ),
+        (
+            PatchUnavailable,
+            "Patch for ",
+            " exceeds the remaining review text limit.",
+        ),
+        (
+            PatchUnverified,
+            "The patch for ",
+            " could not be verified against the pinned source. Using available file text.",
+        ),
+        (ChangeUnsupported, "Unsupported change type for ", "."),
+        (
+            ChangeUnsupported,
+            "Submodule change for ",
+            " was not reviewed.",
+        ),
+        (
+            ChangeUnsupported,
+            "Symbolic link change for ",
+            " was not reviewed.",
+        ),
+        (
+            ChangeUnsupported,
+            "Git file mode change for ",
+            " was not reviewed.",
+        ),
+        (
+            ChangeUnsupported,
+            "Could not verify the Git entry type for ",
+            ". Its patch was excluded.",
+        ),
+        (
+            TextUnavailable,
+            "Text for ",
+            " is unavailable or exceeds the limit.",
+        ),
+        (TextUnavailable, "Excluded ", " due to the text limit."),
+        (ScanIncomplete, "File ", " exceeds scan limits."),
+        (
+            ScanIncomplete,
+            "Semgrep requires the full head file for ",
+            "; only its patch was available.",
+        ),
+        (ScanIncomplete, "Could not create a temporary copy of ", "."),
+        (ScanIncomplete, "Semgrep failed to finish scanning ", "."),
+    ]
+    .into_iter()
+    .find_map(|(kind, prefix, suffix)| {
+        let path = text.strip_prefix(prefix)?.strip_suffix(suffix)?;
+        let path_and_detail = match prefix {
+            "Git file mode change for " => path.rsplit_once(" ("),
+            "Text for " => path.rsplit_once(" at "),
+            _ => None,
+        };
+        Some((kind, path_and_detail.map_or(path, |(path, _)| path)))
+    })
+}
+
+fn critical_limit(limit: &str) -> bool {
+    [
+        "Changed file list is incomplete",
+        "Independent review coverage was incomplete",
+        "The provider failed while",
+        "The provider returned an incomplete response",
+        "Review input exceeds the size limit",
+        "Semgrep CE is unavailable",
+        "Semgrep exceeded the scan time limit",
+        "Semgrep exited with an error",
+        "Semgrep output exceeded the size limit",
+        "Semgrep returned an invalid result",
+        "Could not run Semgrep",
+        "Could not prepare the Semgrep scan",
+    ]
+    .iter()
+    .any(|prefix| limit.starts_with(prefix))
+}
+
+fn coverage(body: &mut String, report: &PublishedReport) {
+    let collected = report.patch_files.as_ref().map(|paths| {
+        paths
+            .iter()
+            .filter(|path| safe_path(path))
+            .collect::<HashSet<_>>()
+            .len()
+    });
+    // A diff can be fetched later for a legacy report, so its patches do not prove what was reviewed.
+    let total = report.diff.as_ref().map(|diff| diff.total_files);
+    body.push_str(if limits(report).any(|limit| !limit.trim().is_empty()) {
+        "\n### Partial coverage\n\n"
+    } else {
+        "\n### Coverage\n\n"
+    });
+    match (collected, total) {
+        (Some(n), Some(total)) if n as u64 <= total => writeln!(
+            body,
+            "- Collected patches for {n} of {total} changed {}.",
+            files(total),
+        ),
+        (Some(n), Some(total)) => writeln!(
+            body,
+            "- Collected patches for {n} {}. GitHub reported {total} changed {}.",
+            files(n as u64),
+            files(total),
+        ),
+        (Some(n), None) => writeln!(
+            body,
+            "- Collected patches for {n} {}. The total number of changed files was not recorded.",
+            files(n as u64),
+        ),
+        (None, Some(total)) => writeln!(
+            body,
+            "- {total} changed {}. Patch collection was not recorded.",
+            files(total),
+        ),
+        (None, None) => writeln!(body, "- Patch collection was not recorded."),
+    }
+    .unwrap();
+    let Some(scan) = &report.scan else {
+        body.push_str("- Semgrep coverage was not recorded.\n");
+        return coverage_limits(body, report);
+    };
+    if scan.version.is_empty()
+        && scan.covered.is_empty()
+        && scan.signals.is_empty()
+        && scan.limits.is_empty()
+    {
+        body.push_str("- No files were available for the bundled Semgrep Python rules.\n");
+    } else {
+        let count = scan.covered.iter().collect::<HashSet<_>>().len();
+        writeln!(
+            body,
+            "- Semgrep scanned {count} {} with the bundled Python rules.",
+            files(count as u64),
+        )
+        .unwrap();
+    }
+    coverage_limits(body, report);
+}
+
+fn files(count: u64) -> &'static str {
+    if count == 1 { "file" } else { "files" }
+}
+
+fn coverage_limits(body: &mut String, report: &PublishedReport) {
+    let mut affected = BTreeMap::<_, BTreeSet<_>>::new();
+    let mut seen = HashSet::new();
+    let mut general = Vec::new();
+    for limit in limits(report)
+        .map(str::trim)
+        .filter(|limit| !limit.is_empty())
+    {
+        if let Some((kind, path)) = file_limit(limit) {
+            affected.entry(kind).or_default().insert(path);
+        } else if seen.insert(limit) {
+            general.push(limit);
+        }
+    }
+    general.sort_by_key(|limit| !critical_limit(limit));
+    for limit in general.iter().take(MAX_LIMIT_DETAILS) {
+        writeln!(body, "- {}", summary_text(limit)).unwrap();
+    }
+    for (kind, paths) in affected {
+        let n = paths.len();
+        let note = match kind {
+            FileLimit::PatchUnavailable if n == 1 => "1 patch was missing or over budget".into(),
+            FileLimit::PatchUnavailable => format!("{n} patches were missing or over budget"),
+            FileLimit::PatchUnverified => {
+                format!("Patch validation failed for {n} {}", files(n as u64))
+            }
+            FileLimit::ChangeUnsupported => format!(
+                "File types or mode changes were outside review for {n} {}",
+                files(n as u64)
+            ),
+            FileLimit::TextUnavailable => {
+                format!("Full source was unavailable for {n} {}", files(n as u64))
+            }
+            FileLimit::ScanIncomplete => format!("{n} {} could not be scanned", files(n as u64)),
+        };
+        writeln!(body, "- {note}.").unwrap();
+    }
+    if general.len() > MAX_LIMIT_DETAILS {
+        let n = general.len() - MAX_LIMIT_DETAILS;
+        if n == 1 {
+            body.push_str("- 1 additional limit was recorded.\n");
+        } else {
+            writeln!(body, "- {n} additional limits were recorded.").unwrap();
+        }
+    }
+}
+
+fn summary_text(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.char_indices().nth(SUMMARY_CHARS) {
+        Some((end, _)) => format!("{}…", escape_markdown(text[..end].trim_end())),
+        None => escape_markdown(&text),
+    }
+}
+
+fn details(body: &mut String, finding: &Finding, show_evidence: bool) {
     writeln!(body, "\n{}", markdown(&finding.impact)).unwrap();
     match finding.attribution {
         Attribution::Introduced => (),
         Attribution::Preexisting => body.push_str("\nThis issue predates the pull request.\n"),
         Attribution::Unknown => body.push_str("\nWhen this issue was introduced is unclear.\n"),
     }
-    if !finding.evidence.trim().is_empty() {
+    if show_evidence && !finding.evidence.trim().is_empty() {
         body.push_str("\nEvidence\n\n");
         // Keep source text in a code block so its syntax, links and mentions stay literal.
         let evidence = finding.evidence.replace("\r\n", "\n").replace('\r', "\n");
@@ -127,13 +409,12 @@ fn details(body: &mut String, finding: &Finding) {
 }
 
 fn markdown(text: &str) -> String {
+    escape_markdown(&text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn escape_markdown(text: &str) -> String {
     let mut escaped = String::new();
-    for ch in text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-    {
+    for ch in text.chars() {
         if ch.is_control() {
             continue;
         }
@@ -153,15 +434,14 @@ fn markdown(text: &str) -> String {
     escaped
 }
 
-fn location(report: &PublishedReport, finding: &Finding) -> String {
-    let Finding { path, line, .. } = finding;
+fn location(report: &PublishedReport, path: &str, line: usize) -> String {
     if !safe_path(path) {
         return format!("{}, line {line}", markdown(path));
     }
     // A delimiter longer than any run of backticks in the path keeps its spelling verbatim.
     let ticks = "`".repeat(1 + path.split(|ch| ch != '`').map(str::len).max().unwrap_or(0));
     let label = format!("{ticks} {path} {ticks}, line {line}");
-    if *line == 0 || !valid_repo(&report.repo) || !valid_sha(&report.head) {
+    if line == 0 || !valid_repo(&report.repo) || !valid_sha(&report.head) {
         return label;
     }
     let mut encoded = String::new();
@@ -381,7 +661,37 @@ struct Submission<'a> {
     automatic: bool,
     legacy_scope: String,
     fingerprint: String,
+    previous_fingerprint: Option<String>,
     payload: Value,
+}
+
+fn review_payload(prepared: &Prepared, head: &str, event: &str) -> Value {
+    let comments: Vec<_> = prepared
+        .comments
+        .iter()
+        .map(|comment| {
+            json!({
+                "path": comment.path,
+                "line": comment.line,
+                "side": "RIGHT",
+                "body": comment.body,
+            })
+        })
+        .collect();
+    json!({
+        "body": prepared.body,
+        "commit_id": head,
+        "event": event,
+        "comments": comments,
+    })
+}
+
+fn fingerprint(payload: &Value) -> Result<String> {
+    Ok(hash(
+        serde_json::to_vec(payload)
+            .ok()
+            .context("Could not encode the GitHub review.")?,
+    ))
 }
 
 impl<'a> Submission<'a> {
@@ -424,29 +734,17 @@ impl<'a> Submission<'a> {
             report.repo.to_ascii_lowercase(),
             report.head.to_ascii_lowercase()
         ));
-        let comments: Vec<_> = prepared
-            .comments
-            .iter()
-            .map(|comment| {
-                json!({
-                    "path": comment.path,
-                    "line": comment.line,
-                    "side": "RIGHT",
-                    "body": comment.body,
-                })
+        let payload = review_payload(prepared, &report.head, event);
+        let previous_fingerprint = (prepare(report, &prepared.selected, prepared.inline)
+            == *prepared)
+            .then(|| {
+                fingerprint(&review_payload(
+                    &previous_preview(report, prepared),
+                    &report.head,
+                    event,
+                ))
             })
-            .collect();
-        let payload = json!({
-            "body": prepared.body,
-            "commit_id": report.head,
-            "event": event,
-            "comments": comments,
-        });
-        let fingerprint = hash(
-            serde_json::to_vec(&payload)
-                .ok()
-                .context("Could not encode the GitHub review.")?,
-        );
+            .transpose()?;
         Ok(Self {
             repo: &report.repo,
             number,
@@ -454,7 +752,8 @@ impl<'a> Submission<'a> {
             event,
             automatic,
             legacy_scope,
-            fingerprint,
+            fingerprint: fingerprint(&payload)?,
+            previous_fingerprint,
             payload,
         })
     }
@@ -493,6 +792,16 @@ impl<'a> Submission<'a> {
         if let Some(record) = Self::load(&connection, &scope)? {
             return self.resume(&connection, github, &reviews, actor.id, record);
         }
+        let previous_scope = self
+            .previous_fingerprint
+            .as_deref()
+            .filter(|_| self.has_comment_scope())
+            .map(|fingerprint| self.comment_scope(actor.id, fingerprint));
+        if let Some(previous) = &previous_scope
+            && let Some(record) = Self::load(&connection, previous)?
+        {
+            return self.resume(&connection, github, &reviews, actor.id, record);
+        }
         if !self.automatic
             && let Some(record) = Self::load(&connection, &self.legacy_scope)?
             && record.actor == actor.id
@@ -500,7 +809,10 @@ impl<'a> Submission<'a> {
         {
             return self.resume(&connection, github, &reviews, actor.id, record);
         }
-        let keys = [scope.as_str(), self.legacy_scope.as_str()];
+        let mut keys = vec![scope.as_str(), self.legacy_scope.as_str()];
+        if let Some(previous) = &previous_scope {
+            keys.push(previous);
+        }
         if let Some(mut record) = self.find_remote(github, &reviews, actor.id, &keys)? {
             record.scope.clone_from(&scope);
             Self::insert(&connection, &record)?;
@@ -584,18 +896,27 @@ impl<'a> Submission<'a> {
         if self.automatic {
             // The bot gets one slot per head, even if its configured account changes.
             self.legacy_scope.clone()
-        } else if self.event == "COMMENT" {
-            hash(format!(
-                "{}:{actor}:{}",
-                self.legacy_scope, self.fingerprint
-            ))
+        } else if self.has_comment_scope() {
+            self.comment_scope(actor, &self.fingerprint)
         } else {
             hash(format!("{}:{actor}", self.legacy_scope))
         }
     }
 
+    fn has_comment_scope(&self) -> bool {
+        !self.automatic && self.event == "COMMENT"
+    }
+
+    fn comment_scope(&self, actor: i64, fingerprint: &str) -> String {
+        hash(format!("{}:{actor}:{fingerprint}", self.legacy_scope))
+    }
+
+    fn matches_payload(&self, fingerprint: &str) -> bool {
+        fingerprint == self.fingerprint || self.previous_fingerprint.as_deref() == Some(fingerprint)
+    }
+
     fn matches_slot(&self, fingerprint: &str) -> bool {
-        self.automatic || self.event != "COMMENT" || fingerprint == self.fingerprint
+        !self.has_comment_scope() || self.matches_payload(fingerprint)
     }
 
     fn insert(connection: &Connection, record: &Record) -> Result<bool> {
@@ -638,12 +959,12 @@ impl<'a> Submission<'a> {
         record: Record,
     ) -> Result<String> {
         ensure!(record.actor == actor, "{DIFFERENT_ACTOR}");
-        ensure!(record.fingerprint == self.fingerprint, "{DIFFERENT}");
+        ensure!(self.matches_payload(&record.fingerprint), "{DIFFERENT}");
         if let Some(id) = record.id {
             return self.url(id);
         }
         if let Some(found) = self.find_remote(github, route, actor, &[&record.scope])? {
-            ensure!(found.fingerprint == self.fingerprint, "{DIFFERENT}");
+            ensure!(found.fingerprint == record.fingerprint, "{DIFFERENT}");
             return self.confirm(connection, &record, found.id.context(STORAGE)?);
         }
         bail!("{PENDING}")
@@ -724,6 +1045,9 @@ impl<'a> Submission<'a> {
                     && fingerprint.len() == 64
                     && fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
                     && self.matches_slot(fingerprint)
+                    && (!self.has_comment_scope()
+                        || *scope == self.legacy_scope
+                        || *scope == self.comment_scope(actor, fingerprint))
             })
         else {
             return Ok(None);
@@ -758,7 +1082,7 @@ fn hash(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::{DiffFile, PinnedDiff, Report, Scan};
+    use crate::contracts::{DiffFile, Focus, PinnedDiff, Report, Scan};
     use std::{
         sync::{
             Arc, Barrier, Mutex,
@@ -819,6 +1143,7 @@ mod tests {
         assert_eq!((&*comment.path, comment.line), (PATH, 8));
         assert_eq!(comment.body.matches("**First**").count(), 1);
         assert!(comment.body.contains("**Second**"));
+        assert_eq!(comment.body.matches("Evidence").count(), 1);
         assert!(comment.body.contains("\\[image\\]\\(https\\://"));
         assert!(comment.body.contains("@\u{200b}team/review #\u{200b}104"));
         assert!(comment.body.contains("        let label = \"@company\";"));
@@ -869,6 +1194,92 @@ mod tests {
         );
         assert!(summary.body.contains("Partial coverage"));
         assert!(summary.body.contains("Scan budget reached"));
+    }
+
+    #[test]
+    fn reports_collected_patches_and_summarizes_limits_without_file_lists() {
+        let mut report = report();
+        report.patch_files = Some(vec![PATH.into(), PATH.into()]);
+        let diff = report.diff.as_mut().unwrap();
+        diff.total_files = 50;
+        diff.files.push(DiffFile {
+            path: "uncollected.py".into(),
+            status: "modified".into(),
+            previous_path: None,
+            patch: None,
+        });
+        let scan_limits: Vec<_> = (0..30)
+            .map(|i| format!("File skipped-{i}.py exceeds scan limits."))
+            .collect();
+        report.report.limits = (0..30)
+            .map(|i| format!("Patch is missing or incomplete for omitted-{i}.rs."))
+            .chain((0..12).map(|i| format!("Other recorded limit {i}.")))
+            .chain(["Independent review coverage was incomplete.".into()])
+            .chain(scan_limits.iter().cloned())
+            .collect();
+        report.scan = Some(Scan {
+            covered: vec!["one.py".into(), "one.py".into()],
+            limits: scan_limits,
+            ..Scan::default()
+        });
+        let body = prepare(&report, &[], false).body;
+        assert!(body.contains("Collected patches for 1 of 50 changed files."));
+        assert!(body.contains("Semgrep scanned 1 file with the bundled Python rules."));
+        assert!(body.contains("30 patches were missing or over budget"));
+        assert!(body.contains("30 files could not be scanned"));
+        assert!(body.contains("Independent review coverage was incomplete"));
+        assert!(body.contains("additional limits"));
+        assert!(!body.contains("omitted-"));
+        assert!(!body.contains("skipped-"));
+        assert!(body.len() < 950, "{body}");
+
+        report.patch_files = None;
+        let body = prepare(&report, &[], false).body;
+        assert!(body.contains("50 changed files. Patch collection was not recorded."));
+        report.patch_files = Some(vec![PATH.into()]);
+        report.diff = None;
+        assert!(prepare(&report, &[], false).body.contains(
+            "Collected patches for 1 file. The total number of changed files was not recorded."
+        ));
+    }
+
+    #[test]
+    fn publishes_only_actual_human_follow_up_and_deduplicates_selected_findings() {
+        let mut report = report();
+        let mirror = Focus {
+            path: PATH.into(),
+            line: 8,
+            checked: "Previously verified behavior.".into(),
+            outcome: report.report.findings[0].impact.clone(),
+            action: "Fix the verified failure.".into(),
+        };
+        let check = Focus {
+            checked: "Read the retry path. <script> @team/review".into(),
+            outcome: "Unverified runtime behavior.".into(),
+            action: "Run the retry test.".into(),
+            ..mirror.clone()
+        };
+        report.report.focus = vec![mirror, check.clone(), check];
+        report
+            .report
+            .findings
+            .push(report.report.findings[0].clone());
+        let prepared = prepare(&report, &[4, 0], true);
+        assert_eq!(prepared.comments.len(), 1);
+        assert_eq!(prepared.comments[0].body.matches("**First**").count(), 1);
+        assert_eq!(prepared.body.matches("**First**").count(), 1);
+        assert_eq!(prepared.body.matches("Run the retry test").count(), 1);
+        assert!(prepared.body.contains("Read the retry path"));
+        assert!(prepared.body.contains("@\u{200b}team/review"));
+        assert!(!prepared.body.contains("<script>"));
+        assert!(!prepared.body.contains("Unverified runtime behavior"));
+        assert!(!prepared.body.contains("Fix the verified failure"));
+
+        let unselected = prepare(&report, &[], false).body;
+        assert!(unselected.contains("No verified findings selected."));
+        assert!(!unselected.contains("Fix the verified failure"));
+        let duplicate_only = prepare(&report, &[4], false).body;
+        assert!(duplicate_only.contains("**First**"));
     }
 
     #[test]
@@ -1187,6 +1598,82 @@ mod tests {
         let db = local.path().join("app.db");
         assert_eq!(submission.send(&db, &mock).unwrap(), LINK);
         assert_eq!(submission.send(&db, &mock).unwrap(), LINK);
+    }
+
+    #[test]
+    fn recovers_reviews_reserved_or_posted_before_the_summary_format_changed() {
+        for (event, automatic) in [("COMMENT", true), ("COMMENT", false), ("APPROVE", false)] {
+            let mut report = report();
+            report.report.limits = vec!["Patch is missing or incomplete for skipped.rs.".into()];
+            let prepared = prepare(&report, &[], false);
+            let submission = Submission::new(&report, 7, &prepared, event, automatic).unwrap();
+            let mut changed = prepared.clone();
+            changed.body.push_str("\nAn additional operator note.\n");
+            let changed = Submission::new(&report, 7, &changed, event, automatic).unwrap();
+            assert!(changed.previous_fingerprint.is_none());
+            let old_body = "## Jidoka Code review\n\nNo verified findings selected.\n\n### Partial coverage\n\n- Patch is missing or incomplete for skipped\\.rs\\.\n";
+            let mut old =
+                json!({"body": old_body, "commit_id": HEAD, "event": event, "comments": []});
+            let old_fingerprint = fingerprint(&old).unwrap();
+            assert_ne!(submission.fingerprint, old_fingerprint);
+            let old_scope = if automatic || event != "COMMENT" {
+                submission.scope(31)
+            } else {
+                submission.comment_scope(31, &old_fingerprint)
+            };
+            old["body"] = json!(format!(
+                "{old_body}\n\n{MARKER}{old_scope}:{old_fingerprint} -->"
+            ));
+            let review = remote(&old);
+            let visible = AtomicBool::new(false);
+            let mock = Mock(|request| {
+                assert_eq!(request.method, "GET");
+                if request.path.starts_with(REVIEWS) {
+                    if visible.load(SeqCst) {
+                        return ok(json!([review]));
+                    }
+                    return ok(json!([]));
+                }
+                preflight(&request)
+            });
+
+            let local = tempfile::tempdir().unwrap();
+            let db = local.path().join("pending.db");
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE github_publications (
+                    scope TEXT PRIMARY KEY, actor INTEGER NOT NULL,
+                    fingerprint TEXT NOT NULL, review_id INTEGER
+                )",
+            )
+            .unwrap();
+            assert!(
+                Submission::insert(
+                    &conn,
+                    &Record {
+                        scope: old_scope,
+                        actor: 31,
+                        fingerprint: old_fingerprint,
+                        id: None
+                    },
+                )
+                .unwrap()
+            );
+            assert_eq!(
+                submission.send(&db, &mock).unwrap_err().to_string(),
+                PENDING
+            );
+            visible.store(true, SeqCst);
+            assert_eq!(submission.send(&db, &mock).unwrap(), LINK);
+            assert_eq!(
+                submission
+                    .send(&local.path().join("fresh.db"), &mock)
+                    .unwrap(),
+                LINK
+            );
+            visible.store(false, SeqCst);
+            assert_eq!(submission.send(&db, &mock).unwrap(), LINK);
+        }
     }
 
     #[test]
