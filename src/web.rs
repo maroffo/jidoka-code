@@ -197,7 +197,7 @@ where
             expected_head
                 .as_deref()
                 .is_none_or(|head| report.head.eq_ignore_ascii_case(head)),
-            crate::source::HeadChanged("The pull request changed before review.")
+            "The report does not match the requested revision."
         );
         let status = if partial(&report) {
             "partial"
