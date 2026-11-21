@@ -8,7 +8,7 @@ A maintainer submits a GitHub pull request and uses the report to decide which l
 
 The home page accepts a PR URL and shows the review history. Before submission, it identifies the provider that will receive the code and asks the reviewer to confirm. The operator configures the provider and the allowed repositories. For private repositories the service reads GitHub with a separately configured token. The service listens on the loopback interface for one trusted user.
 
-Each review has a stable URL and a visible state (queued, running, complete, partial, or failed). The report identifies the base and head revisions actually reviewed. A new review is needed after the PR changes. History remains available after a restart.
+Each review has a stable URL and a visible state (queued, running, complete, partial, failed, canceled, or superseded). The report identifies the base and head revisions actually reviewed. A new review is needed after the PR changes. History remains available after a restart.
 
 New reports use English for findings, coverage limits, and manual review guidance. File paths and source quotations retain their original spelling and language.
 

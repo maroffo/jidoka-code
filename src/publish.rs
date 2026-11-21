@@ -76,6 +76,17 @@ pub fn prepare(report: &PublishedReport, selected: &[usize], inline: bool) -> Pr
                 summary_text(&item.checked),
             )
             .unwrap();
+            if let Some(expected) = item
+                .outcome
+                .strip_prefix("Expected result (not verified). ")
+            {
+                writeln!(
+                    prepared.body,
+                    "  Expected result (unverified): {}",
+                    markdown(expected)
+                )
+                .unwrap();
+            }
         }
     }
     coverage(&mut prepared.body, report);
@@ -1241,6 +1252,20 @@ mod tests {
         assert!(prepare(&report, &[], false).body.contains(
             "Collected patches for 1 file. The total number of changed files was not recorded."
         ));
+    }
+
+    #[test]
+    fn manual_test_includes_the_observation_that_would_verify_it() {
+        let mut report = report();
+        report.report.focus.push(Focus {
+            path: PATH.into(),
+            line: 2,
+            checked: "Inspected the retry limit.".into(),
+            action: "Disconnect before the acknowledgement.".into(),
+            outcome: "Expected result (not verified). The item remains queued.".into(),
+        });
+        let body = prepare(&report, &[], false).body;
+        assert!(body.contains("Expected result (unverified): The item remains queued"));
     }
 
     #[test]
