@@ -66,6 +66,14 @@ impl Provider {
     }
 
     pub fn ask(&self, system: &str, data: &Value) -> Result<Value> {
+        self.ask_with_timeout(system, data, Duration::from_secs(300))
+    }
+
+    pub fn ask_with_timeout(&self, system: &str, data: &Value, timeout: Duration) -> Result<Value> {
+        ensure!(
+            !timeout.is_zero(),
+            "The review exhausted its model time budget"
+        );
         let body = serde_json::to_vec(&json!({
             "model": self.model, "messages": [
                 {"role":"system","content":system},
@@ -79,6 +87,7 @@ impl Provider {
         let mut request = self
             .client
             .post(self.endpoint.clone())
+            .timeout(timeout)
             .header("Content-Type", "application/json")
             .body(body);
         if let Some(authorization) = &self.authorization {
@@ -152,6 +161,26 @@ mod tests {
             assert!(error.to_string().contains("API key"));
             assert!(!format!("{error:#}").contains("synthetic-secret"));
         }
+    }
+
+    #[test]
+    fn review_requests_respect_the_remaining_time_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/chat", listener.local_addr().unwrap());
+        let provider = Provider::new(&endpoint, "fixture", String::new()).unwrap();
+        let exhausted = provider
+            .ask_with_timeout("", &json!({}), Duration::ZERO)
+            .unwrap_err();
+        assert!(exhausted.to_string().contains("exhausted"));
+        // The listening socket accepts a TCP handshake but sends no HTTP response.
+        let error = provider
+            .ask_with_timeout("", &json!({}), Duration::from_millis(100))
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_timeout)
+        );
     }
 
     #[test]

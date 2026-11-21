@@ -79,6 +79,38 @@ Return {"complete": bool, "hypotheses": [{"anchor": head citation,
 "expected": str, "scenario": str, "consequence": str}]}.
 "#;
 
+const DISCOVER: &str = r#"
+Your first job is to identify what deserves review, before deciding whether it
+passes. Select concrete verification questions across the materially different
+changes. Include checks of likely-correct behavior if a mistaken assumption
+would matter to the maintainer. When usage guidance is the concern, anchor the
+guidance and trace the exact steps it prescribes. Keep one observable consequence
+per hypothesis. Leave the verdicts to the next pass. A blank
+list is appropriate for a purely mechanical change with no meaningful check.
+Review each distinct change intent from the perspective of the people who must use
+or ship it. Trace the documented steps separately for each participant. Compare
+what a caller observes before and after following the instructions, including
+information that gets replaced, discarded or recorded. Check whether the tests
+exercise that participant's observation or only another participant's happy path.
+For build or deployment changes, compare the environment exercised in CI with
+the minimum accepted by the released artifact and the documented support policy.
+A newer tool in CI can be intentional. If a change is described as a required fix,
+identify who can still run without it and which requirement a maintainer must decide.
+Use source lines to describe the concrete consequence. Keep a meaningful decision
+as a hypothesis even when the library implementation itself behaves as designed.
+Do not invent consumers, availability failures or a requirement absent from the evidence.
+"#;
+
+const CHALLENGE_DISCOVERY: &str = r#"
+Trace the change once as its caller and once as its release maintainer. Consider
+what each can observe or enforce. Also review the diff independently for important concerns missed by the initial
+reviewer, even if the hypotheses list is empty. You may include an additional
+top-level "leads" array with up to three distinct new hypotheses in impact order.
+Use a different anchor from those already under review. Each lead has "anchor" (head citation), "expected", "scenario" and "consequence".
+They will be checked separately. Return an empty array or omit it when none merit
+a check. Keep assessments limited to the supplied IDs.
+"#;
+
 const CHALLENGE: &str = r#"
 Challenge every hypothesis against the final revision. Look for callers, guards,
 tests and existing behavior that would defeat it. Return
@@ -108,11 +140,25 @@ found. Add only the fields for the selected outcome:
   requirement question ending in '?'), and "alternatives" (exactly two distinct
   strings naming the plausible choices). Use human only when the available
   requirements and code cannot settle the choice and its answer changes a decision.
+  A test that proves a helper behaves as implemented does not by itself settle whether
+  its usage guidance or the declared requirements for callers are appropriate. When
+  both behaviors are defensible and the decision has a concrete impact, use human.
   Refute a hypothesis when the code already settles it. Omit speculative guidance.
 Assess impact for users of the software. Report only the scoped behavior you checked.
 "#;
 
 const LIVE_CHECKS: &str = r#"
+Try the exact path a reader of the changed instructions would take. A different
+path that works is a workaround, not counterevidence for the documented path.
+Separate what the code does from what its author might have intended. If a
+documented instruction changes a caller-visible result, identify which result
+the caller gets. Use human for a consequential choice the guidance leaves
+unresolved, even if the implementation is intentional. Refute it when the
+guidance already explains which path preserves which result. For a version or
+policy discrepancy, check the declared requirements before suggesting a runtime
+experiment. Discard speculative parts of a hypothesis and assess the supported
+part on its own. Avoid inventing outages or release failures.
+
 If a claim depends on unusual persisted state or caller inputs,
 trace a reachable producer or cite a contract that permits that state or input. Refute the claim
 when counterevidence exists. If it depends on a requirement the evidence cannot
@@ -605,6 +651,7 @@ struct Reply {
     complete: bool,
     overflow: bool,
     items: Vec<Value>,
+    leads: Vec<Value>,
 }
 
 impl Reply {
@@ -638,12 +685,21 @@ fn request(
     let (key, instructions) = match pass {
         Pass::Proposal => (
             "hypotheses",
-            format!("Return up to {maximum} hypotheses.\n{PROPOSE}"),
+            match protocol {
+                CitationProtocol::Indexed => {
+                    format!("{DISCOVER}Return up to {maximum} hypotheses.\n{PROPOSE}")
+                }
+                CitationProtocol::Verbatim => {
+                    format!("Return up to {maximum} hypotheses.\n{PROPOSE}")
+                }
+            },
         ),
         Pass::Challenge => (
             "assessments",
             match protocol {
-                CitationProtocol::Indexed => format!("{CHALLENGE}{LIVE_CHECKS}"),
+                CitationProtocol::Indexed => {
+                    format!("{CHALLENGE}{LIVE_CHECKS}{CHALLENGE_DISCOVERY}")
+                }
                 CitationProtocol::Verbatim => CHALLENGE.to_owned(),
             },
         ),
@@ -653,11 +709,22 @@ fn request(
         limits.push(format!("Review input exceeds the size limit for {stage}."));
         return Ok(None);
     }
-    let response = ask(
+    let mut response = ask(
         &format!("{GROUNDING}{citation_instructions}\n{instructions}"),
         data,
     )
     .map_err(|_| anyhow!("The provider failed while {stage}."))?;
+    let mut leads = Vec::new();
+    if matches!(
+        (protocol, pass),
+        (CitationProtocol::Indexed, Pass::Challenge)
+    ) && let Some(value) = response.as_object_mut().and_then(|o| o.remove("leads"))
+    {
+        match value {
+            Value::Array(items) if items.len() <= maximum => leads = items,
+            _ => limits.push("The independent review returned invalid or excess leads.".into()),
+        }
+    }
     let (complete, mut items) = response_items(response, key)
         .ok_or_else(|| anyhow!("The provider returned an invalid response while {stage}."))?;
     let overflow = items.len() > maximum;
@@ -668,6 +735,7 @@ fn request(
         complete,
         overflow,
         items,
+        leads,
     }))
 }
 
@@ -1399,25 +1467,16 @@ fn live_assessments<'a>(
         ask,
         limits,
     );
-    if hypotheses.is_empty() {
-        if let Some(reply) = initial? {
-            reply.report_incomplete(Pass::Challenge, limits);
-            if !reply.items.is_empty() {
-                limits.push(
-                    "The provider returned assessments without a requested hypothesis ID.".into(),
-                );
-            }
-        }
-        return Ok(Vec::new());
-    }
     let (initial, initial_error) = match initial {
         Ok(Some(reply)) => (reply, None),
         Ok(None) => return Ok(Vec::new()),
+        Err(error) if hypotheses.is_empty() => return Err(error),
         Err(error) => (
             Reply {
                 complete: false,
                 overflow: false,
                 items: Vec::new(),
+                leads: Vec::new(),
             },
             Some(error.to_string()),
         ),
@@ -1470,6 +1529,50 @@ fn live_assessments<'a>(
             feedback,
             undecided,
             accepted_outcome,
+        });
+    }
+    // New leads share the existing recheck budget with unresolved assessments.
+    // Assign IDs locally so a model cannot turn an unsolicited assessment into evidence.
+    let mut next_id = anchors.keys().max().copied().unwrap_or(0) as usize + 1;
+    let mut seen_anchors: HashSet<_> = anchors.values().copied().collect();
+    let mut discovered = Vec::new();
+    if !initial.leads.is_empty() && (!initial.complete || initial.overflow) {
+        limits.push("Independent review coverage was incomplete.".into());
+    }
+    for lead in &initial.leads {
+        while initial
+            .items
+            .iter()
+            .any(|item| item["id"].as_u64() == Some(next_id as u64))
+        {
+            next_id += 1;
+        }
+        let Some((anchor, hypothesis)) = proposal(lead, next_id, evidence) else {
+            limits
+                .push("An independent review lead contained invalid details or citations.".into());
+            continue;
+        };
+        if !seen_anchors.insert(anchor) {
+            continue;
+        }
+        if pending.len() + discovered.len() >= MAX_HYPOTHESES {
+            limits.push("Additional review leads exceeded the recheck capacity.".into());
+            break;
+        }
+        discovered.push((anchor, hypothesis));
+        next_id += 1;
+    }
+    for (anchor, hypothesis) in &discovered {
+        pending.push(Pending {
+            id: hypothesis["id"]
+                .as_u64()
+                .expect("locally assigned hypothesis ID"),
+            anchor: *anchor,
+            hypothesis,
+            feedback: "Independently test this newly discovered concern against counterevidence."
+                .into(),
+            undecided: None,
+            accepted_outcome: None,
         });
     }
     accepted.sort_by_key(|(order, _, _)| *order);
@@ -2166,6 +2269,86 @@ mod tests {
                     .any(|limit| limit.starts_with("No valid recheck at cache.go:2."))
             );
         }
+    }
+
+    #[test]
+    fn an_independent_lead_requires_a_separate_verified_assessment() {
+        for confirmed in [true, false] {
+            let assessment = if confirmed {
+                indexed_capacity_finding(1, "H4", "B2", "B4")
+            } else {
+                json!({"id":1,"outcome":"refuted","basis":"H4","countercheck":"The contract permits this result."})
+            };
+            let mut replies = [
+                json!({"complete":true,"hypotheses":[]}),
+                json!({"complete":true,"assessments":[],"leads":[indexed_proposal("H2", "A caller configures one slot.")]}),
+                json!({"complete":true,"assessments":[assessment]}),
+            ].into_iter();
+            let report = review(&indexed_snapshot(), &Scan::default(), |_, data| {
+                if let Some(details) = data.get("recheck") {
+                    assert_eq!(data["hypotheses"][0]["anchor"], "H2");
+                    assert_eq!(details[0]["prior_assessments"], json!([]));
+                }
+                Ok(replies.next().unwrap())
+            })
+            .unwrap();
+            assert!(replies.next().is_none());
+            assert!(report.limits.is_empty(), "{:?}", report.limits);
+            assert_eq!(report.findings.len(), usize::from(confirmed));
+        }
+    }
+
+    #[test]
+    fn malformed_independent_leads_do_not_discard_verified_assessments() {
+        for leads in [
+            json!(false),
+            json!([{}, {}, {}, {}]),
+            json!([{"anchor":"H999"}]),
+        ] {
+            let mut replies = [
+                json!({"complete":true,"hypotheses":[indexed_proposal("H2","A caller configures one slot.")]}),
+                json!({"complete":true,"assessments":[indexed_capacity_finding(1,"H4","B2","B4")],"leads":leads}),
+            ].into_iter();
+            let report = review(&indexed_snapshot(), &Scan::default(), |_, _| {
+                Ok(replies.next().unwrap())
+            })
+            .unwrap();
+            assert_eq!(report.findings.len(), 1);
+            assert_eq!(report.limits.len(), 1);
+        }
+    }
+
+    #[test]
+    fn independent_leads_cannot_reopen_a_refuted_anchor() {
+        let lead = indexed_proposal("H2", "A caller configures one slot.");
+        let mut replies = [
+            json!({"complete":true,"hypotheses":[lead]}),
+            json!({"complete":true,"assessments":[{"id":1,"outcome":"refuted","basis":"H4","countercheck":"The contract permits this result."}],"leads":[lead]}),
+        ].into_iter();
+        let report = review(&indexed_snapshot(), &Scan::default(), |_, _| {
+            Ok(replies.next().unwrap())
+        })
+        .unwrap();
+        assert!(report.findings.is_empty());
+        assert!(report.limits.is_empty());
+    }
+
+    #[test]
+    fn rechecking_a_new_lead_cannot_clear_incomplete_discovery() {
+        let mut replies = [
+            json!({"complete":true,"hypotheses":[]}),
+            json!({"complete":false,"assessments":[],"leads":[indexed_proposal("H2","A caller configures one slot.")]}),
+            json!({"complete":true,"assessments":[indexed_capacity_finding(1,"H4","B2","B4")]}),
+        ].into_iter();
+        let report = review(&indexed_snapshot(), &Scan::default(), |_, _| {
+            Ok(replies.next().unwrap())
+        })
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(
+            report.limits,
+            ["Independent review coverage was incomplete."]
+        );
     }
 
     #[test]
