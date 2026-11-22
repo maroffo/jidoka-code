@@ -31,6 +31,17 @@ impl fmt::Display for ReviewContextExceeded {
 }
 impl std::error::Error for ReviewContextExceeded {}
 
+/// The provider received this batch but ended generation without a usable answer.
+#[derive(Debug)]
+pub struct ReviewBatchInterrupted;
+
+impl fmt::Display for ReviewBatchInterrupted {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("The provider ended generation without a completed answer.")
+    }
+}
+impl std::error::Error for ReviewBatchInterrupted {}
+
 const TOOLS: &str = r##"
 Before answering this stage, you may inspect the pinned repository as often as useful.
 To call a tool, return ONLY {"read":{"path":"repository/path","term":"literal"}}.
@@ -65,6 +76,8 @@ impl Coverage {
 
 enum Stop {
     Context,
+    Interrupted,
+    Provider(anyhow::Error),
     TurnLimit,
     RepeatedRead,
     Error(anyhow::Error),
@@ -182,7 +195,15 @@ fn review_chunk(
                         stop = Some(Stop::Context);
                         anyhow::bail!("Context window exceeded.")
                     }
-                    other => other?,
+                    Err(error) if error.is::<ReviewBatchInterrupted>() => {
+                        stop = Some(Stop::Interrupted);
+                        anyhow::bail!("Generation ended before a reply.")
+                    }
+                    Err(error) => {
+                        stop = Some(Stop::Provider(error));
+                        anyhow::bail!("The provider stopped the review.")
+                    }
+                    Ok(response) => response,
                 };
                 displayed.get_or_insert_with(|| {
                     data["snapshot"]["files"]
@@ -269,17 +290,35 @@ pub fn review_snapshot_iterative(
     let mut first = snapshot.clone();
     first.diff = None; // The review representation consists of indexed source, never a second copy of the diff.
     let mut queue = vec![first];
+    let mut interrupted = 0;
     while let Some(chunk) = queue.pop() {
         let ChunkResult {
-            report: result,
+            report: mut result,
             stop,
             displayed,
         } = review_chunk(
             &chunk, &snapshot, &scan, prior, &mut ask, &mut read, &mut fits,
         );
+        // An interrupted recheck can follow accepted findings. Retain those findings; the
+        // replacement batch determines its own coverage and supersedes interim failure limits.
+        if matches!(
+            stop,
+            Some(Stop::Context | Stop::Interrupted | Stop::Provider(_))
+        ) && let Ok((partial, _)) = &mut result
+        {
+            merge_report(
+                &mut report,
+                Report {
+                    findings: std::mem::take(&mut partial.findings),
+                    focus: std::mem::take(&mut partial.focus),
+                    limits: Vec::new(),
+                },
+            );
+        }
         match stop {
             None => {
                 let (batch, outcome) = result?;
+                interrupted = 0;
                 coverage.record(&chunk, outcome.stages_finished);
                 coverage.missed.extend(outcome.unfinished_paths);
                 if outcome.stages_finished {
@@ -292,6 +331,50 @@ pub fn review_snapshot_iterative(
                     }
                 }
                 merge_report(&mut report, batch);
+            }
+            Some(Stop::Interrupted) => {
+                interrupted += 1;
+                if interrupted >= 3 {
+                    coverage.record(&chunk, false);
+                    for outstanding in &queue {
+                        coverage.record(outstanding, false);
+                    }
+                    report.limits.push("The provider returned no completed answer on three consecutive batches, including smaller inputs. The remaining review was stopped.".into());
+                    break;
+                }
+                // Changing optional context alone may reproduce the same request. Always reduce the diff.
+                let path = chunk.files.first().map(|file| file.path.clone());
+                let mut smaller = chunk;
+                smaller.head_context.clear();
+                if let Some(mut parts) = split_chunk(smaller) {
+                    if interrupted == 2 {
+                        parts = probe_smaller_batch(parts);
+                    }
+                    queue.extend(parts.into_iter().rev());
+                } else if let Some(path) = path {
+                    coverage.missed.insert(path.clone());
+                    report.limits.push(format!("The provider returned no completed answer for the smallest reviewable change in {path}."));
+                } else {
+                    report.limits.push(
+                        "The provider returned no completed answer for the review metadata.".into(),
+                    );
+                }
+            }
+            Some(Stop::Provider(error)) => {
+                // Transport, authentication and policy stops apply to the service request, not its size.
+                // The provider/session owns retry classification; never rebill it as a different review stage.
+                if coverage.examined.is_empty()
+                    && report.findings.is_empty()
+                    && report.focus.is_empty()
+                {
+                    return Err(error);
+                }
+                coverage.record(&chunk, false);
+                for outstanding in &queue {
+                    coverage.record(outstanding, false);
+                }
+                report.limits.push("The provider stopped the request. The remaining review could not be completed.".into());
+                break;
             }
             Some(Stop::Context) => {
                 if let Some(parts) = split_chunk(chunk.clone()) {
@@ -408,6 +491,39 @@ fn split_patch(patch: &str) -> Option<Vec<String>> {
         head += head_count;
     }
     (!patches.is_empty()).then_some(patches)
+}
+
+/// Before declaring repeated provider interruptions, try an inexpensive, real part of the change.
+/// Its pending siblings still cover the rest of the original batch if that probe succeeds.
+fn probe_smaller_batch(mut parts: Vec<Snapshot>) -> Vec<Snapshot> {
+    let weight = |part: &Snapshot| {
+        part.files
+            .iter()
+            .map(|file| file.patch.len())
+            .sum::<usize>()
+    };
+    let mut pending = Vec::new();
+    loop {
+        let smallest = parts
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, part)| weight(part))
+            .unwrap()
+            .0;
+        let probe = parts.remove(smallest);
+        pending.extend(parts);
+        if probe.files.len() == 1 && probe.files[0].patch.lines().take(17).count() <= 16 {
+            pending.insert(0, probe);
+            return pending;
+        }
+        match split_chunk(probe.clone()) {
+            Some(children) => parts = children,
+            None => {
+                pending.insert(0, probe);
+                return pending;
+            }
+        }
+    }
 }
 
 fn split_chunk(mut chunk: Snapshot) -> Option<Vec<Snapshot>> {
@@ -687,5 +803,145 @@ mod tests {
             result.report.limits
         );
         assert_eq!(calls, 3);
+    }
+
+    fn multi_file_snapshot(count: usize) -> Snapshot {
+        let mut source = snapshot("@@ -0,0 +1 @@\n+run();");
+        let original = source.files.pop().unwrap();
+        source.files = (0..count)
+            .map(|i| {
+                let mut file = original.clone();
+                file.path = format!("src/file{i}.rs");
+                file
+            })
+            .collect();
+        source
+    }
+
+    #[test]
+    fn interrupted_large_batch_completes_on_smaller_distinct_batches() {
+        let source = multi_file_snapshot(8);
+        let mut rejected = HashSet::new();
+        let result = review_snapshot_iterative(
+            source,
+            |_, data| {
+                let files = data["snapshot"]["files"].as_array().unwrap();
+                if files.len() > 2 {
+                    assert!(
+                        rejected.insert(
+                            files
+                                .iter()
+                                .map(|f| f["path"].as_str().unwrap().to_owned())
+                                .collect::<Vec<_>>()
+                        )
+                    );
+                    return Err(ReviewBatchInterrupted.into());
+                }
+                if data.get("hypotheses").is_some() {
+                    Ok(json!({"complete":true,"assessments":[]}))
+                } else {
+                    Ok(json!({"complete":true,"hypotheses":[]}))
+                }
+            },
+            |_, _| Ok(Vec::new()),
+            |_, _| Ok(true),
+            &[],
+        )
+        .unwrap();
+        assert!(!rejected.is_empty());
+        assert_eq!(result.reviewed_files.unwrap().len(), 8);
+        assert!(
+            result.report.limits.is_empty(),
+            "{:?}",
+            result.report.limits
+        );
+    }
+
+    #[test]
+    fn persistent_interruptions_stop_after_a_small_probe() {
+        let source = multi_file_snapshot(107);
+        let mut sizes = Vec::new();
+        let result = review_snapshot_iterative(
+            source,
+            |_, data| {
+                sizes.push(data["snapshot"]["files"].as_array().unwrap().len());
+                Err(ReviewBatchInterrupted.into())
+            },
+            |_, _| Ok(Vec::new()),
+            |_, _| Ok(true),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(sizes, [107, 53, 1]);
+        assert!(result.reviewed_files.unwrap().is_empty());
+        assert_eq!(result.patch_files.unwrap().len(), 107);
+        assert!(
+            result
+                .report
+                .limits
+                .iter()
+                .any(|l| l.contains("three consecutive batches"))
+        );
+    }
+
+    #[test]
+    fn unanswerable_single_line_does_not_prevent_reviewing_its_sibling() {
+        let source = multi_file_snapshot(2);
+        let mut calls = 0;
+        let result = review_snapshot_iterative(
+            source,
+            |_, data| {
+                calls += 1;
+                let files = data["snapshot"]["files"].as_array().unwrap();
+                if files[0]["path"] == "src/file0.rs" {
+                    return Err(ReviewBatchInterrupted.into());
+                }
+                if data.get("hypotheses").is_some() {
+                    Ok(json!({"complete":true,"assessments":[]}))
+                } else {
+                    Ok(json!({"complete":true,"hypotheses":[]}))
+                }
+            },
+            |_, _| Ok(Vec::new()),
+            |_, _| Ok(true),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(result.reviewed_files.unwrap(), ["src/file1.rs"]);
+        assert!(
+            result
+                .report
+                .limits
+                .iter()
+                .any(|l| l.contains("smallest reviewable change in src/file0.rs"))
+        );
+    }
+
+    #[test]
+    fn terminal_rejection_during_challenge_does_not_retry_or_partition() {
+        let source = multi_file_snapshot(4);
+        let mut turns = 0;
+        let result = review_snapshot_iterative(
+            source,
+            |_, _| {
+                turns += 1;
+                match turns {
+                    1 => Ok(
+                        json!({"complete":true,"hypotheses":[{"anchor":"H1","expected":"Jobs complete.","scenario":"A caller queues a job.","consequence":"The job could fail."}]}),
+                    ),
+                    2 => anyhow::bail!("Terminal provider rejection."),
+                    _ => panic!("A terminal rejection must not be retried."),
+                }
+            },
+            |_, _| Ok(Vec::new()),
+            |_, _| Ok(true),
+            &[],
+        );
+        assert_eq!(turns, 2);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Terminal provider rejection."
+        );
     }
 }

@@ -229,43 +229,256 @@ fn check_status(response: Response) -> Result<Response> {
 pub struct InvalidReply {
     pub reason: &'static str,
     pub usage: TokenUsage,
+    diagnostics: Option<ReplyDiagnostics>,
 }
+
 impl std::fmt::Display for InvalidReply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.reason)
+        f.write_str(self.reason)?;
+        if let Some(d) = &self.diagnostics {
+            write!(
+                f,
+                " (choices={:?}, finish={}, native_finish={}, block={}, error_code={}, error_status={}, output_tokens={:?})",
+                d.choices,
+                d.finish,
+                d.native_finish,
+                d.block,
+                d.error_code,
+                d.error_status,
+                self.usage.output
+            )?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for InvalidReply {}
 
+// Persist only fixed protocol labels and counts. Provider fields and error
+// messages can contain user input, so an unknown label must never be echoed.
+#[derive(Clone, Copy, Debug)]
+struct ReplyDiagnostics {
+    choices: Option<usize>,
+    finish: &'static str,
+    native_finish: &'static str,
+    block: &'static str,
+    error_code: &'static str,
+    error_status: &'static str,
+}
+
+fn label(value: &Value, names: &[&'static str]) -> &'static str {
+    match value {
+        Value::Null => "absent",
+        Value::String(s) => names
+            .iter()
+            .copied()
+            .find(|name| name.eq_ignore_ascii_case(s))
+            .unwrap_or("unrecognized"),
+        _ => "unrecognized",
+    }
+}
+
+const FINISH: &[&str] = &[
+    "stop",
+    "length",
+    "max_tokens",
+    "content_filter",
+    "safety",
+    "recitation",
+    "language",
+    "blocklist",
+    "prohibited_content",
+    "spii",
+    "image_safety",
+    "image_prohibited_content",
+    "image_recitation",
+    "other",
+    "image_other",
+    "no_image",
+    "tool_calls",
+    "function_call",
+    "malformed_function_call",
+    "unexpected_tool_call",
+    "too_many_tool_calls",
+    "missing_thought_signature",
+    "malformed_response",
+    "error",
+    "finish_reason_unspecified",
+];
+
+fn restricted(reason: &str) -> bool {
+    matches!(
+        reason,
+        "content_filter"
+            | "safety"
+            | "recitation"
+            | "language"
+            | "blocklist"
+            | "prohibited_content"
+            | "spii"
+            | "image_safety"
+            | "image_prohibited_content"
+            | "image_recitation"
+    )
+}
+
+fn first_present<const N: usize>(values: [&Value; N]) -> &Value {
+    values
+        .into_iter()
+        .find(|v| !v.is_null())
+        .unwrap_or(&Value::Null)
+}
+
 fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
-    let reply: Value = serde_json::from_slice(bytes).context(InvalidReply {
-        reason: "Provider returned incomplete JSON.",
-        usage: TokenUsage::default(),
+    let reply: Value = serde_json::from_slice(bytes).map_err(|error| {
+        let issue = InvalidReply {
+            reason: "Provider returned incomplete JSON.",
+            usage: TokenUsage::default(),
+            diagnostics: None,
+        };
+        if error.is_eof() {
+            anyhow::Error::new(crate::ReviewBatchInterrupted).context(issue)
+        } else {
+            anyhow::Error::new(issue)
+        }
     })?;
     let first = &reply["choices"][0];
+    let candidate = &reply["candidates"][0];
+    let message = &first["message"];
+    let error = first_present([&reply["error"], &first["error"]]);
+    let feedback = first_present([&reply["promptFeedback"], &reply["prompt_feedback"]]);
+    let code = &error["code"];
+    let status_names = &[
+        "cancelled",
+        "unknown",
+        "invalid_argument",
+        "deadline_exceeded",
+        "not_found",
+        "already_exists",
+        "permission_denied",
+        "resource_exhausted",
+        "failed_precondition",
+        "aborted",
+        "out_of_range",
+        "unimplemented",
+        "internal",
+        "unavailable",
+        "data_loss",
+        "unauthenticated",
+        "content_filter",
+        "content_policy_violation",
+        "rate_limit_exceeded",
+        "context_length_exceeded",
+        "server_error",
+    ];
+    let d = ReplyDiagnostics {
+        choices: reply["choices"].as_array().map(Vec::len),
+        finish: label(&first["finish_reason"], FINISH),
+        native_finish: label(
+            first_present([
+                &candidate["finishReason"],
+                &candidate["finish_reason"],
+                &first["native_finish_reason"],
+            ]),
+            FINISH,
+        ),
+        block: label(
+            first_present([&feedback["blockReason"], &feedback["block_reason"]]),
+            &[
+                "block_reason_unspecified",
+                "safety",
+                "other",
+                "blocklist",
+                "prohibited_content",
+                "image_safety",
+                "model_armor",
+            ],
+        ),
+        error_code: match code.as_u64() {
+            Some(400) => "400",
+            Some(401) => "401",
+            Some(403) => "403",
+            Some(404) => "404",
+            Some(408) => "408",
+            Some(413) => "413",
+            Some(422) => "422",
+            Some(429) => "429",
+            Some(500) => "500",
+            Some(502) => "502",
+            Some(503) => "503",
+            Some(504) => "504",
+            _ => label(code, status_names),
+        },
+        error_status: label(&error["status"], status_names),
+    };
     let usage = &reply["usage"];
     let usage = TokenUsage {
         input: usage["prompt_tokens"].as_u64(),
         output: usage["completion_tokens"].as_u64(),
         cached: usage["prompt_tokens_details"]["cached_tokens"].as_u64(),
     };
-    let issue = |reason| InvalidReply { reason, usage };
-    match first["finish_reason"].as_str() {
-        Some("stop") => {}
-        Some("length") => {
-            return Err(anyhow::Error::new(crate::ReviewContextExceeded)
-                .context(issue("Provider reached the output token limit.")));
-        }
-        Some("content_filter") => {
-            return Err(issue("Provider stopped at its content filter.").into());
-        }
-        _ => return Err(issue("Provider stopped before completing its reply.").into()),
+    let issue = |reason| InvalidReply {
+        reason,
+        usage,
+        diagnostics: Some(d),
+    };
+    let interrupted =
+        |reason| anyhow::Error::new(crate::ReviewBatchInterrupted).context(issue(reason));
+    let flagged = [&feedback["safetyRatings"], &candidate["safetyRatings"]]
+        .into_iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .any(|rating| rating["blocked"] == true);
+    let refused = message["refusal"].as_str().is_some_and(|s| !s.is_empty())
+        || message["content"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|p| p["type"] == "refusal"));
+    if restricted(d.finish)
+        || restricted(d.native_finish)
+        || !matches!(d.block, "absent" | "block_reason_unspecified")
+        || flagged
+        || refused
+    {
+        return Err(issue("Provider withheld the reply.").into());
     }
-    let text = first["message"]["content"]
-        .as_str()
-        .ok_or_else(|| issue("Provider response is missing text."))?;
-    let value: Value =
-        serde_json::from_str(text).context(issue("Provider returned invalid review JSON."))?;
+    if !error.is_null() {
+        return Err(issue("Provider reported an error in its reply.").into());
+    }
+    if [d.finish, d.native_finish]
+        .iter()
+        .any(|reason| matches!(*reason, "length" | "max_tokens"))
+    {
+        return Err(anyhow::Error::new(crate::ReviewContextExceeded)
+            .context(issue("Provider reached the output token limit.")));
+    }
+    let text = message["content"].as_str();
+    let empty_content = message["content"].is_null() || text.is_some_and(|s| s.trim().is_empty());
+    let no_tool_call = !message["tool_calls"]
+        .as_array()
+        .is_some_and(|calls| !calls.is_empty())
+        && message["function_call"].is_null();
+    // Positive evidence of an empty chat completion. Unknown finish reasons and
+    // native/foreign payloads are never reinterpreted as a transient stop.
+    if d.choices.is_some()
+        && empty_content
+        && no_tool_call
+        && [d.finish, d.native_finish]
+            .iter()
+            .all(|reason| matches!(*reason, "stop" | "absent"))
+        && (d.finish == "stop" || usage.output == Some(0))
+    {
+        return Err(interrupted("Provider returned an empty model completion."));
+    }
+    if d.finish != "stop" || !matches!(d.native_finish, "absent" | "stop") {
+        return Err(issue("Provider stopped before completing its reply.").into());
+    }
+    let text = text.ok_or_else(|| issue("Provider response is missing text."))?;
+    let value: Value = serde_json::from_str(text).map_err(|error| {
+        if error.is_eof() {
+            interrupted("Provider returned truncated review JSON.")
+        } else {
+            anyhow::Error::new(issue("Provider returned invalid review JSON."))
+        }
+    })?;
     ensure!(
         value.is_object(),
         issue("Provider returned an unexpected review format.")
@@ -449,6 +662,58 @@ mod tests {
         assert!(result.is::<crate::ReviewContextExceeded>());
         let failure = result.downcast_ref::<InvalidReply>().unwrap();
         assert_eq!(failure.usage.output, Some(4096));
+    }
+
+    #[test]
+    fn empty_and_truncated_completions_can_be_recovered_without_losing_usage() {
+        let cases = [
+            json!({"choices":[],"usage":{"completion_tokens":0}}),
+            json!({"choices":[{"finish_reason":null,"message":{"content":null}}],"usage":{"completion_tokens":0}}),
+            json!({"choices":[{"finish_reason":"stop","message":{"content":" "}}]}),
+            json!({"choices":[{"finish_reason":"stop","message":{"content":"{\"hypotheses\":"}}]}),
+        ];
+        for case in cases {
+            let error = decode_reply(&serde_json::to_vec(&case).unwrap()).unwrap_err();
+            assert!(error.is::<crate::ReviewBatchInterrupted>());
+            let reply = error.downcast_ref::<InvalidReply>().unwrap();
+            assert_eq!(
+                reply.usage.output,
+                case["usage"]["completion_tokens"].as_u64()
+            );
+            assert!(reply.to_string().contains("choices="));
+        }
+        assert!(
+            decode_reply(b"{\"choices\":")
+                .unwrap_err()
+                .is::<crate::ReviewBatchInterrupted>()
+        );
+    }
+
+    #[test]
+    fn policy_signals_and_unclassified_stops_are_never_rebatched() {
+        let cases = [
+            json!({"choices": [{"finish_reason": "content_filter"}]}),
+            json!({"choices":[{"finish_reason":"stop","message":{"refusal":"private-provider-text"}}]}),
+            json!({"choices":[{"finish_reason":null,"native_finish_reason":"SPII"}],"usage":{"completion_tokens":0}}),
+            json!({"choices":[],"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usage":{"completion_tokens":0}}),
+            json!({"choices":[],"candidates":[{"finishReason":"RECITATION"}],"usage":{"completion_tokens":0}}),
+            json!({"choices":[],"candidates":[{"safetyRatings":[{"blocked":true}]}],"usage":{"completion_tokens":0}}),
+            json!({"choices":[],"error":{"code":403,"status":"PERMISSION_DENIED"},"usage":{"completion_tokens":0}}),
+            json!({"choices":[{"finish_reason":"private-provider-text"}],"usage":{"completion_tokens":0}}),
+            json!({"choices":[{"finish_reason":"stop","message":{"tool_calls":[{"id":"1"}]}}],"usage":{"completion_tokens":0}}),
+            json!({"choices":[],"usage":{"prompt_tokens":2048}}),
+            json!({"choices":[{"finish_reason":"error","error":{"code":"private-provider-text"}}],"usage":{"completion_tokens":0}}),
+        ];
+        for case in cases {
+            let error = decode_reply(&serde_json::to_vec(&case).unwrap()).unwrap_err();
+            assert!(
+                !error.is::<crate::ReviewBatchInterrupted>()
+                    && !error.is::<crate::ReviewContextExceeded>()
+            );
+            let failure = error.downcast_ref::<InvalidReply>().unwrap();
+            assert_ne!(failure.reason, "Provider returned invalid review JSON.");
+            assert!(!failure.to_string().contains("private-provider-text"));
+        }
     }
 
     #[test]

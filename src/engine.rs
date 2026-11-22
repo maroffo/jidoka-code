@@ -1,7 +1,9 @@
 //! Review pinned source and verify proposed findings against counterevidence.
 
 mod interactive;
-pub use interactive::{ReviewContextExceeded, ReviewTurnLimit, review_snapshot_iterative};
+pub use interactive::{
+    ReviewBatchInterrupted, ReviewContextExceeded, ReviewTurnLimit, review_snapshot_iterative,
+};
 
 use crate::{
     contracts::{Attribution, ContextRead, Finding, Focus, Report, Scan, Snapshot, SourceWindow},
@@ -4030,5 +4032,32 @@ mod tests {
         );
         assert_eq!(result.patch_files.unwrap(), ["cache.go", "feed.ts"]);
         assert_eq!(result.reviewed_files.unwrap(), ["cache.go"]);
+    }
+
+    #[test]
+    fn interrupted_recheck_keeps_verified_sibling_after_successful_partition() {
+        let source = indexed_snapshot();
+        let mut passes = 0;
+        let result = review_snapshot_iterative(source, |_, data| {
+            passes += 1;
+            match passes {
+                1 => Ok(json!({"complete":true,"hypotheses":[
+                    indexed_proposal("H2", "The caller configures one slot."),
+                    indexed_proposal("H8", "A public feed might contain drafts.")
+                ]})),
+                2 => Ok(json!({"complete":true,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]})),
+                3 => Err(ReviewBatchInterrupted.into()),
+                _ if data.get("hypotheses").is_some() => Ok(json!({"complete":true,"assessments":[]})),
+                _ => Ok(json!({"complete":true,"hypotheses":[]}))
+            }
+        }, |_,_| Ok(Vec::new()), |_,_| Ok(true), &[]).unwrap();
+        assert_eq!(result.report.findings.len(), 1);
+        assert_eq!(result.report.findings[0].path, "cache.go");
+        assert!(result.unfinished_patches().unwrap().is_empty());
+        assert!(
+            result.report.limits.is_empty(),
+            "{:?}",
+            result.report.limits
+        );
     }
 }

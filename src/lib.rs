@@ -54,4 +54,6 @@ pub fn review_snapshot_with_context(
     })
 }
 
-pub use engine::{ReviewContextExceeded, ReviewTurnLimit, review_snapshot_iterative};
+pub use engine::{
+    ReviewBatchInterrupted, ReviewContextExceeded, ReviewTurnLimit, review_snapshot_iterative,
+};

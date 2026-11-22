@@ -17,6 +17,10 @@ pub(super) fn init(db: &Connection) -> rusqlite::Result<()> {
         review_id INTEGER NOT NULL, step INTEGER NOT NULL, fingerprint BLOB NOT NULL, reply TEXT NOT NULL,
         PRIMARY KEY(review_id,step)
     );
+    CREATE TABLE IF NOT EXISTS review_splits (
+        review_id INTEGER NOT NULL,step INTEGER NOT NULL,fingerprint BLOB NOT NULL,interrupted INTEGER NOT NULL,
+        PRIMARY KEY(review_id,step)
+    );
     CREATE TABLE IF NOT EXISTS review_replays (review_id INTEGER PRIMARY KEY,source_id INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS review_origins (review_id INTEGER PRIMARY KEY,repo TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS review_reads (review_id INTEGER NOT NULL,path TEXT NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,PRIMARY KEY(review_id,path,start,end));")
@@ -158,6 +162,15 @@ impl Session {
             return Ok(serde_json::from_str(&reply)?);
         }
 
+        let split:Option<bool>=self.db.query_row("SELECT interrupted FROM review_splits WHERE review_id=? AND step=? AND fingerprint=?",params![self.id,self.step,fingerprint],|r|r.get(0)).optional()?;
+        if let Some(interrupted) = split {
+            return if interrupted {
+                Err(crate::ReviewBatchInterrupted.into())
+            } else {
+                Err(crate::ReviewContextExceeded.into())
+            };
+        }
+
         let mut retries = 0;
         loop {
             let result = self.dispatch(&fingerprint, &mut call);
@@ -220,6 +233,12 @@ impl Session {
         if let Ok(reply) = &result {
             tx.execute("INSERT OR REPLACE INTO review_turns(review_id,step,fingerprint,reply) VALUES(?,?,?,?)",params![self.id,self.step,fingerprint,serde_json::to_string(&reply.value)?])?;
         }
+        if let Err(error) = &result
+            && (error.is::<crate::ReviewContextExceeded>()
+                || error.is::<crate::ReviewBatchInterrupted>())
+        {
+            tx.execute("INSERT OR REPLACE INTO review_splits(review_id,step,fingerprint,interrupted) VALUES(?,?,?,?)",params![self.id,self.step,fingerprint,error.is::<crate::ReviewBatchInterrupted>()])?;
+        }
         tx.commit()?;
         let status = match &result {
             Ok(_) => "received".to_owned(),
@@ -232,7 +251,7 @@ impl Session {
 
 fn turn_error(error: &anyhow::Error) -> String {
     if let Some(reply) = error.downcast_ref::<crate::provider::InvalidReply>() {
-        return reply.reason.into();
+        return reply.to_string();
     }
     if let Some(err) = error.downcast_ref::<reqwest::Error>() {
         if let Some(status) = err.status() {
@@ -255,6 +274,7 @@ pub(super) fn finish(db: &Connection, id: i64, status: &str, reason: &str) -> Re
         params![status,reason, id],
     )?;
     if matches!(status, "completed" | "partial" | "superseded") {
+        db.execute("DELETE FROM review_splits WHERE review_id=?", [id])?;
         db.execute("DELETE FROM review_turns WHERE review_id=?", [id])?;
         db.execute(
             "UPDATE review_runs SET snapshot=NULL,prior=NULL WHERE review_id=?",
@@ -399,6 +419,37 @@ mod tests {
             .query_row("SELECT status FROM reviews", [], |r| r.get(0))
             .unwrap();
         assert_eq!(state, "queued");
+    }
+
+    #[test]
+    fn restarting_replays_a_split_without_sending_the_failed_request_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.db");
+        super::super::init_db(&connect(&path).unwrap()).unwrap();
+        let input = json!({"source":"wide diff"});
+        let mut original = Session::open(&path, 1).unwrap();
+        assert!(
+            original
+                .ask("review", &input, || Err(
+                    crate::ReviewBatchInterrupted.into()
+                ))
+                .unwrap_err()
+                .is::<crate::ReviewBatchInterrupted>()
+        );
+        drop(original);
+        let mut resumed = Session::open(&path, 1).unwrap();
+        assert!(
+            resumed
+                .ask("review", &input, || panic!("already partitioned"))
+                .unwrap_err()
+                .is::<crate::ReviewBatchInterrupted>()
+        );
+        assert!(
+            metrics(&resumed.db, 1)
+                .unwrap()
+                .unwrap()
+                .contains("1 model turn")
+        );
     }
 
     #[test]
