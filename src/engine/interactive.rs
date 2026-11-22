@@ -79,7 +79,6 @@ enum Stop {
     ShorterIntent(Vec<String>),
     Metadata,
     Interrupted,
-    Provider(anyhow::Error),
     TurnLimit,
     RepeatedRead,
     Error(anyhow::Error),
@@ -146,6 +145,31 @@ type Read<'f> = dyn FnMut(&Snapshot, &[ContextRead]) -> Result<Vec<SourceWindow>
 type Fits<'f> = dyn FnMut(&str, &Value) -> Result<bool> + 'f;
 type Model<'f> = dyn FnMut(&str, &Value) -> Result<Value> + 'f;
 
+fn shorten_intent(intent: &mut Vec<String>) {
+    let commits = intent
+        .iter()
+        .filter(|entry| entry.starts_with("Commit message\n"))
+        .count();
+    if commits > 0 {
+        let mut kept = 0;
+        intent.retain(|entry| {
+            if !entry.starts_with("Commit message\n") {
+                return true;
+            }
+            kept += 1;
+            kept <= commits / 2
+        });
+    } else {
+        let mut bytes = intent.iter().map(String::len).sum::<usize>() / 2;
+        intent.retain_mut(|entry| {
+            let end = entry.floor_char_boundary(bytes.min(entry.len()));
+            entry.truncate(end);
+            bytes -= end;
+            end > 0
+        });
+    }
+}
+
 /// Keep ordinary requests intact. When the repeated metadata alone exceeds the real window,
 /// reduce supplemental commit history first, then the tail of the remaining PR text.
 fn context_overflow(
@@ -153,9 +177,10 @@ fn context_overflow(
     data: &Value,
     chunk: &Snapshot,
     fits: &mut Fits<'_>,
+    rejected_by_provider: bool,
 ) -> Result<Stop> {
-    if data.get("hypotheses").is_some()
-        || data.get("last_read").is_some()
+    if !rejected_by_provider
+        && (data.get("hypotheses").is_some() || data.get("last_read").is_some())
         || chunk.intent.is_empty()
     {
         return Ok(Stop::Context);
@@ -166,32 +191,41 @@ fn context_overflow(
         "scan": data["scan"],
     });
     if fits(system, &metadata)? {
+        if rejected_by_provider {
+            // OpenAI-compatible endpoints may expose no counter at all. An actual rejection
+            // establishes overflow. Size below only chooses which part to reduce first.
+            let intent_bytes = chunk.intent.iter().map(String::len).sum::<usize>();
+            let diff_bytes = chunk
+                .files
+                .iter()
+                .map(|file| {
+                    if file.patch.is_empty() {
+                        file.before.len() + file.after.len()
+                    } else {
+                        file.patch.len()
+                    }
+                })
+                .sum::<usize>();
+            let extras = data["snapshot"]["head_context"].to_string().len()
+                + data
+                    .get("hypotheses")
+                    .map_or(0, |items| items.to_string().len())
+                + data
+                    .get("recheck")
+                    .map_or(0, |items| items.to_string().len());
+            let indivisible =
+                chunk.files.len() == 1 && chunk.files[0].patch.lines().take(3).count() <= 2;
+            if indivisible || intent_bytes >= diff_bytes.saturating_add(extras) {
+                let mut intent = chunk.intent.clone();
+                shorten_intent(&mut intent);
+                return Ok(Stop::ShorterIntent(intent));
+            }
+        }
         return Ok(Stop::Context);
     }
     let mut intent = chunk.intent.clone();
     while !intent.is_empty() {
-        let commits = intent
-            .iter()
-            .filter(|entry| entry.starts_with("Commit message\n"))
-            .count();
-        if commits > 0 {
-            let mut kept = 0;
-            intent.retain(|entry| {
-                if !entry.starts_with("Commit message\n") {
-                    return true;
-                }
-                kept += 1;
-                kept <= commits / 2
-            });
-        } else {
-            let mut bytes = intent.iter().map(String::len).sum::<usize>() / 2;
-            intent.retain_mut(|entry| {
-                let end = entry.floor_char_boundary(bytes.min(entry.len()));
-                entry.truncate(end);
-                bytes -= end;
-                end > 0
-            });
-        }
+        shorten_intent(&mut intent);
         metadata["snapshot"]["intent"] = json!(&intent);
         if fits(system, &metadata)? {
             return Ok(Stop::ShorterIntent(intent));
@@ -235,7 +269,7 @@ fn review_chunk(
                     Ok(true) => {}
                     Ok(false) => {
                         stop = Some(
-                            context_overflow(&system, data, chunk, fits)
+                            context_overflow(&system, data, chunk, fits, false)
                                 .unwrap_or_else(Stop::Error),
                         );
                         anyhow::bail!("Context window exceeded.")
@@ -251,7 +285,10 @@ fn review_chunk(
                         anyhow::bail!("Model turn limit reached.")
                     }
                     Err(error) if error.is::<ReviewContextExceeded>() => {
-                        stop = Some(Stop::Context);
+                        stop = Some(
+                            context_overflow(&system, data, chunk, fits, true)
+                                .unwrap_or_else(Stop::Error),
+                        );
                         anyhow::bail!("Context window exceeded.")
                     }
                     Err(error) if error.is::<ReviewBatchInterrupted>() => {
@@ -259,7 +296,7 @@ fn review_chunk(
                         anyhow::bail!("Generation ended before a reply.")
                     }
                     Err(error) => {
-                        stop = Some(Stop::Provider(error));
+                        stop = Some(Stop::Error(error));
                         anyhow::bail!("The provider stopped the review.")
                     }
                     Ok(response) => response,
@@ -402,22 +439,6 @@ pub fn review_snapshot_iterative(
                         "The provider returned no completed answer for the review metadata.".into(),
                     );
                 }
-            }
-            Some(Stop::Provider(error)) => {
-                // Transport, authentication and policy stops apply to the service request, not its size.
-                // The provider/session owns retry classification; never rebill it as a different review stage.
-                if coverage.examined.is_empty()
-                    && items.findings.is_empty()
-                    && items.priorities.is_empty()
-                {
-                    return Err(error);
-                }
-                coverage.record(&chunk, false);
-                for outstanding in &queue {
-                    coverage.record(outstanding, false);
-                }
-                report.limits.push("The provider stopped the request. The remaining review could not be completed.".into());
-                break;
             }
             Some(Stop::ShorterIntent(intent)) => {
                 let limit =
@@ -1064,5 +1085,75 @@ mod tests {
         assert_eq!(model_calls, 2);
         assert_eq!(fits_calls, 5);
         assert_eq!(result.reviewed_files.unwrap().len(), 107);
+    }
+
+    #[test]
+    fn terminal_provider_failure_after_a_complete_chunk_is_returned_to_the_queue() {
+        let mut calls = 0;
+        let result = review_snapshot_iterative(
+            multi_file_snapshot(2),
+            |_, data| {
+                calls += 1;
+                if data["snapshot"]["files"][0]["path"] == "src/file1.rs" {
+                    anyhow::bail!("Synthetic authentication failure");
+                }
+                if data.get("hypotheses").is_some() {
+                    Ok(json!({"complete":true,"assessments":[]}))
+                } else {
+                    Ok(json!({"complete":true,"hypotheses":[]}))
+                }
+            },
+            |_, _| Ok(Vec::new()),
+            |_, data| Ok(data["snapshot"]["files"].as_array().unwrap().len() == 1),
+            &[],
+        );
+        assert_eq!(calls, 3);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Synthetic authentication failure"
+        );
+    }
+
+    #[test]
+    fn provider_reported_overflow_compacts_shared_intent_without_splitting_the_pr_into_rows() {
+        let mut source = multi_file_snapshot(107);
+        source.intent = vec![
+            "PR title".into(),
+            format!("Commit message\n{}", "á".repeat(30000)),
+        ];
+        let mut calls = 0;
+        let result = review_snapshot_iterative(
+            source,
+            |_, data| {
+                calls += 1;
+                assert!(
+                    calls <= 3,
+                    "The reported context failure must reduce shared PR metadata."
+                );
+                assert_eq!(data["snapshot"]["files"].as_array().unwrap().len(), 107);
+                if data["snapshot"]["intent"].to_string().len() > 1024 {
+                    return Err(ReviewContextExceeded.into());
+                }
+                assert_eq!(data["snapshot"]["intent"], json!(["PR title"]));
+                if data.get("hypotheses").is_some() {
+                    Ok(json!({"complete":true,"assessments":[]}))
+                } else {
+                    Ok(json!({"complete":true,"hypotheses":[]}))
+                }
+            },
+            |_, _| Ok(Vec::new()),
+            |_, _| Ok(true),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(result.reviewed_files.unwrap().len(), 107);
+        assert!(
+            result
+                .report
+                .limits
+                .iter()
+                .any(|l| l.contains("text was shortened"))
+        );
     }
 }

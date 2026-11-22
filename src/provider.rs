@@ -10,7 +10,10 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
-use std::{io::Read, time::Duration};
+use std::{
+    io::{BufRead, BufReader, Read},
+    time::Duration,
+};
 
 const MAX_REPLY_BYTES: usize = 1_000_000;
 
@@ -119,6 +122,8 @@ impl Provider {
             "response_format":{"type":"json_object"}
         });
         if let Some(context) = &self.context {
+            body["stream"] = true.into();
+            body["stream_options"] = json!({"include_usage":true});
             body["max_tokens"] = context
                 .output_budget(&self.client, system, &content)?
                 .into();
@@ -128,11 +133,24 @@ impl Provider {
             .post(self.endpoint.clone())
             .timeout(timeout)
             .json(&body);
+        if self.context.is_some() {
+            request = request.header(reqwest::header::ACCEPT, "text/event-stream");
+        }
         if let Some(authorization) = &self.authorization {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
         let response = request.send().context("Provider is unavailable")?;
         let response = check_status(response)?;
+        // A gateway may return an ordinary JSON error envelope even for a streaming request.
+        let is_json = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(';').next())
+            .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"));
+        if self.context.is_some() && !is_json {
+            return decode_stream(response);
+        }
         let mut bytes = Vec::new();
         response
             .take(MAX_REPLY_BYTES as u64 + 1)
@@ -331,6 +349,9 @@ const FINISH: &[&str] = &[
     "malformed_response",
     "error",
     "finish_reason_unspecified",
+    "escalation",
+    "pup_limited_disabled",
+    "continuation",
 ];
 
 fn restricted(reason: &str) -> bool {
@@ -346,6 +367,8 @@ fn restricted(reason: &str) -> bool {
             | "image_safety"
             | "image_prohibited_content"
             | "image_recitation"
+            | "escalation"
+            | "pup_limited_disabled"
     )
 }
 
@@ -354,6 +377,140 @@ fn first_present<const N: usize>(values: [&Value; N]) -> &Value {
         .into_iter()
         .find(|v| !v.is_null())
         .unwrap_or(&Value::Null)
+}
+
+fn decode_stream(reader: impl Read) -> Result<ModelReply> {
+    // SSE adds a JSON envelope to each output chunk. Bound both transport overhead
+    // and reassembled model text, including the case of one unterminated long line.
+    const MAX_STREAM_BYTES: usize = 16 * MAX_REPLY_BYTES;
+    let mut reader = BufReader::new(reader.take(MAX_STREAM_BYTES as u64 + 1));
+    let mut reply = json!({"choices":[]});
+    let mut text = String::new();
+    let mut line = Vec::new();
+    let mut event = Vec::new();
+    let mut wire_bytes = 0;
+    let mut error_event = false;
+    let mut terminal = false;
+    let done = loop {
+        line.clear();
+        let read = match reader.read_until(b'\n', &mut line) {
+            Ok(read) => read,
+            Err(_) => break false,
+        };
+        wire_bytes += read;
+        ensure!(
+            wire_bytes <= MAX_STREAM_BYTES,
+            "Provider stream exceeds the size limit"
+        );
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        if let Some(kind) = line.strip_prefix(b"event:") {
+            error_event = kind.trim_ascii() == b"error";
+            if error_event && reply["error"].is_null() {
+                // Keep the explicit error terminal even if its final data frame is cut off.
+                reply["error"] = json!({});
+            }
+            continue;
+        }
+        if let Some(data) = line.strip_prefix(b"data:") {
+            if !event.is_empty() {
+                event.push(b'\n');
+            }
+            event.extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
+            continue;
+        }
+        // A blank line dispatches an SSE event. Comments and other SSE fields
+        // do not contribute to model content.
+        if !line.is_empty() {
+            continue;
+        }
+        if !event.is_empty() {
+            if event.trim_ascii() == b"[DONE]" {
+                break true;
+            }
+            let Ok(frame) = serde_json::from_slice::<Value>(&event) else {
+                break false;
+            };
+            if !frame["usage"].is_null() {
+                reply["usage"] = frame["usage"].clone();
+            }
+            if !terminal {
+                if error_event || frame["type"] == "error" {
+                    reply["error"] = if frame["error"].is_null() {
+                        frame.clone()
+                    } else {
+                        frame["error"].clone()
+                    };
+                }
+                append_chunk(&mut reply, &mut text, &frame)?;
+                terminal = !reply["error"].is_null()
+                    || !reply["choices"][0]["error"].is_null()
+                    || ReplyDiagnostics::read(&reply).withheld(&reply);
+            }
+            event.clear();
+        }
+        error_event = false;
+        if read == 0 {
+            break false;
+        }
+    };
+    if !reply["choices"][0].is_null() {
+        reply["choices"][0]["message"]["content"] = text.into();
+    }
+    decode_message(&reply, Some(done))
+}
+
+fn append_chunk(reply: &mut Value, text: &mut String, frame: &Value) -> Result<()> {
+    for field in ["error", "promptFeedback", "prompt_feedback", "candidates"] {
+        if !frame[field].is_null() {
+            reply[field] = frame[field].clone();
+        }
+    }
+    let Some(choice) = frame["choices"].as_array().and_then(|choices| {
+        choices
+            .iter()
+            .find(|choice| choice["index"].as_u64().unwrap_or(0) == 0)
+    }) else {
+        return Ok(());
+    };
+    if reply["choices"][0].is_null() {
+        reply["choices"] = json!([{"message":{}}]);
+    }
+    let collected = &mut reply["choices"][0];
+    for field in ["finish_reason", "native_finish_reason", "error"] {
+        if !choice[field].is_null() {
+            collected[field] = choice[field].clone();
+        }
+    }
+    let delta = &choice["delta"];
+    if let Some(part) = delta["content"].as_str() {
+        ensure!(
+            part.len() <= MAX_REPLY_BYTES.saturating_sub(text.len()),
+            "Provider response exceeds the size limit"
+        );
+        text.push_str(part);
+    }
+    if delta["refusal"].as_str().is_some_and(|s| !s.is_empty())
+        || delta["content"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|p| p["type"] == "refusal"))
+    {
+        collected["message"]["refusal"] = json!("refused");
+    }
+    if delta["tool_calls"]
+        .as_array()
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        collected["message"]["tool_calls"] = json!([{}]);
+    }
+    if !delta["function_call"].is_null() {
+        collected["message"]["function_call"] = json!({});
+    }
+    Ok(())
 }
 
 fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
@@ -369,76 +526,114 @@ fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
             anyhow::Error::new(issue)
         }
     })?;
+    decode_message(&reply, None)
+}
+
+impl ReplyDiagnostics {
+    fn read(reply: &Value) -> Self {
+        let first = &reply["choices"][0];
+        let candidate = &reply["candidates"][0];
+        let error = first_present([&reply["error"], &first["error"]]);
+        let feedback = first_present([&reply["promptFeedback"], &reply["prompt_feedback"]]);
+        let code = &error["code"];
+        let status_names = &[
+            "cancelled",
+            "unknown",
+            "invalid_argument",
+            "deadline_exceeded",
+            "not_found",
+            "already_exists",
+            "permission_denied",
+            "resource_exhausted",
+            "failed_precondition",
+            "aborted",
+            "out_of_range",
+            "unimplemented",
+            "internal",
+            "unavailable",
+            "data_loss",
+            "unauthenticated",
+            "content_filter",
+            "content_policy_violation",
+            "rate_limit_exceeded",
+            "context_length_exceeded",
+            "server_error",
+        ];
+        Self {
+            choices: reply["choices"].as_array().map(Vec::len),
+            finish: label(&first["finish_reason"], FINISH),
+            native_finish: label(
+                first_present([
+                    &candidate["finishReason"],
+                    &candidate["finish_reason"],
+                    &first["native_finish_reason"],
+                ]),
+                FINISH,
+            ),
+            block: label(
+                first_present([&feedback["blockReason"], &feedback["block_reason"]]),
+                &[
+                    "block_reason_unspecified",
+                    "safety",
+                    "other",
+                    "blocklist",
+                    "prohibited_content",
+                    "image_safety",
+                    "model_armor",
+                ],
+            ),
+            error_code: match code.as_u64() {
+                Some(400) => "400",
+                Some(401) => "401",
+                Some(403) => "403",
+                Some(404) => "404",
+                Some(408) => "408",
+                Some(413) => "413",
+                Some(422) => "422",
+                Some(429) => "429",
+                Some(500) => "500",
+                Some(502) => "502",
+                Some(503) => "503",
+                Some(504) => "504",
+                _ => label(code, status_names),
+            },
+            error_status: label(&error["status"], status_names),
+        }
+    }
+
+    fn withheld(&self, reply: &Value) -> bool {
+        let first = &reply["choices"][0];
+        let message = &first["message"];
+        let candidate = &reply["candidates"][0];
+        let feedback = first_present([&reply["promptFeedback"], &reply["prompt_feedback"]]);
+        let flagged = [
+            &feedback["safetyRatings"],
+            &candidate["safetyRatings"],
+            &feedback["safety_ratings"],
+            &candidate["safety_ratings"],
+        ]
+        .into_iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .any(|rating| rating["blocked"] == true);
+        let refused = message["refusal"].as_str().is_some_and(|s| !s.is_empty())
+            || message["content"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|p| p["type"] == "refusal"));
+        restricted(self.finish)
+            || restricted(self.native_finish)
+            || !matches!(self.block, "absent" | "block_reason_unspecified")
+            || flagged
+            || refused
+    }
+}
+
+fn decode_message(reply: &Value, stream_done: Option<bool>) -> Result<ModelReply> {
     let first = &reply["choices"][0];
-    let candidate = &reply["candidates"][0];
     let message = &first["message"];
-    let error = first_present([&reply["error"], &first["error"]]);
-    let feedback = first_present([&reply["promptFeedback"], &reply["prompt_feedback"]]);
-    let code = &error["code"];
-    let status_names = &[
-        "cancelled",
-        "unknown",
-        "invalid_argument",
-        "deadline_exceeded",
-        "not_found",
-        "already_exists",
-        "permission_denied",
-        "resource_exhausted",
-        "failed_precondition",
-        "aborted",
-        "out_of_range",
-        "unimplemented",
-        "internal",
-        "unavailable",
-        "data_loss",
-        "unauthenticated",
-        "content_filter",
-        "content_policy_violation",
-        "rate_limit_exceeded",
-        "context_length_exceeded",
-        "server_error",
-    ];
-    let d = ReplyDiagnostics {
-        choices: reply["choices"].as_array().map(Vec::len),
-        finish: label(&first["finish_reason"], FINISH),
-        native_finish: label(
-            first_present([
-                &candidate["finishReason"],
-                &candidate["finish_reason"],
-                &first["native_finish_reason"],
-            ]),
-            FINISH,
-        ),
-        block: label(
-            first_present([&feedback["blockReason"], &feedback["block_reason"]]),
-            &[
-                "block_reason_unspecified",
-                "safety",
-                "other",
-                "blocklist",
-                "prohibited_content",
-                "image_safety",
-                "model_armor",
-            ],
-        ),
-        error_code: match code.as_u64() {
-            Some(400) => "400",
-            Some(401) => "401",
-            Some(403) => "403",
-            Some(404) => "404",
-            Some(408) => "408",
-            Some(413) => "413",
-            Some(422) => "422",
-            Some(429) => "429",
-            Some(500) => "500",
-            Some(502) => "502",
-            Some(503) => "503",
-            Some(504) => "504",
-            _ => label(code, status_names),
-        },
-        error_status: label(&error["status"], status_names),
-    };
+    let d = ReplyDiagnostics::read(reply);
     let usage = &reply["usage"];
+    let reasoning_tokens = usage["completion_tokens_details"]["reasoning_tokens"].as_u64();
     let usage = TokenUsage {
         input: usage["prompt_tokens"].as_u64(),
         output: usage["completion_tokens"].as_u64(),
@@ -451,24 +646,10 @@ fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
     };
     let interrupted =
         |reason| anyhow::Error::new(crate::ReviewBatchInterrupted).context(issue(reason));
-    let flagged = [&feedback["safetyRatings"], &candidate["safetyRatings"]]
-        .into_iter()
-        .filter_map(Value::as_array)
-        .flatten()
-        .any(|rating| rating["blocked"] == true);
-    let refused = message["refusal"].as_str().is_some_and(|s| !s.is_empty())
-        || message["content"]
-            .as_array()
-            .is_some_and(|parts| parts.iter().any(|p| p["type"] == "refusal"));
-    if restricted(d.finish)
-        || restricted(d.native_finish)
-        || !matches!(d.block, "absent" | "block_reason_unspecified")
-        || flagged
-        || refused
-    {
+    if d.withheld(reply) {
         return Err(issue("Provider withheld the reply.").into());
     }
-    if !error.is_null() {
+    if !reply["error"].is_null() || !first["error"].is_null() {
         return Err(issue("Provider reported an error in its reply.").into());
     }
     if [d.finish, d.native_finish]
@@ -478,12 +659,24 @@ fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
         return Err(anyhow::Error::new(crate::ReviewContextExceeded)
             .context(issue("Provider reached the output token limit.")));
     }
+    if stream_done.is_some_and(|done| !done || d.finish == "absent")
+        && [d.finish, d.native_finish]
+            .iter()
+            .all(|reason| matches!(*reason, "stop" | "absent"))
+    {
+        return Err(interrupted(
+            "Provider stream ended before completing its reply.",
+        ));
+    }
     let text = message["content"].as_str();
     let empty_content = message["content"].is_null() || text.is_some_and(|s| s.trim().is_empty());
     let no_tool_call = !message["tool_calls"]
         .as_array()
         .is_some_and(|calls| !calls.is_empty())
         && message["function_call"].is_null();
+    let reasoning_only = usage
+        .output
+        .is_some_and(|total| total > 0 && Some(total) == reasoning_tokens);
     // Positive evidence of an empty chat completion. Unknown finish reasons and
     // native/foreign payloads are never reinterpreted as a transient stop.
     if d.choices.is_some()
@@ -492,7 +685,7 @@ fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
         && [d.finish, d.native_finish]
             .iter()
             .all(|reason| matches!(*reason, "stop" | "absent"))
-        && (d.finish == "stop" || usage.output == Some(0))
+        && (d.finish == "stop" || usage.output == Some(0) || reasoning_only)
     {
         return Err(interrupted("Provider returned an empty model completion."));
     }
@@ -668,6 +861,7 @@ mod tests {
         assert!(authorized);
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["model"], "test");
+        assert!(body.get("stream").is_none() && body.get("stream_options").is_none());
         let user: Value =
             serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
         assert_eq!(user["diff"].as_str().unwrap().len(), 1_200_000);
@@ -682,6 +876,114 @@ mod tests {
         ] {
             assert!(decode_reply(&serde_json::to_vec(&input).unwrap()).is_err());
         }
+    }
+
+    fn stream_events(events: &[Value], done: bool) -> Result<ModelReply> {
+        let mut wire = String::from(": keepalive\r\n\r\n");
+        for event in events {
+            wire.push_str(&format!("data: {event}\r\n\r\n"));
+        }
+        if done {
+            wire.push_str("data: [DONE]\r\n\r\n");
+        }
+        decode_stream(wire.as_bytes())
+    }
+
+    #[test]
+    fn combines_streamed_text_with_the_usage_after_the_stop() {
+        let reply = stream_events(&[
+            json!({"choices":[{"index":0,"delta":{"role":"assistant"}}]}),
+            json!({"choices":[{"index":1,"delta":{"content":"ignored"}},{"index":0,"delta":{"content":"{\"ok\":"}}]}),
+            json!({"choices":[{"index":0,"delta":{"content":"true}"},"finish_reason":"stop"}]}),
+            json!({"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":7}}})
+        ], true).unwrap();
+        assert_eq!(reply.value, json!({"ok":true}));
+        assert_eq!(
+            reply.usage,
+            TokenUsage {
+                input: Some(40),
+                output: Some(5),
+                cached: Some(7)
+            }
+        );
+    }
+
+    #[test]
+    fn unfinished_streams_and_empty_turns_request_batch_recovery() {
+        let stop = json!({"choices":[{"finish_reason":"stop","delta":{"content":"{}"}}]});
+        let no_finish = json!({"choices":[{"delta":{"content":"{}"}}]});
+        let empty = json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":0}});
+        for error in [
+            stream_events(&[stop], false).unwrap_err(),
+            stream_events(&[no_finish], true).unwrap_err(),
+            stream_events(&[empty], true).unwrap_err(),
+            decode_stream(&b"data: {\"choices\":["[..]).unwrap_err(),
+        ] {
+            assert!(error.is::<crate::ReviewBatchInterrupted>());
+        }
+    }
+
+    #[test]
+    fn streamed_refusals_and_upstream_errors_remain_terminal_even_without_done() {
+        for frame in [
+            json!({"choices":[{"delta":{"refusal":"withheld"}}]}),
+            json!({"choices":[{"delta":{"content":[{"type":"refusal","refusal":"withheld"}]}}]}),
+            json!({"choices":[{"finish_reason":"content_filter"}]}),
+            json!({"choices":[{"native_finish_reason":"RECITATION"}]}),
+            json!({"promptFeedback":{"blockReason":"SAFETY"}}),
+            json!({"error":{"code":403,"message":"private text"}}),
+        ] {
+            let error = stream_events(
+                &[
+                    frame,
+                    json!({"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}),
+                    json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":0}}),
+                ],
+                false,
+            )
+            .unwrap_err();
+            assert!(
+                !error.is::<crate::ReviewBatchInterrupted>()
+                    && !error.is::<crate::ReviewContextExceeded>()
+            );
+            let invalid = error.downcast_ref::<InvalidReply>().unwrap();
+            assert_eq!(invalid.usage.output, Some(0));
+            assert!(!invalid.to_string().contains("private text"));
+        }
+        let error = decode_stream(
+            &b"event: error\ndata: {\"code\":403,\"message\":\"private text\"}\n\n"[..],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<InvalidReply>().unwrap().reason,
+            "Provider reported an error in its reply."
+        );
+    }
+
+    #[test]
+    fn explicit_stream_error_event_stays_terminal_if_its_data_is_cut_off() {
+        let error = decode_stream(&b"event: error\ndata: {\"code\":"[..]).unwrap_err();
+        assert!(!error.is::<crate::ReviewBatchInterrupted>());
+        assert_eq!(
+            error.downcast_ref::<InvalidReply>().unwrap().reason,
+            "Provider reported an error in its reply."
+        );
+    }
+
+    #[test]
+    fn streamed_output_limits_still_require_partition_and_large_replies_are_bounded() {
+        let error = stream_events(
+            &[json!({"choices":[{"finish_reason":"length","delta":{"content":"{"}}]})],
+            true,
+        )
+        .unwrap_err();
+        assert!(error.is::<crate::ReviewContextExceeded>());
+        let error = stream_events(
+            &[json!({"choices":[{"delta":{"content":"x".repeat(MAX_REPLY_BYTES+1)}}]})],
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("size limit"));
     }
 
     #[test]
@@ -715,6 +1017,26 @@ mod tests {
                 .unwrap_err()
                 .is::<crate::ReviewBatchInterrupted>()
         );
+    }
+
+    #[test]
+    fn only_fully_accounted_reasoning_tokens_confirm_zero_visible_output() {
+        let mut reply = json!({"choices":[{"finish_reason":null,"message":{"content":null}}],"usage":{"completion_tokens":9,"completion_tokens_details":{"reasoning_tokens":9}}});
+        let recoverable = |v: &Value| {
+            decode_reply(&serde_json::to_vec(v).unwrap())
+                .unwrap_err()
+                .is::<crate::ReviewBatchInterrupted>()
+        };
+        assert!(recoverable(&reply));
+        reply["choices"][0]["native_finish_reason"] = json!("ESCALATION");
+        assert!(!recoverable(&reply));
+        reply["choices"][0]["native_finish_reason"] = json!("PUP_LIMITED_DISABLED");
+        assert!(!recoverable(&reply));
+        reply["choices"][0]["native_finish_reason"] = Value::Null;
+        for n in [json!(8), json!(10), Value::Null] {
+            reply["usage"]["completion_tokens_details"]["reasoning_tokens"] = n;
+            assert!(!recoverable(&reply));
+        }
     }
 
     #[test]

@@ -188,6 +188,16 @@ impl Session {
         &mut self,
         system: &str,
         data: &Value,
+        call: impl FnMut() -> Result<crate::provider::ModelReply>,
+    ) -> Result<Value> {
+        self.ask_when_eligible(system, data, || Ok(()), call)
+    }
+
+    pub fn ask_when_eligible(
+        &mut self,
+        system: &str,
+        data: &Value,
+        eligible: impl Fn() -> Result<()>,
         mut call: impl FnMut() -> Result<crate::provider::ModelReply>,
     ) -> Result<Value> {
         self.step += 1;
@@ -215,7 +225,13 @@ impl Session {
 
         let mut retries = 0;
         loop {
+            eligible()?;
             let result = self.dispatch(&fingerprint, &mut call);
+            if result.as_ref().is_err_and(|e| {
+                e.is::<crate::ReviewBatchInterrupted>() || e.is::<crate::ReviewContextExceeded>()
+            }) {
+                return result;
+            }
             let retry = result.as_ref().err().is_some_and(|e| {
                 e.downcast_ref::<reqwest::Error>().is_some_and(|r| {
                     r.is_timeout()
@@ -493,6 +509,31 @@ mod tests {
             .query_row("SELECT status FROM reviews", [], |r| r.get(0))
             .unwrap();
         assert_eq!(state, "queued");
+    }
+
+    #[test]
+    fn a_paused_request_does_not_consume_a_model_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.db");
+        super::super::init_db(&connect(&path).unwrap()).unwrap();
+        let mut session = Session::open(&path, 1).unwrap();
+        assert!(
+            session
+                .ask_when_eligible(
+                    "review",
+                    &json!({}),
+                    || Err(Paused.into()),
+                    || panic!("provider was called")
+                )
+                .unwrap_err()
+                .is::<Paused>()
+        );
+        assert!(
+            metrics(&session.db, 1)
+                .unwrap()
+                .unwrap()
+                .contains("0 model turns")
+        );
     }
 
     #[test]

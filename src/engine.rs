@@ -1472,7 +1472,7 @@ struct Pending<'a, 'input> {
     hypothesis: &'input Value,
     feedback: String,
     undecided: Option<Assessment<'a>>,
-    accepted_outcome: Option<String>,
+    provisional_outcome: Option<String>,
 }
 
 struct RecheckReader<'a, F> {
@@ -1568,7 +1568,7 @@ fn recheck_input<'a>(
                 path,
                 line - 1,
                 head.as_slice(),
-                entry.accepted_outcome.is_some(),
+                entry.provisional_outcome.is_some(),
             ))
         })
         .collect();
@@ -1703,7 +1703,7 @@ fn live_assessments<'a>(
     for hypothesis in hypotheses {
         let id = hypothesis["id"].as_u64().expect("validated hypothesis ID");
         let anchor = anchors[&id];
-        let (feedback, undecided, accepted_outcome) = match checked_assessment(
+        let (feedback, undecided, provisional_outcome) = match checked_assessment(
             &initial.items,
             id,
             anchor,
@@ -1715,17 +1715,17 @@ fn live_assessments<'a>(
                 None,
             ),
             Ok((raw, item)) => {
-                let order = initial
-                    .items
-                    .iter()
-                    .position(|item| item["id"].as_u64() == Some(id))
-                    .expect("accepted assessment order");
-                accepted.push((order, id, item));
                 if !recheck_all {
+                    let order = initial
+                        .items
+                        .iter()
+                        .position(|item| item["id"].as_u64() == Some(id))
+                        .expect("accepted assessment order");
+                    accepted.push((order, item));
                     continue;
                 }
                 (
-                        "The earlier response was incomplete for an unspecified part of this set. Independently recheck this previously accepted outcome.".into(),
+                        "The earlier response was incomplete for an unspecified part of this set. Independently recheck this provisional outcome.".into(),
                         None,
                         Some(text(&raw["outcome"]).expect("accepted outcome").to_owned()),
                     )
@@ -1738,7 +1738,7 @@ fn live_assessments<'a>(
             hypothesis,
             feedback,
             undecided,
-            accepted_outcome,
+            provisional_outcome,
         });
     }
     // New leads share the existing recheck budget with unresolved assessments.
@@ -1786,15 +1786,15 @@ fn live_assessments<'a>(
             feedback: "Independently test this newly discovered concern against counterevidence."
                 .into(),
             undecided: None,
-            accepted_outcome: None,
+            provisional_outcome: None,
         });
     }
-    accepted.sort_by_key(|(order, _, _)| *order);
+    accepted.sort_by_key(|(order, _)| *order);
     if pending.is_empty() {
         initial.report_incomplete(Pass::Challenge, limits);
         coverage.stages_finished &= initial.complete && !initial.overflow;
         return Ok((
-            accepted.into_iter().map(|(_, _, item)| item).collect(),
+            accepted.into_iter().map(|(_, item)| item).collect(),
             coverage,
         ));
     }
@@ -1837,7 +1837,15 @@ fn live_assessments<'a>(
     let mut recovered_items = Vec::new();
     for entry in pending {
         let outcome = match &repaired {
-            Some(reply) => checked_assessment(&reply.items, entry.id, entry.anchor, evidence),
+            Some(reply) => checked_assessment(&reply.items, entry.id, entry.anchor, evidence)
+                .and_then(|checked| {
+                    // An unfinished reply may still identify a missing prerequisite for a human check.
+                    if reply.complete && !reply.overflow || checked.1.undecided.is_some() {
+                        Ok(checked)
+                    } else {
+                        Err("The recheck response was incomplete.".into())
+                    }
+                }),
             None => Err(entry.feedback),
         };
         match outcome {
@@ -1849,17 +1857,18 @@ fn live_assessments<'a>(
                         item.priority = entry.undecided.and_then(|prior| prior.priority);
                     }
                 }
-                if let Some(accepted_outcome) = entry.accepted_outcome {
-                    if text(&raw["outcome"]) != Some(accepted_outcome.as_str()) {
-                        recovered = false;
-                        coverage.unresolved(Some(entry.anchor));
-                        accepted.retain(|(_, id, _)| *id != entry.id);
-                        limits.push(format!(
-                            "The recheck did not confirm the accepted outcome at {}:{}.",
-                            entry.anchor.path, entry.anchor.line
-                        ));
-                    }
+                if let Some(previous) = entry.provisional_outcome
+                    && text(&raw["outcome"]) != Some(previous.as_str())
+                {
+                    recovered = false;
+                    coverage.unresolved(Some(entry.anchor));
+                    limits.push(format!(
+                        "The recheck did not confirm the provisional outcome at {}:{}.",
+                        entry.anchor.path, entry.anchor.line
+                    ));
                 } else {
+                    // A provisional claim may have different wording or evidence on independent review.
+                    // Publish only what the complete recheck actually validated.
                     recovered_items.push(item);
                 }
             }
@@ -1893,7 +1902,7 @@ fn live_assessments<'a>(
     Ok((
         accepted
             .into_iter()
-            .map(|(_, _, item)| item)
+            .map(|(_, item)| item)
             .chain(recovered_items)
             .collect(),
         coverage,
@@ -3476,7 +3485,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_recheck_failure_retains_findings_and_records_the_undecided_outcome() {
+    fn terminal_recheck_failure_withholds_provisional_findings_and_records_the_undecided_outcome() {
         let snapshot = indexed_snapshot();
         let mut calls = 0;
         let report = review(&snapshot, &Scan::default(), |_, data| {
@@ -3502,7 +3511,7 @@ mod tests {
             }
         }).unwrap();
         assert_eq!(calls, 3);
-        assert_eq!(report.findings.len(), 1);
+        assert!(report.findings.is_empty());
         assert!(report.focus.is_empty());
         assert!(
             report
@@ -3626,8 +3635,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(calls, 3);
-        assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.findings[0].title, accepted["title"]);
+        assert!(report.findings.is_empty());
         assert_eq!(
             report.limits,
             [
@@ -3667,7 +3675,7 @@ mod tests {
     }
 
     #[test]
-    fn global_incomplete_with_valid_records_can_be_recovered_without_replacing_them() {
+    fn complete_recheck_supplies_the_verified_wording_after_a_provisional_challenge() {
         let snapshot = indexed_snapshot();
         let accepted = indexed_capacity_finding(1, "H4", "B2", "B4");
         let refuted = json!({"id": 2, "outcome": "refuted", "basis": "H8",
@@ -3685,7 +3693,7 @@ mod tests {
                     assert_eq!(data["hypotheses"][0]["id"], 1);
                     assert_eq!(data["hypotheses"][1]["id"], 2);
                     let mut copy = accepted.clone();
-                    copy["title"] = json!("Do not overwrite the original title");
+                    copy["title"] = json!("Capacity is reduced for a one-slot cache");
                     Ok(json!({"complete": true, "assessments": [copy, refuted]}))
                 }
                 _ => panic!("Only one recheck is allowed."),
@@ -3694,7 +3702,10 @@ mod tests {
         .unwrap();
         assert_eq!(calls, 3);
         assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.findings[0].title, accepted["title"]);
+        assert_eq!(
+            report.findings[0].title,
+            "Capacity is reduced for a one-slot cache"
+        );
         assert!(report.focus.is_empty());
         assert!(report.limits.is_empty(), "{:?}", report.limits);
     }
@@ -4120,6 +4131,15 @@ mod tests {
                 ]})),
                 2 => Ok(json!({"complete":true,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]})),
                 3 => Err(ReviewBatchInterrupted.into()),
+                _ if data["snapshot"]["files"][0]["path"] == "cache.go" => {
+                    if data.get("hypotheses").is_none() {
+                        Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))
+                    } else {
+                        let mut repeated = indexed_capacity_finding(1, "H4", "B2", "B4");
+                        repeated["title"] = json!("The partition independently confirms the same finding");
+                        Ok(json!({"complete":true,"assessments":[repeated]}))
+                    }
+                }
                 _ if data.get("hypotheses").is_some() => Ok(json!({"complete":true,"assessments":[]})),
                 _ => Ok(json!({"complete":true,"hypotheses":[]}))
             }
@@ -4204,5 +4224,34 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn interrupted_provisional_finding_is_absent_after_partition_refutes_it() {
+        let mut turns = 0;
+        let result = review_snapshot_iterative(indexed_snapshot(), |_, data| {
+            turns += 1;
+            match turns {
+                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]})),
+                2 => Ok(json!({"complete":false,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]})),
+                3 => Err(ReviewBatchInterrupted.into()),
+                _ if data["snapshot"]["files"][0]["path"] == "cache.go" => {
+                    if data.get("hypotheses").is_none() {
+                        Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))
+                    } else {
+                        Ok(json!({"complete":true,"assessments":[{"id":1,"outcome":"refuted","basis":"H2","countercheck":"The caller enforces a minimum capacity."}]}))
+                    }
+                }
+                _ if data.get("hypotheses").is_some() => Ok(json!({"complete":true,"assessments":[]})),
+                _ => Ok(json!({"complete":true,"hypotheses":[]})),
+            }
+        }, |_,_| Ok(Vec::new()), |_,_| Ok(true), &[]).unwrap();
+        assert!(result.unfinished_patches().unwrap().is_empty());
+        assert!(
+            result.report.limits.is_empty(),
+            "{:?}",
+            result.report.limits
+        );
+        assert!(result.report.findings.is_empty());
     }
 }

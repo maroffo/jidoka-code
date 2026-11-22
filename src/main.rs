@@ -217,10 +217,11 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
             let outcome = review_snapshot_iterative(
                 snapshot,
                 |system, data| {
-                    session.borrow_mut().ask(system, data, || {
-                        eligible()?;
-                        provider.ask_metered(system, data, Duration::from_secs(10 * 60))
-                    })
+                    session
+                        .borrow_mut()
+                        .ask_when_eligible(system, data, eligible, || {
+                            provider.ask_metered(system, data, Duration::from_secs(10 * 60))
+                        })
                 },
                 |snapshot, requests| {
                     let windows = repository.read_context(snapshot, requests)?;

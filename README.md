@@ -29,7 +29,7 @@ For private repositories, set `JIDOKA_GITHUB_TOKEN` to a GitHub token with read 
 
 Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the provider before submitting. The service listens on the loopback interface for one trusted user. The `reviews` volume stores the SQLite history and supports reports from the Python pilot. Existing reports retain their original text.
 
-On shutdown, Jidoka waits for the in-flight model call, saves its response and requeues the active review. The same provider can resume eligible work on restart. Each generation request has a ten-minute timeout. A review can use up to 500 generation requests across restarts.
+On shutdown, Jidoka waits for the in-flight model call, saves its response and requeues the active review. The same provider can resume eligible work on restart. Each generation request has a ten-minute timeout. A review can use up to 500 generation requests in total, including retries and restarts. The review page shows model calls, reported token usage, time spent waiting for the model, and which changed files completed review.
 
 ## Reviewing and publishing
 
@@ -45,7 +45,7 @@ To queue a manual replay of a saved review at the original revisions, run `docke
 
 Use English for documentation, code comments, interface text, and review guidance. Keep quoted source code and file paths exactly as they appear in the repository under review.
 
-The pilot has been tested with Rust 1.100. Export the environment variables above and run `cargo run --locked` to build and start the service. To run the scanner locally, install Semgrep CE on your PATH. The Docker image includes it. Local runs require Git. Each review can make up to 500 model calls. Jidoka stores completed responses in SQLite while the review is in progress so interrupted jobs can resume. The review page records turns, token usage when available, and time spent waiting for the model. The report lists gaps in coverage.
+The pilot has been tested with Rust 1.100. Export the environment variables above and run `cargo run --locked` to build and start the service. Local runs require Git. To run the scanner locally, install Semgrep CE on your PATH. The Docker image includes both tools.
 
 ```sh
 cargo fmt --check
