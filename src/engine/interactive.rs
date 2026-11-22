@@ -263,6 +263,7 @@ fn review_chunk(
     let mut stop = None;
     let mut displayed = None;
     let recheck_has_reads = std::cell::Cell::new(false);
+    let context = RefCell::new(focus::AssessmentContext::new(chunk));
     let result = review_passes(
         chunk,
         scan,
@@ -308,11 +309,15 @@ fn review_chunk(
                 if stop.is_some() {
                     anyhow::bail!("This batch was interrupted.")
                 }
-                match fits(system, data) {
+                let projection = context.borrow().project(data, evidence);
+                let (focused, visible) = projection.unzip();
+                let input = focused.as_ref().unwrap_or(data);
+                evidence.view = visible;
+                match fits(system, input) {
                     Ok(true) => {}
                     Ok(false) => {
                         stop = Some(
-                            context_overflow(system, data, chunk, fits, false)
+                            context_overflow(system, input, chunk, fits, false)
                                 .unwrap_or_else(Stop::Error),
                         );
                         anyhow::bail!("Context window exceeded.")
@@ -322,14 +327,14 @@ fn review_chunk(
                         anyhow::bail!("Could not measure the request.")
                     }
                 }
-                let response = match model(system, data) {
+                let response = match model(system, input) {
                     Err(error) if error.is::<ReviewTurnLimit>() => {
                         stop = Some(Stop::TurnLimit);
                         anyhow::bail!("Model turn limit reached.")
                     }
                     Err(error) if error.is::<ReviewContextExceeded>() => {
                         stop = Some(
-                            context_overflow(system, data, chunk, fits, true)
+                            context_overflow(system, input, chunk, fits, true)
                                 .unwrap_or_else(Stop::Error),
                         );
                         anyhow::bail!("Context window exceeded.")
@@ -350,6 +355,9 @@ fn review_chunk(
                     }
                     Ok(response) => response,
                 };
+                context
+                    .borrow_mut()
+                    .remember_reply(&response, input, evidence.view.as_ref());
                 displayed.get_or_insert_with(|| {
                     data["snapshot"]["files"]
                         .as_array()
@@ -421,6 +429,18 @@ fn review_chunk(
                 let status = match result {
                     Ok(windows) => {
                         let windows = slot.get_or_init(|| windows);
+                        evidence
+                            .read_owners
+                            .entry((request.path.clone(), request.term.clone()))
+                            .or_default()
+                            .extend(
+                                data["hypotheses"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|h| h["id"].as_u64()),
+                            );
+                        context.borrow_mut().record(&request, windows);
                         let count = extend_evidence(data, evidence, windows);
                         has_source |= returned_source(windows);
                         format!("{count} new source lines.")
@@ -438,7 +458,10 @@ fn review_chunk(
                 // Each lookup has its own page budget, even when different IDs ask in the same round.
                 for request in requests {
                     match read.borrow_mut()(full, std::slice::from_ref(request)) {
-                        Ok(result) => windows.extend(result),
+                        Ok(result) => {
+                            context.borrow_mut().record(request, &result);
+                            windows.extend(result);
+                        }
                         Err(error) => failure = Some(error),
                     }
                 }
@@ -775,7 +798,7 @@ mod tests {
                 6 => json!({"read":{"path":"src/guard.rs","term":"#L41"}}),
                 7 => {
                     let windows = data["snapshot"]["head_context"].as_array().unwrap();
-                    let guard = windows.last().unwrap();
+                    let guard = windows.iter().find(|w|w["path"]=="src/guard.rs").unwrap();
                     assert_eq!(guard["start"],41);
                     json!({"complete":true,"assessments":[{
                         "id":1, "outcome":"refuted", "basis":guard["rows"][0][1],
