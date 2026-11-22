@@ -83,6 +83,7 @@ pub fn recover(db: &Path, provider: &str) -> Result<()> {
     crate::automation::init(&connection)?;
     crate::automation::recover(&connection, provider)?;
     let transaction = connection.transaction()?;
+    cancel_ineligible(&transaction, None)?;
     transaction.execute(
         "UPDATE reviews SET status='queued', error=NULL WHERE status='running' AND provider=?
          AND EXISTS (SELECT 1 FROM review_runs WHERE review_id=reviews.id)
@@ -189,6 +190,28 @@ where
     run_one_session(db, |_, url, head| process(url, head))
 }
 
+fn cancel_ineligible(db: &Connection, id: Option<i64>) -> Result<()> {
+    let canceled = db
+        .prepare(
+            "UPDATE reviews SET status='canceled',error=NULL
+        WHERE status IN ('queued','running') AND (?1 IS NULL OR id=?1)
+          AND EXISTS (SELECT 1 FROM ineligible_automatic_reviews WHERE review_id=reviews.id)
+        RETURNING id",
+        )?
+        .query_map([id], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in canceled {
+        db.execute("UPDATE automation_jobs SET state='canceled',retry_at=0 WHERE review_id=? AND state='pending'", [id])?;
+        session::finish(
+            db,
+            id,
+            "canceled",
+            "Automatic review is no longer eligible.",
+        )?;
+    }
+    Ok(())
+}
+
 pub fn run_one_session<F>(db: &Path, process: F) -> Result<bool>
 where
     F: FnOnce(i64, &str, Option<&str>) -> Result<PublishedReport>,
@@ -199,6 +222,7 @@ where
         .query_row(
             "UPDATE reviews SET status = 'running'
             WHERE id = (SELECT id FROM reviews WHERE status = 'queued'
+                AND NOT EXISTS (SELECT 1 FROM ineligible_automatic_reviews WHERE review_id=reviews.id)
                 AND NOT EXISTS (SELECT 1 FROM provider_cooldowns
                     WHERE provider=reviews.provider AND retry_at>unixepoch())
                 ORDER BY id LIMIT 1)
@@ -235,6 +259,9 @@ where
         Ok((status, serde_json::to_string(&report)?))
     });
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if expected_head.is_some() {
+        cancel_ineligible(&tx, Some(id))?;
+    }
     let (status, report, error) = match outcome {
         Ok((status, report)) => (status, Some(report), None),
         Err(error) if error.is::<crate::provider::RateLimited>() => {
@@ -1684,6 +1711,95 @@ mod tests {
         );
     }
 
+    fn enable_automatic_test_pr(db: &Connection, head: &str) {
+        crate::automation::bind_provider(db, PROVIDER).unwrap();
+        db.execute(
+            "INSERT OR IGNORE INTO automation_settings(repo,mode) VALUES ('test/demo','summary')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO automation_seen(repo,number,head,ready) VALUES ('test/demo',7,?,1)",
+            [head],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn revoked_automatic_review_cannot_dispatch_or_resume_after_a_pause_or_rate_limit() {
+        for rate_limited in [true, false] {
+            let f = Fixture::new();
+            let db = connect(&f.db).unwrap();
+            enable_automatic_test_pr(&db, "pinned");
+            db.execute(
+                "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
+                [URL, PROVIDER],
+            )
+            .unwrap();
+            db.execute("INSERT INTO automation_jobs(repo,number,head,review_id) VALUES ('test/demo',7,'pinned',1)", []).unwrap();
+            assert!(
+                run_one_session(&f.db, |id, _, _| {
+                    assert!(session::running(&f.db, id)?);
+                    let mut session = session::Session::open(&f.db, id)?;
+                    if rate_limited {
+                        crate::automation::set_mode(&db, "test/demo", "manual")?;
+                    } else {
+                        db.execute("UPDATE automation_seen SET ready=0", [])?;
+                        db.execute("UPDATE automation_jobs SET state='canceled'", [])?;
+                    }
+                    assert!(!session::running(&f.db, id)?);
+                    let error = session
+                        .ask_when_eligible(
+                            "review",
+                            &serde_json::json!({}),
+                            || {
+                                anyhow::ensure!(session::running(&f.db, id)?, "review revoked");
+                                Ok(())
+                            },
+                            || panic!("must not dispatch after consent was revoked"),
+                        )
+                        .unwrap_err();
+                    assert_eq!(error.to_string(), "review revoked");
+                    if rate_limited {
+                        Err(crate::provider::RateLimited::new(None).into())
+                    } else {
+                        Err(session::Paused.into())
+                    }
+                })
+                .unwrap()
+            );
+            let status = || {
+                db.query_row("SELECT status FROM reviews WHERE id=1", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap()
+            };
+            assert_eq!(status(), "canceled");
+            db.execute("DELETE FROM provider_cooldowns", []).unwrap();
+            // Older workers could leave an ineligible job queued or running.
+            for stored in ["queued", "running"] {
+                db.execute("UPDATE reviews SET status=? WHERE id=1", [stored])
+                    .unwrap();
+                assert!(!run_one_session(&f.db, |_, _, _| panic!("revoked job claimed")).unwrap());
+                recover(&f.db, PROVIDER).unwrap();
+                assert_eq!(status(), "canceled");
+            }
+            db.execute(
+                "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
+                [URL, PROVIDER],
+            )
+            .unwrap();
+            assert!(
+                run_one_session(&f.db, |id, _, head| {
+                    assert_eq!((id, head), (2, None));
+                    assert!(session::running(&f.db, id)?);
+                    Ok(report(None))
+                })
+                .unwrap()
+            );
+        }
+    }
+
     #[test]
     fn automatic_queue_passes_the_pinned_head_and_rejects_a_mismatch() {
         let f = Fixture::new();
@@ -1695,6 +1811,7 @@ mod tests {
         .unwrap();
         let id = conn.last_insert_rowid();
         let expected = "a".repeat(40);
+        enable_automatic_test_pr(&conn, &expected);
         conn.execute(
             "INSERT INTO automation_jobs(repo,number,head,review_id) VALUES ('test/demo',7,?1,?2)",
             params![expected, id],
@@ -1735,6 +1852,7 @@ mod tests {
         )
         .unwrap();
         let head = report(None).head;
+        enable_automatic_test_pr(&db, &head);
         db.execute(
             "INSERT INTO automation_jobs(repo,number,head,review_id) VALUES('test/demo',7,?,2)",
             [&head],
@@ -1974,6 +2092,7 @@ mod tests {
         let id: i64 = url.rsplit('/').next().unwrap().parse().unwrap();
         db.execute("INSERT INTO automation_jobs(repo,number,head,review_id,state) VALUES ('test/demo',7,'old',?1,'pending')", [id]).unwrap();
         db.execute("INSERT INTO automation_settings(repo,mode,review_error_job,review_error) VALUES ('test/demo','summary',?1,'Earlier retry')", [id]).unwrap();
+        enable_automatic_test_pr(&db, "old");
         assert!(
             run_one_pinned(&fixture.db, |_, head| {
                 assert_eq!(head, Some("old"));

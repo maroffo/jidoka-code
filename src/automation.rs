@@ -69,7 +69,16 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (repo, number, head)
         );
         CREATE INDEX IF NOT EXISTS automation_jobs_pending
-            ON automation_jobs (repo, review_id) WHERE state = 'pending';",
+            ON automation_jobs (repo, review_id) WHERE state = 'pending';
+        CREATE VIEW IF NOT EXISTS ineligible_automatic_reviews AS
+            SELECT job.review_id FROM automation_jobs job JOIN reviews review ON review.id=job.review_id
+            WHERE job.state <> 'pending' OR NOT EXISTS (
+                SELECT 1 FROM automation_settings settings
+                JOIN automation_seen seen ON seen.repo=settings.repo
+                JOIN automation_provider provider ON provider.id=1 AND provider.label=review.provider
+                WHERE settings.repo=job.repo AND settings.mode <> 'manual'
+                  AND seen.number=job.number AND seen.ready=1 AND seen.head=job.head
+            );",
     )?;
     if !has_analysis_attempts(conn)? {
         let tx = immediate(conn)?;
@@ -204,13 +213,9 @@ pub fn recover(conn: &Connection, provider: &str) -> rusqlite::Result<()> {
     }
     tx.execute(
         "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
-         WHERE status = 'running' AND provider = ?1 AND id IN (
-             SELECT job.review_id FROM automation_jobs AS job
-             JOIN automation_settings AS settings ON settings.repo = job.repo
-             JOIN automation_seen AS seen ON seen.repo = job.repo AND seen.number = job.number
-             WHERE job.state = 'pending' AND settings.mode <> 'manual'
-               AND seen.ready = 1 AND seen.head = job.head
-         )",
+         WHERE status = 'running' AND provider = ?1
+           AND EXISTS (SELECT 1 FROM automation_jobs WHERE review_id=reviews.id)
+           AND NOT EXISTS (SELECT 1 FROM ineligible_automatic_reviews WHERE review_id=reviews.id)",
         [provider],
     )?;
     tx.commit()
@@ -1356,7 +1361,7 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(statuses, ["queued", "failed", "failed"]);
+        assert_eq!(statuses, ["queued", "canceled", "failed"]);
     }
 
     #[test]

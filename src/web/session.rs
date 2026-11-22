@@ -351,7 +351,7 @@ pub(super) fn finish(db: &Connection, id: i64, status: &str, reason: &str) -> Re
         "UPDATE review_runs SET stop_reason=CASE WHEN ?1='failed' THEN coalesce(stop_reason,?2) ELSE ?2 END WHERE review_id=?3",
         params![status,reason, id],
     )?;
-    if matches!(status, "completed" | "partial" | "superseded") {
+    if matches!(status, "completed" | "partial" | "superseded" | "canceled") {
         db.execute("DELETE FROM review_splits WHERE review_id=?", [id])?;
         db.execute("DELETE FROM review_turns WHERE review_id=?", [id])?;
         db.execute(
@@ -364,7 +364,9 @@ pub(super) fn finish(db: &Connection, id: i64, status: &str, reason: &str) -> Re
 
 pub fn running(db: &Path, id: i64) -> Result<bool> {
     Ok(connect(db)?.query_row(
-        "SELECT status='running' FROM reviews WHERE id=?",
+        "SELECT status='running' AND NOT EXISTS (
+             SELECT 1 FROM ineligible_automatic_reviews WHERE review_id=reviews.id
+         ) FROM reviews WHERE id=?",
         [id],
         |r| r.get(0),
     )?)
