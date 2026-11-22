@@ -766,6 +766,7 @@ struct Reply {
     overflow: bool,
     items: Vec<Value>,
     leads: Vec<Value>,
+    valid_leads: bool,
 }
 
 impl Reply {
@@ -840,6 +841,7 @@ fn request<'a>(
     )
     .map_err(|_| anyhow!("The provider failed while {stage}."))?;
     let mut leads = Vec::new();
+    let mut valid_leads = true;
     if matches!(
         (protocol, pass),
         (
@@ -850,7 +852,10 @@ fn request<'a>(
     {
         match value {
             Value::Array(items) if items.len() <= maximum => leads = items,
-            _ => limits.push("The independent review returned invalid or excess leads.".into()),
+            _ => {
+                valid_leads = false;
+                limits.push("The independent review returned invalid or excess leads.".into());
+            }
         }
     }
     let (complete, mut items) = response_items(response, key)
@@ -864,6 +869,7 @@ fn request<'a>(
         overflow,
         items,
         leads,
+        valid_leads,
     }))
 }
 
@@ -1043,7 +1049,6 @@ fn add_citations<'a>(
 
 struct RankedFinding<'a> {
     severity: u8,
-    anchor: Citation<'a>,
     basis: Citation<'a>,
     kind: &'static str,
     finding: Finding,
@@ -1113,7 +1118,6 @@ fn confirmed<'a>(
     Some(Assessment {
         finding: Some(RankedFinding {
             severity,
-            anchor,
             basis,
             kind,
             finding,
@@ -1641,6 +1645,16 @@ struct BatchCoverage {
     unfinished_paths: HashSet<String>,
 }
 
+impl BatchCoverage {
+    fn unresolved(&mut self, anchor: Option<Citation<'_>>) {
+        if let Some(anchor) = anchor {
+            self.unfinished_paths.insert(anchor.path.to_owned());
+        } else {
+            self.stages_finished = false;
+        }
+    }
+}
+
 fn live_assessments<'a>(
     data: &mut Value,
     hypotheses: &[Value],
@@ -1668,11 +1682,16 @@ fn live_assessments<'a>(
                 overflow: false,
                 items: Vec::new(),
                 leads: Vec::new(),
+                valid_leads: true,
             },
             Some(error.to_string()),
         ),
     };
     let unexpected = unexpected_assessments(&initial.items, |id| anchors.contains_key(&id));
+    let mut coverage = BatchCoverage {
+        stages_finished: !unexpected && initial.valid_leads,
+        ..BatchCoverage::default()
+    };
     if unexpected {
         limits.push("The provider returned assessments without a requested hypothesis ID.".into());
     }
@@ -1728,6 +1747,7 @@ fn live_assessments<'a>(
     let mut seen_anchors: HashSet<_> = anchors.values().copied().collect();
     let mut discovered = Vec::new();
     if !initial.leads.is_empty() && (!initial.complete || initial.overflow) {
+        coverage.stages_finished = false;
         limits.push("Independent review coverage was incomplete.".into());
     }
     for lead in &initial.leads {
@@ -1739,6 +1759,7 @@ fn live_assessments<'a>(
             next_id += 1;
         }
         let Some((anchor, hypothesis)) = proposal(lead, next_id, evidence) else {
+            coverage.unresolved(evidence.citation(&lead["anchor"], Revision::Head));
             limits
                 .push("An independent review lead contained invalid details or citations.".into());
             continue;
@@ -1771,14 +1792,10 @@ fn live_assessments<'a>(
     accepted.sort_by_key(|(order, _, _)| *order);
     if pending.is_empty() {
         initial.report_incomplete(Pass::Challenge, limits);
-        let examined =
-            initial.complete && !initial.overflow && (!unexpected || !accepted.is_empty());
+        coverage.stages_finished &= initial.complete && !initial.overflow;
         return Ok((
             accepted.into_iter().map(|(_, _, item)| item).collect(),
-            BatchCoverage {
-                stages_finished: examined,
-                ..BatchCoverage::default()
-            },
+            coverage,
         ));
     }
 
@@ -1815,9 +1832,9 @@ fn live_assessments<'a>(
                 .push("The recheck returned assessments without a requested hypothesis ID.".into());
         }
         recovered = reply.complete && !reply.overflow && !unexpected_retry;
+        coverage.stages_finished &= recovered;
     }
     let mut recovered_items = Vec::new();
-    let mut unfinished_paths = HashSet::new();
     for entry in pending {
         let outcome = match &repaired {
             Some(reply) => checked_assessment(&reply.items, entry.id, entry.anchor, evidence),
@@ -1835,7 +1852,7 @@ fn live_assessments<'a>(
                 if let Some(accepted_outcome) = entry.accepted_outcome {
                     if text(&raw["outcome"]) != Some(accepted_outcome.as_str()) {
                         recovered = false;
-                        unfinished_paths.insert(entry.anchor.path.to_owned());
+                        coverage.unresolved(Some(entry.anchor));
                         accepted.retain(|(_, id, _)| *id != entry.id);
                         limits.push(format!(
                             "The recheck did not confirm the accepted outcome at {}:{}.",
@@ -1848,7 +1865,7 @@ fn live_assessments<'a>(
             }
             Err(feedback) => {
                 recovered = false;
-                unfinished_paths.insert(entry.anchor.path.to_owned());
+                coverage.unresolved(Some(entry.anchor));
                 if let Some(item) = entry.undecided {
                     if let Some(reason) = &item.undecided {
                         recorded_undecided(limits, entry.anchor, reason);
@@ -1869,7 +1886,7 @@ fn live_assessments<'a>(
             initial.report_incomplete(Pass::Challenge, limits);
         }
     }
-    let examined = recovered
+    coverage.stages_finished &= recovered
         || (initial.complete
             && !initial.overflow
             && (!accepted.is_empty() || !recovered_items.is_empty()));
@@ -1879,10 +1896,7 @@ fn live_assessments<'a>(
             .map(|(_, _, item)| item)
             .chain(recovered_items)
             .collect(),
-        BatchCoverage {
-            stages_finished: examined,
-            unfinished_paths,
-        },
+        coverage,
     ))
 }
 
@@ -2008,7 +2022,10 @@ where
         prior,
         protocol,
     )
-    .map(|(report, _)| report)
+    .map(|mut batch| {
+        batch.items.publish(&mut batch.report);
+        batch.report
+    })
 }
 
 fn collection_report(snapshot: &Snapshot, scan: &Scan) -> Report {
@@ -2025,6 +2042,68 @@ fn collection_report(snapshot: &Snapshot, scan: &Scan) -> Report {
     }
 }
 
+struct VerifiedFinding {
+    severity: u8,
+    basis: (String, usize),
+    kind: &'static str,
+    finding: Finding,
+}
+
+#[derive(Default)]
+struct RankedItems {
+    findings: Vec<VerifiedFinding>,
+    priorities: Vec<(u8, u8, Focus)>,
+}
+
+impl RankedItems {
+    fn append(&mut self, other: &mut Self) {
+        self.findings.append(&mut other.findings);
+        self.priorities.append(&mut other.priorities);
+    }
+
+    fn publish(mut self, report: &mut Report) {
+        self.findings.sort_by_key(|item| item.severity);
+        let mut seen = HashSet::new();
+        for item in self.findings {
+            let key = (
+                item.finding.path.clone(),
+                item.finding.line,
+                item.basis,
+                item.kind,
+            );
+            if seen.insert(key) {
+                report.findings.push(item.finding);
+            }
+        }
+        self.priorities
+            .sort_by_key(|&(severity, kind, _)| (severity, kind));
+        let mut locations = HashSet::new();
+        let mut actions = HashSet::new();
+        for (_, _, focus) in self.priorities {
+            let action = focus
+                .action
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let action = fold_for_comparison(action.trim_end_matches(['.', '!', '?']));
+            let location = (focus.path.clone(), focus.line);
+            if !locations.contains(&location) && actions.insert(action) {
+                locations.insert(location);
+                report.focus.push(focus);
+            }
+            if report.focus.len() == 3 {
+                break;
+            }
+        }
+    }
+}
+
+struct BatchResult {
+    report: Report,
+    coverage: BatchCoverage,
+    items: RankedItems,
+}
+
 fn review_passes<'a>(
     snapshot: &'a Snapshot,
     scan: &Scan,
@@ -2032,7 +2111,7 @@ fn review_passes<'a>(
     reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
     prior: &[Finding],
     protocol: CitationProtocol,
-) -> Result<(Report, BatchCoverage)> {
+) -> Result<BatchResult> {
     let mut report = collection_report(snapshot, scan);
     let source = source_index(snapshot, &mut report.limits);
     let (mut data, references) = match protocol {
@@ -2052,22 +2131,32 @@ fn review_passes<'a>(
         &mut report.limits,
     )?
     else {
-        return Ok((report, BatchCoverage::default()));
+        return Ok(BatchResult {
+            report,
+            coverage: BatchCoverage::default(),
+            items: RankedItems::default(),
+        });
     };
     proposed.report_incomplete(Pass::Proposal, &mut report.limits);
-    let discovery_complete = proposed.complete && !proposed.overflow;
+    let mut discovery = BatchCoverage {
+        stages_finished: proposed.complete && !proposed.overflow,
+        ..BatchCoverage::default()
+    };
     let proposed = proposed.items;
-    let fresh: Vec<_> = proposed
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| proposal(item, index + 1, &evidence))
-        .collect();
+    let mut fresh = Vec::new();
+    for (index, item) in proposed.iter().enumerate() {
+        if let Some(valid) = proposal(item, index + 1, &evidence) {
+            fresh.push(valid);
+        } else {
+            discovery.unresolved(evidence.citation(&item["anchor"], Revision::Head));
+        }
+    }
     if fresh.len() != proposed.len() {
         report
             .limits
             .push("Some hypotheses contain invalid details or citations.".into());
     }
-    let discovery_complete = discovery_complete && (proposed.is_empty() || !fresh.is_empty());
+    discovery.stages_finished &= proposed.is_empty() || !fresh.is_empty();
     let capacity = if matches!(protocol, CitationProtocol::Interactive) {
         usize::MAX
     } else {
@@ -2103,41 +2192,25 @@ fn review_passes<'a>(
             },
         ),
     };
-    let mut findings = Vec::new();
-    let mut priorities = Vec::new();
+    let mut items = RankedItems::default();
     for assessment in assessments {
-        findings.extend(assessment.finding);
-        priorities.extend(assessment.priority);
-    }
-
-    findings.sort_by_key(|item| item.severity);
-    let mut seen = HashSet::new();
-    for item in findings {
-        if seen.insert((item.anchor, item.basis, item.kind)) {
-            report.findings.push(item.finding);
+        if let Some(item) = assessment.finding {
+            items.findings.push(VerifiedFinding {
+                severity: item.severity,
+                basis: (item.basis.path.to_owned(), item.basis.line),
+                kind: item.kind,
+                finding: item.finding,
+            });
         }
+        items.priorities.extend(assessment.priority);
     }
-    priorities.sort_by_key(|&(severity, kind, _)| (severity, kind));
-    let mut locations = HashSet::new();
-    let mut actions = HashSet::new();
-    for (_, _, focus) in priorities {
-        let action = focus
-            .action
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let action = fold_for_comparison(action.trim_end_matches(['.', '!', '?']));
-        let location = (focus.path.clone(), focus.line);
-        if !locations.contains(&location) && actions.insert(action) {
-            locations.insert(location);
-            report.focus.push(focus);
-        }
-        if report.focus.len() == 3 {
-            break;
-        }
-    }
-    coverage.stages_finished &= discovery_complete;
-    Ok((report, coverage))
+    coverage.stages_finished &= discovery.stages_finished;
+    coverage.unfinished_paths.extend(discovery.unfinished_paths);
+    Ok(BatchResult {
+        report,
+        coverage,
+        items,
+    })
 }
 
 #[cfg(test)]
@@ -4059,5 +4132,77 @@ mod tests {
             "{:?}",
             result.report.limits
         );
+    }
+
+    #[test]
+    fn unscoped_invalid_proposals_leads_and_unsolicited_verdicts_preserve_only_verified_items() {
+        for case in [
+            "proposal",
+            "leads-container",
+            "lead-anchor",
+            "unexpected-id",
+        ] {
+            let mut proposals = vec![indexed_proposal("H2", "The caller configures one slot.")];
+            if case == "proposal" {
+                proposals.push(indexed_proposal("H999", "Unscoped concern."));
+            }
+            let mut challenge = json!({"complete":true,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]});
+            match case {
+                "leads-container" => challenge["leads"] = json!("malformed"),
+                "lead-anchor" => {
+                    challenge["leads"] = json!([indexed_proposal("H999", "Unscoped lead.")])
+                }
+                "unexpected-id" => challenge["assessments"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(indexed_capacity_finding(999, "H4", "B2", "B4")),
+                _ => {}
+            }
+            let mut replies =
+                [json!({"complete":true,"hypotheses":proposals}), challenge].into_iter();
+            let result = review_snapshot_iterative(
+                indexed_snapshot(),
+                |_, _| Ok(replies.next().unwrap()),
+                |_, _| Ok(vec![]),
+                |_, _| Ok(true),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(result.report.findings.len(), 1, "{case}");
+            assert!(result.reviewed_files.unwrap().is_empty(), "{case}");
+            assert_eq!(result.patch_files.unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn scoped_invalid_lead_blocks_its_file_but_an_unresolved_supporting_anchor_blocks_the_batch() {
+        for anchor in ["H8", "H4"] {
+            let mut challenge = json!({"complete":true,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")],
+                "leads":[indexed_proposal(anchor, "Check this related concern.")]});
+            if anchor == "H8" {
+                challenge["leads"][0]["expected"] = json!("");
+            }
+            let mut replies = [
+                json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}),
+                challenge, json!({"complete":true,"assessments":[]})
+            ].into_iter();
+            let result = review_snapshot_iterative(
+                indexed_snapshot(),
+                |_, _| Ok(replies.next().unwrap()),
+                |_, _| Ok(vec![]),
+                |_, _| Ok(true),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(result.report.findings.len(), 1);
+            assert_eq!(
+                result.reviewed_files.unwrap(),
+                if anchor == "H8" {
+                    vec!["cache.go"]
+                } else {
+                    vec![]
+                }
+            );
+        }
     }
 }

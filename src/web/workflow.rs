@@ -123,8 +123,13 @@ async fn decision(
     id: i64,
     confirm: bool,
 ) -> Result<Response, PageError> {
-    let fields = checked_form(state, request, 128).await?;
     let target = target(state, id).await?;
+    let fields = checked_form(
+        state,
+        request,
+        target.report.report.findings.len().saturating_add(8),
+    )
+    .await?;
     let report = target.report;
     let bad_form = || PageError::new(StatusCode::BAD_REQUEST, BAD_FORM);
     let (event, label) = EVENTS

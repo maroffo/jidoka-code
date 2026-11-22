@@ -7,7 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub(super) fn init(db: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn init(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS review_runs (
         review_id INTEGER PRIMARY KEY, base TEXT, head TEXT, snapshot TEXT, prior TEXT,
         turns INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER,
@@ -27,8 +27,15 @@ pub(super) fn init(db: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Enqueue a manual review of the exact revisions in a previous report.
-pub fn replay(db: &Path, id: i64, provider: &str) -> Result<i64> {
+pub fn replay(
+    db: &Path,
+    id: i64,
+    provider: &str,
+    configured: &std::collections::HashSet<String>,
+) -> Result<i64> {
     let mut conn = connect(db)?;
+    super::init_db(&conn)?;
+    crate::automation::init(&conn)?;
     let tx = conn.transaction()?;
     let (url, raw): (String, String) = tx.query_row(
         "SELECT url,report FROM reviews WHERE id=? AND status IN ('completed','partial')",
@@ -39,6 +46,11 @@ pub fn replay(db: &Path, id: i64, provider: &str) -> Result<i64> {
     ensure!(
         parse_pull_url(&url).is_some_and(|(repo, _)| repo.eq_ignore_ascii_case(&original.repo)),
         "Stored review repository does not match URL"
+    );
+    ensure!(
+        crate::automation::repositories(&tx, configured)?
+            .contains(&original.repo.to_ascii_lowercase()),
+        "This repository is not approved for review."
     );
     tx.execute(
         "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
@@ -80,6 +92,15 @@ impl Session {
             JOIN reviews current ON current.id=review_replays.review_id
             WHERE current.id=? AND source.provider=current.provider AND source.url=current.url COLLATE NOCASE",[self.id],|r|r.get(0)).optional()?;
         Ok(raw.map(|text| serde_json::from_str(&text)).transpose()?)
+    }
+
+    pub fn reset(&mut self) -> Result<()> {
+        let tx = self.db.transaction()?;
+        clear(&tx, self.id)?;
+        tx.execute("INSERT INTO review_runs(review_id) VALUES(?)", [self.id])?;
+        tx.commit()?;
+        self.step = 0;
+        Ok(())
     }
 
     pub fn remember_origin(&self, repo: Option<&str>) -> Result<Option<String>> {
@@ -138,6 +159,31 @@ impl Session {
         Ok(())
     }
 
+    fn fingerprint(system: &str, data: &Value) -> Result<Vec<u8>> {
+        let mut hash = Sha256::new();
+        hash.update(system.len().to_be_bytes());
+        hash.update(system);
+        serde_json::to_writer(&mut hash, data)?;
+        Ok(hash.finalize().to_vec())
+    }
+
+    /// A matching saved outcome is returned by ask, including a saved split.
+    /// Peeking must not advance the step; a fresh input may be partitioned before dispatch.
+    pub fn fits_context(
+        &self,
+        system: &str,
+        data: &Value,
+        measure: impl FnOnce() -> Result<bool>,
+    ) -> Result<bool> {
+        let fingerprint = Self::fingerprint(system, data)?;
+        let restored: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM review_turns WHERE review_id=?1 AND step=?2 AND fingerprint=?3
+             UNION ALL SELECT 1 FROM review_splits WHERE review_id=?1 AND step=?2 AND fingerprint=?3)",
+            params![self.id, self.step + 1, fingerprint], |row| row.get(0),
+        )?;
+        if restored { Ok(true) } else { measure() }
+    }
+
     pub fn ask(
         &mut self,
         system: &str,
@@ -145,11 +191,7 @@ impl Session {
         mut call: impl FnMut() -> Result<crate::provider::ModelReply>,
     ) -> Result<Value> {
         self.step += 1;
-        let mut hash = Sha256::new();
-        hash.update(system.len().to_be_bytes());
-        hash.update(system);
-        serde_json::to_writer(&mut hash, data)?;
-        let fingerprint = hash.finalize().to_vec();
+        let fingerprint = Self::fingerprint(system, data)?;
         let cached: Option<String> = self
             .db
             .query_row(
@@ -268,6 +310,21 @@ fn turn_error(error: &anyhow::Error) -> String {
     "Model call failed.".into()
 }
 
+/// Forget every checkpoint tied to an automatic job that will start a fresh analysis.
+pub(crate) fn clear(db: &Connection, id: i64) -> rusqlite::Result<()> {
+    for table in [
+        "review_turns",
+        "review_splits",
+        "review_reads",
+        "review_origins",
+        "review_replays",
+        "review_runs",
+    ] {
+        db.execute(&format!("DELETE FROM {table} WHERE review_id=?"), [id])?;
+    }
+    Ok(())
+}
+
 pub(super) fn finish(db: &Connection, id: i64, status: &str, reason: &str) -> Result<()> {
     db.execute(
         "UPDATE review_runs SET stop_reason=CASE WHEN ?1='failed' THEN coalesce(stop_reason,?2) ELSE ?2 END WHERE review_id=?3",
@@ -360,7 +417,14 @@ mod tests {
         let record = json!({"repo":"owner/repo","base":"a".repeat(40),"head":"b".repeat(40),"findings":[],"focus":[],"limits":["Undecided at src/file.rs:1. Inspect the caller."]});
         conn.execute("INSERT INTO reviews(url,provider,status,report) VALUES ('https://github.com/owner/repo/pull/1','provider','partial',?)",[record.to_string()]).unwrap();
         let source = conn.last_insert_rowid();
-        let new = replay(&path, source, "provider").unwrap();
+        assert!(replay(&path, source, "provider", &Default::default()).is_err());
+        let new = replay(
+            &path,
+            source,
+            "provider",
+            &["owner/repo".to_string()].into(),
+        )
+        .unwrap();
         let session = Session::open(&path, new).unwrap();
         assert_eq!(
             session
@@ -381,7 +445,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(jobs, 0);
-        let other = Session::open(&path, replay(&path, source, "other-provider").unwrap()).unwrap();
+        let other = Session::open(
+            &path,
+            replay(
+                &path,
+                source,
+                "other-provider",
+                &["owner/repo".to_string()].into(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert!(other.replay_source().unwrap().is_none());
     }
 
@@ -440,6 +514,11 @@ mod tests {
         let mut resumed = Session::open(&path, 1).unwrap();
         assert!(
             resumed
+                .fits_context("review", &input, || panic!("resized a saved split"))
+                .unwrap()
+        );
+        assert!(
+            resumed
                 .ask("review", &input, || panic!("already partitioned"))
                 .unwrap_err()
                 .is::<crate::ReviewBatchInterrupted>()
@@ -472,6 +551,21 @@ mod tests {
         session.ask("review", &input, answer).unwrap();
         drop(session);
         let mut resumed = Session::open(&path, 1).unwrap();
+        assert!(
+            !resumed
+                .fits_context("different", &input, || Ok(false))
+                .unwrap()
+        );
+        assert!(
+            !resumed
+                .fits_context("review", &json!({"source":"changed"}), || Ok(false))
+                .unwrap()
+        );
+        assert!(
+            resumed
+                .fits_context("review", &input, || panic!("resized a saved reply"))
+                .unwrap()
+        );
         resumed
             .ask("review", &input, || panic!("repeated a completed call"))
             .unwrap();

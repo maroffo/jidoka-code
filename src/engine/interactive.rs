@@ -76,6 +76,8 @@ impl Coverage {
 
 enum Stop {
     Context,
+    ShorterIntent(Vec<String>),
+    Metadata,
     Interrupted,
     Provider(anyhow::Error),
     TurnLimit,
@@ -144,8 +146,62 @@ type Read<'f> = dyn FnMut(&Snapshot, &[ContextRead]) -> Result<Vec<SourceWindow>
 type Fits<'f> = dyn FnMut(&str, &Value) -> Result<bool> + 'f;
 type Model<'f> = dyn FnMut(&str, &Value) -> Result<Value> + 'f;
 
+/// Keep ordinary requests intact. When the repeated metadata alone exceeds the real window,
+/// reduce supplemental commit history first, then the tail of the remaining PR text.
+fn context_overflow(
+    system: &str,
+    data: &Value,
+    chunk: &Snapshot,
+    fits: &mut Fits<'_>,
+) -> Result<Stop> {
+    if data.get("hypotheses").is_some()
+        || data.get("last_read").is_some()
+        || chunk.intent.is_empty()
+    {
+        return Ok(Stop::Context);
+    }
+    let mut metadata = json!({
+        "snapshot":{"url":chunk.url,"repo":chunk.repo,"number":chunk.number,"base":chunk.base,"head":chunk.head,
+            "intent":chunk.intent,"limits":chunk.limits,"files":[],"head_context":[],"complete_head_paths":[]},
+        "scan": data["scan"],
+    });
+    if fits(system, &metadata)? {
+        return Ok(Stop::Context);
+    }
+    let mut intent = chunk.intent.clone();
+    while !intent.is_empty() {
+        let commits = intent
+            .iter()
+            .filter(|entry| entry.starts_with("Commit message\n"))
+            .count();
+        if commits > 0 {
+            let mut kept = 0;
+            intent.retain(|entry| {
+                if !entry.starts_with("Commit message\n") {
+                    return true;
+                }
+                kept += 1;
+                kept <= commits / 2
+            });
+        } else {
+            let mut bytes = intent.iter().map(String::len).sum::<usize>() / 2;
+            intent.retain_mut(|entry| {
+                let end = entry.floor_char_boundary(bytes.min(entry.len()));
+                entry.truncate(end);
+                bytes -= end;
+                end > 0
+            });
+        }
+        metadata["snapshot"]["intent"] = json!(&intent);
+        if fits(system, &metadata)? {
+            return Ok(Stop::ShorterIntent(intent));
+        }
+    }
+    Ok(Stop::Metadata)
+}
+
 struct ChunkResult {
-    report: Result<(Report, BatchCoverage)>,
+    report: Result<BatchResult>,
     stop: Option<Stop>,
     displayed: HashSet<String>,
 }
@@ -178,7 +234,10 @@ fn review_chunk(
                 match fits(&system, data) {
                     Ok(true) => {}
                     Ok(false) => {
-                        stop = Some(Stop::Context);
+                        stop = Some(
+                            context_overflow(&system, data, chunk, fits)
+                                .unwrap_or_else(Stop::Error),
+                        );
                         anyhow::bail!("Context window exceeded.")
                     }
                     Err(error) => {
@@ -259,20 +318,10 @@ fn review_chunk(
     }
 }
 
-fn merge_report(report: &mut Report, next: Report) {
+fn merge_limits(report: &mut Report, next: Report) {
     for limit in next.limits {
         if !report.limits.contains(&limit) {
             report.limits.push(limit);
-        }
-    }
-    for finding in next.findings {
-        if !report.findings.contains(&finding) {
-            report.findings.push(finding);
-        }
-    }
-    for focus in next.focus {
-        if !report.focus.contains(&focus) {
-            report.focus.push(focus);
         }
     }
 }
@@ -287,6 +336,7 @@ pub fn review_snapshot_iterative(
     let scan = crate::scanner::scan(&snapshot);
     let mut report = collection_report(&snapshot, &scan);
     let mut coverage = Coverage::default();
+    let mut items = RankedItems::default();
     let mut first = snapshot.clone();
     first.diff = None; // The review representation consists of indexed source, never a second copy of the diff.
     let mut queue = vec![first];
@@ -299,29 +349,22 @@ pub fn review_snapshot_iterative(
         } = review_chunk(
             &chunk, &snapshot, &scan, prior, &mut ask, &mut read, &mut fits,
         );
-        // An interrupted recheck can follow accepted findings. Retain those findings; the
-        // replacement batch determines its own coverage and supersedes interim failure limits.
-        if matches!(
-            stop,
-            Some(Stop::Context | Stop::Interrupted | Stop::Provider(_))
-        ) && let Ok((partial, _)) = &mut result
-        {
-            merge_report(
-                &mut report,
-                Report {
-                    findings: std::mem::take(&mut partial.findings),
-                    focus: std::mem::take(&mut partial.focus),
-                    limits: Vec::new(),
-                },
-            );
+        // Accepted items survive interrupted rechecks. Rank once across every batch, including retries.
+        if let Ok(batch) = &mut result {
+            items.append(&mut batch.items);
         }
         match stop {
             None => {
-                let (batch, outcome) = result?;
+                let batch = result?;
+                let outcome = batch.coverage;
                 interrupted = 0;
-                coverage.record(&chunk, outcome.stages_finished);
+                // A supporting file can establish evidence, but cannot identify which changed
+                // patch an unresolved hypothesis affects without a corresponding displayed hunk.
+                let finished =
+                    outcome.stages_finished && outcome.unfinished_paths.is_subset(&displayed);
+                coverage.record(&chunk, finished);
                 coverage.missed.extend(outcome.unfinished_paths);
-                if outcome.stages_finished {
+                if finished {
                     for file in chunk
                         .files
                         .iter()
@@ -330,7 +373,7 @@ pub fn review_snapshot_iterative(
                         coverage.missed.insert(file.path.to_owned());
                     }
                 }
-                merge_report(&mut report, batch);
+                merge_limits(&mut report, batch.report);
             }
             Some(Stop::Interrupted) => {
                 interrupted += 1;
@@ -364,8 +407,8 @@ pub fn review_snapshot_iterative(
                 // Transport, authentication and policy stops apply to the service request, not its size.
                 // The provider/session owns retry classification; never rebill it as a different review stage.
                 if coverage.examined.is_empty()
-                    && report.findings.is_empty()
-                    && report.focus.is_empty()
+                    && items.findings.is_empty()
+                    && items.priorities.is_empty()
                 {
                     return Err(error);
                 }
@@ -374,6 +417,28 @@ pub fn review_snapshot_iterative(
                     coverage.record(outstanding, false);
                 }
                 report.limits.push("The provider stopped the request. The remaining review could not be completed.".into());
+                break;
+            }
+            Some(Stop::ShorterIntent(intent)) => {
+                let limit =
+                    "Pull request or commit text was shortened to fit the model context window."
+                        .to_owned();
+                if !report.limits.contains(&limit) {
+                    report.limits.push(limit);
+                }
+                let mut next = chunk;
+                next.intent = intent.clone();
+                for remaining in &mut queue {
+                    remaining.intent.clone_from(&intent);
+                }
+                queue.push(next);
+            }
+            Some(Stop::Metadata) => {
+                coverage.record(&chunk, false);
+                for remaining in &queue {
+                    coverage.record(remaining, false);
+                }
+                report.limits.push("The review instructions and metadata exceed the model context window even without source or pull request text.".into());
                 break;
             }
             Some(Stop::Context) => {
@@ -392,8 +457,8 @@ pub fn review_snapshot_iterative(
             }
             Some(reason @ (Stop::TurnLimit | Stop::RepeatedRead)) => {
                 // live_assessments can have accepted independent findings before a recheck was stopped.
-                if let Ok((partial, _)) = result {
-                    merge_report(&mut report, partial);
+                if let Ok(partial) = result {
+                    merge_limits(&mut report, partial.report);
                 }
                 coverage.record(&chunk, false);
                 match reason {
@@ -409,6 +474,7 @@ pub fn review_snapshot_iterative(
             Some(Stop::Error(error)) => return Err(error),
         }
     }
+    items.publish(&mut report);
     let reviewed_files = snapshot
         .files
         .iter()
@@ -943,5 +1009,60 @@ mod tests {
             result.unwrap_err().to_string(),
             "Terminal provider rejection."
         );
+    }
+
+    #[test]
+    fn published_manual_focus_keeps_the_highest_three_distinct_priorities_across_batches() {
+        let result = review_snapshot_iterative(multi_file_snapshot(6), |_,data| {
+            let path = data["snapshot"]["files"][0]["path"].as_str().unwrap();
+            let action = if path.ends_with("5.rs") { "Try job src/file4.rs".to_owned() } else {format!("Try job {path}")};
+            if data.get("hypotheses").is_none() {
+                Ok(json!({"complete":true,"hypotheses":[{"anchor":"H1","expected":"The job completes.","scenario":"A caller queues a job.","consequence":"The job could fail."}]}))
+            } else {
+                let severity = if path.ends_with("4.rs") || path.ends_with("5.rs") { "high" } else { "low" };
+                Ok(json!({"complete":true,"assessments":[{"id":1,"outcome":"manual_test","basis":"H1","action":action,"expected":"The submitted job completes once.","severity":severity,"countercheck":"Dispatching the job requires a running queue."}]}))
+            }
+        }, |_,_| Ok(Vec::new()), |_,data| Ok(data["snapshot"]["files"].as_array().unwrap().len() <= 1), &[]).unwrap();
+        let paths: Vec<_> = result
+            .report
+            .focus
+            .iter()
+            .map(|focus| focus.path.as_str())
+            .collect();
+        assert_eq!(paths, ["src/file4.rs", "src/file0.rs", "src/file1.rs"]);
+    }
+
+    #[test]
+    fn oversized_shared_intent_is_compacted_once_for_all_patches() {
+        let mut source = multi_file_snapshot(107);
+        source.intent = vec![
+            "PR title".into(),
+            format!("Commit message\n{}", "á".repeat(10000)),
+        ];
+        let mut fits_calls = 0;
+        let mut model_calls = 0;
+        let result = review_snapshot_iterative(
+            source,
+            |_, data| {
+                model_calls += 1;
+                assert_eq!(data["snapshot"]["files"].as_array().unwrap().len(), 107);
+                assert_eq!(data["snapshot"]["intent"], json!(["PR title"]));
+                if data.get("hypotheses").is_some() {
+                    Ok(json!({"complete":true,"assessments":[]}))
+                } else {
+                    Ok(json!({"complete":true,"hypotheses":[]}))
+                }
+            },
+            |_, _| Ok(Vec::new()),
+            |_, data| {
+                fits_calls += 1;
+                Ok(data["snapshot"]["intent"].to_string().len() <= 1024)
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(model_calls, 2);
+        assert_eq!(fits_calls, 5);
+        assert_eq!(result.reviewed_files.unwrap().len(), 107);
     }
 }

@@ -264,6 +264,16 @@ where
             .unwrap_or_else(|| error.clone().unwrap_or_else(|| status.to_string()));
         session::finish(&tx, id, status, &reason)?;
     }
+    if updated == 0 {
+        let superseded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reviews WHERE id=? AND status='superseded')",
+            [id],
+            |r| r.get(0),
+        )?;
+        if superseded {
+            session::finish(&tx, id, "superseded", "superseded")?;
+        }
+    }
     if updated != 0 && status == "superseded" {
         tx.execute("UPDATE automation_jobs SET state='canceled', retry_at=0 WHERE review_id=?1 AND state='pending'", [id])?;
         tx.execute("UPDATE automation_settings SET review_error=NULL, review_error_job=NULL WHERE review_error_job=?1", [id])?;
@@ -577,7 +587,12 @@ async fn checked_form(
     }) {
         return Err(PageError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, BAD_FORM));
     }
-    let Ok(body) = to_bytes(request.into_body(), FORM_LIMIT).await else {
+    let Ok(body) = to_bytes(
+        request.into_body(),
+        FORM_LIMIT.max(max_fields.saturating_mul(32)),
+    )
+    .await
+    else {
         return Err(PageError::new(StatusCode::PAYLOAD_TOO_LARGE, BAD_FORM));
     };
     if std::str::from_utf8(&body).is_err() {
@@ -1455,6 +1470,39 @@ mod tests {
         }
         let (status, _, _) = f.request(Method::POST, &publish, &[], body).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn all_findings_in_a_large_report_can_be_previewed() {
+        let f = Fixture::new();
+        let path = f.enqueue(URL).await;
+        let mut r = report(None);
+        for i in 0..140 {
+            r.report.findings.push(Finding {
+                path: "readme.md".into(),
+                line: i + 1,
+                title: format!("Finding {i}"),
+                impact: "A documented operation fails.".into(),
+                evidence: "A regression is visible in the changed expression.".into(),
+                attribution: Attribution::Introduced,
+            });
+        }
+        run_one(&f.db, |_| Ok(r)).unwrap();
+        let (cookie, token) = f.form().await;
+        let headers = [
+            ("cookie", cookie.as_str()),
+            ("origin", ORIGIN),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ];
+        let mut body = format!("csrf_token={token}&event=COMMENT");
+        for i in 0..140 {
+            write!(body, "&finding-{i}=yes").unwrap();
+        }
+        let (status, _, page) = f
+            .request(Method::POST, &format!("{path}/submit"), &headers, body)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("finding-139"));
     }
 
     #[tokio::test]

@@ -208,21 +208,49 @@ fn check_status(response: Response) -> Result<Response> {
     if matches!(status.as_u16(), 400 | 422) {
         // Provider errors may quote private input. Classify them without logging the body.
         let error: Value = serde_json::from_reader(response.take(32_768)).unwrap_or_default();
-        let error = &error["error"];
-        let message = error["message"]
-            .as_str()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if error["code"] == "context_length_exceeded"
-            || message.contains("maximum context length")
-            || message.contains("context window")
-                && (message.contains("exceed") || message.contains("too long"))
-            || message.contains("input token count") && message.contains("exceed")
-        {
+        if context_overflow(&error) {
             return Err(crate::ReviewContextExceeded.into());
         }
     }
     bail!("The provider rejected the request (HTTP {status})")
+}
+
+fn context_overflow(body: &Value) -> bool {
+    // vLLM can return a flat ErrorResponse. Other chat adapters nest the same
+    // fields under "error". A policy refusal takes precedence over its message.
+    let error = body.get("error").filter(|e| e.is_object()).unwrap_or(body);
+    let fields = [error["code"].as_str(), error["type"].as_str()];
+    if fields.iter().flatten().any(|code| {
+        matches!(
+            *code,
+            "content_filter" | "content_policy_violation" | "safety" | "refusal"
+        )
+    }) {
+        return false;
+    }
+    if fields.iter().flatten().any(|code| {
+        matches!(
+            *code,
+            "context_length_exceeded" | "exceed_context_size_error"
+        )
+    }) {
+        return true;
+    }
+    let message = error["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    (message.contains("maximum context length")
+        && (message.contains("requested")
+            || message.contains("exceed")
+            || message.contains("reduce the length of the input")))
+        || (message.contains("context window")
+            && (message.contains("exceed") || message.contains("too long")))
+        || (message.contains("input token count") && message.contains("exceed"))
+        || message.contains("exceeds the available context size")
+        || (message.contains("prompt is too long")
+            && message.contains("tokens >")
+            && message.contains("maximum"))
 }
 
 #[derive(Debug)]
@@ -713,6 +741,28 @@ mod tests {
             let failure = error.downcast_ref::<InvalidReply>().unwrap();
             assert_ne!(failure.reason, "Provider returned invalid review JSON.");
             assert!(!failure.to_string().contains("private-provider-text"));
+        }
+    }
+
+    #[test]
+    fn compatible_context_errors_select_a_smaller_batch() {
+        for body in [
+            json!({"object":"error", "type":"BadRequestError", "message":"This model's maximum context length is 4096 tokens. However, you requested 5010 tokens."}),
+            json!({"error":{"type":"invalid_request_error","message":"prompt is too long: 204901 tokens > 200000 maximum"}}),
+            json!({"error":{"message":"litellm.BadRequestError: prompt is too long: 5000 tokens > 4096 maximum"}}),
+            json!({"error":{"type":"exceed_context_size_error","message":"Request cannot fit"}}),
+            json!({"error":{"code":400,"message":"request (4390 tokens) exceeds the available context size (4096 tokens)"}}),
+            json!({"error":{"code":"context_length_exceeded"}}),
+        ] {
+            assert!(context_overflow(&body));
+        }
+        for body in [
+            json!({"error":{"code":"content_policy_violation","message":"prompt is too long: 5000 tokens > 4096 maximum"}}),
+            json!({"error":{"message":"The value of maximum context length must be positive"}}),
+            json!({"type":"BadRequestError","message":"The prompt is too long for the preview field"}),
+            json!({"error":{"message":"Too many requests for your rate limit"}}),
+        ] {
+            assert!(!context_overflow(&body));
         }
     }
 

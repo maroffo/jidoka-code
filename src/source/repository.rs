@@ -87,6 +87,16 @@ struct ComparisonBase {
     merge_base_commit: GitId,
 }
 
+fn comparison_head(base_repo: &str, source_repo: &str, head: &str) -> Result<String> {
+    if base_repo == source_repo {
+        return Ok(head.to_owned());
+    }
+    let (owner, _) = source_repo
+        .split_once('/')
+        .context("Invalid GitHub fork.")?;
+    Ok(format!("{owner}:{head}"))
+}
+
 fn commit_messages(hub: &mut GitHub<Http>, route: &str, total: usize) -> Vec<String> {
     let mut messages = Vec::new();
     for page in 1..=total
@@ -106,20 +116,96 @@ fn commit_messages(hub: &mut GitHub<Http>, route: &str, total: usize) -> Vec<Str
     messages
 }
 
+fn read_commit_message(repository: &ReviewRepository, head: &str) -> Result<String> {
+    let mut child = repository
+        .git()
+        .args(["show", "-s", "--format=%B", head])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut message = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .context("Missing commit message stream.")?
+        .take((RESPONSE + 1) as u64)
+        .read_to_end(&mut message);
+    if read.is_err() || message.len() > RESPONSE {
+        let _ = child.kill();
+    }
+    let status = child.wait()?;
+    read?;
+    ensure!(
+        status.success() || message.len() > RESPONSE,
+        "Could not read the pinned commit message."
+    );
+    if message.len() > RESPONSE {
+        message.truncate(RESPONSE);
+        message.extend_from_slice(b"\n[Commit message exceeds the metadata response limit.]");
+    }
+    Ok(String::from_utf8_lossy(&message).into_owned())
+}
+
 #[derive(Copy, Clone)]
 enum ReviewTarget<'a> {
     Current(Option<&'a str>),
-    AutomaticResume { base: &'a str, head: &'a str },
-    Historical { base: &'a str, head: &'a str },
+    AutomaticResume {
+        base: &'a str,
+        head: &'a str,
+        source: Option<&'a str>,
+    },
+    Historical {
+        base: &'a str,
+        head: &'a str,
+        source: Option<&'a str>,
+    },
 }
 
 impl<'a> ReviewTarget<'a> {
     fn saved(self) -> Option<(&'a str, &'a str)> {
         match self {
             Self::Current(_) => None,
-            Self::Historical { base, head } | Self::AutomaticResume { base, head } => {
+            Self::Historical { base, head, .. } | Self::AutomaticResume { base, head, .. } => {
                 Some((base, head))
             }
+        }
+    }
+
+    fn head_repo<'r>(self, base_repo: &'r str, current: &'r Repo) -> Result<&'r str> {
+        let source = match self {
+            Self::Current(_) => return Ok(&current.full_name),
+            Self::Historical { source, .. } | Self::AutomaticResume { source, .. } => source,
+        };
+        // Older reports lack head-remote provenance. Never switch them to the current fork.
+        let Some(source) = source else {
+            return Ok(base_repo);
+        };
+        if source.eq_ignore_ascii_case(base_repo) {
+            return Ok(base_repo);
+        }
+        ensure!(
+            source.eq_ignore_ascii_case(&current.full_name),
+            "The recorded fork no longer matches the pull request's authorized head repository."
+        );
+        Ok(&current.full_name)
+    }
+
+    fn checked_base<'c>(
+        self,
+        comparison: &'c ComparisonBase,
+        requested_base: &str,
+    ) -> Result<&'c str> {
+        ensure!(
+            sha(&comparison.base_commit.sha)? == requested_base,
+            "GitHub returned an unexpected comparison base."
+        );
+        let actual = sha(&comparison.merge_base_commit.sha)?;
+        match self {
+            Self::AutomaticResume { base, .. } if base != actual => Err(BaseChanged.into()),
+            Self::Historical { base, .. } if base != actual => {
+                bail!("The recorded historical merge base could not be verified.")
+            }
+            _ => Ok(actual),
         }
     }
 
@@ -202,6 +288,7 @@ pub fn resume_automatic_repository(
     allowed: &HashSet<String>,
     base: &str,
     head: &str,
+    source: Option<&str>,
 ) -> Result<(Snapshot, ReviewRepository)> {
     collect(
         url,
@@ -209,6 +296,7 @@ pub fn resume_automatic_repository(
         ReviewTarget::AutomaticResume {
             base: sha(base)?,
             head: sha(head)?,
+            source,
         },
         None,
         &[],
@@ -221,6 +309,7 @@ pub fn collect_repository_at(
     allowed: &HashSet<String>,
     base: &str,
     head: &str,
+    source: Option<&str>,
 ) -> Result<(Snapshot, ReviewRepository)> {
     collect(
         url,
@@ -228,6 +317,7 @@ pub fn collect_repository_at(
         ReviewTarget::Historical {
             base: sha(base)?,
             head: sha(head)?,
+            source,
         },
         None,
         &[],
@@ -251,34 +341,20 @@ fn collect(
     // The first comparison page can contain megabytes of unrelated file JSON.
     // Later pages contain the same pinned commit metadata without the file list.
     let saved = target.saved();
-    let saved_base = saved.map(|(base, _)| base);
     let head = saved.map_or(pull.head.sha.as_str(), |(_, head)| head);
-    let head_repo = if matches!(target, ReviewTarget::Historical { .. }) {
-        &repo
-    } else {
-        &pull.head.repo.full_name
-    };
+    let head_repo = target.head_repo(&repo, &pull.head.repo)?;
     let compare_base = match target {
         ReviewTarget::Historical { base, .. } => base,
         _ => &pull.base.sha,
     };
-    let head_ref = if &repo == head_repo {
-        head.to_owned()
-    } else {
-        let (owner, _) = head_repo.split_once('/').context("Invalid fork.")?;
-        format!("{owner}:{head}")
-    };
+    let head_ref = comparison_head(&repo, head_repo, head)?;
     let comparison: ComparisonBase = hub.get(
         &format!("{repo}/compare/{compare_base}...{head_ref}?per_page=1&page=2"),
         PULL_BYTES,
         false,
     )?;
-    let base = sha(&comparison.merge_base_commit.sha)?;
-    ensure!(
-        comparison.base_commit.sha == compare_base && saved_base.is_none_or(|id| id == base),
-        "GitHub returned an unexpected comparison base."
-    );
-    let messages = if head == pull.head.sha && comparison.total_commits > 1 {
+    let base = target.checked_base(&comparison, compare_base)?;
+    let mut messages = if head == pull.head.sha && comparison.total_commits > 1 {
         commit_messages(&mut hub, &route, comparison.total_commits)
     } else {
         Vec::new()
@@ -289,7 +365,7 @@ fn collect(
         git(directory.path()).args(["init", "--bare", "--template=", "--quiet"]),
         "initialize pinned source",
     )?;
-    if &repo == head_repo {
+    if repo == head_repo {
         fetch(directory.path(), &repo, &[base, head])?;
     } else {
         fetch(directory.path(), &repo, &[base])?;
@@ -297,7 +373,7 @@ fn collect(
     }
     let fork = (pull.head.repo.full_name != repo && pull.head.repo.private)
         .then(|| pull.head.repo.full_name.clone());
-    let repository = ReviewRepository::open(directory, base, head, fork)?;
+    let repository = ReviewRepository::open(directory, base, head, head_repo.to_owned(), fork)?;
     let (mut files, diff, mut limits) = repository.changes()?;
     if !matches!(target, ReviewTarget::Historical { .. }) && diff.total_files != pull.changed_files
     {
@@ -322,23 +398,20 @@ fn collect(
         intent.push(pull.title);
         intent.extend(pull.body.filter(|body| !body.is_empty()));
     }
-    intent.extend(
-        messages
-            .into_iter()
-            .filter(|message| !message.trim().is_empty()),
-    );
-    let message = run(
-        repository.git().args(["show", "-s", "--format=%B", head]),
-        "read the pinned commit message",
-    )?;
-    if let Ok(message) = String::from_utf8(message)
-        && !message.trim().is_empty()
-        && !intent
+    let message = read_commit_message(&repository, head)?;
+    if !message.trim().is_empty()
+        && !messages
             .iter()
             .any(|item| item.trim_end() == message.trim_end())
     {
-        intent.push(message.trim_end().to_owned());
+        messages.push(message);
     }
+    intent.extend(
+        messages
+            .into_iter()
+            .filter(|message| !message.trim().is_empty())
+            .map(|message| format!("Commit message\n{}", message.trim_end())),
+    );
 
     let snapshot = Snapshot {
         url: format!("https://github.com/{repo}/pull/{number}"),
@@ -356,6 +429,7 @@ fn collect(
 }
 
 pub struct ReviewRepository {
+    source_repo: String,
     private_source_repo: Option<String>,
     directory: TempDir,
     base: String,
@@ -369,6 +443,7 @@ impl ReviewRepository {
         directory: TempDir,
         base: &str,
         head: &str,
+        source_repo: String,
         private_source_repo: Option<String>,
     ) -> Result<Self> {
         let data = run(
@@ -394,12 +469,18 @@ impl ReviewRepository {
             }
         }
         Ok(Self {
+            source_repo,
             private_source_repo,
             directory,
             base: sha(base)?.to_owned(),
             head: head.to_owned(),
             paths,
         })
+    }
+
+    /// The verified remote used to fetch the pinned head.
+    pub fn source_repo(&self) -> &str {
+        &self.source_repo
     }
 
     /// The separate private fork whose approval must remain valid when resuming.
@@ -824,12 +905,14 @@ mod tests {
         let target = ReviewTarget::AutomaticResume {
             base: &base,
             head: &saved,
+            source: None,
         };
         assert!(target.check_head(&saved).is_ok());
         assert!(target.check_head(&pushed).unwrap_err().is::<HeadChanged>());
         let replay = ReviewTarget::Historical {
             base: &base,
             head: &saved,
+            source: None,
         };
         assert!(replay.check_head(&pushed).is_ok());
         assert_eq!(replay.saved(), Some((base.as_str(), saved.as_str())));
@@ -855,6 +938,99 @@ mod tests {
             !check_collection(target, &before, &new_base)
                 .unwrap_err()
                 .is::<HeadChanged>()
+        );
+    }
+
+    #[test]
+    fn uses_verified_fork_for_saved_commits_and_never_substitutes_an_unrelated_fork() {
+        let base_repo = "base/project";
+        let resumed = |source| ReviewTarget::AutomaticResume {
+            base: "base",
+            head: "head",
+            source,
+        };
+        let replay = |source| ReviewTarget::Historical {
+            base: "base",
+            head: "head",
+            source,
+        };
+        assert_eq!(comparison_head(base_repo, base_repo, "abc").unwrap(), "abc");
+        assert_eq!(
+            comparison_head(base_repo, "author/fork", "abc").unwrap(),
+            "author:abc"
+        );
+        for private in [true, false] {
+            let fork = Repo {
+                full_name: "author/fork".into(),
+                private,
+            };
+            for target in [
+                ReviewTarget::Current(None),
+                resumed(Some("author/fork")),
+                replay(Some("Author/Fork")),
+            ] {
+                assert_eq!(target.head_repo(base_repo, &fork).unwrap(), "author/fork");
+            }
+            for target in [resumed(None), replay(None), replay(Some(base_repo))] {
+                assert_eq!(target.head_repo(base_repo, &fork).unwrap(), base_repo);
+            }
+            assert!(
+                replay(Some("different/fork"))
+                    .head_repo(base_repo, &fork)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_verified_different_merge_base_can_restart_an_automatic_checkpoint() {
+        let first = "a".repeat(40);
+        let second = "b".repeat(40);
+        let tip = "c".repeat(40);
+        let comparison = |base_tip: &str, merge_base: &str| ComparisonBase {
+            base_commit: GitId {
+                sha: base_tip.into(),
+            },
+            merge_base_commit: GitId {
+                sha: merge_base.into(),
+            },
+            total_commits: 2,
+        };
+        let resumed = ReviewTarget::AutomaticResume {
+            base: &first,
+            head: &second,
+            source: None,
+        };
+        assert_eq!(
+            resumed
+                .checked_base(&comparison(&tip, &first), &tip)
+                .unwrap(),
+            first
+        );
+        assert!(
+            resumed
+                .checked_base(&comparison(&tip, &second), &tip)
+                .unwrap_err()
+                .is::<BaseChanged>()
+        );
+        for bad in [comparison(&first, &second), comparison(&tip, "invalid")] {
+            assert!(
+                !resumed
+                    .checked_base(&bad, &tip)
+                    .unwrap_err()
+                    .is::<BaseChanged>()
+            );
+        }
+        let historical = ReviewTarget::Historical {
+            base: &first,
+            head: &second,
+            source: None,
+        };
+        assert!(
+            !historical
+                .checked_base(&comparison(&first, &second), &first)
+                .unwrap_err()
+                .is::<BaseChanged>()
         );
     }
 
@@ -940,7 +1116,14 @@ mod tests {
         fs::write(work.join("binary.bin"), [0, 1, 2]).unwrap();
         symlink("helper.sql", work.join("unsafe.sql")).unwrap();
         let head = commit(work);
-        let repo = ReviewRepository::open(temp, &base, &head, Some("fork/project".into())).unwrap();
+        let repo = ReviewRepository::open(
+            temp,
+            &base,
+            &head,
+            "fork/project".into(),
+            Some("fork/project".into()),
+        )
+        .unwrap();
         assert_eq!(repo.private_source_repo(), Some("fork/project"));
         let (files, diff, limits) = repo.changes().unwrap();
         assert_eq!(diff.total_files, 4);

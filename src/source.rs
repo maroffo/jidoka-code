@@ -22,6 +22,18 @@ impl std::fmt::Display for HeadChanged {
 
 impl std::error::Error for HeadChanged {}
 
+/// A paused automatic review's head is unchanged but the PR now has a different merge base.
+#[derive(Debug)]
+pub struct BaseChanged;
+
+impl std::fmt::Display for BaseChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("The pull request's merge base changed since the checkpoint.")
+    }
+}
+
+impl std::error::Error for BaseChanged {}
+
 use crate::contracts::{
     DiffFile, GitHubRateLimit, PinnedDiff, SNAPSHOT_TEXT_BYTES, Snapshot, SourceFile, SourceWindow,
 };

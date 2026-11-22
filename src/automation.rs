@@ -34,6 +34,7 @@ pub(crate) const STALE: &str = "The pull request no longer matches this automati
 const BOT_TOKEN_REQUIRED: &str = "Set JIDOKA_BOT_TOKEN to enable automatic reviews.";
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
+    crate::web::session::init(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS authorized_repositories (repo TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS automation_provider (
@@ -627,11 +628,14 @@ fn enqueue(
                 ) || matching_report(status, raw.as_deref(), repo, head).is_some()
             });
             let review_id = if reusable {
-                conn.execute(
+                if conn.execute(
                     "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
                      WHERE id = ?1 AND status IN ('failed', 'superseded')",
                     [id],
-                )?;
+                )? != 0
+                {
+                    crate::web::session::clear(conn, id)?;
+                }
                 id
             } else {
                 insert_review(conn, &url, provider)?
@@ -1153,6 +1157,7 @@ mod tests {
         conn.execute("UPDATE reviews SET status = 'running'", [])
             .unwrap();
         conn.execute("UPDATE automation_settings SET review_error = 'Old retry', review_error_job = (SELECT review_id FROM automation_jobs WHERE head=?1)", [OLD]).unwrap();
+        conn.execute("INSERT INTO review_runs(review_id,base,head,turns) SELECT review_id,'previous-base',head,500 FROM automation_jobs WHERE head=?",[OLD]).unwrap();
         snapshot(&conn, &[(1, NEW, true)]);
         let status = |head| {
             conn.query_row("SELECT r.status FROM automation_jobs j JOIN reviews r ON r.id=j.review_id WHERE j.head=?1", [head], |row| row.get::<_, String>(0)).unwrap()
@@ -1162,6 +1167,12 @@ mod tests {
         assert_eq!(status(NEW), "queued");
         snapshot(&conn, &[(1, OLD, true)]);
         assert_eq!(status(OLD), "queued");
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM review_runs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         assert_eq!(status(NEW), "superseded");
     }
 
