@@ -94,7 +94,7 @@ fn hypothesis() -> Value {
         "type":"object","additionalProperties":false,
         "properties":{
             "anchor":{"type":"string","description":"Head reference from a source row (H ID)"},
-            "related":{"type":"array","description":"Up to eight H or B references copied from related source rows","items":{"type":"string"}},
+            "related":{"type":"array","items":{"type":"string"}},
             "expected":{"type":"string"},"scenario":{"type":"string"},"consequence":{"type":"string"}
         },
         "required":["anchor","expected","scenario","consequence"]

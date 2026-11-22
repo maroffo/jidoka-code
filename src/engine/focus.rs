@@ -8,6 +8,8 @@ const NEIGHBOR_ROWS: usize = 12;
 pub(super) struct VisibleEvidence {
     pub references: HashSet<String>,
     pub complete: HashSet<String>,
+    pub next_pages: HashSet<String>,
+    uncitable: HashMap<String, HashSet<usize>>,
 }
 
 type Windows = BTreeMap<String, Vec<Range<usize>>>;
@@ -17,6 +19,7 @@ pub(super) struct AssessmentContext {
     returned: HashMap<(String, String), Windows>,
     cited: HashMap<u64, HashSet<String>>,
     changed_paths: Vec<String>,
+    supporting_paths: Vec<String>,
 }
 
 fn values(value: &Value) -> impl Iterator<Item = &Value> {
@@ -71,6 +74,12 @@ impl AssessmentContext {
                 .filter(|f| !f.patch.is_empty())
                 .map(|f| f.path.clone())
                 .collect(),
+            supporting_paths: snapshot
+                .files
+                .iter()
+                .filter(|f| f.patch.is_empty())
+                .map(|f| f.path.clone())
+                .collect(),
             ..Self::default()
         }
     }
@@ -116,6 +125,7 @@ impl AssessmentContext {
             return None;
         }
         let active: HashSet<_> = hypotheses.iter().filter_map(|h| h["id"].as_u64()).collect();
+        let mut diff_pages = diff_read::DiffPages::new(&evidence.read_owners, &active);
         let mut seeds = HashSet::new();
         for h in hypotheses {
             seeds.extend(
@@ -145,14 +155,13 @@ impl AssessmentContext {
         let index = evidence.references.as_ref()?;
         let mut snapshot = fields_except(source, &["files", "head_context", "complete_head_paths"]);
         let mut view = VisibleEvidence::default();
-        let mut full_files = HashSet::new();
         let mut selected_paths = HashSet::new();
         let mut files = Vec::new();
         for file in values(&source["files"]) {
             let path = file["path"].as_str()?;
+            let mut requested_sections = diff_pages.open(path, file["sections"].as_array()?);
             let mut sections = Vec::new();
-            let mut whole = true;
-            for section in values(&file["sections"]) {
+            for (section_index, section) in values(&file["sections"]).enumerate() {
                 let rows = section.as_array()?;
                 let opened = requested.get(path);
                 let intersects = |row: &Value, side: usize, revision: Revision| {
@@ -179,12 +188,28 @@ impl AssessmentContext {
                         .map(|(i, _)| {
                             i.saturating_sub(NEIGHBOR_ROWS)..rows.len().min(i + NEIGHBOR_ROWS + 1)
                         })
+                        .chain(
+                            requested_sections
+                                .remove(&section_index)
+                                .into_iter()
+                                .flatten(),
+                        )
                         .collect(),
                 );
-                whole &= ranges.len() == 1 && ranges[0] == (0..rows.len());
                 for range in ranges {
+                    let start = range.start;
                     let slice = &rows[range];
-                    for row in slice {
+                    for (offset, row) in slice.iter().enumerate() {
+                        if let Some(line) =
+                            index
+                                .uncitable_rows
+                                .get(&(path, section_index, start + offset))
+                        {
+                            view.uncitable
+                                .entry(path.to_owned())
+                                .or_default()
+                                .insert(*line);
+                        }
                         view.references.extend(
                             [0, 1]
                                 .into_iter()
@@ -196,9 +221,6 @@ impl AssessmentContext {
             }
             if !sections.is_empty() {
                 selected_paths.insert(path);
-                if whole && file["scope"] == "file" {
-                    full_files.insert(path);
-                }
                 files.push(json!({"path":path,"scope":file["scope"],"sections":sections}));
             }
         }
@@ -228,7 +250,11 @@ impl AssessmentContext {
                         break;
                     };
                     let id = id.map(|n| format!("H{n}"));
-                    view.references.extend(id.iter().cloned());
+                    if let Some(id) = &id {
+                        view.references.insert(id.clone());
+                    } else {
+                        view.uncitable.entry(path.clone()).or_default().insert(line);
+                    }
                     rows.push(json!([null, id, quote]));
                 }
                 if !rows.is_empty() {
@@ -246,18 +272,19 @@ impl AssessmentContext {
                 continue;
             };
             // A previously complete canonical file may have only one hunk in the focused request.
-            if full_files.contains(path)
-                || (1..=file.head.len()).all(|line| {
-                    head_ranges
+            if (1..=file.head.len()).all(|line| {
+                view.uncitable
+                    .get(path)
+                    .is_some_and(|lines| lines.contains(&line))
+                    || head_ranges
                         .get(path)
                         .is_some_and(|ranges| ranges.iter().any(|r| r.contains(&line)))
-                        || index
-                            .head_lines
-                            .get(&(path, line))
-                            .and_then(|(_, id)| *id)
-                            .is_some_and(|id| view.references.contains(&format!("H{id}")))
-                })
-            {
+                    || index
+                        .head_lines
+                        .get(&(path, line))
+                        .and_then(|(_, id)| *id)
+                        .is_some_and(|id| view.references.contains(&format!("H{id}")))
+            }) {
                 complete.insert(path);
             }
         }
@@ -265,6 +292,18 @@ impl AssessmentContext {
         snapshot["complete_head_paths"] = json!(complete);
         snapshot["files"] = json!(files);
         snapshot["changed_paths"] = json!(self.changed_paths);
+        if !self.supporting_paths.is_empty() {
+            snapshot["supporting_paths"] = json!(self.supporting_paths);
+        }
+        let pages = diff_pages.finish();
+        if !pages.is_empty() {
+            for page in &pages {
+                if let (Some(path), Some(next)) = (page["path"].as_str(), page["next"].as_str()) {
+                    view.next_pages.insert(format!("{path} {next}"));
+                }
+            }
+            snapshot["diff_pages"] = json!(pages);
+        }
         snapshot["head_context"] = json!(head_context);
         // Discovery already read all commit messages. Keep the PR intent and supplemental
         // messages that explicitly describe a file in the current assessment.
@@ -305,23 +344,23 @@ impl AssessmentContext {
         request["scan"] = scan;
         Some((request, view))
     }
-}
-
-pub(super) fn restores_hidden(evidence: &Evidence<'_>, windows: &[SourceWindow]) -> bool {
-    let (Some(view), Some(index)) = (&evidence.view, &evidence.references) else {
-        return false;
-    };
-    windows.iter().any(|w| {
-        w.text.lines().enumerate().any(|(i, quote)| {
-            w.start
-                .checked_add(i)
-                .and_then(|line| index.head_lines.get(&(w.path.as_str(), line)))
-                .is_some_and(|(actual, id)| {
-                    *actual == quote
-                        && id.is_some_and(|n| !view.references.contains(&format!("H{n}")))
-                })
-        })
-    })
+    pub fn adds_evidence(&self, data: &Value, evidence: &Evidence<'_>) -> bool {
+        let Some(previous) = evidence.view.as_ref() else {
+            return false;
+        };
+        let Some((_, next)) = self.project(data, evidence) else {
+            return false;
+        };
+        !next.references.is_subset(&previous.references)
+            || !next.complete.is_subset(&previous.complete)
+            || !next.next_pages.is_subset(&previous.next_pages)
+            || next.uncitable.iter().any(|(path, lines)| {
+                previous
+                    .uncitable
+                    .get(path)
+                    .is_none_or(|seen| !lines.is_subset(seen))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -410,5 +449,72 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+    #[test]
+    fn blank_lines_count_only_when_present_in_the_projected_hunk_or_opened_window() {
+        let snapshot=serde_json::from_value(json!({"url":"https://github.com/test/repo/pull/1","repo":"test/repo","number":1,"base":"before","head":"after","intent":[],"limits":[],
+            "files":[
+                {"path":"whole.rs","before":"","after":"first();\n \t\nlast();","patch":"@@ -0,0 +1,3 @@\n+first();\n+ \t\n+last();"},
+                {"path":"partial.rs","before":"old_first();\n \t\nold_last();","after":"first();\n \t\nlast();","patch":"@@ -1 +1 @@\n-old_first();\n+first();\n@@ -3 +3 @@\n-old_last();\n+last();"}],
+            "head_context":[{"path":"partial.rs","start":2,"text":" \t"}]
+        })).unwrap();
+        let mut turn = 0;
+        let mut main = Value::Null;
+        let mut partial = Value::Null;
+        let result=review_snapshot_iterative(snapshot,|_,data|{
+            turn+=1;
+            let complete=data["snapshot"]["complete_head_paths"].as_array().unwrap();
+            let files=data["snapshot"]["files"].as_array().unwrap();
+            match turn {
+                1=>{
+                    assert_eq!(complete.len(),2);
+                    main=files[0]["sections"][0][0][1].clone();
+                    partial=files[1]["sections"][0][1][1].clone();
+                    let last=files[1]["sections"][1][1][1].clone();
+                    Ok(json!({"complete":true,"hypotheses":[{"anchor":main,"expected":"Preserve the input.","scenario":"The caller submits a value.","consequence":"The result changes."},{"anchor":partial,"related":[last],"expected":"Preserve the input.","scenario":"A second caller submits a value.","consequence":"The result changes."}]}))
+                }
+                2=>{
+                    assert!(complete.contains(&json!("whole.rs")));
+                    assert!(!complete.contains(&json!("partial.rs")));
+                    Ok(json!({"complete":true,"assessments":[{"id":1,"outcome":"refuted","basis":main,"countercheck":"The first entry point preserves the input."},{"id":2,"outcome":"indeterminate","countercheck":"Read the omitted line to establish file coverage.","reads":[{"path":"partial.rs","term":"#L2"}]}]}))
+                }
+                3=>{
+                    assert!(complete.contains(&json!("partial.rs")));
+                    Ok(json!({"complete":true,"assessments":[{"id":2,"outcome":"refuted","basis":partial,"countercheck":"The entire second file preserves the input."}]}))
+                }
+                _=>panic!("Extra turn after viewing the missing line")
+            }
+        },|_,_|Ok(vec![SourceWindow{path:"partial.rs".into(),start:2,text:" \t".into()}]),|_,_|Ok(true),&[]).unwrap();
+        assert_eq!(turn, 3);
+        assert!(result.report.limits.is_empty());
+    }
+
+    #[test]
+    fn a_pending_hypothesis_can_reopen_a_settled_siblings_cached_lookup() {
+        let mut turn = 0;
+        let mut calls = Vec::new();
+        let question = |id, path| json!({"id":id,"outcome":"indeterminate","countercheck":"Inspect the code on the caller path.","reads":[{"path":path,"term":"guard"}]});
+        let result=review_snapshot_iterative(fixture(),|_,data|{
+            turn+=1;
+            let windows=data["snapshot"]["head_context"].as_array().unwrap();
+            let shared=windows.iter().find(|w|w["path"]=="shared.rs");
+            match turn {
+                1=>Ok(json!({"complete":true,"hypotheses":(["H1","H71"].map(|anchor|json!({"anchor":anchor,"expected":"Respect the guard.","scenario":"The caller changes state.","consequence":"An update could be lost."})))})),
+                2=>Ok(json!({"complete":true,"assessments":[question(1,"shared.rs"),question(2,"first.rs")]})),
+                3=>Ok(json!({"complete":true,"assessments":[{"id":1,"outcome":"refuted","countercheck":"The guard rejects invalid updates.","basis":shared.unwrap()["rows"][0][1]},question(2,"hop.rs")]})),
+                4=>{
+                    assert!(shared.is_none(),"The completed sibling no longer owns a visible window.");
+                    Ok(json!({"complete":true,"assessments":[question(2,"shared.rs")]}))
+                }
+                5=>Ok(json!({"complete":true,"assessments":[{"id":2,"outcome":"refuted","countercheck":"The second caller shares the same guard.","basis":shared.unwrap()["rows"][0][1]}]})),
+                _=>panic!("Extra turn after reviewing the cached lookup")
+            }
+        },|_,requests|{
+            let path=&requests[0].path;calls.push(path.clone());
+            Ok(vec![SourceWindow{path:path.clone(),start:10,text:"guard(input)".into()}])
+        },|_,_|Ok(true),&[]).unwrap();
+        assert_eq!(calls, ["shared.rs", "first.rs", "hop.rs"]);
+        assert_eq!(turn, 5);
+        assert!(result.report.limits.is_empty());
     }
 }

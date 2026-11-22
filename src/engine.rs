@@ -1,5 +1,6 @@
 //! Review pinned source and verify proposed findings against counterevidence.
 
+mod diff_read;
 mod focus;
 mod interactive;
 pub(crate) use interactive::read_request;
@@ -361,6 +362,8 @@ struct ReferenceIndex<'a> {
     base: Vec<Citation<'a>>,
     head: Vec<Citation<'a>>,
     head_lines: HashMap<(&'a str, usize), (&'a str, Option<usize>)>,
+    // Table rows with no H ID still display a physical head line (for example whitespace).
+    uncitable_rows: HashMap<(&'a str, usize, usize), usize>,
 }
 
 impl<'a> ReferenceIndex<'a> {
@@ -513,6 +516,22 @@ impl<'a> ReferenceIndex<'a> {
         paths
     }
 
+    fn file_row(
+        &mut self,
+        path: &'a str,
+        section: usize,
+        offset: usize,
+        line: LocatedLine<'a>,
+    ) -> ReferencedLine<'a> {
+        let row = self.row(path, line);
+        if let Some(number) = line.1
+            && row.1.is_none()
+        {
+            self.uncitable_rows.insert((path, section, offset), number);
+        }
+        row
+    }
+
     fn hunk_sections(
         &mut self,
         path: &'a str,
@@ -535,7 +554,7 @@ impl<'a> ReferenceIndex<'a> {
             }
             last_base = base.or(last_base);
             last_head = head.or(last_head);
-            section.push(self.row(path, row));
+            section.push(self.file_row(path, sections.len(), section.len(), row));
         }
         if !section.is_empty() {
             sections.push(section);
@@ -553,7 +572,7 @@ impl<'a> ReferenceIndex<'a> {
                 file.head
                     .iter()
                     .enumerate()
-                    .map(|(i, &quote)| self.row(path, (Some(i + 1), Some(i + 1), quote)))
+                    .map(|(i, &quote)| self.file_row(path, 0, i, (Some(i + 1), Some(i + 1), quote)))
                     .collect(),
             ];
         }
@@ -568,11 +587,12 @@ impl<'a> ReferenceIndex<'a> {
             );
         }
         if !file.head.is_empty() {
+            let section = sections.len();
             sections.push(
                 file.head
                     .iter()
                     .enumerate()
-                    .map(|(i, &quote)| self.row(path, (None, Some(i + 1), quote)))
+                    .map(|(i, &quote)| self.file_row(path, section, i, (None, Some(i + 1), quote)))
                     .collect(),
             );
         }
@@ -1543,9 +1563,12 @@ struct Pending<'a, 'input> {
     provisional_outcome: Option<String>,
 }
 
-struct RecheckReader<F> {
+type ProjectionGain<'a> = dyn Fn(&Value, &Evidence<'_>) -> bool + 'a;
+
+struct RecheckReader<'a, F> {
     protocol: CitationProtocol,
     read: F,
+    projection: Option<&'a ProjectionGain<'a>>,
 }
 
 fn pending_reads(pending: &[Pending<'_, '_>], interactive: bool) -> Vec<ContextRead> {
@@ -1727,7 +1750,7 @@ fn live_assessments<'a>(
     anchors: &HashMap<u64, Citation<'a>>,
     evidence: &mut Evidence<'a>,
     ask: &mut Ask<'a, '_>,
-    mut reader: RecheckReader<impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
+    mut reader: RecheckReader<'_, impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
     limits: &mut Vec<String>,
 ) -> Result<(Vec<Assessment<'a>>, BatchCoverage)> {
     let initial = request(
@@ -1918,10 +1941,10 @@ fn live_assessments<'a>(
             windows,
             reader.protocol,
         )?;
-        let gained = focus::restores_hidden(evidence, windows)
-            || data["snapshot"]["head_context"]
-                .as_array()
-                .is_some_and(|items| items.len() > before);
+        let gained = data["snapshot"]["head_context"]
+            .as_array()
+            .is_some_and(|items| items.len() > before)
+            || (requested && reader.projection.is_some_and(|adds| adds(data, evidence)));
         if interactive
             && requested
             && !gained
@@ -2269,6 +2292,7 @@ where
         &mut |system, data, _| ask(system, data),
         RecheckReader {
             protocol,
+            projection: None,
             read: |requests: &[ContextRead]| {
                 let result = read(requests)?;
                 Ok(windows.get_or_init(|| result).as_slice())
@@ -2363,7 +2387,7 @@ fn review_passes<'a>(
     snapshot: &'a Snapshot,
     scan: &Scan,
     ask: &mut Ask<'a, '_>,
-    reader: RecheckReader<impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
+    reader: RecheckReader<'_, impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
     prior: &[Finding],
     protocol: CitationProtocol,
 ) -> Result<BatchResult> {

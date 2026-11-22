@@ -14,6 +14,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
 use std::{
+    borrow::Cow,
     io::{BufRead, BufReader, Read},
     time::{Duration, Instant},
 };
@@ -106,8 +107,10 @@ impl Provider {
         let Some(context) = &self.context else {
             return Ok(true);
         };
-        let format = AnswerShape::from_input(data).map(|shape| shape.format(data));
-        match context.output_budget(&self.client, system, &user_content(data)?, format.as_ref()) {
+        let shape = AnswerShape::from_input(data);
+        let system = system_content(system, shape);
+        let format = shape.map(|shape| shape.format(data));
+        match context.output_budget(&self.client, &system, &user_content(data)?, format.as_ref()) {
             Ok(_) => Ok(true),
             Err(error) if error.is::<crate::ReviewContextExceeded>() => Ok(false),
             Err(error) => Err(error),
@@ -119,6 +122,8 @@ impl Provider {
             !timeout.is_zero(),
             "The review exhausted its model time budget"
         );
+        let shape = AnswerShape::from_input(data);
+        let system = system_content(system, shape);
         let content = user_content(data)?;
         let mut body = json!({
             "model": self.model, "messages": [
@@ -126,14 +131,11 @@ impl Provider {
                 {"role":"user","content":content}],
             "response_format":{"type":"json_object"}
         });
-        let answer_shape = self
-            .context
-            .as_ref()
-            .and_then(|_| AnswerShape::from_input(data));
+        let answer_shape = shape.filter(|_| self.context.is_some());
         if let Some(context) = &self.context {
             let format = answer_shape.map(|shape| shape.format(data));
             let max_tokens =
-                context.output_budget(&self.client, system, &content, format.as_ref())?;
+                context.output_budget(&self.client, &system, &content, format.as_ref())?;
             if let Some(format) = format {
                 body["response_format"] = format;
             }
@@ -221,6 +223,19 @@ fn send_generation(
         }
         result => result.context("Provider is unavailable"),
     }
+}
+
+// Apply this optional field at the transport boundary so the engine can replay
+// earlier proposals with the same checkpoint key. Sizing uses this exact text.
+fn system_content(system: &str, shape: Option<AnswerShape>) -> Cow<'_, str> {
+    let subject = match shape {
+        Some(AnswerShape::Hypotheses) => "hypothesis",
+        Some(AnswerShape::Assessments { leads: true, .. }) => "additional lead",
+        _ => return Cow::Borrowed(system),
+    };
+    Cow::Owned(format!(
+        "{system}\nFor each {subject}, you may add \"related\", an array of up to eight H or B references copied from the supplied rows. Include lines from other files when they help check the claim."
+    ))
 }
 
 // Implicit provider caching matches prompt prefixes. Keep the pinned diff ahead
@@ -1253,7 +1268,10 @@ mod tests {
             let provider = Provider::new(&endpoint, "  test  ", "fixture-token".into()).unwrap();
             assert_eq!(
                 provider
-                    .ask("instruction", &json!({"diff": "x".repeat(1_200_000)}))
+                    .ask(
+                        "instruction",
+                        &json!({"answer_shape":"hypotheses","diff": "x".repeat(1_200_000)})
+                    )
                     .unwrap(),
                 json!({})
             );
@@ -1327,6 +1345,9 @@ mod tests {
         assert!(authorized);
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["model"], "test");
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with("instruction\nFor each hypothesis"));
+        assert_eq!(system.matches("\"related\"").count(), 1);
         assert!(body.get("stream").is_none() && body.get("stream_options").is_none());
         let user: Value =
             serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();

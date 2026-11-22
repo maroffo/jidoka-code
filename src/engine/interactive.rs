@@ -50,6 +50,9 @@ Ask only for source that can change that verdict. Other IDs still need a disposi
 Use path "*" with a nonempty literal to search the pinned repository; "*:13" opens
 the next page of matching paths. Use an exact path with an empty term to open
 the file, "#L81" for a particular line, or a literal for matching passages.
+To reopen the original base and head rows of a changed or supporting file, use
+its exact path with "#diff", including for deleted files. Follow the next term
+in snapshot.diff_pages to read later pages. Scope "file" shows pinned text only.
 Rechecks include the last assessments and all previous pinned evidence. A search
 with no hits does not establish absence. If no further source can help, describe
 the concrete remaining human check. Set complete to true when every required ID
@@ -312,6 +315,13 @@ fn review_chunk(
                 let projection = context.borrow().project(data, evidence);
                 let (focused, visible) = projection.unzip();
                 let input = focused.as_ref().unwrap_or(data);
+                has_source |= input["snapshot"]["diff_pages"]
+                    .as_array()
+                    .is_some_and(|pages| {
+                        pages
+                            .iter()
+                            .any(|page| page["returned_rows"].as_u64().unwrap_or(0) > 0)
+                    });
                 evidence.view = visible;
                 match fits(system, input) {
                     Ok(true) => {}
@@ -425,7 +435,12 @@ fn review_chunk(
                     stop = Some(Stop::TurnLimit);
                     anyhow::bail!("Model turn limit reached.")
                 };
-                let result = read.borrow_mut()(full, std::slice::from_ref(&request));
+                let diff = diff_read::page(&request.path, &request.term).is_some();
+                let result = if diff {
+                    Ok(Vec::new())
+                } else {
+                    read.borrow_mut()(full, std::slice::from_ref(&request))
+                };
                 let status = match result {
                     Ok(windows) => {
                         let windows = slot.get_or_init(|| windows);
@@ -440,10 +455,14 @@ fn review_chunk(
                                     .flatten()
                                     .filter_map(|h| h["id"].as_u64()),
                             );
-                        context.borrow_mut().record(&request, windows);
-                        let count = extend_evidence(data, evidence, windows);
-                        has_source |= returned_source(windows);
-                        format!("{count} new source lines.")
+                        if diff {
+                            "See the indexed base/head rows and the next page, if available, in the snapshot.".into()
+                        } else {
+                            context.borrow_mut().record(&request, windows);
+                            let count = extend_evidence(data, evidence, windows);
+                            has_source |= returned_source(windows);
+                            format!("{count} new source lines.")
+                        }
                     }
                     Err(_) => "The pinned source lookup failed.".into(),
                 };
@@ -452,11 +471,16 @@ fn review_chunk(
         },
         RecheckReader {
             protocol: CitationProtocol::Interactive,
+            projection: Some(&|data, evidence| context.borrow().adds_evidence(data, evidence)),
             read: |requests: &[ContextRead]| {
                 let mut windows = Vec::new();
                 let mut failure = None;
                 // Each lookup has its own page budget, even when different IDs ask in the same round.
                 for request in requests {
+                    if diff_read::page(&request.path, &request.term).is_some() {
+                        // The focused request projects these rows from the indexed snapshot.
+                        continue;
+                    }
                     match read.borrow_mut()(full, std::slice::from_ref(request)) {
                         Ok(result) => {
                             context.borrow_mut().record(request, &result);

@@ -169,3 +169,71 @@ fn focused_requests_keep_pinned_proof_and_report_unresolved_coverage() {
     assert_eq!(result.report.limits.len(), 1);
     assert!(result.report.limits[0].contains("deployment permission"));
 }
+
+#[test]
+fn focused_review_can_reopen_deleted_rows_and_pinned_support_across_diff_pages() {
+    let deleted: Vec<_> = (1..=40).map(|n| format!("old entry {n}")).collect();
+    let contract = "A one-slot pool must admit exactly one worker.";
+    let before = "fn capacity(slots: usize) -> usize { slots }";
+    let files = json!([
+        {"path":"pool.rs","before":before,"after":CAPACITY,"patch":format!("@@ -1 +1 @@\n-{before}\n+{CAPACITY}")},
+        {"path":"removed.md","before":deleted.join("\n"),"after":"","patch":format!("@@ -1,40 +0,0 @@\n{}",deleted.iter().map(|s| format!("-{s}")).collect::<Vec<_>>().join("\n"))},
+        {"path":"retained.md","before":"Old safeguard.\nOther section.","after":"Other section.","patch":"@@ -1 +0,0 @@\n-Old safeguard."},
+        {"path":"policy.md","before":contract,"after":contract,"patch":""}
+    ]);
+    let snapshot: Snapshot = serde_json::from_value(json!({
+        "repo":"example/workers","url":"https://github.com/example/workers/pull/1",
+        "number":1,"base":"base","head":"pinned","files":files,"intent":[],"limits":[]
+    }))
+    .unwrap();
+    let mut turns = 0;
+    let mut last_deletion = Value::Null;
+    let result = review_snapshot_iterative(snapshot, |_, data| {
+        turns += 1;
+        let files = data["snapshot"]["files"].as_array().unwrap();
+        let file = |path| files.iter().find(|f| f["path"] == path).unwrap();
+        let anchor = reference(data,"pool.rs",CAPACITY);
+        let pending = |reads:Value| json!({"complete":true,"assessments":[{"id":1,"outcome":"indeterminate","countercheck":"Compare the removed safeguards and the pinned capacity contract.","reads":reads}]});
+        Ok(match turns {
+            1 => {
+                last_deletion = file("removed.md")["sections"][0][39].clone();
+                json!({"complete":true,"hypotheses":[{"anchor":anchor,"expected":"A requested worker is available.","scenario":"A pool is given one slot.","consequence":"No worker can enter."}]})
+            }
+            2 => {
+                assert_eq!(files.len(), 1);
+                assert_eq!(data["snapshot"]["supporting_paths"], json!(["policy.md"]));
+                pending(json!([{"path":"removed.md","term":"#diff"},{"path":"retained.md","term":"#diff"},{"path":"policy.md","term":"#diff"}]))
+            }
+            3 => {
+                let deleted = &file("removed.md")["sections"][0];
+                assert_eq!(deleted.as_array().unwrap().len(),32);
+                assert!(deleted[0][0].is_string() && deleted[0][1].is_null());
+                assert!(!data.to_string().contains("old entry 40"));
+                assert_eq!(file("retained.md")["sections"][0][0][2],"Old safeguard.");
+                assert_eq!(file("policy.md")["scope"],"file");
+                let page = data["snapshot"]["diff_pages"].as_array().unwrap().iter()
+                    .find(|p| p["path"]=="removed.md").unwrap();
+                pending(json!([{"path":"removed.md","term":page["next"]}]))
+            }
+            4 => {
+                assert_eq!(file("removed.md")["sections"][0][39],last_deletion);
+                let rule = &file("policy.md")["sections"][0][0];
+                let old = &file("pool.rs")["sections"][0][0][0];
+                json!({"complete":true,"assessments":[{"id":1,"outcome":"confirmed","kind":"contract","severity":"high","title":"One-slot pools admit no workers", "basis":rule[1],"support":[],"comparison":{"behavior":old,"basis":rule[0],"affected":false},"impact":"No worker can enter a pool with one slot.","reason":"The new calculation subtracts one even when only one slot is requested.","countercheck":"The old capacity calculation accepted the single slot.","counterevidence":{"references":[anchor],"absence_paths":[]}}]})
+            }
+            _ => panic!("Unexpected review turn {turns}"),
+        })
+    }, |_,_| panic!("Indexed diff reads must not consult the head tree"), |_,_| Ok(true), &[]).unwrap();
+    assert_eq!(turns, 4);
+    assert!(
+        result.report.limits.is_empty(),
+        "{:?}",
+        result.report.limits
+    );
+    assert_eq!(result.report.findings.len(), 1);
+    assert_eq!(
+        result.report.findings[0].attribution,
+        jidoka_code::contracts::Attribution::Introduced
+    );
+    assert!(result.unfinished_patches().unwrap().is_empty());
+}
