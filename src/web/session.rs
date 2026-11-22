@@ -148,17 +148,25 @@ impl Session {
         let mut retries = 0;
         loop {
             let result = self.dispatch(&fingerprint, &mut call);
-            let retry = result
-                .as_ref()
-                .err()
-                .and_then(|e| e.downcast_ref::<reqwest::Error>())
-                .is_some_and(|e| {
-                    e.is_timeout()
-                        || e.is_connect()
-                        || e.status().is_some_and(|s| {
+            let retry = result.as_ref().err().is_some_and(|e| {
+                e.downcast_ref::<reqwest::Error>().is_some_and(|r| {
+                    r.is_timeout()
+                        || r.is_connect()
+                        || r.is_body()
+                        || (r.is_request() && r.status().is_none())
+                        || r.status().is_some_and(|s| {
                             s == reqwest::StatusCode::TOO_MANY_REQUESTS || s.is_server_error()
                         })
-                });
+                }) || e
+                    .downcast_ref::<crate::provider::InvalidReply>()
+                    .is_some_and(|r| {
+                        matches!(
+                            r.reason,
+                            "Provider returned incomplete JSON."
+                                | "Provider returned invalid review JSON."
+                        )
+                    })
+            });
             if !retry || retries >= 2 {
                 return result;
             }
@@ -180,32 +188,58 @@ impl Session {
         let ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
         let tx = self.db.transaction()?;
         tx.execute(
-            "UPDATE review_runs SET model_ms=model_ms+? WHERE review_id=?",
-            params![ms, self.id],
+            "UPDATE review_runs SET model_ms=model_ms+?,stop_reason=? WHERE review_id=?",
+            params![ms, result.as_ref().err().map(turn_error), self.id],
         )?;
-        if let Ok(reply) = &result {
-            let usage = &reply.usage;
+        let usage = match &result {
+            Ok(reply) => Some(reply.usage),
+            Err(error) => error
+                .downcast_ref::<crate::provider::InvalidReply>()
+                .map(|r| r.usage),
+        };
+        if let Some(usage) = usage {
             tx.execute("UPDATE review_runs SET
                 input_tokens=CASE WHEN ?1 IS NULL THEN input_tokens ELSE coalesce(input_tokens,0)+?1 END,
                 output_tokens=CASE WHEN ?2 IS NULL THEN output_tokens ELSE coalesce(output_tokens,0)+?2 END,
                 cached_tokens=CASE WHEN ?3 IS NULL THEN cached_tokens ELSE coalesce(cached_tokens,0)+?3 END
                 WHERE review_id=?4",params![usage.input,usage.output,usage.cached,self.id])?;
+        }
+        if let Ok(reply) = &result {
             tx.execute("INSERT OR REPLACE INTO review_turns(review_id,step,fingerprint,reply) VALUES(?,?,?,?)",params![self.id,self.step,fingerprint,serde_json::to_string(&reply.value)?])?;
         }
         tx.commit()?;
-        eprintln!(
-            "Review {} turn {turn}: {} ({ms} ms)",
-            self.id,
-            if result.is_ok() { "received" } else { "failed" }
-        );
+        let status = match &result {
+            Ok(_) => "received".to_owned(),
+            Err(error) => turn_error(error),
+        };
+        eprintln!("Review {} turn {turn}: {status} ({ms} ms)", self.id);
         result.map(|r| r.value)
     }
 }
 
+fn turn_error(error: &anyhow::Error) -> String {
+    if let Some(reply) = error.downcast_ref::<crate::provider::InvalidReply>() {
+        return reply.reason.into();
+    }
+    if let Some(err) = error.downcast_ref::<reqwest::Error>() {
+        if let Some(status) = err.status() {
+            return format!("Provider HTTP {status}.");
+        }
+        if err.is_timeout() {
+            return "Provider timed out.".into();
+        }
+        return "Provider connection interrupted.".into();
+    }
+    if error.is::<crate::ReviewContextExceeded>() {
+        return "Provider context window exceeded.".into();
+    }
+    "Model call failed.".into()
+}
+
 pub(super) fn finish(db: &Connection, id: i64, status: &str, reason: &str) -> Result<()> {
     db.execute(
-        "UPDATE review_runs SET stop_reason=? WHERE review_id=?",
-        params![reason, id],
+        "UPDATE review_runs SET stop_reason=CASE WHEN ?1='failed' THEN coalesce(stop_reason,?2) ELSE ?2 END WHERE review_id=?3",
+        params![status,reason, id],
     )?;
     if matches!(status, "completed" | "partial" | "superseded") {
         db.execute("DELETE FROM review_turns WHERE review_id=?", [id])?;
@@ -249,7 +283,7 @@ pub fn record_reads(db: &Path, id: i64, windows: &[crate::contracts::SourceWindo
 
 pub(super) fn metrics(db: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
     db.query_row(
-        "SELECT turns,input_tokens,output_tokens,model_ms FROM review_runs WHERE review_id=?",
+        "SELECT turns,input_tokens,output_tokens,model_ms,CASE WHEN (SELECT status FROM reviews WHERE id=review_id)='failed' THEN stop_reason END FROM review_runs WHERE review_id=?",
         [id],
         |r| {
             let turns: i64 = r.get(0)?;
@@ -262,6 +296,7 @@ pub(super) fn metrics(db: &Connection, id: i64) -> rusqlite::Result<Option<Strin
             if let Some(tokens) = r.get::<_, Option<i64>>(2)? {
                 summary.push_str(&format!(" · {tokens} output tokens"));
             }
+            if let Some(reason)=r.get::<_,Option<String>>(4)? { summary.push_str(&format!(" · {reason}")); }
             Ok(summary)
         },
     )
@@ -323,7 +358,7 @@ mod tests {
     fn resuming_reuses_only_matching_turns_and_keeps_one_budget() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reviews.db");
-        init(&connect(&path).unwrap()).unwrap();
+        super::super::init_db(&connect(&path).unwrap()).unwrap();
         let input = json!({"source":"patch"});
         let answer = || {
             Ok(ModelReply {

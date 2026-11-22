@@ -225,28 +225,52 @@ fn check_status(response: Response) -> Result<Response> {
     bail!("The provider rejected the request (HTTP {status})")
 }
 
+#[derive(Debug)]
+pub struct InvalidReply {
+    pub reason: &'static str,
+    pub usage: TokenUsage,
+}
+impl std::fmt::Display for InvalidReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+impl std::error::Error for InvalidReply {}
+
 fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
-    let reply: Value = serde_json::from_slice(bytes)?;
+    let reply: Value = serde_json::from_slice(bytes).context(InvalidReply {
+        reason: "Provider returned incomplete JSON.",
+        usage: TokenUsage::default(),
+    })?;
     let first = &reply["choices"][0];
-    ensure!(
-        first["finish_reason"] == "stop",
-        "Incomplete provider response"
-    );
-    let value: Value = serde_json::from_str(
-        first["message"]["content"]
-            .as_str()
-            .context("Provider response is missing text")?,
-    )?;
-    ensure!(value.is_object(), "Expected a JSON object");
     let usage = &reply["usage"];
-    Ok(ModelReply {
-        value,
-        usage: TokenUsage {
-            input: usage["prompt_tokens"].as_u64(),
-            output: usage["completion_tokens"].as_u64(),
-            cached: usage["prompt_tokens_details"]["cached_tokens"].as_u64(),
-        },
-    })
+    let usage = TokenUsage {
+        input: usage["prompt_tokens"].as_u64(),
+        output: usage["completion_tokens"].as_u64(),
+        cached: usage["prompt_tokens_details"]["cached_tokens"].as_u64(),
+    };
+    let issue = |reason| InvalidReply { reason, usage };
+    match first["finish_reason"].as_str() {
+        Some("stop") => {}
+        Some("length") => {
+            return Err(anyhow::Error::new(crate::ReviewContextExceeded)
+                .context(issue("Provider reached the output token limit.")));
+        }
+        Some("content_filter") => {
+            return Err(issue("Provider stopped at its content filter.").into());
+        }
+        _ => return Err(issue("Provider stopped before completing its reply.").into()),
+    }
+    let text = first["message"]["content"]
+        .as_str()
+        .ok_or_else(|| issue("Provider response is missing text."))?;
+    let value: Value =
+        serde_json::from_str(text).context(issue("Provider returned invalid review JSON."))?;
+    ensure!(
+        value.is_object(),
+        issue("Provider returned an unexpected review format.")
+    );
+    Ok(ModelReply { value, usage })
 }
 
 #[cfg(test)]
@@ -417,6 +441,14 @@ mod tests {
         ] {
             assert!(decode_reply(&serde_json::to_vec(&input).unwrap()).is_err());
         }
+    }
+
+    #[test]
+    fn exhausted_output_is_partitioned_and_counts_actual_usage() {
+        let result=decode_reply(br#"{"choices":[{"finish_reason":"length"}],"usage":{"prompt_tokens":18000,"completion_tokens":4096}}"#).unwrap_err();
+        assert!(result.is::<crate::ReviewContextExceeded>());
+        let failure = result.downcast_ref::<InvalidReply>().unwrap();
+        assert_eq!(failure.usage.output, Some(4096));
     }
 
     #[test]
