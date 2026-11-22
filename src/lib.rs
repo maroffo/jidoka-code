@@ -42,6 +42,7 @@ pub fn review_snapshot_with_context(
         report,
         scan: Some(scan),
         diff: snapshot.diff,
+        reviewed_files: None,
         patch_files: Some(
             snapshot
                 .files
@@ -52,3 +53,7 @@ pub fn review_snapshot_with_context(
         ),
     })
 }
+
+pub use engine::{
+    ReviewBatchInterrupted, ReviewContextExceeded, ReviewTurnLimit, review_snapshot_iterative,
+};

@@ -1,5 +1,6 @@
 //! Review pages and the persistent, single-user work queue.
 
+pub mod session;
 mod workflow;
 
 use std::{
@@ -65,8 +66,14 @@ fn init_db(connection: &Connection) -> rusqlite::Result<()> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             report TEXT,
             error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS provider_cooldowns (
+            provider TEXT PRIMARY KEY,
+            retry_at INTEGER NOT NULL,
+            backoff_seconds INTEGER NOT NULL
         )",
-    )
+    )?;
+    session::init(connection)
 }
 
 /// Recover interrupted work and invalidate old consent before starting the worker.
@@ -76,6 +83,13 @@ pub fn recover(db: &Path, provider: &str) -> Result<()> {
     crate::automation::init(&connection)?;
     crate::automation::recover(&connection, provider)?;
     let transaction = connection.transaction()?;
+    cancel_ineligible(&transaction, None)?;
+    transaction.execute(
+        "UPDATE reviews SET status='queued', error=NULL WHERE status='running' AND provider=?
+         AND EXISTS (SELECT 1 FROM review_runs WHERE review_id=reviews.id)
+         AND NOT EXISTS (SELECT 1 FROM automation_jobs WHERE review_id=reviews.id)",
+        [provider],
+    )?;
     transaction.execute(
         "UPDATE reviews SET status = 'failed', error = ?1 WHERE status = 'running'",
         [INTERRUPTED],
@@ -108,10 +122,15 @@ pub fn latest_review(db: &Path, provider: &str, url: &str) -> Result<Option<Publ
 /// On a later revision the previous line may have moved or disappeared entirely.
 /// Give discovery the old question without presenting its line or evidence as current.
 pub fn add_previous_questions(previous: &PublishedReport, current: &mut Snapshot) {
-    if previous.head == current.head
-        || previous.base != current.base
-        || !previous.repo.eq_ignore_ascii_case(&current.repo)
-    {
+    if previous.base != current.base || !previous.repo.eq_ignore_ascii_case(&current.repo) {
+        return;
+    }
+    if previous.head == current.head {
+        for limit in &previous.report.limits {
+            if limit.starts_with("Undecided at ") {
+                current.intent.push(format!("An earlier review left this question open. Use the pinned repository to verify or disprove it independently: {limit}"));
+            }
+        }
         return;
     }
     for finding in previous
@@ -168,18 +187,51 @@ pub fn run_one_pinned<F>(db: &Path, process: F) -> Result<bool>
 where
     F: FnOnce(&str, Option<&str>) -> Result<PublishedReport>,
 {
+    run_one_session(db, |_, url, head| process(url, head))
+}
+
+fn cancel_ineligible(db: &Connection, id: Option<i64>) -> Result<()> {
+    let canceled = db
+        .prepare(
+            "UPDATE reviews SET status='canceled',error=NULL
+        WHERE status IN ('queued','running') AND (?1 IS NULL OR id=?1)
+          AND EXISTS (SELECT 1 FROM ineligible_automatic_reviews WHERE review_id=reviews.id)
+        RETURNING id",
+        )?
+        .query_map([id], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in canceled {
+        db.execute("UPDATE automation_jobs SET state='canceled',retry_at=0 WHERE review_id=? AND state='pending'", [id])?;
+        session::finish(
+            db,
+            id,
+            "canceled",
+            "Automatic review is no longer eligible.",
+        )?;
+    }
+    Ok(())
+}
+
+pub fn run_one_session<F>(db: &Path, process: F) -> Result<bool>
+where
+    F: FnOnce(i64, &str, Option<&str>) -> Result<PublishedReport>,
+{
     let mut connection = connect(db)?;
     let transaction = connection.transaction()?;
-    let job: Option<(i64, String)> = transaction
+    let job: Option<(i64, String, String)> = transaction
         .query_row(
             "UPDATE reviews SET status = 'running'
-            WHERE id = (SELECT id FROM reviews WHERE status = 'queued' ORDER BY id LIMIT 1)
-            RETURNING id, url",
+            WHERE id = (SELECT id FROM reviews WHERE status = 'queued'
+                AND NOT EXISTS (SELECT 1 FROM ineligible_automatic_reviews WHERE review_id=reviews.id)
+                AND NOT EXISTS (SELECT 1 FROM provider_cooldowns
+                    WHERE provider=reviews.provider AND retry_at>unixepoch())
+                ORDER BY id LIMIT 1)
+            RETURNING id, url, provider",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((id, url)) = job else {
+    let Some((id, url, provider)) = job else {
         transaction.commit()?;
         return Ok(false);
     };
@@ -192,7 +244,7 @@ where
         .optional()?;
     transaction.commit()?;
 
-    let outcome = process(&url, expected_head.as_deref()).and_then(|report| {
+    let outcome = process(id, &url, expected_head.as_deref()).and_then(|report| {
         anyhow::ensure!(
             expected_head
                 .as_deref()
@@ -206,8 +258,37 @@ where
         };
         Ok((status, serde_json::to_string(&report)?))
     });
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if expected_head.is_some() {
+        cancel_ineligible(&tx, Some(id))?;
+    }
     let (status, report, error) = match outcome {
         Ok((status, report)) => (status, Some(report), None),
+        Err(error) if error.is::<crate::provider::RateLimited>() => {
+            let limit = error.downcast::<crate::provider::RateLimited>()?;
+            let prior: Option<i64> = tx
+                .query_row(
+                    "SELECT backoff_seconds FROM provider_cooldowns WHERE provider=?",
+                    [&provider],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            // Without provider guidance, start at one minute and double to one hour.
+            let backoff = prior.map_or(60, |seconds| seconds.saturating_mul(2).clamp(60, 3600));
+            let delay = limit.retry_after.map_or(backoff, |hint| {
+                let rounded = hint
+                    .as_secs()
+                    .saturating_add(u64::from(hint.subsec_nanos() != 0));
+                rounded.clamp(1, 253402300799) as i64
+            });
+            // unixepoch() rounds down. Round the deadline up so the retry never fires early.
+            tx.execute("INSERT INTO provider_cooldowns (provider,retry_at,backoff_seconds)
+                VALUES (?1,min(253402300799,unixepoch()+1+?2),?3)
+                ON CONFLICT(provider) DO UPDATE SET retry_at=max(retry_at,excluded.retry_at),backoff_seconds=excluded.backoff_seconds",
+                params![provider,delay,backoff])?;
+            ("queued", None, None)
+        }
+        Err(error) if error.is::<session::Paused>() => ("queued", None, None),
         Err(error) if expected_head.is_some() && error.is::<crate::source::HeadChanged>() => {
             ("superseded", None, None)
         }
@@ -218,11 +299,34 @@ where
             ("failed", None, Some(reason))
         }
     };
-    let tx = connection.transaction()?;
     let updated = tx.execute(
         "UPDATE reviews SET status = ?1, report = ?2, error = ?3 WHERE id = ?4 AND status = 'running'",
         params![status, report, error, id],
     )?;
+    if updated != 0 && status != "queued" {
+        let reason = report
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<PublishedReport>(raw).ok())
+            .and_then(|r| {
+                r.report
+                    .limits
+                    .into_iter()
+                    .chain(r.scan.into_iter().flat_map(|s| s.limits))
+                    .next()
+            })
+            .unwrap_or_else(|| error.clone().unwrap_or_else(|| status.to_string()));
+        session::finish(&tx, id, status, &reason)?;
+    }
+    if updated == 0 {
+        let superseded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reviews WHERE id=? AND status='superseded')",
+            [id],
+            |r| r.get(0),
+        )?;
+        if superseded {
+            session::finish(&tx, id, "superseded", "superseded")?;
+        }
+    }
     if updated != 0 && status == "superseded" {
         tx.execute("UPDATE automation_jobs SET state='canceled', retry_at=0 WHERE review_id=?1 AND state='pending'", [id])?;
         tx.execute("UPDATE automation_settings SET review_error=NULL, review_error_job=NULL WHERE review_error_job=?1", [id])?;
@@ -536,7 +640,12 @@ async fn checked_form(
     }) {
         return Err(PageError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, BAD_FORM));
     }
-    let Ok(body) = to_bytes(request.into_body(), FORM_LIMIT).await else {
+    let Ok(body) = to_bytes(
+        request.into_body(),
+        FORM_LIMIT.max(max_fields.saturating_mul(32)),
+    )
+    .await
+    else {
         return Err(PageError::new(StatusCode::PAYLOAD_TOO_LARGE, BAD_FORM));
     };
     if std::str::from_utf8(&body).is_err() {
@@ -657,19 +766,32 @@ async fn review(
     }
     let (token, cookie) = page_token(&state, &headers);
     let html = with_db(&state, move |connection| {
-        connection.query_row(
-            "SELECT url, provider, status, created_at, report, error FROM reviews WHERE id = ?1",
-            [id],
-            |row| {
-                let raw_report: Option<String> = row.get(4)?;
-                let error: Option<String> = row.get(5)?;
-                let stored: String = row.get(2)?;
-                let (status, replacement) = displayed_status(&connection, id, &stored, error.as_deref())?;
-                Ok(review_page((id, &token, replacement), &row.get::<_, String>(0)?, &row.get::<_, String>(1)?,
-                    status, &row.get::<_, String>(3)?,
-                    raw_report.as_deref(), error.as_deref()))
-            },
-        ).optional()
+        connection
+            .query_row(
+                "SELECT url, provider, status, created_at, report,
+                CASE WHEN status='queued' THEN (SELECT 'Provider rate limit. Automatic retry after '
+                    ||datetime(retry_at,'unixepoch')||' UTC.' FROM provider_cooldowns
+                    WHERE provider=reviews.provider AND retry_at>unixepoch()) ELSE error END
+             FROM reviews WHERE id = ?1",
+                [id],
+                |row| {
+                    let raw_report: Option<String> = row.get(4)?;
+                    let error: Option<String> = row.get(5)?;
+                    let stored: String = row.get(2)?;
+                    let (status, replacement) =
+                        displayed_status(&connection, id, &stored, error.as_deref())?;
+                    Ok(review_page(
+                        (id, &token, replacement, session::metrics(&connection, id)?),
+                        &row.get::<_, String>(0)?,
+                        &row.get::<_, String>(1)?,
+                        status,
+                        &row.get::<_, String>(3)?,
+                        raw_report.as_deref(),
+                        error.as_deref(),
+                    ))
+                },
+            )
+            .optional()
     })
     .await?;
     Ok(html.map_or_else(not_found, |html| form_page(html, cookie)))
@@ -1065,6 +1187,9 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
                 html_list("ul", &text_list(files), "No patches were supplied.")
             )
         });
+    let unfinished = report.unfinished_patches().filter(|paths| !paths.is_empty()).map_or_else(String::new, |paths| {
+        format!("<details><summary>Patches with unfinished review ({})</summary><ul>{}</ul></details>", paths.len(), text_list(paths))
+    });
     let limits = text_list(report.report.limits.iter().filter(|limit| {
         !report
             .scan
@@ -1084,12 +1209,21 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
     let files = report.patch_files.as_ref().map_or_else(String::new, |v| {
         format!("<div><dt>Files with patches</dt><dd>{}</dd></div>", v.len())
     });
+    let checked = report
+        .reviewed_files
+        .as_ref()
+        .map_or_else(String::new, |paths| {
+            format!(
+                "<div><dt>Files with completed review</dt><dd>{}</dd></div>",
+                paths.len()
+            )
+        });
     format!(
         r##"<div class="workspace"><div>{warnings}{content}</div>
         <aside><section class="panel inspect"><div class="panel-head"><h2>Review summary</h2></div><dl>
-        <div><dt>Verified findings</dt><dd>{}</dd></div><div><dt>Manual checks</dt><dd>{}</dd></div>{files}</dl>
+        <div><dt>Verified findings</dt><dd>{}</dd></div><div><dt>Manual checks</dt><dd>{}</dd></div>{files}{checked}</dl>
         <details><summary>Git revisions</summary><div class="detail-body"><b>Reviewed revision</b><code>{}</code><b>Base revision</b><code>{}</code></div></details></section>
-        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Review coverage</h2></div>{coverage_limits}{patches}
+        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Review coverage</h2></div>{coverage_limits}{unfinished}{patches}
         <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section></aside></div>"##,
         report.report.findings.len(),
         manual.len(),
@@ -1105,7 +1239,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
 }
 
 fn review_page(
-    (id, token, replacement): (i64, &str, Option<i64>),
+    (id, token, replacement, metrics): (i64, &str, Option<i64>, Option<String>),
     url: &str,
     provider: &str,
     status: &str,
@@ -1127,10 +1261,10 @@ fn review_page(
         },
     );
     let (status, details) = match status {
-        "queued" | "running" => (
-            status,
-            format!(r#"<p><a href="/reviews/{id}">Refresh status</a></p>"#),
-        ),
+        "queued" | "running" => {
+            let waiting = failure.map_or_else(String::new, |reason| format!("<p>{}</p>", escape(reason)));
+            (status, format!(r#"{waiting}<p><a href="/reviews/{id}">Refresh status</a></p>"#))
+        }
         "superseded" => (
             status,
             replacement.map_or_else(|| "<p>A newer revision replaced this review.</p>".into(),
@@ -1159,12 +1293,15 @@ fn review_page(
         }
         _ => ("failed", failure_html(failure)),
     };
+    let metrics = metrics.map_or_else(String::new, |value| {
+        format!(r#"<p class="meta">{}</p>"#, escape(&value))
+    });
     page(
         &format!("Review {id}"),
         &format!(
             r##"<div class="hero"><div class="trail"><a href="/#history">Review history</a><span>/</span>Review {id}</div>
 <div class="title-line"><h1>{heading}</h1>{}</div>
-<div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div></div>{details}"##,
+<div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div>{metrics}</div>{details}"##,
             status_badge(status),
             escape(created),
             escape(provider_name(provider)),
@@ -1219,6 +1356,18 @@ mod tests {
         let (row, _) = row.split_once("</a>").unwrap();
         assert!(row.contains(&format!("{repo} <b>#{number}</b>")));
         assert!(row.contains(&format!(">{status}</span>")));
+    }
+
+    #[test]
+    fn html_distinguishes_collected_and_finished_file_counts() {
+        let mut report = report(None);
+        report.patch_files = Some(vec!["src/a.rs".into(), "src/b.rs".into()]);
+        assert!(!report_html(&report, false).contains("Files with completed review"));
+        report.reviewed_files = Some(vec!["src/a.rs".into()]);
+        let html = report_html(&report, true);
+        assert!(html.contains("Files with patches</dt><dd>2"));
+        assert!(html.contains("Files with completed review</dt><dd>1"));
+        assert!(html.contains("Patches with unfinished review (1)</summary><ul><li>src/b.rs</li>"));
     }
 
     #[test]
@@ -1390,6 +1539,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn all_findings_in_a_large_report_can_be_previewed() {
+        let f = Fixture::new();
+        let path = f.enqueue(URL).await;
+        let mut r = report(None);
+        for i in 0..140 {
+            r.report.findings.push(Finding {
+                path: "readme.md".into(),
+                line: i + 1,
+                title: format!("Finding {i}"),
+                impact: "A documented operation fails.".into(),
+                evidence: "A regression is visible in the changed expression.".into(),
+                attribution: Attribution::Introduced,
+            });
+        }
+        run_one(&f.db, |_| Ok(r)).unwrap();
+        let (cookie, token) = f.form().await;
+        let headers = [
+            ("cookie", cookie.as_str()),
+            ("origin", ORIGIN),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ];
+        let mut body = format!("csrf_token={token}&event=COMMENT");
+        for i in 0..140 {
+            write!(body, "&finding-{i}=yes").unwrap();
+        }
+        let (status, _, page) = f
+            .request(Method::POST, &format!("{path}/submit"), &headers, body)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("finding-139"));
+    }
+
+    #[tokio::test]
     async fn repository_forms_default_to_manual_and_enforce_the_allowlist() {
         let f = Fixture::new();
         let (cookie, token) = f.form().await;
@@ -1529,6 +1711,95 @@ mod tests {
         );
     }
 
+    fn enable_automatic_test_pr(db: &Connection, head: &str) {
+        crate::automation::bind_provider(db, PROVIDER).unwrap();
+        db.execute(
+            "INSERT OR IGNORE INTO automation_settings(repo,mode) VALUES ('test/demo','summary')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO automation_seen(repo,number,head,ready) VALUES ('test/demo',7,?,1)",
+            [head],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn revoked_automatic_review_cannot_dispatch_or_resume_after_a_pause_or_rate_limit() {
+        for rate_limited in [true, false] {
+            let f = Fixture::new();
+            let db = connect(&f.db).unwrap();
+            enable_automatic_test_pr(&db, "pinned");
+            db.execute(
+                "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
+                [URL, PROVIDER],
+            )
+            .unwrap();
+            db.execute("INSERT INTO automation_jobs(repo,number,head,review_id) VALUES ('test/demo',7,'pinned',1)", []).unwrap();
+            assert!(
+                run_one_session(&f.db, |id, _, _| {
+                    assert!(session::running(&f.db, id)?);
+                    let mut session = session::Session::open(&f.db, id)?;
+                    if rate_limited {
+                        crate::automation::set_mode(&db, "test/demo", "manual")?;
+                    } else {
+                        db.execute("UPDATE automation_seen SET ready=0", [])?;
+                        db.execute("UPDATE automation_jobs SET state='canceled'", [])?;
+                    }
+                    assert!(!session::running(&f.db, id)?);
+                    let error = session
+                        .ask_when_eligible(
+                            "review",
+                            &serde_json::json!({}),
+                            || {
+                                anyhow::ensure!(session::running(&f.db, id)?, "review revoked");
+                                Ok(())
+                            },
+                            || panic!("must not dispatch after consent was revoked"),
+                        )
+                        .unwrap_err();
+                    assert_eq!(error.to_string(), "review revoked");
+                    if rate_limited {
+                        Err(crate::provider::RateLimited::new(None).into())
+                    } else {
+                        Err(session::Paused.into())
+                    }
+                })
+                .unwrap()
+            );
+            let status = || {
+                db.query_row("SELECT status FROM reviews WHERE id=1", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap()
+            };
+            assert_eq!(status(), "canceled");
+            db.execute("DELETE FROM provider_cooldowns", []).unwrap();
+            // Older workers could leave an ineligible job queued or running.
+            for stored in ["queued", "running"] {
+                db.execute("UPDATE reviews SET status=? WHERE id=1", [stored])
+                    .unwrap();
+                assert!(!run_one_session(&f.db, |_, _, _| panic!("revoked job claimed")).unwrap());
+                recover(&f.db, PROVIDER).unwrap();
+                assert_eq!(status(), "canceled");
+            }
+            db.execute(
+                "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
+                [URL, PROVIDER],
+            )
+            .unwrap();
+            assert!(
+                run_one_session(&f.db, |id, _, head| {
+                    assert_eq!((id, head), (2, None));
+                    assert!(session::running(&f.db, id)?);
+                    Ok(report(None))
+                })
+                .unwrap()
+            );
+        }
+    }
+
     #[test]
     fn automatic_queue_passes_the_pinned_head_and_rejects_a_mismatch() {
         let f = Fixture::new();
@@ -1540,6 +1811,7 @@ mod tests {
         .unwrap();
         let id = conn.last_insert_rowid();
         let expected = "a".repeat(40);
+        enable_automatic_test_pr(&conn, &expected);
         conn.execute(
             "INSERT INTO automation_jobs(repo,number,head,review_id) VALUES ('test/demo',7,?1,?2)",
             params![expected, id],
@@ -1556,6 +1828,166 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stored, ("failed".to_owned(), None));
+    }
+
+    #[tokio::test]
+    async fn provider_rate_limit_defers_manual_and_automatic_reviews_across_restart() {
+        let f = Fixture::new();
+        let db = connect(&f.db).unwrap();
+        for provider in [PROVIDER, PROVIDER, "other"] {
+            db.execute(
+                "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
+                [URL, provider],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO review_runs(review_id,turns,snapshot) VALUES(1,499,'checkpoint')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO review_turns(review_id,step,fingerprint,reply) VALUES(1,1,X'01','cached')",
+            [],
+        )
+        .unwrap();
+        let head = report(None).head;
+        enable_automatic_test_pr(&db, &head);
+        db.execute(
+            "INSERT INTO automation_jobs(repo,number,head,review_id) VALUES('test/demo',7,?,2)",
+            [&head],
+        )
+        .unwrap();
+        let limited = || crate::provider::RateLimited::new(Some(Duration::from_secs(137))).into();
+        let now: i64 = db
+            .query_row("SELECT unixepoch()", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            run_one_session(&f.db, |id, _, _| {
+                assert_eq!(id, 1);
+                Err(limited())
+            })
+            .unwrap()
+        );
+        let retry_at: i64 = db
+            .query_row(
+                "SELECT retry_at FROM provider_cooldowns WHERE provider=?",
+                [PROVIDER],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(retry_at >= now + 137);
+        for id in [1, 2] {
+            assert!(
+                f.get(&format!("/reviews/{id}"))
+                    .await
+                    .contains("Provider rate limit. Automatic retry after")
+            );
+        }
+        assert!(
+            run_one_session(&f.db, |id, _, _| {
+                assert_eq!(id, 3);
+                Ok(report(None))
+            })
+            .unwrap()
+        );
+        recover(&f.db, PROVIDER).unwrap();
+        assert!(!run_one_session(&f.db, |_, _, _| panic!("provider must wait")).unwrap());
+        let expire = || {
+            db.execute("UPDATE provider_cooldowns SET retry_at=unixepoch()-1", [])
+                .unwrap()
+        };
+        assert_eq!(expire(), 1);
+        assert!(run_one_session(&f.db, |id, _, _| {
+            assert_eq!(id,1);
+            let checkpoint: (i64,String,String) = db.query_row("SELECT turns,snapshot,reply FROM review_runs JOIN review_turns USING(review_id) WHERE review_id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            assert_eq!(checkpoint,(499,"checkpoint".into(),"cached".into()));
+            Ok(report(None))
+        }).unwrap());
+        assert!(
+            run_one_session(&f.db, |id, _, expected| {
+                assert_eq!((id, expected), (2, Some(head.as_str())));
+                Err(limited())
+            })
+            .unwrap()
+        );
+        recover(&f.db, PROVIDER).unwrap();
+        let automatic: (String,String,i64) = db.query_row("SELECT reviews.status,job.state,job.analysis_attempts FROM reviews JOIN automation_jobs job ON reviews.id=job.review_id WHERE reviews.id=2", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(automatic, ("queued".into(), "pending".into(), 0));
+        assert!(!run_one_session(&f.db, |_, _, _| panic!("provider must still wait")).unwrap());
+        assert_eq!(expire(), 1);
+        assert!(
+            run_one_session(&f.db, |id, _, expected| {
+                assert_eq!((id, expected), (2, Some(head.as_str())));
+                Ok(report(None))
+            })
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_retry_hint_backs_off_until_provider_recovers() {
+        let f = Fixture::new();
+        let db = connect(&f.db).unwrap();
+        db.execute(
+            "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
+            [URL, PROVIDER],
+        )
+        .unwrap();
+        let input = serde_json::json!({"step":"discovery"});
+        let reply = || {
+            Ok(crate::provider::ModelReply {
+                value: serde_json::json!({}),
+                usage: Default::default(),
+            })
+        };
+        session::Session::open(&f.db, 1)
+            .unwrap()
+            .ask("first", &input, reply)
+            .unwrap();
+        for expected in [60, 120] {
+            assert!(
+                run_one_session(&f.db, |id, _, _| {
+                    let mut session = session::Session::open(&f.db, id)?;
+                    session.ask("first", &input, || {
+                        panic!("cached reply must not reset backoff")
+                    })?;
+                    session.ask("second", &input, || {
+                        Err(crate::provider::RateLimited::new(None).into())
+                    })?;
+                    unreachable!()
+                })
+                .unwrap()
+            );
+            let delay: i64 = db
+                .query_row(
+                    "SELECT backoff_seconds FROM provider_cooldowns WHERE retry_at>unixepoch()",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(delay, expected);
+            db.execute("UPDATE provider_cooldowns SET retry_at=unixepoch()", [])
+                .unwrap();
+        }
+        assert!(
+            run_one_session(&f.db, |id, _, _| {
+                let mut session = session::Session::open(&f.db, id)?;
+                session.ask("first", &input, || panic!("cached reply expected"))?;
+                session.ask("second", &input, reply)?;
+                session.ask("third", &input, || {
+                    Err(crate::provider::RateLimited::new(None).into())
+                })?;
+                unreachable!()
+            })
+            .unwrap()
+        );
+        let delay: i64 = db
+            .query_row("SELECT backoff_seconds FROM provider_cooldowns", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(delay, 60);
     }
 
     fn form_body(token: &str, url: &str, consent: Option<&str>) -> String {
@@ -1578,6 +2010,7 @@ mod tests {
             base: "a".repeat(40),
             head: "b".repeat(40),
             report: Report::default(),
+            reviewed_files: None,
             patch_files: None,
             diff: None,
             scan,
@@ -1659,6 +2092,7 @@ mod tests {
         let id: i64 = url.rsplit('/').next().unwrap().parse().unwrap();
         db.execute("INSERT INTO automation_jobs(repo,number,head,review_id,state) VALUES ('test/demo',7,'old',?1,'pending')", [id]).unwrap();
         db.execute("INSERT INTO automation_settings(repo,mode,review_error_job,review_error) VALUES ('test/demo','summary',?1,'Earlier retry')", [id]).unwrap();
+        enable_automatic_test_pr(&db, "old");
         assert!(
             run_one_pinned(&fixture.db, |_, head| {
                 assert_eq!(head, Some("old"));
@@ -1751,6 +2185,19 @@ mod tests {
         let hint = &current.intent[0];
         assert!(hint.contains("A test is omitted") && hint.contains("check.yml"));
         assert!(!hint.contains("117") && !hint.contains("Obsolete proof"));
+        current.head = old.head.clone();
+        old.report
+            .limits
+            .push("Undecided at check.yml:117. The caller was unavailable.".into());
+        add_previous_questions(&old, &mut current);
+        assert_eq!(current.intent.len(), 2);
+        assert!(
+            current
+                .intent
+                .pop()
+                .unwrap()
+                .contains("caller was unavailable")
+        );
         current.base = "d".repeat(40);
         add_previous_questions(&old, &mut current);
         assert_eq!(current.intent.len(), 1);

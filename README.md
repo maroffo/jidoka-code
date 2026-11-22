@@ -2,9 +2,9 @@
 
 Jidoka Code is a single-user Rust web service for reviewing GitHub pull requests. Each report opens with **Where to focus**, a short guide to the lines worth reading, what the reviewer already checked, and which decisions need a maintainer.
 
-The engine reviews text changes across languages and frameworks. It proposes findings, then checks the code for evidence that could disprove each one. The second pass also looks for problems the first pass missed, including disagreements between documentation, configuration and behavior. A newly proposed concern needs a separate check before it can become a finding. When evidence is missing, the model can ask for a file and a search term. Jidoka reads matching lines at the reviewed commit for one targeted recheck. The report gives the reviewer a concrete manual test when a behavior needs to be observed at runtime.
+The engine reviews text changes across languages and frameworks. It proposes findings, then checks the code for evidence that could disprove each one. The second pass also looks for problems the first pass missed, including disagreements between documentation, configuration and behavior. A newly proposed concern needs a separate check before it can become a finding. The model can search the pinned repository and read source files across turns while it investigates a concern. The report gives the reviewer a concrete manual test when a behavior needs to be observed at runtime.
 
-Jidoka collects changed lines before spending its budget on surrounding files. It verifies source references and lists the files supplied with patches and any gaps in coverage. Semgrep supplies additional leads when a bundled rule applies. The pilot includes one Python rule. Pull requests in other languages and changes that span multiple stacks go through the same review.
+Jidoka collects the pinned diff with Git. Reviews that exceed the model context window continue in smaller pieces. It verifies source references and lists the files supplied with patches and any gaps in coverage. Semgrep supplies additional leads when a bundled rule applies. The pilot includes one Python rule. Pull requests in other languages and changes that span multiple stacks go through the same review.
 
 On a new push, Jidoka prioritizes files changed since the last review by the same provider. Earlier findings are leads for a fresh check against the current code. A superseded automatic review links to its replacement. GitHub comments summarize coverage and highlight specific decisions or tests for a human reviewer. The full list of coverage limits stays in Jidoka.
 
@@ -29,7 +29,9 @@ For private repositories, set `JIDOKA_GITHUB_TOKEN` to a GitHub token with read 
 
 Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the provider before submitting. The service listens on the loopback interface for one trusted user. The `reviews` volume stores the SQLite history and supports reports from the Python pilot. Existing reports retain their original text.
 
-Running `docker compose stop` stops the service from accepting HTTP requests and lets the active review finish. Queued reviews resume on the next startup. Model calls share a fifteen-minute budget per review. A single call can use up to ten minutes. The engine can request one targeted recheck for an unresolved assessment. Compose allows up to seventeen minutes for shutdown so the worker can finish the active review.
+On shutdown, Jidoka waits for the in-flight model call, saves its response and requeues the active review. The same provider can resume eligible work on restart. Each generation request has a ten-minute timeout. A review can use up to 500 generation requests in total, including retries and restarts. The review page shows model calls, reported token usage, time spent waiting for the model, and which changed files completed review.
+
+When the model provider returns HTTP 429, Jidoka keeps the review in the queue with its completed work. Reviews for that provider resume after the wait shown on the review page. The wait survives a service restart.
 
 ## Reviewing and publishing
 
@@ -39,11 +41,13 @@ For a single-user installation, set `JIDOKA_REVIEWER_TOKEN` to your own GitHub t
 
 Under **Repositories**, choose **Manual**, **Automatic summary**, or **Automatic summary and inline comments** per repository. Manual is the default. Set `JIDOKA_BOT_TOKEN` to a personal access token for a dedicated bot account with **Pull requests: write** on the selected repositories. Keep the read token configured for private source. Jidoka polls GitHub from the container and sends eligible changes to the configured provider. The bot posts comments. Approvals and change requests come from the operator.
 
+To queue a manual replay of a saved review at the original revisions, run `docker exec jidoka-code jidoka-code --replay-review ID`. The replay gets a new review ID and uses the currently authorized repository and provider.
+
 ## Development
 
 Use English for documentation, code comments, interface text, and review guidance. Keep quoted source code and file paths exactly as they appear in the repository under review.
 
-The pilot has been tested with Rust 1.100. Export the environment variables above and run `cargo run --locked` to build and start the service. To run the scanner locally, install Semgrep CE on your PATH. The Docker image includes it. Jidoka uses the GitHub API and limits the number of files, bytes, requests, and time spent collecting source. The report lists gaps in coverage.
+The pilot has been tested with Rust 1.100. Export the environment variables above and run `cargo run --locked` to build and start the service. Local runs require Git. To run the scanner locally, install Semgrep CE on your PATH. The Docker image includes both tools.
 
 ```sh
 cargo fmt --check

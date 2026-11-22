@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use jidoka_code::{provider::Provider, review_snapshot_with_context, source, web};
+use jidoka_code::{provider::Provider, review_snapshot_iterative, source, web};
 use std::{
     collections::HashSet,
     env,
@@ -34,6 +34,16 @@ fn main() -> Result<()> {
     let db = PathBuf::from(env::var("JIDOKA_DB").unwrap_or_else(|_| "data/reviews.sqlite3".into()));
     if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
+    }
+    let args: Vec<_> = env::args().skip(1).collect();
+    if !args.is_empty() {
+        anyhow::ensure!(
+            args.len() == 2 && args[0] == "--replay-review",
+            "Usage: jidoka-code [--replay-review ID]"
+        );
+        let id = web::session::replay(&db, args[1].parse()?, provider.label(), &repositories)?;
+        println!("Queued review {id}");
+        return Ok(());
     }
     let address = env::var("JIDOKA_BIND").unwrap_or_else(|_| "127.0.0.1".into());
     let port = env::var("JIDOKA_PORT")
@@ -99,81 +109,138 @@ async fn supervise(
     Ok(())
 }
 
+fn poll(db: &Path, provider: &Provider, repositories: &HashSet<String>, next: &mut Instant) {
+    if Instant::now() >= *next {
+        if jidoka_code::automation::tick(db, provider.label(), repositories).is_err() {
+            eprintln!("Could not complete repository polling");
+        }
+        *next = Instant::now() + Duration::from_secs(60);
+    }
+}
+
 fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mpsc::Receiver<()>) {
     let mut next_poll = Instant::now();
     while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
-        if Instant::now() >= next_poll {
-            if jidoka_code::automation::tick(db, provider.label(), repositories).is_err() {
-                eprintln!("Could not complete repository polling");
-            }
-            next_poll = Instant::now() + Duration::from_secs(60);
-        }
-        let result = web::run_one_pinned(db, |url, expected_head| {
+        poll(db, &provider, repositories, &mut next_poll);
+        let result = web::run_one_session(db, |id, url, expected_head| {
+            let mut session = web::session::Session::open(db, id)?;
             let allowed = jidoka_code::automation::repositories_at(db, repositories)?;
-            let previous = web::latest_review(db, provider.label(), url)?;
+            let previous = match session.replay_source()? {
+                Some(original) => Some(original),
+                None => web::latest_review(db, provider.label(), url)?,
+            };
             let paths = previous
                 .iter()
                 .flat_map(|report| &report.report.findings)
                 .map(|finding| finding.path.clone())
                 .collect::<Vec<_>>();
-            let mut snapshot = source::collect_with_previous(
-                url,
-                &allowed,
-                expected_head,
-                previous.as_ref().map(|r| r.head.as_str()),
-                &paths,
-            )?;
-            if let Some(report) = &previous {
-                web::add_previous_questions(report, &mut snapshot);
-            }
-            let prior = web::previous_findings(db, provider.label(), &snapshot)?;
-            let patches = snapshot
-                .files
-                .iter()
-                .filter(|file| !file.patch.is_empty())
-                .count();
-            eprintln!(
-                "Collected {patches} file patches and {} surrounding source excerpts",
-                snapshot.head_context.len()
+            let collect_current = || {
+                source::collect_repository(
+                    url,
+                    &allowed,
+                    expected_head,
+                    previous.as_ref().map(|r| r.head.as_str()),
+                    &paths,
+                )
+            };
+            let saved_origin = session.remember_origin(None)?;
+            let (fresh, repository) = if let Some((base, head)) = session.revisions()? {
+                anyhow::ensure!(
+                    expected_head.is_none_or(|expected| expected == head),
+                    "Checkpoint revision changed"
+                );
+                if expected_head.is_some() {
+                    match source::resume_automatic_repository(
+                        url,
+                        &allowed,
+                        &base,
+                        &head,
+                        saved_origin.as_deref(),
+                    ) {
+                        Err(e) if e.is::<source::BaseChanged>() => {
+                            session.reset()?;
+                            collect_current()?
+                        }
+                        result => result?,
+                    }
+                } else {
+                    source::collect_repository_at(
+                        url,
+                        &allowed,
+                        &base,
+                        &head,
+                        saved_origin.as_deref(),
+                    )?
+                }
+            } else {
+                collect_current()?
+            };
+            let recorded = session.remember_origin(Some(repository.source_repo()))?;
+            anyhow::ensure!(
+                recorded.as_deref() == Some(repository.source_repo()),
+                "The source repository changed since the checkpoint"
             );
-            let mut pass = 0;
-            let mut model_time_left = Duration::from_secs(15 * 60);
-            review_snapshot_with_context(
+            let origin = repository.private_source_repo().map(str::to_owned);
+            let (snapshot, prior) = if let Some(saved) = session.saved_inputs()? {
+                anyhow::ensure!(
+                    fresh.repo.eq_ignore_ascii_case(&saved.0.repo)
+                        && fresh.base == saved.0.base
+                        && fresh.head == saved.0.head,
+                    "Checkpoint repository changed"
+                );
+                saved
+            } else {
+                let mut snapshot = fresh;
+                if let Some(report) = &previous {
+                    web::add_previous_questions(report, &mut snapshot);
+                }
+                let prior = web::previous_findings(db, provider.label(), &snapshot)?;
+                session.save_inputs(&snapshot, &prior)?;
+                (snapshot, prior)
+            };
+            let reviewed_repo = snapshot.repo.to_ascii_lowercase();
+            let stopping = || !matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty));
+            let eligible = || -> Result<()> {
+                if stopping() {
+                    return Err(web::session::Paused.into());
+                }
+                let allowed = jidoka_code::automation::repositories_at(db, repositories)?;
+                anyhow::ensure!(
+                    web::session::running(db, id)?
+                        && allowed.contains(&reviewed_repo)
+                        && origin.as_ref().is_none_or(|r| allowed.contains(r)),
+                    "Review is no longer eligible"
+                );
+                Ok(())
+            };
+            let session = std::cell::RefCell::new(session);
+            let outcome = review_snapshot_iterative(
                 snapshot,
                 |system, data| {
-                    pass += 1;
-                    let started = Instant::now();
-                    let timeout = model_time_left.min(Duration::from_secs(10 * 60));
-                    let reply = provider.ask_with_timeout(system, data, timeout);
-                    model_time_left = model_time_left.saturating_sub(started.elapsed());
-                    let status = match &reply {
-                        Ok(_) => "received",
-                        Err(error)
-                            if error
-                                .downcast_ref::<reqwest::Error>()
-                                .is_some_and(|error| error.is_timeout()) =>
-                        {
-                            "timed out"
-                        }
-                        Err(_) => "failed",
-                    };
-                    eprintln!(
-                        "Model response {pass}: {status} after {}s",
-                        started.elapsed().as_secs()
-                    );
-                    reply
+                    session
+                        .borrow_mut()
+                        .ask_when_eligible(system, data, eligible, || {
+                            provider.ask_metered(system, data, Duration::from_secs(10 * 60))
+                        })
                 },
                 |snapshot, requests| {
-                    let windows = source::read_context(snapshot, &allowed, requests)?;
-                    eprintln!(
-                        "Read {} pinned excerpts for {} requested source lookups",
-                        windows.len(),
-                        requests.len()
-                    );
+                    let windows = repository.read_context(snapshot, requests)?;
+                    web::session::record_reads(db, id, &windows)?;
                     Ok(windows)
                 },
+                |system, data| {
+                    poll(db, &provider, repositories, &mut next_poll);
+                    eligible()?;
+                    session
+                        .borrow()
+                        .fits_context(system, data, || provider.fits_context(system, data))
+                },
                 &prior,
-            )
+            );
+            if stopping() {
+                return Err(web::session::Paused.into());
+            }
+            outcome
         });
         match result {
             Ok(true)

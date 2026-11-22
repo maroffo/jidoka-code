@@ -1,6 +1,5 @@
 //! Parse the hunk-only patches returned for individual files.
 
-use crate::contracts::SNAPSHOT_TEXT_BYTES;
 const NO_NEWLINE: &str = "\\ No newline at end of file";
 type Line<'patch> = (Option<usize>, Option<usize>, &'patch str);
 
@@ -82,10 +81,6 @@ impl Hunk {
 /// Return original 1-based base and head positions with the exact borrowed line text.
 /// An empty patch returns an empty vector. An invalid or incomplete patch returns None.
 pub(crate) fn lines(patch: &str) -> Option<Vec<Line<'_>>> {
-    if patch.len() > SNAPSHOT_TEXT_BYTES {
-        return None;
-    }
-
     let mut rows = Vec::new();
     let mut hunk: Option<Hunk> = None;
     let mut last_line = None;
@@ -278,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_overflow_and_limits_patch_bytes_without_count_based_allocations() {
+    fn rejects_overflow_without_count_based_allocations() {
         let max = usize::MAX;
         for patch in [
             format!("@@ -{max}0 +1 @@\n-a\n+b"),
@@ -288,13 +283,10 @@ mod tests {
         ] {
             assert!(lines(&patch).is_none(), "accepted {patch:?}");
         }
-        let header = "@@ -0,0 +1 @@\n+";
-        let mut patch = format!("{header}{}", "x".repeat(SNAPSHOT_TEXT_BYTES - header.len()));
+        let line = "x".repeat(100_000);
         assert_eq!(
-            lines(&patch).unwrap()[0].2.len(),
-            SNAPSHOT_TEXT_BYTES - header.len()
+            lines(&format!("@@ -0,0 +1 @@\n+{line}")).unwrap()[0].2,
+            line
         );
-        patch.push('x');
-        assert!(lines(&patch).is_none());
     }
 }

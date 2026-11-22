@@ -116,11 +116,26 @@ pub struct PublishedReport {
     pub scan: Option<Scan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch_files: Option<Vec<String>>,
+    /// Collected files whose changed hunks reached the end of the model review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<PinnedDiff>,
 }
 
 impl PublishedReport {
+    /// Available only for reviews that tracked completion of each collected patch.
+    pub fn unfinished_patches(&self) -> Option<Vec<&String>> {
+        let reviewed: HashSet<_> = self.reviewed_files.as_ref()?.iter().collect();
+        Some(
+            self.patch_files
+                .as_ref()?
+                .iter()
+                .filter(|path| !reviewed.contains(path))
+                .collect(),
+        )
+    }
+
     /// Return distinct human follow-ups in report order, including for older saved reports.
     pub fn human_focus(&self) -> impl Iterator<Item = &Focus> {
         let mut seen = HashSet::new();
