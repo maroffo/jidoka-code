@@ -247,7 +247,7 @@ mod tests {
                         leads: true,
                         reads: false,
                     }
-                    .format();
+                    .format(&json!({"hypotheses":[{"id":3},{"id":9}]}));
                     let size = serde_json::to_vec(&format).unwrap().len() as u64;
                     assert_eq!(
                         context

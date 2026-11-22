@@ -105,7 +105,7 @@ impl Provider {
         let Some(context) = &self.context else {
             return Ok(true);
         };
-        let format = AnswerShape::from_input(data).map(AnswerShape::format);
+        let format = AnswerShape::from_input(data).map(|shape| shape.format(data));
         match context.output_budget(&self.client, system, &user_content(data)?, format.as_ref()) {
             Ok(_) => Ok(true),
             Err(error) if error.is::<crate::ReviewContextExceeded>() => Ok(false),
@@ -130,7 +130,7 @@ impl Provider {
             .as_ref()
             .and_then(|_| AnswerShape::from_input(data));
         if let Some(context) = &self.context {
-            let format = answer_shape.map(AnswerShape::format);
+            let format = answer_shape.map(|shape| shape.format(data));
             let max_tokens =
                 context.output_budget(&self.client, system, &content, format.as_ref())?;
             if let Some(format) = format {

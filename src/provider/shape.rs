@@ -1,5 +1,6 @@
 //! Structured proposals and assessments for interactive reviews.
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AnswerShape {
@@ -27,17 +28,37 @@ impl AnswerShape {
         }
     }
 
-    pub(super) fn format(self) -> Value {
+    pub(super) fn format(self, data: &Value) -> Value {
         let key = self.key();
+        // The engine replaces the hypotheses list with the unresolved subset
+        // before each recheck. Use only its validated, distinct positive IDs.
+        let ids = match self {
+            Self::Assessments { .. } => data["hypotheses"].as_array().and_then(|items| {
+                let ids: BTreeSet<_> = items
+                    .iter()
+                    .map(|item| item["id"].as_u64().filter(|id| *id > 0))
+                    .collect::<Option<_>>()?;
+                (ids.len() == items.len()).then_some(ids)
+            }),
+            Self::Hypotheses => None,
+        };
+        let limit_ids = ids.as_ref().is_some_and(|ids| !ids.is_empty());
         let item = match self {
             Self::Hypotheses => hypothesis(),
-            Self::Assessments { reads, .. } => assessment(reads),
+            Self::Assessments { reads, .. } => assessment(reads, limit_ids),
         };
         let mut schema = json!({
             "type":"object", "additionalProperties":false,
             "properties":{"complete":{"type":"boolean"}, key:{"type":"array","items":item}},
             "required":["complete",key]
         });
+        if let Some(ids) = ids {
+            schema["properties"][key]["minItems"] = ids.len().into();
+            schema["properties"][key]["maxItems"] = ids.len().into();
+            if !ids.is_empty() {
+                schema["$defs"] = json!({"assessmentId":{"type":"integer","enum":ids}});
+            }
+        }
         if matches!(self, Self::Assessments { leads: true, .. }) {
             schema["properties"]["leads"] = json!({"type":"array","items":hypothesis()});
         }
@@ -79,7 +100,12 @@ fn hypothesis() -> Value {
     })
 }
 
-fn assessment(allow_reads: bool) -> Value {
+fn assessment(allow_reads: bool, limit_ids: bool) -> Value {
+    let id = if limit_ids {
+        json!({"$ref":"#/$defs/assessmentId"})
+    } else {
+        json!({"type":"integer"})
+    };
     let text = json!({"type":"string"});
     let head = json!({"type":"string","description":"Head reference from a source row (H ID)"});
     let base = json!({"type":"string","description":"Base reference from a source row (B ID)"});
@@ -103,7 +129,8 @@ fn assessment(allow_reads: bool) -> Value {
         "action":text,"expected":text
     });
     let variant = |outcome: &str, names: &[&str]| {
-        let mut properties = json!({"id":{"type":"integer"},"outcome":{"type":"string","enum":[outcome]},"countercheck":text});
+        let mut properties =
+            json!({"id":id,"outcome":{"type":"string","enum":[outcome]},"countercheck":text});
         let mut required = vec!["id", "outcome", "countercheck"];
         for &name in names {
             properties[name] = fields[name].clone();
@@ -134,6 +161,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn assessments_match_current_hypothesis_ids_and_share_one_id_schema() {
+        let data = json!({"answer_shape":"assessments","hypotheses":[{"id":9},{"id":2}],
+            "recheck":[{"id":2,"prior_assessments":[{"id":1}]}], "snapshot":{"hypotheses":[{"id":1}]}});
+        let shape = AnswerShape::from_input(&data).unwrap();
+        let format = shape.format(&data);
+        let schema = &format["json_schema"]["schema"];
+        let array = &schema["properties"]["assessments"];
+        assert_eq!(array["minItems"], 2);
+        assert_eq!(array["maxItems"], 2);
+        assert_eq!(schema["$defs"]["assessmentId"]["enum"], json!([2, 9]));
+        for variant in array["items"]["anyOf"].as_array().unwrap() {
+            assert_eq!(
+                variant["properties"]["id"],
+                json!({"$ref":"#/$defs/assessmentId"})
+            );
+        }
+        assert!(schema["properties"].get("leads").is_none());
+
+        let empty = json!({"answer_shape":"assessments","hypotheses":[]});
+        let format = AnswerShape::from_input(&empty).unwrap().format(&empty);
+        let schema = &format["json_schema"]["schema"];
+        assert_eq!(schema["properties"]["assessments"]["maxItems"], 0);
+        assert_eq!(schema["properties"]["assessments"]["minItems"], 0);
+        assert!(schema["properties"]["leads"].is_object());
+        assert!(schema.get("$defs").is_none());
+
+        for hypotheses in [
+            Value::Null,
+            json!([{"id":1},{"id":1}]),
+            json!([{"id":0}]),
+            json!([{"id":"2"}]),
+            json!([{"id":1},{}]),
+        ] {
+            let data = json!({"answer_shape":"assessments","hypotheses":hypotheses});
+            let format = AnswerShape::from_input(&data).unwrap().format(&data);
+            let schema = &format["json_schema"]["schema"];
+            assert!(
+                schema["properties"]["assessments"]
+                    .get("minItems")
+                    .is_none()
+            );
+            assert!(
+                schema["properties"]["assessments"]
+                    .get("maxItems")
+                    .is_none()
+            );
+            assert!(schema.get("$defs").is_none());
+        }
+    }
+
+    #[test]
     fn only_indeterminate_assessments_can_request_reads_during_evidence_rounds() {
         let mut input = json!({"answer_shape":"assessments","hypotheses":[],
             "snapshot":{"allow_assessment_reads":true}});
@@ -151,7 +229,7 @@ mod tests {
             let shape = AnswerShape::from_input(&input).unwrap();
             assert_eq!(shape.accepts(&answer), marker == true);
             assert!(!shape.accepts(&json!({"read":read})));
-            let format = shape.format();
+            let format = shape.format(&input);
             let variants =
                 format["json_schema"]["schema"]["properties"]["assessments"]["items"]["anyOf"]
                     .as_array()
@@ -204,19 +282,19 @@ mod tests {
         assert!(challenge.accepts(&with_leads));
         assert!(!recheck.accepts(&with_leads));
         assert!(!hypothesis.accepts(&with_leads));
-        let challenge = challenge.format();
+        let challenge = challenge.format(&json!({"hypotheses":[]}));
         assert_eq!(
             challenge["json_schema"]["schema"]["properties"]["leads"]["items"],
             super::hypothesis()
         );
         assert!(
-            recheck.format()["json_schema"]["schema"]["properties"]
+            recheck.format(&json!({"hypotheses":[]}))["json_schema"]["schema"]["properties"]
                 .get("leads")
                 .is_none()
         );
         assert_eq!(
-            hypothesis.format()["json_schema"]["schema"]["properties"]["hypotheses"]["items"]["properties"]
-                ["anchor"]["type"],
+            hypothesis.format(&json!({}))["json_schema"]["schema"]["properties"]["hypotheses"]["items"]
+                ["properties"]["anchor"]["type"],
             "string"
         );
     }
