@@ -2132,6 +2132,15 @@ fn review_passes<'a>(
         CitationProtocol::Verbatim => (verbatim_input(snapshot, scan), None),
     };
     let mut evidence = Evidence { source, references };
+    if matches!(protocol, CitationProtocol::Interactive) && !prior.is_empty() {
+        let leads: Vec<_> = retain_history(Vec::new(), prior, 1, usize::MAX, &evidence)
+            .into_iter()
+            .map(|(_, item)| item)
+            .collect();
+        if !leads.is_empty() {
+            data["prior_leads"] = json!(leads);
+        }
+    }
     let Some(proposed) = request(
         Pass::Proposal,
         protocol,
@@ -2147,6 +2156,9 @@ fn review_passes<'a>(
             items: RankedItems::default(),
         });
     };
+    data.as_object_mut()
+        .expect("review request")
+        .remove("prior_leads");
     proposed.report_incomplete(Pass::Proposal, &mut report.limits);
     let mut discovery = BatchCoverage {
         stages_finished: proposed.complete && !proposed.overflow,
@@ -4285,5 +4297,65 @@ mod tests {
         assert!(result.report.findings[0].evidence.contains("caller.go:21"));
         assert!(result.unfinished_patches().unwrap().is_empty());
         assert!(result.report.limits.is_empty());
+    }
+
+    #[test]
+    fn interrupted_challenge_synthesizes_a_verified_finding_from_its_prior_read() {
+        let mut calls = 0;
+        let result = review_snapshot_iterative(indexed_snapshot(), |_, data| {
+            calls += 1;
+            match calls {
+                1 => {
+                    assert_eq!(data["answer_shape"], "hypotheses");
+                    Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))
+                }
+                2 => {
+                    assert!(data.get("answer_shape").is_none());
+                    Ok(json!({"read":{"path":"caller.go","term":"#L21"}}))
+                }
+                3 => Err(ReviewBatchInterrupted.into()),
+                4 => {
+                    assert_eq!(data["answer_shape"], "assessments");
+                    let caller = data["snapshot"]["head_context"].as_array().unwrap().iter().find(|w| w["path"]=="caller.go").unwrap();
+                    let mut item = indexed_capacity_finding(1,"H4","B2","B4");
+                    item["counterevidence"]["references"] = json!(["H2",caller["rows"][0][1]]);
+                    Ok(json!({"complete":true,"assessments":[item],"leads":[]}))
+                }
+                _ => panic!("The completed stage must not be partitioned and replayed"),
+            }
+        }, |_,_| Ok(vec![SourceWindow{path:"caller.go".into(),start:21,text:"return new_cache(1)".into()}]), |_,_|Ok(true),&[]).unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(result.report.findings.len(), 1);
+        assert!(result.report.findings[0].evidence.contains("caller.go:21"));
+        assert!(result.unfinished_patches().unwrap().is_empty());
+        assert!(result.report.limits.is_empty());
+    }
+
+    #[test]
+    fn incomplete_synthesis_reopens_investigation_and_still_obeys_the_turn_limit() {
+        let mut calls = 0;
+        let result = review_snapshot_iterative(indexed_snapshot(), |_, data| {
+            calls += 1;
+            match calls {
+                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]})),
+                2 => Ok(json!({"read":{"path":"caller.go","term":"#L21"}})),
+                3 => Err(ReviewBatchInterrupted.into()),
+                4 => {
+                    assert_eq!(data["answer_shape"],"assessments");
+                    Ok(json!({"complete":false,"assessments":[indexed_capacity_finding(1,"H4","B2","B4")],
+                        "leads":[indexed_proposal("H8","Check the publication path.")]}))
+                }
+                5 => {
+                    assert_eq!(data["recheck"].as_array().unwrap().len(),2);
+                    assert!(data.get("last_read").is_none() && data.get("answer_shape").is_none());
+                    Err(ReviewTurnLimit.into())
+                }
+                _ => panic!("No further dispatch after the limit"),
+            }
+        }, |_,_| Ok(vec![SourceWindow{path:"caller.go".into(),start:21,text:"return new_cache(1)".into()}]), |_,_|Ok(true),&[]).unwrap();
+        assert_eq!(calls, 5);
+        assert!(result.report.findings.is_empty());
+        assert!(result.reviewed_files.unwrap().is_empty());
+        assert!(result.report.limits.contains(&ReviewTurnLimit.to_string()));
     }
 }

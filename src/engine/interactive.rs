@@ -51,9 +51,11 @@ up to 12 matching paths at a time: use "*:13" for the next page, then "*:25", et
 Use an exact path with an empty term to open it, or "#L81" to read from line 81. A path and literal
 together locate matching passages. Results appear in snapshot.head_context, with
 head citations you can use. A read returning no matches is not proof of absence.
-Follow callers, relevant contracts and tests until evidence settles the question
-or a concrete piece of evidence is unavailable. Acknowledge tool results already
-in the input. To finish, return the requested hypotheses or assessments object.
+Request another source window only if it can change the verdict on a specific
+hypothesis. Follow its callers, contracts or tests as needed. Otherwise return
+the assessments. Set complete to true when every required hypothesis has an
+evidence-supported disposition, including indeterminate with a concrete missing
+check for a human reviewer. Acknowledge results already supplied.
 "##;
 
 #[derive(Default)]
@@ -140,6 +142,12 @@ fn extend_evidence<'a>(
     }
     data["snapshot"]["complete_head_paths"] = json!(index.complete_head_paths(&evidence.source));
     index.head_lines.len() - before
+}
+
+fn returned_source(windows: &[SourceWindow]) -> bool {
+    windows
+        .iter()
+        .any(|window| safe_path(&window.path) && window.start > 0 && !window.text.is_empty())
 }
 
 type Read<'f> = dyn FnMut(&Snapshot, &[ContextRead]) -> Result<Vec<SourceWindow>> + 'f;
@@ -256,6 +264,7 @@ fn review_chunk(
     let mut turns = evidence_turns.iter();
     let mut stop = None;
     let mut displayed = None;
+    let recheck_has_reads = std::cell::Cell::new(false);
     let result = review_passes(
         chunk,
         scan,
@@ -268,15 +277,25 @@ fn review_chunk(
             } else {
                 ("discovery", "hypotheses")
             };
-            let synthesis = format!(
-                "{instructions}\nRepository reads are closed for this {stage} stage. Synthesize its final answer now from the collected diff, source references and lookup results. Return the requested JSON object with complete and {answer_key}. Do not request another read. Retain only outcomes supported by the supplied evidence; identify uncertainty using this stage's specified format."
-            );
+            let planning = stage == "discovery";
+            let synthesis = if planning {
+                format!(
+                    "{instructions}\nPlan the review using the supplied diff, intent, prior leads and pinned context. Return the hypotheses now. The challenge stage investigates them against additional repository source."
+                )
+            } else {
+                format!(
+                    "{instructions}\nRepository reads are closed for this {stage} stage. Return the final assessments from the collected diff, source references and lookup results. Give every required hypothesis a disposition. Use indeterminate for a specific unresolved question."
+                )
+            };
             let mut attempted = HashMap::new();
-            let mut synthesis_turn = 0;
+            let mut synthesis_turn = usize::from(planning);
+            let mut has_source = stage == "recheck" && recheck_has_reads.get();
+            let mut interrupted = false;
             loop {
                 let system = if synthesis_turn == 0 {
                     with_tools.as_str()
                 } else {
+                    data["answer_shape"] = json!(answer_key);
                     synthesis.as_str()
                 };
                 if stop.is_some() {
@@ -309,6 +328,12 @@ fn review_chunk(
                         anyhow::bail!("Context window exceeded.")
                     }
                     Err(error) if error.is::<ReviewBatchInterrupted>() => {
+                        if has_source && synthesis_turn == 0 {
+                            interrupted = true;
+                            synthesis_turn = 1;
+                            data["last_read"] = json!({"result":"The provider interrupted the previous answer. The pinned source already read is included. Finish the assessments using that evidence."});
+                            continue;
+                        }
                         stop = Some(Stop::Interrupted);
                         anyhow::bail!("Generation ended before a reply.")
                     }
@@ -339,13 +364,17 @@ fn review_chunk(
                         })
                     {
                         // The next stage may use tools again; its evidence includes all pinned source windows.
-                        data.as_object_mut()
-                            .expect("review request")
-                            .remove("last_read");
+                        let request = data.as_object_mut().expect("review request");
+                        request.remove("last_read");
+                        request.remove("answer_shape");
                         return Ok(response);
                     }
                     if synthesis_turn == 2 {
-                        stop = Some(Stop::RepeatedRead);
+                        stop = Some(if interrupted || planning {
+                            Stop::Interrupted
+                        } else {
+                            Stop::RepeatedRead
+                        });
                         anyhow::bail!(
                             "The model did not finish the stage with the available evidence."
                         )
@@ -355,6 +384,9 @@ fn review_chunk(
                     continue;
                 }
                 let Some(request) = read_request(&response)? else {
+                    data.as_object_mut()
+                        .expect("review request")
+                        .remove("last_read");
                     return Ok(response);
                 };
                 let attempts = attempted
@@ -379,6 +411,7 @@ fn review_chunk(
                     Ok(windows) => {
                         let windows = slot.get_or_init(|| windows);
                         let count = extend_evidence(data, evidence, windows);
+                        has_source |= returned_source(windows);
                         format!("{count} new source lines.")
                     }
                     Err(_) => "The pinned source lookup failed.".into(),
@@ -388,7 +421,11 @@ fn review_chunk(
         },
         RecheckReader {
             protocol: CitationProtocol::Interactive,
-            read: |requests: &[ContextRead]| read.borrow_mut()(full, requests),
+            read: |requests: &[ContextRead]| {
+                let windows = read.borrow_mut()(full, requests)?;
+                recheck_has_reads.set(returned_source(&windows));
+                Ok(windows)
+            },
             windows: &mut Vec::new(),
         },
         prior,
@@ -707,10 +744,10 @@ mod tests {
         let result = review_snapshot_iterative(source, |_, data| {
             turns += 1;
             let reply = match turns {
-                1..=4 => json!({"read":{"path":"*","term":format!("lookup_{turns}")}}),
-                5 => json!({"complete":true,"hypotheses":[{
+                1 => json!({"complete":true,"hypotheses":[{
                     "anchor":"H1","expected":"Only queued jobs run.","scenario":"A paused job is submitted.","consequence":"It could run twice."
                 }]}),
+                2..=5 => json!({"read":{"path":"*","term":format!("lookup_{turns}")}}),
                 6 => json!({"read":{"path":"src/guard.rs","term":"#L41"}}),
                 7 => {
                     let windows = data["snapshot"]["head_context"].as_array().unwrap();
@@ -826,7 +863,10 @@ mod tests {
             source,
             |_, data| {
                 turns += 1;
-                if turns == 3 {
+                if turns == 1 {
+                    return Ok(json!({"complete":true,"hypotheses":[]}));
+                }
+                if turns == 4 {
                     assert!(
                         data["last_read"]["result"]
                             .as_str()
@@ -844,7 +884,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!((turns, reads), (5, 1));
+        assert_eq!((turns, reads), (6, 1));
         assert!(result.reviewed_files.unwrap().is_empty());
         assert!(
             result

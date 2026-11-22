@@ -1,4 +1,7 @@
 mod context;
+mod shape;
+
+use shape::FinalAnswer;
 
 use anyhow::{Context, Result, bail, ensure};
 use context::GeminiContext;
@@ -102,7 +105,8 @@ impl Provider {
         let Some(context) = &self.context else {
             return Ok(true);
         };
-        match context.output_budget(&self.client, system, &user_content(data)?) {
+        let format = FinalAnswer::from_input(data).map(FinalAnswer::format);
+        match context.output_budget(&self.client, system, &user_content(data)?, format.as_ref()) {
             Ok(_) => Ok(true),
             Err(error) if error.is::<crate::ReviewContextExceeded>() => Ok(false),
             Err(error) => Err(error),
@@ -121,14 +125,22 @@ impl Provider {
                 {"role":"user","content":content}],
             "response_format":{"type":"json_object"}
         });
+        let final_answer = self
+            .context
+            .as_ref()
+            .and_then(|_| FinalAnswer::from_input(data));
         if let Some(context) = &self.context {
+            let format = final_answer.map(FinalAnswer::format);
+            let max_tokens =
+                context.output_budget(&self.client, system, &content, format.as_ref())?;
+            if let Some(format) = format {
+                body["response_format"] = format;
+            }
             // Jidoka reads a pinned repository itself; Gemini returns only JSON text.
             body["tool_choice"] = "none".into();
             body["stream"] = true.into();
             body["stream_options"] = json!({"include_usage":true});
-            body["max_tokens"] = context
-                .output_budget(&self.client, system, &content)?
-                .into();
+            body["max_tokens"] = max_tokens.into();
         }
         let mut request = self
             .client
@@ -151,7 +163,7 @@ impl Provider {
             .and_then(|s| s.split(';').next())
             .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"));
         if self.context.is_some() && !is_json {
-            return decode_stream(response);
+            return decode_stream(response, final_answer);
         }
         let mut bytes = Vec::new();
         response
@@ -161,7 +173,7 @@ impl Provider {
             bytes.len() <= MAX_REPLY_BYTES,
             "Provider response exceeds the size limit"
         );
-        decode_reply(&bytes)
+        decode_reply(&bytes, final_answer)
     }
 }
 
@@ -510,7 +522,7 @@ fn first_present<const N: usize>(values: [&Value; N]) -> &Value {
         .unwrap_or(&Value::Null)
 }
 
-fn decode_stream(reader: impl Read) -> Result<ModelReply> {
+fn decode_stream(reader: impl Read, final_answer: Option<FinalAnswer>) -> Result<ModelReply> {
     // SSE adds a JSON envelope to each output chunk. Bound both transport overhead
     // and reassembled model text, including the case of one unterminated long line.
     const MAX_STREAM_BYTES: usize = 16 * MAX_REPLY_BYTES;
@@ -592,7 +604,7 @@ fn decode_stream(reader: impl Read) -> Result<ModelReply> {
     if !reply["choices"][0].is_null() {
         reply["choices"][0]["message"]["content"] = text.into();
     }
-    decode_message(&reply, Some(done))
+    decode_message(&reply, Some(done), final_answer)
 }
 
 fn append_chunk(reply: &mut Value, text: &mut String, frame: &Value) -> Result<()> {
@@ -642,7 +654,7 @@ fn append_chunk(reply: &mut Value, text: &mut String, frame: &Value) -> Result<(
     Ok(())
 }
 
-fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
+fn decode_reply(bytes: &[u8], final_answer: Option<FinalAnswer>) -> Result<ModelReply> {
     let reply: Value = serde_json::from_slice(bytes).map_err(|error| {
         let issue = InvalidReply {
             reason: "Provider returned incomplete JSON.",
@@ -655,7 +667,7 @@ fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
             anyhow::Error::new(issue)
         }
     })?;
-    decode_message(&reply, None)
+    decode_message(&reply, None, final_answer)
 }
 
 impl ReplyDiagnostics {
@@ -769,7 +781,11 @@ fn read_hint(text: &str) -> Option<Value> {
         .map(|_| value)
 }
 
-fn decode_message(reply: &Value, stream_done: Option<bool>) -> Result<ModelReply> {
+fn decode_message(
+    reply: &Value,
+    stream_done: Option<bool>,
+    final_answer: Option<FinalAnswer>,
+) -> Result<ModelReply> {
     let first = &reply["choices"][0];
     let message = &first["message"];
     let d = ReplyDiagnostics::read(reply);
@@ -825,7 +841,8 @@ fn decode_message(reply: &Value, stream_done: Option<bool>) -> Result<ModelReply
         && d.finish == "malformed_function_call"
         && matches!(d.native_finish, "absent" | "malformed_function_call")
     {
-        if stream_done == Some(true)
+        if final_answer.is_none()
+            && stream_done == Some(true)
             && no_tool_call
             && let Some(value) = text.and_then(read_hint)
         {
@@ -850,6 +867,15 @@ fn decode_message(reply: &Value, stream_done: Option<bool>) -> Result<ModelReply
     if d.finish != "stop" || !matches!(d.native_finish, "absent" | "stop") {
         return Err(issue("Provider stopped before completing its reply.").into());
     }
+    if final_answer.is_some()
+        && ((!message["tool_calls"].is_null()
+            && !message["tool_calls"].as_array().is_some_and(Vec::is_empty))
+            || !message["function_call"].is_null())
+    {
+        return Err(interrupted(
+            "Provider returned a native call instead of its final stage response.",
+        ));
+    }
     let text = text.ok_or_else(|| issue("Provider response is missing text."))?;
     let value: Value = serde_json::from_str(text).map_err(|error| {
         if error.is_eof() {
@@ -862,12 +888,25 @@ fn decode_message(reply: &Value, stream_done: Option<bool>) -> Result<ModelReply
         value.is_object(),
         issue("Provider returned an unexpected review format.")
     );
+    if final_answer.is_some_and(|shape| !shape.accepts(&value)) {
+        return Err(interrupted(
+            "Provider returned a different response from the requested final stage.",
+        ));
+    }
     Ok(ModelReply { value, usage })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
+        super::decode_reply(bytes, None)
+    }
+
+    fn decode_stream(reader: impl Read) -> Result<ModelReply> {
+        super::decode_stream(reader, None)
+    }
     use std::{
         env,
         io::{BufRead, BufReader, Write},
@@ -1188,6 +1227,54 @@ mod tests {
             assert!(details.contains(expected) && !details.contains("private-tag"));
             assert!(!err.is::<crate::ReviewBatchInterrupted>());
         }
+    }
+
+    #[test]
+    fn final_only_responses_reject_read_hints_and_native_calls_even_with_json_text() {
+        let shape = Some(FinalAnswer::Assessments { leads: false });
+        let answer = json!({"complete":true,"assessments":[]});
+        let read = json!({"read":{"path":"src/lib.rs","term":"run"}});
+        for (finish, content, tool) in [
+            ("stop", read.clone(), Value::Null),
+            (
+                "function_call_filter: MALFORMED_FUNCTION_CALL",
+                read,
+                Value::Null,
+            ),
+            (
+                "function_call_filter: MALFORMED_FUNCTION_CALL",
+                answer.clone(),
+                Value::Null,
+            ),
+            ("stop", answer.clone(), json!([{}])),
+            ("stop", answer.clone(), json!({})),
+        ] {
+            let reply = json!({"choices":[{"finish_reason":finish,"message":{"content":content.to_string(),"tool_calls":tool}}]});
+            let error = super::decode_message(&reply, Some(true), shape).unwrap_err();
+            assert!(error.is::<crate::ReviewBatchInterrupted>());
+        }
+        let normal =
+            json!({"choices":[{"finish_reason":"stop","message":{"content":answer.to_string()}}]});
+        assert_eq!(
+            super::decode_message(&normal, Some(true), shape)
+                .unwrap()
+                .value,
+            answer
+        );
+        assert!(
+            super::decode_message(&normal, Some(false), shape)
+                .unwrap_err()
+                .is::<crate::ReviewBatchInterrupted>()
+        );
+        let refusal = json!({"choices":[{"finish_reason":"content_filter","message":{"content":answer.to_string()}}]});
+        assert_eq!(
+            super::decode_message(&refusal, Some(true), shape)
+                .unwrap_err()
+                .downcast_ref::<InvalidReply>()
+                .unwrap()
+                .reason,
+            "Provider withheld the reply."
+        );
     }
 
     #[test]
