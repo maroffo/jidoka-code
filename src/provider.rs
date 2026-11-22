@@ -122,6 +122,8 @@ impl Provider {
             "response_format":{"type":"json_object"}
         });
         if let Some(context) = &self.context {
+            // Jidoka reads a pinned repository itself; Gemini returns only JSON text.
+            body["tool_choice"] = "none".into();
             body["stream"] = true.into();
             body["stream_options"] = json!({"include_usage":true});
             body["max_tokens"] = context
@@ -309,6 +311,57 @@ struct ReplyDiagnostics {
     block: &'static str,
     error_code: &'static str,
     error_status: &'static str,
+}
+
+// Google can append a provider-specific explanation to a Chat Completions
+// finish reason. Persist only exact protocol labels, never the explanation.
+fn finish_label(value: &Value) -> &'static str {
+    let known = label(value, FINISH);
+    if known != "unrecognized" {
+        return known;
+    }
+    let Some(text) = value.as_str() else {
+        return "unrecognized_non_string";
+    };
+    let text = text.to_ascii_lowercase();
+    if text == "function_call_filter: malformed_function_call" {
+        return "malformed_function_call";
+    }
+    if text
+        .split_once(':')
+        .is_some_and(|(prefix, _)| prefix.trim() == "content_filter")
+    {
+        return "content_filter";
+    }
+    let words = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+    if words.clone().any(|w| {
+        restricted(w)
+            || [
+                "policy",
+                "blocked",
+                "refusal",
+                "model_armor",
+                "content_policy_violation",
+            ]
+            .contains(&w)
+    }) {
+        return "unrecognized_policy_marker";
+    }
+    if words.into_iter().any(|w| {
+        [
+            "deadline_exceeded",
+            "resource_exhausted",
+            "model_timeout",
+            "timeout",
+            "deadline",
+            "unavailable",
+            "internal",
+        ]
+        .contains(&w)
+    }) {
+        return "unrecognized_technical_marker";
+    }
+    known
 }
 
 fn label(value: &Value, names: &[&'static str]) -> &'static str {
@@ -501,9 +554,7 @@ fn append_chunk(reply: &mut Value, text: &mut String, frame: &Value) -> Result<(
     {
         collected["message"]["refusal"] = json!("refused");
     }
-    if delta["tool_calls"]
-        .as_array()
-        .is_some_and(|calls| !calls.is_empty())
+    if !delta["tool_calls"].is_null() && !delta["tool_calls"].as_array().is_some_and(Vec::is_empty)
     {
         collected["message"]["tool_calls"] = json!([{}]);
     }
@@ -561,15 +612,12 @@ impl ReplyDiagnostics {
         ];
         Self {
             choices: reply["choices"].as_array().map(Vec::len),
-            finish: label(&first["finish_reason"], FINISH),
-            native_finish: label(
-                first_present([
-                    &candidate["finishReason"],
-                    &candidate["finish_reason"],
-                    &first["native_finish_reason"],
-                ]),
-                FINISH,
-            ),
+            finish: finish_label(&first["finish_reason"]),
+            native_finish: finish_label(first_present([
+                &candidate["finishReason"],
+                &candidate["finish_reason"],
+                &first["native_finish_reason"],
+            ])),
             block: label(
                 first_present([&feedback["blockReason"], &feedback["block_reason"]]),
                 &[
@@ -628,6 +676,21 @@ impl ReplyDiagnostics {
     }
 }
 
+fn read_hint(text: &str) -> Option<Value> {
+    // Deserialize to structs first so duplicate fields are rejected as well.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Hint {
+        read: crate::contracts::ContextRead,
+    }
+    let hint: Hint = serde_json::from_str(text).ok()?;
+    let value = json!({"read": hint.read});
+    crate::engine::read_request(&value)
+        .ok()
+        .flatten()
+        .map(|_| value)
+}
+
 fn decode_message(reply: &Value, stream_done: Option<bool>) -> Result<ModelReply> {
     let first = &reply["choices"][0];
     let message = &first["message"];
@@ -677,6 +740,23 @@ fn decode_message(reply: &Value, stream_done: Option<bool>) -> Result<ModelReply
     let reasoning_only = usage
         .output
         .is_some_and(|total| total > 0 && Some(total) == reasoning_tokens);
+    // Google may reject a native function call while also sending separate
+    // JSON text. A complete read-only hint can be revalidated by the engine.
+    // Findings and all native calls stay unusable on this stop.
+    if stream_done.is_some()
+        && d.finish == "malformed_function_call"
+        && matches!(d.native_finish, "absent" | "malformed_function_call")
+    {
+        if stream_done == Some(true)
+            && no_tool_call
+            && let Some(value) = text.and_then(read_hint)
+        {
+            return Ok(ModelReply { value, usage });
+        }
+        return Err(interrupted(
+            "Provider generated a malformed native function call.",
+        ));
+    }
     // Positive evidence of an empty chat completion. Unknown finish reasons and
     // native/foreign payloads are never reinterpreted as a transient stop.
     if d.choices.is_some()
@@ -967,6 +1047,87 @@ mod tests {
         assert_eq!(
             error.downcast_ref::<InvalidReply>().unwrap().reason,
             "Provider reported an error in its reply."
+        );
+    }
+
+    #[test]
+    fn compound_content_filter_stays_terminal_without_logging_its_explanation() {
+        let err=stream_events(&[json!({"choices":[{"finish_reason":"content_filter: PRIVATE_NOTE","delta":{"content":"{}"}}]})],true).unwrap_err();
+        let info = err.downcast_ref::<InvalidReply>().unwrap();
+        assert_eq!(info.reason, "Provider withheld the reply.");
+        assert!(
+            !err.is::<crate::ReviewBatchInterrupted>()
+                && !info.to_string().contains("PRIVATE_NOTE")
+        );
+        for (tag, expected) in [
+            (json!(7), "finish=unrecognized_non_string"),
+            (
+                json!("private-tag: deadline exceeded"),
+                "finish=unrecognized_technical_marker",
+            ),
+            (
+                json!("private-tag: safety"),
+                "finish=unrecognized_policy_marker",
+            ),
+        ] {
+            let err = stream_events(
+                &[json!({"choices":[{"finish_reason":tag,"delta":{"content":"{}"}}]})],
+                true,
+            )
+            .unwrap_err();
+            let details = err.downcast_ref::<InvalidReply>().unwrap().to_string();
+            assert!(details.contains(expected) && !details.contains("private-tag"));
+            assert!(!err.is::<crate::ReviewBatchInterrupted>());
+        }
+    }
+
+    #[test]
+    fn malformed_native_call_allows_only_a_complete_independent_read_only_hint() {
+        let frame = |text: &str| json!({"choices":[{"finish_reason":"function_call_filter: MALFORMED_FUNCTION_CALL", "delta":{"content":text}}]});
+        let valid = r##"{"read":{"path":"src/main.rs","term":"#L7"}}"##;
+        let good = stream_events(&[frame(valid)], true).unwrap();
+        assert_eq!(good.value, serde_json::from_str::<Value>(valid).unwrap());
+        for text in [
+            r#"{"complete":true,"hypotheses":[]}"#,
+            r#"{"assessments":[]}"#,
+            r#"{"read":{"path":"../private","term":""}}"#,
+            r#"{"read":{"path":"src","term":"","command":"pwd"}}"#,
+            r#"{"read":{"path":"src","term":"","term":"other"}}"#,
+            r#"{"read":{"path":"src","term":""},"read":{"path":"other","term":""}}"#,
+            "{}",
+        ] {
+            assert!(
+                stream_events(&[frame(text)], true)
+                    .unwrap_err()
+                    .is::<crate::ReviewBatchInterrupted>()
+            );
+        }
+        assert!(
+            stream_events(&[frame(valid)], false)
+                .unwrap_err()
+                .is::<crate::ReviewBatchInterrupted>()
+        );
+        let mut native = frame(valid);
+        native["choices"][0]["delta"]["tool_calls"] = json!([{"function":{"name":"read"}}]);
+        assert!(
+            stream_events(&[native], true)
+                .unwrap_err()
+                .is::<crate::ReviewBatchInterrupted>()
+        );
+        let mut malformed_native = frame(valid);
+        malformed_native["choices"][0]["delta"]["tool_calls"] = json!({"unexpected":"shape"});
+        assert!(
+            stream_events(&[malformed_native], true)
+                .unwrap_err()
+                .is::<crate::ReviewBatchInterrupted>()
+        );
+        let mut blocked = frame(valid);
+        blocked["choices"][0]["native_finish_reason"] = json!("SAFETY");
+        let error = stream_events(&[blocked], true).unwrap_err();
+        assert!(!error.is::<crate::ReviewBatchInterrupted>());
+        assert_eq!(
+            error.downcast_ref::<InvalidReply>().unwrap().reason,
+            "Provider withheld the reply."
         );
     }
 

@@ -43,8 +43,9 @@ impl fmt::Display for ReviewBatchInterrupted {
 impl std::error::Error for ReviewBatchInterrupted {}
 
 const TOOLS: &str = r##"
-Before answering this stage, you may inspect the pinned repository as often as useful.
-To call a tool, return ONLY {"read":{"path":"repository/path","term":"literal"}}.
+Reply with one JSON text object. When you need to inspect source, return only
+{"read":{"path":"repository/path","term":"literal"}}. Jidoka reads the pinned
+repository and includes the result in the next request.
 Use path "*" with a nonempty literal to search the proposed repository. Search returns
 up to 12 matching paths at a time: use "*:13" for the next page, then "*:25", etc.
 Use an exact path with an empty term to open it, or "#L81" to read from line 81. A path and literal
@@ -84,7 +85,7 @@ enum Stop {
     Error(anyhow::Error),
 }
 
-fn read_request(response: &Value) -> Result<Option<ContextRead>> {
+pub(crate) fn read_request(response: &Value) -> Result<Option<ContextRead>> {
     let Some(value) = response.get("read") else {
         return Ok(None);
     };
@@ -258,18 +259,34 @@ fn review_chunk(
     let result = review_passes(
         chunk,
         scan,
-        &mut |system, data, evidence| {
-            let system = format!("{system}\n{TOOLS}");
+        &mut |instructions, data, evidence| {
+            let with_tools = format!("{instructions}\n{TOOLS}");
+            let (stage, answer_key) = if data.get("recheck").is_some() {
+                ("recheck", "assessments")
+            } else if data.get("hypotheses").is_some() {
+                ("challenge", "assessments")
+            } else {
+                ("discovery", "hypotheses")
+            };
+            let synthesis = format!(
+                "{instructions}\nRepository reads are closed for this {stage} stage. Synthesize its final answer now from the collected diff, source references and lookup results. Return the requested JSON object with complete and {answer_key}. Do not request another read. Retain only outcomes supported by the supplied evidence; identify uncertainty using this stage's specified format."
+            );
             let mut attempted = HashMap::new();
+            let mut synthesis_turn = 0;
             loop {
+                let system = if synthesis_turn == 0 {
+                    with_tools.as_str()
+                } else {
+                    synthesis.as_str()
+                };
                 if stop.is_some() {
                     anyhow::bail!("This batch was interrupted.")
                 }
-                match fits(&system, data) {
+                match fits(system, data) {
                     Ok(true) => {}
                     Ok(false) => {
                         stop = Some(
-                            context_overflow(&system, data, chunk, fits, false)
+                            context_overflow(system, data, chunk, fits, false)
                                 .unwrap_or_else(Stop::Error),
                         );
                         anyhow::bail!("Context window exceeded.")
@@ -279,14 +296,14 @@ fn review_chunk(
                         anyhow::bail!("Could not measure the request.")
                     }
                 }
-                let response = match model(&system, data) {
+                let response = match model(system, data) {
                     Err(error) if error.is::<ReviewTurnLimit>() => {
                         stop = Some(Stop::TurnLimit);
                         anyhow::bail!("Model turn limit reached.")
                     }
                     Err(error) if error.is::<ReviewContextExceeded>() => {
                         stop = Some(
-                            context_overflow(&system, data, chunk, fits, true)
+                            context_overflow(system, data, chunk, fits, true)
                                 .unwrap_or_else(Stop::Error),
                         );
                         anyhow::bail!("Context window exceeded.")
@@ -310,12 +327,35 @@ fn review_chunk(
                         .filter_map(|file| file["path"].as_str().map(str::to_owned))
                         .collect::<HashSet<_>>()
                 });
+                if synthesis_turn > 0 {
+                    if response["complete"].is_boolean()
+                        && response[answer_key].is_array()
+                        && response.as_object().is_some_and(|object| {
+                            object.keys().all(|key| {
+                                key == "complete"
+                                    || key == answer_key
+                                    || (stage == "challenge" && key == "leads")
+                            })
+                        })
+                    {
+                        // The next stage may use tools again; its evidence includes all pinned source windows.
+                        data.as_object_mut()
+                            .expect("review request")
+                            .remove("last_read");
+                        return Ok(response);
+                    }
+                    if synthesis_turn == 2 {
+                        stop = Some(Stop::RepeatedRead);
+                        anyhow::bail!(
+                            "The model did not finish the stage with the available evidence."
+                        )
+                    }
+                    synthesis_turn += 1;
+                    data["last_read"] = json!({"result": format!("No further lookup will be executed. Return the final {stage} JSON with complete and {answer_key}.")});
+                    continue;
+                }
                 let Some(request) = read_request(&response)? else {
                     return Ok(response);
-                };
-                let Some(slot) = turns.next() else {
-                    stop = Some(Stop::TurnLimit);
-                    anyhow::bail!("Model turn limit reached.")
                 };
                 let attempts = attempted
                     .entry((request.path.clone(), request.term.clone()))
@@ -324,10 +364,16 @@ fn review_chunk(
                 if *attempts == 2 {
                     data["last_read"] = json!({"request": request, "result": "This lookup was already performed on the same revision. Choose a different query or finish with the available evidence."});
                     continue;
-                } else if *attempts > 2 {
-                    stop = Some(Stop::RepeatedRead);
-                    anyhow::bail!("Repeated pinned source lookup.")
                 }
+                if *attempts > 2 {
+                    synthesis_turn = 1;
+                    data["last_read"] = json!({"request": request, "result": "This lookup was already performed. Its results remain in the supplied evidence. No further reads will be executed during this stage."});
+                    continue;
+                }
+                let Some(slot) = turns.next() else {
+                    stop = Some(Stop::TurnLimit);
+                    anyhow::bail!("Model turn limit reached.")
+                };
                 let result = read.borrow_mut()(full, std::slice::from_ref(&request));
                 let status = match result {
                     Ok(windows) => {
@@ -488,7 +534,7 @@ pub fn review_snapshot_iterative(
                         report.limits.push(ReviewTurnLimit.to_string());
                         break;
                     }
-                    Stop::RepeatedRead => report.limits.push("The model repeated the same pinned lookup after it was asked to choose a different query or finish.".into()),
+                    Stop::RepeatedRead => report.limits.push("The model repeated the same pinned lookup and did not return a final stage result after two requests to use the collected evidence.".into()),
                     _ => unreachable!()
                 }
             }
@@ -798,7 +844,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!((turns, reads), (3, 1));
+        assert_eq!((turns, reads), (5, 1));
         assert!(result.reviewed_files.unwrap().is_empty());
         assert!(
             result

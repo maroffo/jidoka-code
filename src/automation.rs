@@ -145,10 +145,64 @@ fn migrate_job_states(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+// A stopped review can be reactivated for the same SHA after a draft/ready transition.
+// Classify only the service's own persisted reason and normalized protocol fields.
+fn terminal_model_stop(reason: &str) -> Option<&'static str> {
+    let (label, fields) = reason.split_once(" (").unwrap_or((reason, ""));
+    if label == "Provider withheld the reply." {
+        return Some("The provider withheld the reply.");
+    }
+    if label == "Provider stopped before completing its reply."
+        && fields.split(", ").any(|field| {
+            field.split_once('=').is_some_and(|(key, value)| {
+                matches!(key, "finish" | "native_finish")
+                    && !matches!(value.trim_end_matches(')'), "" | "absent" | "stop")
+            })
+        })
+    {
+        return Some("The provider explicitly stopped generation.");
+    }
+    None
+}
+
+fn saved_model_stop(
+    conn: &Connection,
+    id: i64,
+    provider: &str,
+) -> rusqlite::Result<Option<&'static str>> {
+    let reason: Option<String> = conn.query_row(
+        "SELECT run.stop_reason FROM review_runs run JOIN reviews review ON review.id=run.review_id
+         WHERE run.review_id=?1 AND review.provider=?2", params![id,provider], |row| row.get(0),
+    ).optional()?.flatten();
+    Ok(reason.as_deref().and_then(terminal_model_stop))
+}
+
 /// Resume interrupted automatic analyses before web recovery fails other running reviews.
 pub fn recover(conn: &Connection, provider: &str) -> rusqlite::Result<()> {
     bind_provider(conn, provider)?;
-    conn.execute(
+    let tx = immediate(conn)?;
+    // Dispatch commits the model stop before the worker commits the review's final status.
+    // Also recognize retries scheduled by an older service before restarting its queue.
+    {
+        let mut query = tx.prepare(
+            "SELECT run.review_id,run.stop_reason FROM review_runs run
+             JOIN automation_jobs job ON job.review_id=run.review_id JOIN reviews review ON review.id=run.review_id
+             WHERE review.provider=? AND run.stop_reason IS NOT NULL AND
+               ((job.state='pending' AND review.status IN ('running','queued')) OR job.state='waiting_analysis')"
+        )?;
+        let stopped = query
+            .query_map([provider], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, reason) in stopped {
+            if let Some(reason) = terminal_model_stop(&reason) {
+                tx.execute("UPDATE reviews SET status='failed',error=? WHERE id=? AND status IN ('running','queued')",params![reason,id])?;
+                tx.execute("UPDATE automation_jobs SET state='pending',retry_at=0 WHERE review_id=? AND state='waiting_analysis'",[id])?;
+            }
+        }
+    }
+    tx.execute(
         "UPDATE reviews SET status = 'queued', report = NULL, error = NULL
          WHERE status = 'running' AND provider = ?1 AND id IN (
              SELECT job.review_id FROM automation_jobs AS job
@@ -159,7 +213,7 @@ pub fn recover(conn: &Connection, provider: &str) -> rusqlite::Result<()> {
          )",
         [provider],
     )?;
-    Ok(())
+    tx.commit()
 }
 
 /// Bind automatic consent to the provider currently configured at startup.
@@ -608,6 +662,9 @@ fn enqueue(
     ).optional()?;
     if let Some((id, state)) = existing {
         if matches!(state.as_str(), "canceled" | "deferred") || (state == "stopped" && allow_new) {
+            if saved_model_stop(conn, id, provider)?.is_some() {
+                return Ok(());
+            }
             if has_publications(conn)? && conn.execute(
                 "UPDATE automation_jobs SET state = 'published', retry_at = 0 WHERE review_id = ?1
                  AND EXISTS (SELECT 1 FROM github_publications WHERE scope = ?2 AND review_id > 0)",
@@ -772,12 +829,18 @@ fn publish_finished(
                 }
             },
             None if finished.status == "failed" => {
-                let retry = retry_delay(finished.analysis_attempts, MAX_ANALYSIS_ATTEMPTS);
-                Outcome::AnalysisFailed {
-                    error: retry_message(
-                        format!("The automatic review for PR #{number} failed."),
-                        retry,
+                let (message, retry) = match saved_model_stop(conn, finished.review_id, provider)? {
+                    Some(reason) => (
+                        format!("The automatic review for PR #{number} failed. {reason}"),
+                        None,
                     ),
+                    None => (
+                        format!("The automatic review for PR #{number} failed."),
+                        retry_delay(finished.analysis_attempts, MAX_ANALYSIS_ATTEMPTS),
+                    ),
+                };
+                Outcome::AnalysisFailed {
+                    error: retry_message(message, retry),
                     retry,
                 }
             }
@@ -1294,6 +1357,96 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(statuses, ["queued", "failed", "failed"]);
+    }
+
+    #[test]
+    fn terminal_model_stops_survive_polls_restart_and_same_head_reactivation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("reviews.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        setup(&conn);
+        save_mode(&conn, REPO, "summary", Some(TOKEN)).unwrap();
+        let ready = [(1, OLD, true), (2, OLD, true), (3, OLD, true)];
+        snapshot(&conn, &[]);
+        snapshot(&conn, &ready);
+        for (id, reason) in [
+            (
+                1,
+                "Provider withheld the reply. (choices=Some(1), finish=content_filter, native_finish=absent, block=absent)",
+            ),
+            (
+                2,
+                "Provider stopped before completing its reply. (choices=Some(1), finish=unrecognized, native_finish=absent, block=absent)",
+            ),
+            (3, "Provider timed out."),
+        ] {
+            finish(&conn, id, "failed", None);
+            conn.execute(
+                "INSERT INTO review_runs(review_id,turns,stop_reason) VALUES(?,42,?)",
+                params![id, reason],
+            )
+            .unwrap();
+        }
+        assert!(
+            publish_ready_with(&conn, PROVIDER, &repos(), |_, _, _| panic!(
+                "Failed runs cannot publish"
+            ))
+            .is_err()
+        );
+        let job_state = |conn: &Connection, id| {
+            conn.query_row(
+                "SELECT state FROM automation_jobs WHERE review_id=?",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(job_state(&conn, 1), "stopped");
+        assert_eq!(job_state(&conn, 2), "stopped");
+        assert_eq!(job_state(&conn, 3), "waiting_analysis");
+        // Simulate an older worker that scheduled a retry, and a crash just after a refusal was saved.
+        conn.execute(
+            "UPDATE automation_jobs SET state='waiting_analysis',retry_at=0 WHERE review_id=1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE automation_jobs SET state='pending' WHERE review_id=2",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE reviews SET status='running' WHERE id=2", [])
+            .unwrap();
+        drop(conn);
+        crate::web::recover(&path, PROVIDER).unwrap();
+        let conn = open(&path).unwrap();
+        conn.execute("UPDATE automation_jobs SET retry_at=0", [])
+            .unwrap();
+        assert!(
+            publish_ready_with(&conn, PROVIDER, &repos(), |_, _, _| panic!(
+                "Unexpected post"
+            ))
+            .is_err()
+        );
+        snapshot(&conn, &ready);
+        snapshot(&conn, &[(1, OLD, false), (2, OLD, false), (3, OLD, true)]);
+        snapshot(&conn, &ready);
+        snapshot(&conn, &ready);
+        assert_eq!(
+            states(&conn)
+                .iter()
+                .map(|row| row.2.as_str())
+                .collect::<Vec<_>>(),
+            ["failed", "failed", "queued"]
+        );
+        assert_eq!(
+            conn.query_row("SELECT sum(turns) FROM review_runs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            126
+        );
+        snapshot(&conn, &[(1, NEW, true), (2, OLD, true), (3, OLD, true)]);
+        assert!(states(&conn).contains(&(1, NEW.to_owned(), "queued".to_owned())));
     }
 
     #[test]

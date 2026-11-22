@@ -1,6 +1,7 @@
 //! Review pinned source and verify proposed findings against counterevidence.
 
 mod interactive;
+pub(crate) use interactive::read_request;
 pub use interactive::{
     ReviewBatchInterrupted, ReviewContextExceeded, ReviewTurnLimit, review_snapshot_iterative,
 };
@@ -4253,5 +4254,36 @@ mod tests {
             result.report.limits
         );
         assert!(result.report.findings.is_empty());
+    }
+
+    #[test]
+    fn repeated_repository_lookup_can_end_in_a_verified_source_grounded_finding() {
+        let mut calls = 0;
+        let mut reads = 0;
+        let result = review_snapshot_iterative(indexed_snapshot(),|system,data| {
+            calls+=1;
+            match calls {
+                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]})),
+                2..=4 => Ok(json!({"read":{"path":"*","term":"new_cache"}})),
+                5 => {
+                    assert!(system.contains("Repository reads are closed"));
+                    assert!(system.contains("assessments"));
+                    assert!(data["snapshot"]["head_context"].as_array().unwrap().iter().any(|w|w["path"]=="caller.go"));
+                    let guard=&data["snapshot"]["head_context"].as_array().unwrap().last().unwrap()["rows"][0][1];
+                    let mut finding=indexed_capacity_finding(1,"H4","B2","B4");
+                    finding["counterevidence"]["references"]=json!(["H2",guard]);
+                    Ok(json!({"complete":true,"assessments":[finding]}))
+                }
+                _ => panic!("Unnecessary extra turn")
+            }
+        }, |_,_| {
+            reads+=1;
+            Ok(vec![SourceWindow{path:"caller.go".into(),start:21,text:"return new_cache(1)".into()}])
+        }, |_,_| Ok(true), &[]).unwrap();
+        assert_eq!((calls, reads), (5, 1));
+        assert_eq!(result.report.findings.len(), 1);
+        assert!(result.report.findings[0].evidence.contains("caller.go:21"));
+        assert!(result.unfinished_patches().unwrap().is_empty());
+        assert!(result.report.limits.is_empty());
     }
 }
