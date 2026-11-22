@@ -27,7 +27,7 @@ const MAX_TEXT: usize = 400;
 const MAX_QUOTE: usize = 1_000;
 const REPLAY_INPUT_BYTES: usize = 900_000;
 const MAX_PRIOR_ASSESSMENT_BYTES: usize = 4_096;
-const MAX_CONTEXT_READS: usize = 3;
+pub(crate) const MAX_CONTEXT_READS: usize = 3;
 const MAX_READ_TERM_BYTES: usize = 128;
 const MAX_RECHECK_CONTEXT_BYTES: usize = 96_000;
 const RECHECK_CONTEXT_RADIUS: usize = 6;
@@ -678,6 +678,7 @@ fn indexed_input<'a>(
 struct Evidence<'a> {
     source: Source<'a>,
     references: Option<ReferenceIndex<'a>>,
+    interactive: bool,
 }
 
 #[derive(Default)]
@@ -687,6 +688,17 @@ struct Counterevidence<'a> {
 }
 
 impl<'a> Evidence<'a> {
+    fn requested_reads(&self, value: &Value) -> Option<Vec<ContextRead>> {
+        if !self.interactive {
+            return context_reads(value);
+        }
+        value
+            .as_array()
+            .filter(|items| items.len() <= MAX_CONTEXT_READS)?
+            .iter()
+            .map(|item| interactive::read_request(&json!({"read":item})).ok()?)
+            .collect()
+    }
     fn citation(&self, value: &Value, revision: Revision) -> Option<Citation<'a>> {
         match &self.references {
             Some(references) => references.resolve(value, revision),
@@ -1296,7 +1308,7 @@ fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Opti
             None
         };
         let reads = match object.get("reads") {
-            Some(value) => context_reads(value)?,
+            Some(value) => source.requested_reads(value)?,
             None => Vec::new(),
         };
         return Some(Assessment {
@@ -1383,7 +1395,7 @@ fn validation_feedback(item: &Value, anchor: Citation<'_>, evidence: &Evidence<'
     }
     if object
         .get("reads")
-        .is_some_and(|value| context_reads(value).is_none())
+        .is_some_and(|value| evidence.requested_reads(value).is_none())
     {
         return format!(
             "reads must contain at most {MAX_CONTEXT_READS} objects with a safe path or exact file stem and a literal symbol or property term."
@@ -1476,20 +1488,23 @@ struct Pending<'a, 'input> {
     provisional_outcome: Option<String>,
 }
 
-struct RecheckReader<'a, F> {
+struct RecheckReader<F> {
     protocol: CitationProtocol,
     read: F,
-    windows: &'a mut Vec<SourceWindow>,
 }
 
-fn pending_reads(pending: &[Pending<'_, '_>]) -> Vec<ContextRead> {
+fn pending_reads(pending: &[Pending<'_, '_>], interactive: bool) -> Vec<ContextRead> {
     let mut seen = HashSet::new();
     pending
         .iter()
         .filter_map(|entry| entry.undecided.as_ref())
         .flat_map(|entry| &entry.reads)
         .filter(|read| seen.insert((read.path.as_str(), read.term.as_str())))
-        .take(MAX_CONTEXT_READS)
+        .take(if interactive {
+            usize::MAX
+        } else {
+            MAX_CONTEXT_READS
+        })
         .cloned()
         .collect()
 }
@@ -1523,12 +1538,12 @@ fn recheck_input<'a>(
     data["recheck"] = json!(details);
 
     // Interactive reviews explicitly open additional files through the repository tools.
-    let interactive = matches!(protocol, CitationProtocol::Interactive);
-    let mut remaining = if interactive {
-        usize::MAX
-    } else {
-        MAX_RECHECK_CONTEXT_BYTES.min(REPLAY_INPUT_BYTES.saturating_sub(request_bytes(data)?))
-    };
+    if matches!(protocol, CitationProtocol::Interactive) {
+        interactive::extend_evidence(data, evidence, read_windows);
+        return Ok(());
+    }
+    let mut remaining =
+        MAX_RECHECK_CONTEXT_BYTES.min(REPLAY_INPUT_BYTES.saturating_sub(request_bytes(data)?));
     let references = evidence
         .references
         .as_mut()
@@ -1555,11 +1570,6 @@ fn recheck_input<'a>(
         )?;
     }
 
-    if interactive {
-        data["snapshot"]["complete_head_paths"] =
-            json!(references.complete_head_paths(&evidence.source));
-        return Ok(());
-    }
     let mut sources: Vec<_> = pending
         .iter()
         .filter_map(|entry| {
@@ -1662,7 +1672,7 @@ fn live_assessments<'a>(
     anchors: &HashMap<u64, Citation<'a>>,
     evidence: &mut Evidence<'a>,
     ask: &mut Ask<'a, '_>,
-    mut reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
+    mut reader: RecheckReader<impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
     limits: &mut Vec<String>,
 ) -> Result<(Vec<Assessment<'a>>, BatchCoverage)> {
     let initial = request(
@@ -1699,6 +1709,8 @@ fn live_assessments<'a>(
 
     let mut accepted = Vec::new();
     let mut pending = Vec::new();
+    let mut settled = Vec::new();
+    let interactive = matches!(reader.protocol, CitationProtocol::Interactive);
     // An unscoped incomplete reply can only be superseded by rechecking the entire set.
     let recheck_all = !initial.complete;
     for hypothesis in hypotheses {
@@ -1723,6 +1735,9 @@ fn live_assessments<'a>(
                         .position(|item| item["id"].as_u64() == Some(id))
                         .expect("accepted assessment order");
                     accepted.push((order, item));
+                    if interactive {
+                        settled.push(json!({"id":id,"outcome":raw["outcome"]}));
+                    }
                     continue;
                 }
                 (
@@ -1800,27 +1815,116 @@ fn live_assessments<'a>(
         ));
     }
 
-    let reads = pending_reads(&pending);
-    if !reads.is_empty() {
-        match (reader.read)(&reads) {
-            Ok(windows) => *reader.windows = windows,
-            Err(_) => limits.push("Requested pinned source context could not be read.".into()),
+    let mut seen = HashSet::new();
+    let mut previous_items = initial.items.clone();
+    let mut previous_complete = initial.complete;
+    let repaired = loop {
+        let requests = pending_reads(&pending, interactive);
+        let requested = !requests.is_empty();
+        let fresh: Vec<_> = requests
+            .into_iter()
+            .filter(|r| seen.insert((r.path.clone(), r.term.clone())))
+            .collect();
+        let windows = if fresh.is_empty() {
+            &[][..]
+        } else {
+            match (reader.read)(&fresh) {
+                Ok(windows) => windows,
+                Err(_) => {
+                    limits.push("Requested pinned source context could not be read.".into());
+                    &[]
+                }
+            }
+        };
+        let before = data["snapshot"]["head_context"]
+            .as_array()
+            .map_or(0, Vec::len);
+        if !settled.is_empty() {
+            data["settled_assessments"] = json!(&settled);
         }
-    }
-    recheck_input(
-        data,
-        &pending,
-        &initial.items,
-        evidence,
-        reader.windows,
-        reader.protocol,
-    )?;
-    let repaired = match request(Pass::Recheck, reader.protocol, data, evidence, ask, limits) {
-        Ok(reply) => reply,
-        Err(error) => {
-            limits.push(error.to_string());
-            None
+        recheck_input(
+            data,
+            &pending,
+            &previous_items,
+            evidence,
+            windows,
+            reader.protocol,
+        )?;
+        let gained = data["snapshot"]["head_context"]
+            .as_array()
+            .is_some_and(|items| items.len() > before);
+        if interactive
+            && requested
+            && !gained
+            && previous_complete
+            && pending.iter().all(|p| p.undecided.is_some())
+        {
+            previous_items.retain(|item| pending.iter().any(|p| item["id"].as_u64() == Some(p.id)));
+            break Some(Reply {
+                complete: true,
+                overflow: false,
+                items: previous_items,
+                leads: Vec::new(),
+                valid_leads: true,
+            });
         }
+
+        let reply = match request(Pass::Recheck, reader.protocol, data, evidence, ask, limits) {
+            Ok(Some(reply)) => reply,
+            Ok(None) => break None,
+            Err(error) => {
+                limits.push(error.to_string());
+                break None;
+            }
+        };
+        if !interactive
+            || !reply.complete
+            || reply.overflow
+            || unexpected_assessments(&reply.items, |id| pending.iter().any(|p| p.id == id))
+        {
+            break Some(reply);
+        }
+        // Only a locally valid assessment for the requested ID may ask for more source.
+        let mut checked = Vec::new();
+        for entry in &pending {
+            let Ok((raw, item)) =
+                checked_assessment(&reply.items, entry.id, entry.anchor, evidence)
+            else {
+                break;
+            };
+            if entry
+                .provisional_outcome
+                .as_ref()
+                .is_some_and(|outcome| text(&raw["outcome"]) != Some(outcome.as_str()))
+            {
+                break;
+            }
+            checked.push((&raw["outcome"], item));
+        }
+        if checked.len() != pending.len() || !checked.iter().any(|(_, item)| !item.reads.is_empty())
+        {
+            break Some(reply);
+        }
+        previous_complete = true;
+        pending = pending
+            .into_iter()
+            .zip(checked)
+            .filter_map(|(mut entry, (outcome, mut item))| {
+                if let Some(reason) = &item.undecided {
+                    entry.feedback = reason.clone();
+                    if item.priority.is_none() {
+                        item.priority = entry.undecided.take().and_then(|prior| prior.priority);
+                    }
+                    entry.undecided = Some(item);
+                    Some(entry)
+                } else {
+                    accepted.push((accepted.len(), item));
+                    settled.push(json!({"id":entry.id,"outcome":outcome}));
+                    None
+                }
+            })
+            .collect();
+        previous_items = reply.items;
     };
     let mut recovered = false;
     if let Some(reply) = &repaired {
@@ -2013,21 +2117,24 @@ fn review_with_protocol<F>(
     snapshot: &Snapshot,
     scan: &Scan,
     mut ask: F,
-    read: impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>,
+    mut read: impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>,
     prior: &[Finding],
     protocol: CitationProtocol,
 ) -> Result<Report>
 where
     F: FnMut(&str, &Value) -> Result<Value>,
 {
+    let windows = std::cell::OnceCell::new();
     review_passes(
         snapshot,
         scan,
         &mut |system, data, _| ask(system, data),
         RecheckReader {
             protocol,
-            read,
-            windows: &mut Vec::new(),
+            read: |requests: &[ContextRead]| {
+                let result = read(requests)?;
+                Ok(windows.get_or_init(|| result).as_slice())
+            },
         },
         prior,
         protocol,
@@ -2118,7 +2225,7 @@ fn review_passes<'a>(
     snapshot: &'a Snapshot,
     scan: &Scan,
     ask: &mut Ask<'a, '_>,
-    reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
+    reader: RecheckReader<impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
     prior: &[Finding],
     protocol: CitationProtocol,
 ) -> Result<BatchResult> {
@@ -2131,7 +2238,11 @@ fn review_passes<'a>(
         }
         CitationProtocol::Verbatim => (verbatim_input(snapshot, scan), None),
     };
-    let mut evidence = Evidence { source, references };
+    let mut evidence = Evidence {
+        source,
+        references,
+        interactive: matches!(protocol, CitationProtocol::Interactive),
+    };
     if matches!(protocol, CitationProtocol::Interactive) && !prior.is_empty() {
         let leads: Vec<_> = retain_history(Vec::new(), prior, 1, usize::MAX, &evidence)
             .into_iter()
@@ -4310,7 +4421,8 @@ mod tests {
                     Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))
                 }
                 2 => {
-                    assert!(data.get("answer_shape").is_none());
+                    assert_eq!(data["answer_shape"],"assessments");
+                    assert_eq!(data["allow_assessment_reads"],true);
                     Ok(json!({"read":{"path":"caller.go","term":"#L21"}}))
                 }
                 3 => Err(ReviewBatchInterrupted.into()),
@@ -4347,7 +4459,8 @@ mod tests {
                 }
                 5 => {
                     assert_eq!(data["recheck"].as_array().unwrap().len(),2);
-                    assert!(data.get("last_read").is_none() && data.get("answer_shape").is_none());
+                    assert!(data.get("last_read").is_none());
+                    assert_eq!(data["allow_assessment_reads"],true);
                     Err(ReviewTurnLimit.into())
                 }
                 _ => panic!("No further dispatch after the limit"),
@@ -4357,5 +4470,84 @@ mod tests {
         assert!(result.report.findings.is_empty());
         assert!(result.reviewed_files.unwrap().is_empty());
         assert!(result.report.limits.contains(&ReviewTurnLimit.to_string()));
+    }
+    #[test]
+    fn targeted_assessments_keep_verified_siblings_and_only_revisit_the_unresolved_id() {
+        let mut calls = 0;
+        let mut reads = Vec::new();
+        let undecided = |read: Value| json!({"id":2,"outcome":"indeterminate","countercheck":"Check whether the publisher suppresses the draft.","reads":[read]});
+        let result = review_snapshot_iterative(indexed_snapshot(), |_,data| {
+            calls+=1;
+            if calls>1 { assert_eq!(data["answer_shape"], "assessments"); assert_eq!(data["allow_assessment_reads"],true); }
+            match calls {
+                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot."),indexed_proposal("H8","The publisher exposes a draft.")]})),
+                2 => {
+                    let mut question = undecided(json!({"path":"*","term":"publish draft"}));
+                    question["reads"].as_array_mut().unwrap().push(json!({"path":"*:13","term":"publish draft"}));
+                    Ok(json!({"complete":true,"assessments":[indexed_capacity_finding(1,"H4","B2","B4"),question]}))
+                },
+                3 | 4 => {
+                    assert_eq!(data["hypotheses"].as_array().unwrap().len(),1);
+                    assert_eq!(data["hypotheses"][0]["id"],2);
+                    assert_eq!(data["settled_assessments"],json!([{"id":1,"outcome":"confirmed"}]));
+                    let prev=&data["recheck"][0]["prior_assessments"][0];
+                    assert_eq!(prev["outcome"],"indeterminate");
+                    let windows=data["snapshot"]["head_context"].as_array().unwrap();
+                    assert!(windows.iter().any(|w|w["path"]=="publisher.go"));
+                    if calls==3 {return Ok(json!({"complete":true,"assessments":[undecided(json!({"path":"guard.go","term":""}))]}))}
+                    let guard=windows.iter().find(|w|w["path"]=="guard.go").unwrap();
+                    Ok(json!({"complete":true,"assessments":[{"id":2,"outcome":"refuted","basis":guard["rows"][0][1],"countercheck":"The guard excludes unpublished entries."}]}))
+                }
+                _=>panic!("No unresolved hypothesis remains")
+            }
+        }, |_,requests| {
+            assert_eq!(requests.len(),1);
+            reads.push((requests[0].path.clone(),requests[0].term.clone()));
+            let path=match requests[0].path.as_str() { "*" => "publisher.go", "*:13" => "publisher_test.go", _ => "guard.go" };
+            Ok(vec![SourceWindow{path:path.into(),start:11,text:"publish_if_ready(entry)".into()}])
+        }, |_,_| Ok(true), &[]).unwrap();
+        assert_eq!(
+            reads,
+            [
+                ("*".into(), "publish draft".into()),
+                ("*:13".into(), "publish draft".into()),
+                ("guard.go".into(), "".into())
+            ]
+        );
+        assert_eq!(calls, 4);
+        assert_eq!(result.report.findings.len(), 1);
+        assert!(result.unfinished_patches().unwrap().is_empty());
+        assert!(result.report.limits.is_empty());
+    }
+
+    #[test]
+    fn repeated_or_unproductive_targeted_reads_preserve_human_checks_and_unknown_ids_cannot_read() {
+        for mode in ["empty", "repeat", "unknown"] {
+            let mut calls = 0;
+            let mut reads = 0;
+            let result=review_snapshot_iterative(indexed_snapshot(), |_,_| {
+                calls+=1;
+                if calls==1 {return Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))}
+                let check=json!({"id":if mode=="unknown"{99}else{1},"outcome":"indeterminate","countercheck":"The caller configuration must be checked.","basis":"H2","action":"Supply one slot and record the configured capacity.","expected":"The configured capacity remains one.","severity":"medium","reads":[{"path":"caller.go","term":"#L81"}]});
+                Ok(json!({"complete":true,"assessments":[check]}))
+            }, |_,_| {
+                reads+=1;
+                if mode=="unknown"{panic!("unknown ID triggered a source read")}
+                Ok(if mode=="empty" {vec![]} else {vec![SourceWindow{path:"caller.go".into(),start:81,text:"configure_cache()".into()}]})
+            },|_,_|Ok(true),&[]).unwrap();
+            assert_eq!(reads, usize::from(mode != "unknown"));
+            assert_eq!(calls, if mode == "empty" { 2 } else { 3 });
+            assert!(result.report.findings.is_empty());
+            assert!(!result.report.limits.is_empty());
+            if mode != "unknown" {
+                assert!(
+                    result
+                        .report
+                        .focus
+                        .iter()
+                        .any(|focus| focus.action.contains("one slot"))
+                );
+            }
+        }
     }
 }

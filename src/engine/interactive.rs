@@ -43,19 +43,17 @@ impl fmt::Display for ReviewBatchInterrupted {
 impl std::error::Error for ReviewBatchInterrupted {}
 
 const TOOLS: &str = r##"
-Reply with one JSON text object. When you need to inspect source, return only
-{"read":{"path":"repository/path","term":"literal"}}. Jidoka reads the pinned
-repository and includes the result in the next request.
-Use path "*" with a nonempty literal to search the proposed repository. Search returns
-up to 12 matching paths at a time: use "*:13" for the next page, then "*:25", etc.
-Use an exact path with an empty term to open it, or "#L81" to read from line 81. A path and literal
-together locate matching passages. Results appear in snapshot.head_context, with
-head citations you can use. A read returning no matches is not proof of absence.
-Request another source window only if it can change the verdict on a specific
-hypothesis. Follow its callers, contracts or tests as needed. Otherwise return
-the assessments. Set complete to true when every required hypothesis has an
-evidence-supported disposition, including indeterminate with a concrete missing
-check for a human reviewer. Acknowledge results already supplied.
+Return an assessment for every supplied hypothesis now. For a specific unresolved
+ID, use outcome "indeterminate", describe the missing evidence in countercheck,
+and add "reads":[{"path":"repository/path","term":"literal"}] on that assessment.
+Ask only for source that can change that verdict. Other IDs still need a disposition.
+Use path "*" with a nonempty literal to search the pinned repository; "*:13" opens
+the next page of matching paths. Use an exact path with an empty term to open
+the file, "#L81" for a particular line, or a literal for matching passages.
+Rechecks include the last assessments and all previous pinned evidence. A search
+with no hits does not establish absence. If no further source can help, describe
+the concrete remaining human check. Set complete to true when every required ID
+has a disposition, including an explicit indeterminate outcome.
 "##;
 
 #[derive(Default)]
@@ -109,7 +107,7 @@ pub(crate) fn read_request(response: &Value) -> Result<Option<ContextRead>> {
     Ok(Some(read))
 }
 
-fn extend_evidence<'a>(
+pub(super) fn extend_evidence<'a>(
     data: &mut Value,
     evidence: &mut Evidence<'a>,
     windows: &'a [SourceWindow],
@@ -261,7 +259,7 @@ fn review_chunk(
     let read = RefCell::new(read);
     // Fixed slots provide stable references to tool evidence while citations are live.
     let evidence_turns: Vec<_> = (0..ReviewTurnLimit::MAX).map(|_| OnceCell::new()).collect();
-    let mut turns = evidence_turns.iter();
+    let turns = RefCell::new(evidence_turns.iter());
     let mut stop = None;
     let mut displayed = None;
     let recheck_has_reads = std::cell::Cell::new(false);
@@ -292,10 +290,14 @@ fn review_chunk(
             let mut has_source = stage == "recheck" && recheck_has_reads.get();
             let mut interrupted = false;
             loop {
+                data["answer_shape"] = json!(answer_key);
                 let system = if synthesis_turn == 0 {
+                    data["allow_assessment_reads"] = json!(true);
                     with_tools.as_str()
                 } else {
-                    data["answer_shape"] = json!(answer_key);
+                    data.as_object_mut()
+                        .expect("review request")
+                        .remove("allow_assessment_reads");
                     synthesis.as_str()
                 };
                 if stop.is_some() {
@@ -355,6 +357,9 @@ fn review_chunk(
                 if synthesis_turn > 0 {
                     if response["complete"].is_boolean()
                         && response[answer_key].is_array()
+                        && !response[answer_key].as_array().is_some_and(|items| {
+                            items.iter().any(|item| item.get("reads").is_some())
+                        })
                         && response.as_object().is_some_and(|object| {
                             object.keys().all(|key| {
                                 key == "complete"
@@ -384,9 +389,10 @@ fn review_chunk(
                     continue;
                 }
                 let Some(request) = read_request(&response)? else {
-                    data.as_object_mut()
-                        .expect("review request")
-                        .remove("last_read");
+                    let request = data.as_object_mut().expect("review request");
+                    request.remove("last_read");
+                    request.remove("answer_shape");
+                    request.remove("allow_assessment_reads");
                     return Ok(response);
                 };
                 let attempts = attempted
@@ -402,7 +408,7 @@ fn review_chunk(
                     data["last_read"] = json!({"request": request, "result": "This lookup was already performed. Its results remain in the supplied evidence. No further reads will be executed during this stage."});
                     continue;
                 }
-                let Some(slot) = turns.next() else {
+                let Some(slot) = turns.borrow_mut().next() else {
                     stop = Some(Stop::TurnLimit);
                     anyhow::bail!("Model turn limit reached.")
                 };
@@ -422,11 +428,24 @@ fn review_chunk(
         RecheckReader {
             protocol: CitationProtocol::Interactive,
             read: |requests: &[ContextRead]| {
-                let windows = read.borrow_mut()(full, requests)?;
-                recheck_has_reads.set(returned_source(&windows));
-                Ok(windows)
+                let mut windows = Vec::new();
+                let mut failure = None;
+                // Each lookup has its own page budget, even when different IDs ask in the same round.
+                for request in requests {
+                    match read.borrow_mut()(full, std::slice::from_ref(request)) {
+                        Ok(result) => windows.extend(result),
+                        Err(error) => failure = Some(error),
+                    }
+                }
+                if windows.is_empty()
+                    && let Some(error) = failure
+                {
+                    return Err(error);
+                }
+                recheck_has_reads.set(recheck_has_reads.get() || returned_source(&windows));
+                let slot = turns.borrow_mut().next().ok_or(ReviewTurnLimit)?;
+                Ok(slot.get_or_init(|| windows).as_slice())
             },
-            windows: &mut Vec::new(),
         },
         prior,
         CitationProtocol::Interactive,

@@ -1,7 +1,7 @@
 mod context;
 mod shape;
 
-use shape::FinalAnswer;
+use shape::AnswerShape;
 
 use anyhow::{Context, Result, bail, ensure};
 use context::GeminiContext;
@@ -105,7 +105,7 @@ impl Provider {
         let Some(context) = &self.context else {
             return Ok(true);
         };
-        let format = FinalAnswer::from_input(data).map(FinalAnswer::format);
+        let format = AnswerShape::from_input(data).map(AnswerShape::format);
         match context.output_budget(&self.client, system, &user_content(data)?, format.as_ref()) {
             Ok(_) => Ok(true),
             Err(error) if error.is::<crate::ReviewContextExceeded>() => Ok(false),
@@ -125,12 +125,12 @@ impl Provider {
                 {"role":"user","content":content}],
             "response_format":{"type":"json_object"}
         });
-        let final_answer = self
+        let answer_shape = self
             .context
             .as_ref()
-            .and_then(|_| FinalAnswer::from_input(data));
+            .and_then(|_| AnswerShape::from_input(data));
         if let Some(context) = &self.context {
-            let format = final_answer.map(FinalAnswer::format);
+            let format = answer_shape.map(AnswerShape::format);
             let max_tokens =
                 context.output_budget(&self.client, system, &content, format.as_ref())?;
             if let Some(format) = format {
@@ -163,7 +163,7 @@ impl Provider {
             .and_then(|s| s.split(';').next())
             .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"));
         if self.context.is_some() && !is_json {
-            return decode_stream(response, final_answer);
+            return decode_stream(response, answer_shape);
         }
         let mut bytes = Vec::new();
         response
@@ -173,7 +173,7 @@ impl Provider {
             bytes.len() <= MAX_REPLY_BYTES,
             "Provider response exceeds the size limit"
         );
-        decode_reply(&bytes, final_answer)
+        decode_reply(&bytes, answer_shape)
     }
 }
 
@@ -522,7 +522,7 @@ fn first_present<const N: usize>(values: [&Value; N]) -> &Value {
         .unwrap_or(&Value::Null)
 }
 
-fn decode_stream(reader: impl Read, final_answer: Option<FinalAnswer>) -> Result<ModelReply> {
+fn decode_stream(reader: impl Read, answer_shape: Option<AnswerShape>) -> Result<ModelReply> {
     // SSE adds a JSON envelope to each output chunk. Bound both transport overhead
     // and reassembled model text, including the case of one unterminated long line.
     const MAX_STREAM_BYTES: usize = 16 * MAX_REPLY_BYTES;
@@ -604,7 +604,7 @@ fn decode_stream(reader: impl Read, final_answer: Option<FinalAnswer>) -> Result
     if !reply["choices"][0].is_null() {
         reply["choices"][0]["message"]["content"] = text.into();
     }
-    decode_message(&reply, Some(done), final_answer)
+    decode_message(&reply, Some(done), answer_shape)
 }
 
 fn append_chunk(reply: &mut Value, text: &mut String, frame: &Value) -> Result<()> {
@@ -654,7 +654,7 @@ fn append_chunk(reply: &mut Value, text: &mut String, frame: &Value) -> Result<(
     Ok(())
 }
 
-fn decode_reply(bytes: &[u8], final_answer: Option<FinalAnswer>) -> Result<ModelReply> {
+fn decode_reply(bytes: &[u8], answer_shape: Option<AnswerShape>) -> Result<ModelReply> {
     let reply: Value = serde_json::from_slice(bytes).map_err(|error| {
         let issue = InvalidReply {
             reason: "Provider returned incomplete JSON.",
@@ -667,7 +667,7 @@ fn decode_reply(bytes: &[u8], final_answer: Option<FinalAnswer>) -> Result<Model
             anyhow::Error::new(issue)
         }
     })?;
-    decode_message(&reply, None, final_answer)
+    decode_message(&reply, None, answer_shape)
 }
 
 impl ReplyDiagnostics {
@@ -784,7 +784,7 @@ fn read_hint(text: &str) -> Option<Value> {
 fn decode_message(
     reply: &Value,
     stream_done: Option<bool>,
-    final_answer: Option<FinalAnswer>,
+    answer_shape: Option<AnswerShape>,
 ) -> Result<ModelReply> {
     let first = &reply["choices"][0];
     let message = &first["message"];
@@ -841,7 +841,7 @@ fn decode_message(
         && d.finish == "malformed_function_call"
         && matches!(d.native_finish, "absent" | "malformed_function_call")
     {
-        if final_answer.is_none()
+        if answer_shape.is_none()
             && stream_done == Some(true)
             && no_tool_call
             && let Some(value) = text.and_then(read_hint)
@@ -867,13 +867,13 @@ fn decode_message(
     if d.finish != "stop" || !matches!(d.native_finish, "absent" | "stop") {
         return Err(issue("Provider stopped before completing its reply.").into());
     }
-    if final_answer.is_some()
+    if answer_shape.is_some()
         && ((!message["tool_calls"].is_null()
             && !message["tool_calls"].as_array().is_some_and(Vec::is_empty))
             || !message["function_call"].is_null())
     {
         return Err(interrupted(
-            "Provider returned a native call instead of its final stage response.",
+            "Provider returned a native call instead of its structured stage response.",
         ));
     }
     let text = text.ok_or_else(|| issue("Provider response is missing text."))?;
@@ -888,9 +888,9 @@ fn decode_message(
         value.is_object(),
         issue("Provider returned an unexpected review format.")
     );
-    if final_answer.is_some_and(|shape| !shape.accepts(&value)) {
+    if answer_shape.is_some_and(|shape| !shape.accepts(&value)) {
         return Err(interrupted(
-            "Provider returned a different response from the requested final stage.",
+            "Provider returned a different response from the requested review stage.",
         ));
     }
     Ok(ModelReply { value, usage })
@@ -1231,7 +1231,10 @@ mod tests {
 
     #[test]
     fn final_only_responses_reject_read_hints_and_native_calls_even_with_json_text() {
-        let shape = Some(FinalAnswer::Assessments { leads: false });
+        let shape = Some(AnswerShape::Assessments {
+            leads: false,
+            reads: false,
+        });
         let answer = json!({"complete":true,"assessments":[]});
         let read = json!({"read":{"path":"src/lib.rs","term":"run"}});
         for (finish, content, tool) in [

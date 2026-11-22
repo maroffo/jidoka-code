@@ -243,7 +243,11 @@ mod tests {
             if let Some(expected) = expected {
                 assert_eq!(result.unwrap(), expected);
                 if tokens == 1_032_000 {
-                    let format = super::super::FinalAnswer::Assessments { leads: true }.format();
+                    let format = super::super::AnswerShape::Assessments {
+                        leads: true,
+                        reads: false,
+                    }
+                    .format();
                     let size = serde_json::to_vec(&format).unwrap().len() as u64;
                     assert_eq!(
                         context
