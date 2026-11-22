@@ -1,5 +1,7 @@
 //! Review pinned source and verify proposed findings against counterevidence.
 
+mod diff_read;
+mod focus;
 mod interactive;
 pub(crate) use interactive::read_request;
 pub use interactive::{
@@ -360,6 +362,8 @@ struct ReferenceIndex<'a> {
     base: Vec<Citation<'a>>,
     head: Vec<Citation<'a>>,
     head_lines: HashMap<(&'a str, usize), (&'a str, Option<usize>)>,
+    // Table rows with no H ID still display a physical head line (for example whitespace).
+    uncitable_rows: HashMap<(&'a str, usize, usize), usize>,
 }
 
 impl<'a> ReferenceIndex<'a> {
@@ -512,6 +516,22 @@ impl<'a> ReferenceIndex<'a> {
         paths
     }
 
+    fn file_row(
+        &mut self,
+        path: &'a str,
+        section: usize,
+        offset: usize,
+        line: LocatedLine<'a>,
+    ) -> ReferencedLine<'a> {
+        let row = self.row(path, line);
+        if let Some(number) = line.1
+            && row.1.is_none()
+        {
+            self.uncitable_rows.insert((path, section, offset), number);
+        }
+        row
+    }
+
     fn hunk_sections(
         &mut self,
         path: &'a str,
@@ -534,7 +554,7 @@ impl<'a> ReferenceIndex<'a> {
             }
             last_base = base.or(last_base);
             last_head = head.or(last_head);
-            section.push(self.row(path, row));
+            section.push(self.file_row(path, sections.len(), section.len(), row));
         }
         if !section.is_empty() {
             sections.push(section);
@@ -552,7 +572,7 @@ impl<'a> ReferenceIndex<'a> {
                 file.head
                     .iter()
                     .enumerate()
-                    .map(|(i, &quote)| self.row(path, (Some(i + 1), Some(i + 1), quote)))
+                    .map(|(i, &quote)| self.file_row(path, 0, i, (Some(i + 1), Some(i + 1), quote)))
                     .collect(),
             ];
         }
@@ -567,11 +587,12 @@ impl<'a> ReferenceIndex<'a> {
             );
         }
         if !file.head.is_empty() {
+            let section = sections.len();
             sections.push(
                 file.head
                     .iter()
                     .enumerate()
-                    .map(|(i, &quote)| self.row(path, (None, Some(i + 1), quote)))
+                    .map(|(i, &quote)| self.file_row(path, section, i, (None, Some(i + 1), quote)))
                     .collect(),
             );
         }
@@ -680,6 +701,8 @@ struct Evidence<'a> {
     source: Source<'a>,
     references: Option<ReferenceIndex<'a>>,
     interactive: bool,
+    view: Option<focus::VisibleEvidence>,
+    read_owners: HashMap<(String, String), HashSet<u64>>,
 }
 
 #[derive(Default)]
@@ -701,6 +724,13 @@ impl<'a> Evidence<'a> {
             .collect()
     }
     fn citation(&self, value: &Value, revision: Revision) -> Option<Citation<'a>> {
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|v| !value.as_str().is_some_and(|id| v.references.contains(id)))
+        {
+            return None;
+        }
         match &self.references {
             Some(references) => references.resolve(value, revision),
             None => verbatim_citation(value, &self.source, revision),
@@ -725,7 +755,7 @@ impl<'a> Evidence<'a> {
             .and_then(|items| {
                 items
                     .iter()
-                    .map(|value| index.resolve(value, Revision::Head))
+                    .map(|value| self.citation(value, Revision::Head))
                     .collect::<Option<Vec<_>>>()
             })
             .ok_or_else(|| {
@@ -745,10 +775,14 @@ impl<'a> Evidence<'a> {
                     "Every absence path must have a counterevidence reference in that file."
                         .to_owned()
                 })?;
-            if !self
-                .source
-                .get(path)
-                .is_some_and(|file| index.has_complete_head(path, file))
+            if self
+                .view
+                .as_ref()
+                .is_some_and(|v| !v.complete.contains(path))
+                || !self
+                    .source
+                    .get(path)
+                    .is_some_and(|file| index.has_complete_head(path, file))
             {
                 return Err(format!(
                     "Cannot verify absence in {path} without the complete proposed file. Check the expanded context or use indeterminate."
@@ -912,20 +946,34 @@ fn response_items(response: Value, key: &str) -> Option<(bool, Vec<Value>)> {
 }
 
 fn proposal<'a>(item: &Value, id: usize, evidence: &Evidence<'a>) -> Option<(Citation<'a>, Value)> {
-    if !exact_keys(
-        item.as_object()?,
-        &["anchor", "expected", "scenario", "consequence"],
-    ) {
+    let keys = item.as_object()?;
+    let related = evidence.interactive && keys.contains_key("related");
+    let required = ["anchor", "expected", "scenario", "consequence"];
+    if keys.len() != required.len() + usize::from(related)
+        || !required.iter().all(|k| keys.contains_key(*k))
+    {
         return None;
     }
     let anchor = evidence.citation(&item["anchor"], Revision::Head)?;
-    let validated = json!({
+    let mut validated = json!({
         "id": id,
         "anchor": item["anchor"],
         "expected": text(&item["expected"])?,
         "scenario": text(&item["scenario"])?,
         "consequence": text(&item["consequence"])?,
     });
+    if related {
+        let refs = item["related"]
+            .as_array()?
+            .iter()
+            .filter(|r| {
+                evidence.citation(r, Revision::Head).is_some()
+                    || evidence.citation(r, Revision::Base).is_some()
+            })
+            .take(8)
+            .collect::<Vec<_>>();
+        validated["related"] = json!(refs);
+    }
     Some((anchor, validated))
 }
 
@@ -1515,9 +1563,12 @@ struct Pending<'a, 'input> {
     provisional_outcome: Option<String>,
 }
 
-struct RecheckReader<F> {
+type ProjectionGain<'a> = dyn Fn(&Value, &Evidence<'_>) -> bool + 'a;
+
+struct RecheckReader<'a, F> {
     protocol: CitationProtocol,
     read: F,
+    projection: Option<&'a ProjectionGain<'a>>,
 }
 
 fn pending_reads(pending: &[Pending<'_, '_>], interactive: bool) -> Vec<ContextRead> {
@@ -1699,7 +1750,7 @@ fn live_assessments<'a>(
     anchors: &HashMap<u64, Citation<'a>>,
     evidence: &mut Evidence<'a>,
     ask: &mut Ask<'a, '_>,
-    mut reader: RecheckReader<impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
+    mut reader: RecheckReader<'_, impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
     limits: &mut Vec<String>,
 ) -> Result<(Vec<Assessment<'a>>, BatchCoverage)> {
     let initial = request(
@@ -1849,6 +1900,17 @@ fn live_assessments<'a>(
     let mut repaired_ids = HashSet::new();
     let repaired = loop {
         let requests = pending_reads(&pending, interactive);
+        if interactive {
+            for entry in &pending {
+                for read in entry.undecided.iter().flat_map(|item| &item.reads) {
+                    evidence
+                        .read_owners
+                        .entry((read.path.clone(), read.term.clone()))
+                        .or_default()
+                        .insert(entry.id);
+                }
+            }
+        }
         let requested = !requests.is_empty();
         let fresh: Vec<_> = requests
             .into_iter()
@@ -1881,7 +1943,8 @@ fn live_assessments<'a>(
         )?;
         let gained = data["snapshot"]["head_context"]
             .as_array()
-            .is_some_and(|items| items.len() > before);
+            .is_some_and(|items| items.len() > before)
+            || (requested && reader.projection.is_some_and(|adds| adds(data, evidence)));
         if interactive
             && requested
             && !gained
@@ -2229,6 +2292,7 @@ where
         &mut |system, data, _| ask(system, data),
         RecheckReader {
             protocol,
+            projection: None,
             read: |requests: &[ContextRead]| {
                 let result = read(requests)?;
                 Ok(windows.get_or_init(|| result).as_slice())
@@ -2323,7 +2387,7 @@ fn review_passes<'a>(
     snapshot: &'a Snapshot,
     scan: &Scan,
     ask: &mut Ask<'a, '_>,
-    reader: RecheckReader<impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
+    reader: RecheckReader<'_, impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
     prior: &[Finding],
     protocol: CitationProtocol,
 ) -> Result<BatchResult> {
@@ -2340,6 +2404,8 @@ fn review_passes<'a>(
         source,
         references,
         interactive: matches!(protocol, CitationProtocol::Interactive),
+        view: None,
+        read_owners: HashMap::new(),
     };
     if matches!(protocol, CitationProtocol::Interactive) && !prior.is_empty() {
         let leads: Vec<_> = retain_history(Vec::new(), prior, 1, usize::MAX, &evidence)
@@ -4283,11 +4349,17 @@ mod tests {
         );
     }
 
+    fn capacity_proposal(scenario: &str) -> Value {
+        let mut item = indexed_proposal("H2", scenario);
+        item["related"] = json!(["H4", "B4"]);
+        item
+    }
+
     #[test]
     fn interactive_turn_limit_during_recheck_keeps_a_validated_sibling_finding() {
         let mut replies = [
             json!({"complete":true,"hypotheses":[
-                indexed_proposal("H2", "The caller configures one slot."),
+                capacity_proposal("The caller configures one slot."),
                 indexed_proposal("H8", "A public feed might contain drafts.")
             ]}),
             json!({"complete":true,"assessments":[
@@ -4312,7 +4384,7 @@ mod tests {
     fn unpublished_assessment_leaves_only_its_own_patch_unfinished() {
         let mut replies = [
             json!({"complete":true,"hypotheses":[
-                indexed_proposal("H2", "The caller configures one slot."),
+                capacity_proposal("The caller configures one slot."),
                 indexed_proposal("H8", "A public feed might contain drafts.")
             ]}),
             json!({"complete":true,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]}),
@@ -4353,14 +4425,14 @@ mod tests {
             passes += 1;
             match passes {
                 1 => Ok(json!({"complete":true,"hypotheses":[
-                    indexed_proposal("H2", "The caller configures one slot."),
+                    capacity_proposal("The caller configures one slot."),
                     indexed_proposal("H8", "A public feed might contain drafts.")
                 ]})),
                 2 => Ok(json!({"complete":true,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]})),
                 3 => Err(ReviewBatchInterrupted.into()),
                 _ if data["snapshot"]["files"][0]["path"] == "cache.go" => {
                     if data.get("hypotheses").is_none() {
-                        Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))
+                        Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot.")]}))
                     } else {
                         let mut repeated = indexed_capacity_finding(1, "H4", "B2", "B4");
                         repeated["title"] = json!("The partition independently confirms the same finding");
@@ -4389,7 +4461,7 @@ mod tests {
             "lead-anchor",
             "unexpected-id",
         ] {
-            let mut proposals = vec![indexed_proposal("H2", "The caller configures one slot.")];
+            let mut proposals = vec![capacity_proposal("The caller configures one slot.")];
             if case == "proposal" {
                 proposals.push(indexed_proposal("H999", "Unscoped concern."));
             }
@@ -4430,7 +4502,7 @@ mod tests {
                 challenge["leads"][0]["expected"] = json!("");
             }
             let mut replies = [
-                json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}),
+                json!({"complete":true,"hypotheses":[({let mut p=capacity_proposal("The caller configures one slot."); p["related"]=json!(["H4","B4","H8"]); p})]}),
                 challenge, json!({"complete":true,"assessments":[]})
             ].into_iter();
             let result = review_snapshot_iterative(
@@ -4463,12 +4535,12 @@ mod tests {
         let result = review_snapshot_iterative(indexed_snapshot(), |_, data| {
             turns += 1;
             match turns {
-                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]})),
+                1 => Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot.")]})),
                 2 => Ok(json!({"complete":false,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]})),
                 3 => Err(ReviewBatchInterrupted.into()),
                 _ if data["snapshot"]["files"][0]["path"] == "cache.go" => {
                     if data.get("hypotheses").is_none() {
-                        Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))
+                        Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot.")]}))
                     } else {
                         Ok(json!({"complete":true,"assessments":[{"id":1,"outcome":"refuted","basis":"H2","countercheck":"The caller enforces a minimum capacity."}]}))
                     }
@@ -4493,7 +4565,7 @@ mod tests {
         let result = review_snapshot_iterative(indexed_snapshot(),|system,data| {
             calls+=1;
             match calls {
-                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]})),
+                1 => Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot.")]})),
                 2..=4 => Ok(json!({"read":{"path":"*","term":"new_cache"}})),
                 5 => {
                     assert!(system.contains("Repository reads are closed"));
@@ -4525,7 +4597,7 @@ mod tests {
             match calls {
                 1 => {
                     assert_eq!(data["answer_shape"], "hypotheses");
-                    Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))
+                    Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot.")]}))
                 }
                 2 => {
                     assert_eq!(data["answer_shape"],"assessments");
@@ -4556,7 +4628,7 @@ mod tests {
         let result = review_snapshot_iterative(indexed_snapshot(), |_, data| {
             calls += 1;
             match calls {
-                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]})),
+                1 => Ok(json!({"complete":true,"hypotheses":[({let mut p=capacity_proposal("The caller configures one slot."); p["related"]=json!(["H4","B4","H8"]); p})]})),
                 2 => Ok(json!({"read":{"path":"caller.go","term":"#L21"}})),
                 3 => Err(ReviewBatchInterrupted.into()),
                 4 => {
@@ -4588,7 +4660,7 @@ mod tests {
             if calls>1 { assert_eq!(data["answer_shape"], "assessments"); assert_eq!(data.get("allow_assessment_reads").and_then(Value::as_bool),(calls<5).then_some(true)); }
             if calls <= 2 { assert!(!system.contains("next source window")); }
             match calls {
-                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot."),indexed_proposal("H8","The publisher exposes a draft.")]})),
+                1 => Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot."),indexed_proposal("H8","The publisher exposes a draft.")]})),
                 2 => {
                     let mut question = undecided(json!({"path":"*","term":"publish draft"}));
                     question["reads"].as_array_mut().unwrap().push(json!({"path":"*:13","term":"publish draft"}));
@@ -4644,7 +4716,7 @@ mod tests {
             let mut reads = 0;
             let result=review_snapshot_iterative(indexed_snapshot(), |_,_| {
                 calls+=1;
-                if calls==1 {return Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))}
+                if calls==1 {return Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot.")]}))}
                 let check=json!({"id":if mode=="unknown"{99}else{1},"outcome":"indeterminate","countercheck":"The caller configuration must be checked.","basis":"H2","action":"Supply one slot and record the configured capacity.","expected":"The configured capacity remains one.","severity":"medium","reads":[{"path":"caller.go","term":"#L81"}]});
                 Ok(json!({"complete":true,"assessments":[check]}))
             }, |_,_| {
@@ -4728,7 +4800,7 @@ mod tests {
                 let tentative=indexed_capacity_finding(1,"H4","B2","B4");
                 let missing=json!({"id":2,"outcome":"indeterminate","countercheck":"Determine if the published feed excludes drafts."});
                 match calls {
-                    1=>Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","Check cache size."),indexed_proposal("H8","Check the publisher.")]})),
+                    1=>Ok(json!({"complete":true,"hypotheses":[capacity_proposal("Check cache size."),indexed_proposal("H8","Check the publisher.")]})),
                     2=>Ok(json!({"complete":false,"assessments":[tentative,missing]})),
                     3|4=>{
                         if calls==4{
@@ -4764,7 +4836,7 @@ mod tests {
                         let row = file["sections"][0].as_array().unwrap().iter().find(|row|row[0].is_null() && row[1].is_string()).unwrap();
                         anchors.push(row[1].as_str().unwrap().to_owned());
                     }
-                    Ok(json!({"complete":true,"hypotheses":anchors.iter().map(|anchor|indexed_proposal(anchor,"Check the observable behavior.")).collect::<Vec<_>>()}))
+                    Ok(json!({"complete":true,"hypotheses":anchors.iter().map(|anchor|{let mut p=indexed_proposal(anchor,"Check the observable behavior."); p["related"]=json!(["H4"]); p}).collect::<Vec<_>>()}))
                 }
                 2=>Ok(json!({"complete":false,"assessments":(1..=4).map(|id|json!({"id":id,"outcome":"indeterminate","countercheck":"Inspect the caller to establish the intended behavior.","reads":[{"path":"caller.go","term":"#L1"}]})).collect::<Vec<_>>()})),
                 3=>{

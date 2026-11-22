@@ -94,6 +94,7 @@ fn hypothesis() -> Value {
         "type":"object","additionalProperties":false,
         "properties":{
             "anchor":{"type":"string","description":"Head reference from a source row (H ID)"},
+            "related":{"type":"array","items":{"type":"string"}},
             "expected":{"type":"string"},"scenario":{"type":"string"},"consequence":{"type":"string"}
         },
         "required":["anchor","expected","scenario","consequence"]
@@ -259,6 +260,26 @@ mod tests {
         }
         answer["assessments"][0]["outcome"] = json!("confirmed");
         assert!(!AnswerShape::from_input(&input).unwrap().accepts(&answer));
+    }
+
+    #[test]
+    fn hypotheses_and_leads_can_include_optional_related_source_references() {
+        for (input, key) in [
+            (json!({"answer_shape":"hypotheses"}), "hypotheses"),
+            (
+                json!({"answer_shape":"assessments","hypotheses":[{"id":1}]}),
+                "leads",
+            ),
+        ] {
+            let format = AnswerShape::from_input(&input).unwrap().format(&input);
+            let item = &format["json_schema"]["schema"]["properties"][key]["items"];
+            assert_eq!(item["properties"]["related"]["type"], "array");
+            assert_eq!(item["properties"]["related"]["items"]["type"], "string");
+            assert_eq!(
+                item["required"],
+                json!(["anchor", "expected", "scenario", "consequence"])
+            );
+        }
     }
 
     #[test]

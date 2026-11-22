@@ -210,6 +210,58 @@ mod tests {
     }
 
     #[test]
+    fn fits_and_dispatch_budget_the_interactive_wire_instructions() {
+        use super::super::{AnswerShape, Provider, system_content, user_content};
+        let base = "Review this code";
+        let data = json!({"answer_shape":"assessments","hypotheses":[],"source":"x".repeat(6000)});
+        let shape = AnswerShape::from_input(&data).unwrap();
+        let system = system_content(base, Some(shape));
+        assert!(system.contains("For each additional lead"));
+        assert_eq!(system.matches("\"related\"").count(), 1);
+        for other in [
+            json!({"answer_shape":"assessments","hypotheses":[],"recheck":[]}),
+            json!({"snapshot":{"answer_shape":"hypotheses"}}),
+        ] {
+            assert_eq!(system_content(base, AnswerShape::from_input(&other)), base);
+        }
+        let user = user_content(&data).unwrap();
+        let framing =
+            CHAT_FRAMING_TOKENS + serde_json::to_vec(&shape.format(&data)).unwrap().len() as u64;
+        let undecorated = (base.len() + user.len()) as u64;
+        let mut provider = Provider::new(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            "gemini-test",
+            String::new(),
+        )
+        .unwrap();
+        provider.endpoint = Url::parse("http://127.0.0.1:0").unwrap();
+        let context = provider.context.as_mut().unwrap();
+        context.count_url = provider.endpoint.clone();
+        context
+            .limits
+            .set(Limits {
+                input_token_limit: undecorated + framing + MIN_OUTPUT_TOKENS,
+                output_token_limit: MIN_OUTPUT_TOKENS,
+            })
+            .ok()
+            .unwrap();
+        // The undecorated prompt just fits. The actual system message forces a count
+        // and misses the minimum output budget by one token.
+        let mut hash = Sha256::new();
+        hash.update(system.len().to_le_bytes());
+        hash.update(system.as_bytes());
+        hash.update(&user);
+        *context.last_count.lock().unwrap() = Some((hash.finalize().into(), undecorated + 1));
+        assert!(!provider.fits_context(base, &data).unwrap());
+        assert!(
+            provider
+                .ask(base, &data)
+                .unwrap_err()
+                .is::<crate::ReviewContextExceeded>()
+        );
+    }
+
+    #[test]
     fn a_large_request_uses_the_actual_count_and_keeps_response_room() {
         let endpoint =
             Url::parse("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
