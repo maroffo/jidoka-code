@@ -267,7 +267,12 @@ fn review_chunk(
         chunk,
         scan,
         &mut |instructions, data, evidence| {
-            let with_tools = format!("{instructions}\n{TOOLS}");
+            let recheck_hint = if data.get("recheck").is_some() {
+                "If a function body or SQL statement is cut off and it can settle the question, request the next source window in that file starting at the first missing line."
+            } else {
+                ""
+            };
+            let with_tools = format!("{instructions}\n{TOOLS}{recheck_hint}");
             let (stage, answer_key) = if data.get("recheck").is_some() {
                 ("recheck", "assessments")
             } else if data.get("hypotheses").is_some() {
@@ -282,7 +287,7 @@ fn review_chunk(
                 )
             } else {
                 format!(
-                    "{instructions}\nRepository reads are closed for this {stage} stage. Return the final assessments from the collected diff, source references and lookup results. Give every required hypothesis a disposition. Use indeterminate for a specific unresolved question."
+                    "{instructions}\nRepository reads are closed for this {stage} stage. {CLOSED_READS} Return the final assessments from the collected diff, source references and lookup results. Give every required hypothesis a disposition. Use indeterminate for a specific unresolved question."
                 )
             };
             let mut attempted = HashMap::new();
