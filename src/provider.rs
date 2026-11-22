@@ -143,22 +143,7 @@ impl Provider {
             body["stream_options"] = json!({"include_usage":true});
             body["max_tokens"] = max_tokens.into();
         }
-        let mut request = self
-            .client
-            .post(self.endpoint.clone())
-            .timeout(timeout)
-            .json(&body);
-        if self.context.is_some() {
-            request = request.header(reqwest::header::ACCEPT, "text/event-stream");
-        }
-        if let Some(authorization) = &self.authorization {
-            request = request.header(AUTHORIZATION, authorization.clone());
-        }
-        // A short caller-supplied deadline can expire during connection setup.
-        let generation_deadline =
-            (self.context.is_some() && timeout > CONNECT_TIMEOUT).then_some(timeout);
-        let response = send_generation(request, generation_deadline)?;
-        let response = check_status(response)?;
+        let response = self.submit_generation(body, timeout)?;
         // A gateway may return an ordinary JSON error envelope even for a streaming request.
         let is_json = response
             .headers()
@@ -178,6 +163,38 @@ impl Provider {
             "Provider response exceeds the size limit"
         );
         decode_reply(&bytes, answer_shape)
+    }
+    fn submit_generation(&self, mut body: Value, timeout: Duration) -> Result<Response> {
+        let google = self.context.is_some();
+        let started = Instant::now();
+        loop {
+            let mut request = self.client.post(self.endpoint.clone()).json(&body);
+            if google {
+                request = request.header(reqwest::header::ACCEPT, "text/event-stream");
+            }
+            if let Some(authorization) = &self.authorization {
+                request = request.header(AUTHORIZATION, authorization.clone());
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            ensure!(
+                !remaining.is_zero(),
+                "The review exhausted its model time budget"
+            );
+            // A short deadline can expire during connection setup.
+            let deadline = (google && remaining > CONNECT_TIMEOUT).then_some(remaining);
+            let response = send_generation(request.timeout(remaining), deadline)?;
+            let result = check_http_status(response, google);
+            // Google rejected this schema before inference. Retry the same turn
+            // once, retaining the allowed IDs, evidence rules and output budget.
+            if result.as_ref().is_err_and(|e| {
+                e.downcast_ref::<InvalidReply>()
+                    .is_some_and(|issue| issue.reason == SCHEMA_TOO_COMPLEX)
+            }) && remove_assessment_count(&mut body)
+            {
+                continue;
+            }
+            return result;
+        }
     }
 }
 
@@ -319,7 +336,29 @@ impl RateLimited {
     }
 }
 
+const SCHEMA_TOO_COMPLEX: &str = "Gemini rejected the review response schema as too complex.";
+
+fn remove_assessment_count(body: &mut Value) -> bool {
+    let Some(array) = body
+        .pointer_mut("/response_format/json_schema/schema/properties/assessments")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    let count = array.get("minItems").and_then(Value::as_u64);
+    if !count.is_some_and(|n| n > 0) || array.get("maxItems").and_then(Value::as_u64) != count {
+        return false;
+    }
+    array.remove("minItems");
+    array.remove("maxItems");
+    true
+}
+
 fn check_status(response: Response) -> Result<Response> {
+    check_http_status(response, false)
+}
+
+fn check_http_status(response: Response, google_generation: bool) -> Result<Response> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -347,6 +386,16 @@ fn check_status(response: Response) -> Result<Response> {
     if matches!(status.as_u16(), 400 | 422) {
         // Provider errors may quote private input. Classify them without logging the body.
         let error: Value = serde_json::from_reader(response.take(32_768)).unwrap_or_default();
+        if google_generation && status == reqwest::StatusCode::BAD_REQUEST {
+            let detail = &error
+                .as_array()
+                .and_then(|items| items.first())
+                .unwrap_or(&error)["error"];
+            if detail["code"] == 400 && detail["status"] == "INVALID_ARGUMENT"
+                && detail["message"].as_str().is_some_and(|s| s.starts_with("The specified schema produces a constraint that has too many states for serving.")) {
+                return Err(InvalidReply { reason: SCHEMA_TOO_COMPLEX, usage: TokenUsage::default(), diagnostics: None }.into());
+            }
+        }
         if context_overflow(&error) {
             return Err(crate::ReviewContextExceeded.into());
         }
@@ -1019,6 +1068,113 @@ mod tests {
                 .downcast_ref::<reqwest::Error>()
                 .is_some_and(reqwest::Error::is_timeout)
         );
+    }
+
+    // Loopback stands in for the configured endpoint; no credentials or source are sent.
+    fn submit_fixture(
+        google: bool,
+        body: Value,
+        responses: Vec<(u16, Value)>,
+    ) -> (Result<Response>, Vec<Value>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let local = format!("http://{}/chat", listener.local_addr().unwrap());
+        let mut provider = Provider::new(
+            if google {
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            } else {
+                &local
+            },
+            "gemini-4-carbon",
+            String::new(),
+        )
+        .unwrap();
+        provider.endpoint = Url::parse(&local).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let mut requests = Vec::new();
+            for (status, response) in responses {
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(1))
+                        }
+                        Err(e) => panic!("Loopback did not receive expected request: {e}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut socket);
+                let mut length = 0;
+                for line in reader.by_ref().lines() {
+                    let line = line.unwrap();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':')
+                        && key.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).unwrap();
+                requests.push(serde_json::from_slice(&bytes).unwrap());
+                let text = response.to_string();
+                write!(socket, "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",text.len()).unwrap();
+            }
+            requests
+        });
+        let result = provider.submit_generation(body, Duration::from_secs(3));
+        (result, server.join().unwrap())
+    }
+
+    #[test]
+    fn retries_only_google_schema_compiler_rejections_once_without_changing_review_content() {
+        let compiler = json!([{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"The specified schema produces a constraint that has too many states for serving. private detail."}}]);
+        let input = json!({"answer_shape":"assessments","allow_assessment_reads":true,"hypotheses":[{"id":2},{"id":7}]});
+        let original = json!({"messages":[{"content":"fixture"}],"max_tokens":1234,"response_format":AnswerShape::from_input(&input).unwrap().format(&input)});
+        let mut relaxed = original.clone();
+        assert!(remove_assessment_count(&mut relaxed));
+        let (success, requests) = submit_fixture(
+            true,
+            original.clone(),
+            vec![(400, compiler.clone()), (200, json!({}))],
+        );
+        assert!(success.unwrap().status().is_success());
+        assert_eq!(requests, [original.clone(), relaxed.clone()]);
+        let (error, requests) = submit_fixture(
+            true,
+            original.clone(),
+            vec![(400, compiler.clone()), (400, compiler.clone())],
+        );
+        assert_eq!(error.unwrap_err().to_string(), SCHEMA_TOO_COMPLEX);
+        assert_eq!(requests.len(), 2);
+
+        for (google, status, response, body, expected) in [
+            (false, 400, compiler.clone(), original.clone(), "400"),
+            (true, 400, compiler.clone(), relaxed, SCHEMA_TOO_COMPLEX),
+            (true, 401, compiler.clone(), original.clone(), "401"),
+            (true, 429, compiler.clone(), original.clone(), "429"),
+            (
+                true,
+                400,
+                json!({"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Other field is invalid."}}),
+                original,
+                "400",
+            ),
+        ] {
+            let (error, requests) = submit_fixture(google, body, vec![(status, response)]);
+            let label = error.unwrap_err().to_string();
+            assert!(label.contains(expected) && !label.contains("private detail"));
+            assert_eq!(requests.len(), 1);
+        }
     }
 
     #[test]
