@@ -2012,7 +2012,7 @@ fn live_assessments<'a>(
             .collect();
         previous_items = reply.items;
     };
-    let mut recovered = false;
+    let mut valid_recheck = false;
     if let Some(reply) = &repaired {
         reply.report_incomplete(Pass::Recheck, limits);
         let unexpected_retry = unexpected_assessments(&reply.items, |id| {
@@ -2022,8 +2022,8 @@ fn live_assessments<'a>(
             limits
                 .push("The recheck returned assessments without a requested hypothesis ID.".into());
         }
-        recovered = reply.complete && !reply.overflow && !unexpected_retry;
-        coverage.stages_finished &= recovered;
+        valid_recheck = reply.complete && !reply.overflow && !unexpected_retry;
+        coverage.stages_finished &= valid_recheck;
     }
     let mut recovered_items = Vec::new();
     for entry in pending {
@@ -2042,7 +2042,8 @@ fn live_assessments<'a>(
         match outcome {
             Ok((raw, mut item)) => {
                 if let Some(reason) = &item.undecided {
-                    recovered = false;
+                    // An explicit unknown is a valid disposition with a file-specific limit.
+                    coverage.unresolved(Some(entry.anchor));
                     recorded_undecided(limits, entry.anchor, reason);
                     if item.priority.is_none() {
                         item.priority = entry.undecided.and_then(|prior| prior.priority);
@@ -2051,7 +2052,7 @@ fn live_assessments<'a>(
                 if let Some(previous) = entry.provisional_outcome
                     && text(&raw["outcome"]) != Some(previous.as_str())
                 {
-                    recovered = false;
+                    valid_recheck = false;
                     coverage.unresolved(Some(entry.anchor));
                     limits.push(format!(
                         "The recheck did not confirm the provisional outcome at {}:{}.",
@@ -2064,7 +2065,7 @@ fn live_assessments<'a>(
                 }
             }
             Err(feedback) => {
-                recovered = false;
+                valid_recheck = false;
                 coverage.unresolved(Some(entry.anchor));
                 if let Some(item) = entry.undecided {
                     if let Some(reason) = &item.undecided {
@@ -2079,14 +2080,14 @@ fn live_assessments<'a>(
             }
         }
     }
-    if !recovered || unexpected {
+    if !valid_recheck || unexpected {
         if let Some(error) = initial_error {
             limits.push(error);
         } else {
             initial.report_incomplete(Pass::Challenge, limits);
         }
     }
-    coverage.stages_finished &= recovered
+    coverage.stages_finished &= valid_recheck
         || (initial.complete
             && !initial.overflow
             && (!accepted.is_empty() || !recovered_items.is_empty()));
@@ -4721,5 +4722,49 @@ mod tests {
             assert_eq!(result.report.findings.len(), usize::from(repaired));
             assert_eq!(result.report.limits.is_empty(), repaired);
         }
+    }
+    #[test]
+    fn complete_recheck_keeps_only_the_still_indeterminate_file_unfinished() {
+        let mut source = indexed_snapshot();
+        for path in ["replica.go", "policy.go"] {
+            let mut file = source.files[0].clone();
+            file.path = path.into();
+            source.files.push(file);
+        }
+        let mut calls = 0;
+        let mut anchors = Vec::new();
+        let result=review_snapshot_iterative(source, |_,data|{
+            calls+=1;
+            match calls {
+                1=>{
+                    for path in ["cache.go","replica.go","feed.ts","policy.go"] {
+                        let file=data["snapshot"]["files"].as_array().unwrap().iter().find(|f|f["path"]==path).unwrap();
+                        let row = file["sections"][0].as_array().unwrap().iter().find(|row|row[0].is_null() && row[1].is_string()).unwrap();
+                        anchors.push(row[1].as_str().unwrap().to_owned());
+                    }
+                    Ok(json!({"complete":true,"hypotheses":anchors.iter().map(|anchor|indexed_proposal(anchor,"Check the observable behavior.")).collect::<Vec<_>>()}))
+                }
+                2=>Ok(json!({"complete":false,"assessments":(1..=4).map(|id|json!({"id":id,"outcome":"indeterminate","countercheck":"Inspect the caller to establish the intended behavior.","reads":[{"path":"caller.go","term":"#L1"}]})).collect::<Vec<_>>()})),
+                3=>{
+                    let mut first=indexed_capacity_finding(1,"H4","B2","B4");
+                    first["comparison"]=Value::Null;
+                    let mut second=first.clone();
+                    second["id"]=json!(2);
+                    second["counterevidence"]["references"]=json!([anchors[1]]);
+                    Ok(json!({"complete":true,"assessments":[first,second,
+                        {"id":3,"outcome":"human","basis":anchors[2],"countercheck":"The publisher omits draft entries.","severity":"medium","reason":"Whether moderators should see drafts is a product choice.","question":"Should moderators see drafts?","alternatives":["Show drafts","Hide drafts"]},
+                        {"id":4,"outcome":"indeterminate","countercheck":"The deployed policy configuration was unavailable."}]}))
+                }
+                _=>panic!("All requested IDs already have valid dispositions")
+            }
+        },|_,_|Ok(vec![SourceWindow{path:"caller.go".into(),start:1,text:"publish(entries)".into()}]),|_,_|Ok(true),&[]).unwrap();
+        assert_eq!(result.report.findings.len(), 2);
+        assert_eq!(result.report.focus.len(), 1);
+        assert_eq!(result.reviewed_files.as_ref().unwrap().len(), 3);
+        assert_eq!(result.unfinished_patches().unwrap(), ["policy.go"]);
+        assert_eq!(
+            result.report.limits,
+            ["Undecided at policy.go:2. The deployed policy configuration was unavailable."]
+        );
     }
 }
