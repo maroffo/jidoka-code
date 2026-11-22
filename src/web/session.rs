@@ -17,6 +17,7 @@ pub(super) fn init(db: &Connection) -> rusqlite::Result<()> {
         review_id INTEGER NOT NULL, step INTEGER NOT NULL, fingerprint BLOB NOT NULL, reply TEXT NOT NULL,
         PRIMARY KEY(review_id,step)
     );
+    CREATE TABLE IF NOT EXISTS review_replays (review_id INTEGER PRIMARY KEY,source_id INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS review_origins (review_id INTEGER PRIMARY KEY,repo TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS review_reads (review_id INTEGER NOT NULL,path TEXT NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,PRIMARY KEY(review_id,path,start,end));")
 }
@@ -45,6 +46,10 @@ pub fn replay(db: &Path, id: i64, provider: &str) -> Result<i64> {
         params![new_id, original.base, original.head],
     )?;
     tx.execute("INSERT INTO review_origins(review_id,repo) SELECT ?1,repo FROM review_origins WHERE review_id=?2",params![new_id,id])?;
+    tx.execute(
+        "INSERT INTO review_replays(review_id,source_id) VALUES(?,?)",
+        params![new_id, id],
+    )?;
     tx.commit()?;
     Ok(new_id)
 }
@@ -63,6 +68,14 @@ impl Session {
             [id],
         )?;
         Ok(Self { db, id, step: 0 })
+    }
+
+    pub fn replay_source(&self) -> Result<Option<PublishedReport>> {
+        let raw:Option<String>=self.db.query_row("SELECT source.report FROM review_replays
+            JOIN reviews source ON source.id=review_replays.source_id
+            JOIN reviews current ON current.id=review_replays.review_id
+            WHERE current.id=? AND source.provider=current.provider AND source.url=current.url COLLATE NOCASE",[self.id],|r|r.get(0)).optional()?;
+        Ok(raw.map(|text| serde_json::from_str(&text)).transpose()?)
     }
 
     pub fn remember_origin(&self, repo: Option<&str>) -> Result<Option<String>> {

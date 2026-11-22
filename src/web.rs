@@ -116,10 +116,15 @@ pub fn latest_review(db: &Path, provider: &str, url: &str) -> Result<Option<Publ
 /// On a later revision the previous line may have moved or disappeared entirely.
 /// Give discovery the old question without presenting its line or evidence as current.
 pub fn add_previous_questions(previous: &PublishedReport, current: &mut Snapshot) {
-    if previous.head == current.head
-        || previous.base != current.base
-        || !previous.repo.eq_ignore_ascii_case(&current.repo)
-    {
+    if previous.base != current.base || !previous.repo.eq_ignore_ascii_case(&current.repo) {
+        return;
+    }
+    if previous.head == current.head {
+        for limit in &previous.report.limits {
+            if limit.starts_with("Undecided at ") {
+                current.intent.push(format!("An earlier review left this question open. Use the pinned repository to verify or disprove it independently: {limit}"));
+            }
+        }
         return;
     }
     for finding in previous
@@ -1790,6 +1795,19 @@ mod tests {
         let hint = &current.intent[0];
         assert!(hint.contains("A test is omitted") && hint.contains("check.yml"));
         assert!(!hint.contains("117") && !hint.contains("Obsolete proof"));
+        current.head = old.head.clone();
+        old.report
+            .limits
+            .push("Undecided at check.yml:117. The caller was unavailable.".into());
+        add_previous_questions(&old, &mut current);
+        assert_eq!(current.intent.len(), 2);
+        assert!(
+            current
+                .intent
+                .pop()
+                .unwrap()
+                .contains("caller was unavailable")
+        );
         current.base = "d".repeat(40);
         add_previous_questions(&old, &mut current);
         assert_eq!(current.intent.len(), 1);

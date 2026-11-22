@@ -125,7 +125,10 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
         let result = web::run_one_session(db, |id, url, expected_head| {
             let mut session = web::session::Session::open(db, id)?;
             let allowed = jidoka_code::automation::repositories_at(db, repositories)?;
-            let previous = web::latest_review(db, provider.label(), url)?;
+            let previous = match session.replay_source()? {
+                Some(original) => Some(original),
+                None => web::latest_review(db, provider.label(), url)?,
+            };
             let paths = previous
                 .iter()
                 .flat_map(|report| &report.report.findings)
