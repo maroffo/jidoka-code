@@ -31,6 +31,8 @@ Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the 
 
 On shutdown, Jidoka waits for the in-flight model call, saves its response and requeues the active review. The same provider can resume eligible work on restart. Each generation request has a ten-minute timeout. A review can use up to 500 generation requests in total, including retries and restarts. The review page shows model calls, reported token usage, time spent waiting for the model, and which changed files completed review.
 
+When the model provider returns HTTP 429, Jidoka keeps the review in the queue with its completed work. Reviews for that provider resume after the wait shown on the review page. The wait survives a service restart.
+
 ## Reviewing and publishing
 
 Open **View diff** on a report to browse the stored changes at the reviewed revisions. Select a line reference in the manual guide to jump into the patch. For older reports, **Load reviewed diff from GitHub** retrieves the patch when both revisions still match.

@@ -592,6 +592,7 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "hmac",
+ "httpdate",
  "icu_properties",
  "libc",
  "pulldown-cmark",

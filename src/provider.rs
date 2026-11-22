@@ -214,12 +214,90 @@ impl Serialize for ReviewFields<'_> {
     }
 }
 
+#[derive(Debug)]
+pub struct RateLimited {
+    pub retry_after: Option<Duration>,
+    resource_exhausted: bool,
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Provider HTTP 429 Too Many Requests")?;
+        if self.resource_exhausted {
+            f.write_str(" (RESOURCE_EXHAUSTED)")?;
+        }
+        if let Some(delay) = self.retry_after {
+            write!(f, ". Retry after {} seconds", delay.as_secs_f64())?;
+        }
+        f.write_str(".")
+    }
+}
+impl std::error::Error for RateLimited {}
+
+impl RateLimited {
+    fn from_response(header: Option<&str>, body: &Value, now: std::time::SystemTime) -> Self {
+        let error = &body
+            .as_array()
+            .and_then(|list| list.first())
+            .unwrap_or(body)["error"];
+        let header = header.and_then(|s| {
+            s.trim()
+                .parse::<u64>()
+                .ok()
+                .map(Duration::from_secs)
+                .or_else(|| {
+                    httpdate::parse_http_date(s)
+                        .ok()
+                        .map(|time| time.duration_since(now).unwrap_or_default())
+                })
+        });
+        let body_delay = error["details"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|detail| detail["@type"] == "type.googleapis.com/google.rpc.RetryInfo")
+            .filter_map(|detail| {
+                let seconds = detail["retryDelay"].as_str()?.strip_suffix('s')?;
+                if !seconds.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+                    return None;
+                }
+                Duration::try_from_secs_f64(seconds.parse().ok()?).ok()
+            })
+            .max();
+        Self {
+            retry_after: header.max(body_delay),
+            resource_exhausted: error["status"] == "RESOURCE_EXHAUSTED",
+        }
+    }
+
+    pub fn new(retry_after: Option<Duration>) -> Self {
+        Self {
+            retry_after,
+            resource_exhausted: false,
+        }
+    }
+}
+
 fn check_status(response: Response) -> Result<Response> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
     }
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let header = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let body = serde_json::from_reader(response.take(32_768)).unwrap_or_default();
+        return Err(RateLimited::from_response(
+            header.as_deref(),
+            &body,
+            std::time::SystemTime::now(),
+        )
+        .into());
+    }
+    if status.is_server_error() {
         return response.error_for_status().map_err(Into::into);
     }
     if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
@@ -798,6 +876,37 @@ mod tests {
         thread,
         time::Instant,
     };
+
+    #[test]
+    fn rate_limits_honor_both_retry_after_formats_and_google_retry_info() {
+        let time = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let date = httpdate::fmt_http_date(time + Duration::from_secs(90));
+        let body = json!({"error":{"status":"RESOURCE_EXHAUSTED","message":"private",
+            "details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"70.25s"}]}});
+        let seconds = RateLimited::from_response(Some("45"), &body, time);
+        assert_eq!(seconds.retry_after, Some(Duration::from_millis(70_250)));
+        assert!(!seconds.to_string().contains("private"));
+        assert_eq!(
+            RateLimited::from_response(Some(&date), &body, time).retry_after,
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            RateLimited::from_response(Some("83"), &Value::Null, time).retry_after,
+            Some(Duration::from_secs(83))
+        );
+        let unknown = RateLimited::from_response(
+            Some("private-header"),
+            &json!([{
+                "error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"other","retryDelay":"80s"}]}
+            }]),
+            time,
+        );
+        assert_eq!(unknown.retry_after, None);
+        assert_eq!(
+            unknown.to_string(),
+            "Provider HTTP 429 Too Many Requests (RESOURCE_EXHAUSTED)."
+        );
+    }
 
     #[test]
     fn refuses_remote_plaintext_and_embedded_credentials() {

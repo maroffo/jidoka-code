@@ -290,6 +290,8 @@ impl Session {
         }
         if let Ok(reply) = &result {
             tx.execute("INSERT OR REPLACE INTO review_turns(review_id,step,fingerprint,reply) VALUES(?,?,?,?)",params![self.id,self.step,fingerprint,serde_json::to_string(&reply.value)?])?;
+            tx.execute("DELETE FROM provider_cooldowns WHERE provider=(SELECT provider FROM reviews WHERE id=?)
+                AND retry_at<=unixepoch()", [self.id])?;
         }
         if let Err(error) = &result
             && (error.is::<crate::ReviewContextExceeded>()
@@ -308,6 +310,9 @@ impl Session {
 }
 
 fn turn_error(error: &anyhow::Error) -> String {
+    if let Some(limited) = error.downcast_ref::<crate::provider::RateLimited>() {
+        return limited.to_string();
+    }
     if let Some(reply) = error.downcast_ref::<crate::provider::InvalidReply>() {
         return reply.to_string();
     }
@@ -509,6 +514,30 @@ mod tests {
             .query_row("SELECT status FROM reviews", [], |r| r.get(0))
             .unwrap();
         assert_eq!(state, "queued");
+    }
+
+    #[test]
+    fn a_rate_limit_returns_to_the_queue_without_another_model_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.db");
+        super::super::init_db(&connect(&path).unwrap()).unwrap();
+        let mut session = Session::open(&path, 1).unwrap();
+        let error = session
+            .ask("review", &json!({}), || {
+                Err(crate::provider::RateLimited::new(None).into())
+            })
+            .unwrap_err();
+        assert!(error.is::<crate::provider::RateLimited>());
+        let (turns, reason): (i64, String) = session
+            .db
+            .query_row(
+                "SELECT turns, stop_reason FROM review_runs WHERE review_id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(turns, 1);
+        assert!(reason.contains("429"));
     }
 
     #[test]

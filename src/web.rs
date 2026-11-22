@@ -66,6 +66,11 @@ fn init_db(connection: &Connection) -> rusqlite::Result<()> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             report TEXT,
             error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS provider_cooldowns (
+            provider TEXT PRIMARY KEY,
+            retry_at INTEGER NOT NULL,
+            backoff_seconds INTEGER NOT NULL
         )",
     )?;
     session::init(connection)
@@ -190,16 +195,19 @@ where
 {
     let mut connection = connect(db)?;
     let transaction = connection.transaction()?;
-    let job: Option<(i64, String)> = transaction
+    let job: Option<(i64, String, String)> = transaction
         .query_row(
             "UPDATE reviews SET status = 'running'
-            WHERE id = (SELECT id FROM reviews WHERE status = 'queued' ORDER BY id LIMIT 1)
-            RETURNING id, url",
+            WHERE id = (SELECT id FROM reviews WHERE status = 'queued'
+                AND NOT EXISTS (SELECT 1 FROM provider_cooldowns
+                    WHERE provider=reviews.provider AND retry_at>unixepoch())
+                ORDER BY id LIMIT 1)
+            RETURNING id, url, provider",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((id, url)) = job else {
+    let Some((id, url, provider)) = job else {
         transaction.commit()?;
         return Ok(false);
     };
@@ -226,15 +234,34 @@ where
         };
         Ok((status, serde_json::to_string(&report)?))
     });
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let (status, report, error) = match outcome {
         Ok((status, report)) => (status, Some(report), None),
-        Err(error) if error.is::<session::Paused>() => {
-            connection.execute(
-                "UPDATE reviews SET status='queued' WHERE id=? AND status='running'",
-                [id],
-            )?;
-            return Ok(true);
+        Err(error) if error.is::<crate::provider::RateLimited>() => {
+            let limit = error.downcast::<crate::provider::RateLimited>()?;
+            let prior: Option<i64> = tx
+                .query_row(
+                    "SELECT backoff_seconds FROM provider_cooldowns WHERE provider=?",
+                    [&provider],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            // Without provider guidance, start at one minute and double to one hour.
+            let backoff = prior.map_or(60, |seconds| seconds.saturating_mul(2).clamp(60, 3600));
+            let delay = limit.retry_after.map_or(backoff, |hint| {
+                let rounded = hint
+                    .as_secs()
+                    .saturating_add(u64::from(hint.subsec_nanos() != 0));
+                rounded.clamp(1, 253402300799) as i64
+            });
+            // unixepoch() rounds down. Round the deadline up so the retry never fires early.
+            tx.execute("INSERT INTO provider_cooldowns (provider,retry_at,backoff_seconds)
+                VALUES (?1,min(253402300799,unixepoch()+1+?2),?3)
+                ON CONFLICT(provider) DO UPDATE SET retry_at=max(retry_at,excluded.retry_at),backoff_seconds=excluded.backoff_seconds",
+                params![provider,delay,backoff])?;
+            ("queued", None, None)
         }
+        Err(error) if error.is::<session::Paused>() => ("queued", None, None),
         Err(error) if expected_head.is_some() && error.is::<crate::source::HeadChanged>() => {
             ("superseded", None, None)
         }
@@ -245,12 +272,11 @@ where
             ("failed", None, Some(reason))
         }
     };
-    let tx = connection.transaction()?;
     let updated = tx.execute(
         "UPDATE reviews SET status = ?1, report = ?2, error = ?3 WHERE id = ?4 AND status = 'running'",
         params![status, report, error, id],
     )?;
-    if updated != 0 {
+    if updated != 0 && status != "queued" {
         let reason = report
             .as_deref()
             .and_then(|raw| serde_json::from_str::<PublishedReport>(raw).ok())
@@ -713,19 +739,32 @@ async fn review(
     }
     let (token, cookie) = page_token(&state, &headers);
     let html = with_db(&state, move |connection| {
-        connection.query_row(
-            "SELECT url, provider, status, created_at, report, error FROM reviews WHERE id = ?1",
-            [id],
-            |row| {
-                let raw_report: Option<String> = row.get(4)?;
-                let error: Option<String> = row.get(5)?;
-                let stored: String = row.get(2)?;
-                let (status, replacement) = displayed_status(&connection, id, &stored, error.as_deref())?;
-                Ok(review_page((id, &token, replacement, session::metrics(&connection,id)?), &row.get::<_, String>(0)?, &row.get::<_, String>(1)?,
-                    status, &row.get::<_, String>(3)?,
-                    raw_report.as_deref(), error.as_deref()))
-            },
-        ).optional()
+        connection
+            .query_row(
+                "SELECT url, provider, status, created_at, report,
+                CASE WHEN status='queued' THEN (SELECT 'Provider rate limit. Automatic retry after '
+                    ||datetime(retry_at,'unixepoch')||' UTC.' FROM provider_cooldowns
+                    WHERE provider=reviews.provider AND retry_at>unixepoch()) ELSE error END
+             FROM reviews WHERE id = ?1",
+                [id],
+                |row| {
+                    let raw_report: Option<String> = row.get(4)?;
+                    let error: Option<String> = row.get(5)?;
+                    let stored: String = row.get(2)?;
+                    let (status, replacement) =
+                        displayed_status(&connection, id, &stored, error.as_deref())?;
+                    Ok(review_page(
+                        (id, &token, replacement, session::metrics(&connection, id)?),
+                        &row.get::<_, String>(0)?,
+                        &row.get::<_, String>(1)?,
+                        status,
+                        &row.get::<_, String>(3)?,
+                        raw_report.as_deref(),
+                        error.as_deref(),
+                    ))
+                },
+            )
+            .optional()
     })
     .await?;
     Ok(html.map_or_else(not_found, |html| form_page(html, cookie)))
@@ -1195,10 +1234,10 @@ fn review_page(
         },
     );
     let (status, details) = match status {
-        "queued" | "running" => (
-            status,
-            format!(r#"<p><a href="/reviews/{id}">Refresh status</a></p>"#),
-        ),
+        "queued" | "running" => {
+            let waiting = failure.map_or_else(String::new, |reason| format!("<p>{}</p>", escape(reason)));
+            (status, format!(r#"{waiting}<p><a href="/reviews/{id}">Refresh status</a></p>"#))
+        }
         "superseded" => (
             status,
             replacement.map_or_else(|| "<p>A newer revision replaced this review.</p>".into(),
@@ -1672,6 +1711,165 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stored, ("failed".to_owned(), None));
+    }
+
+    #[tokio::test]
+    async fn provider_rate_limit_defers_manual_and_automatic_reviews_across_restart() {
+        let f = Fixture::new();
+        let db = connect(&f.db).unwrap();
+        for provider in [PROVIDER, PROVIDER, "other"] {
+            db.execute(
+                "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
+                [URL, provider],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO review_runs(review_id,turns,snapshot) VALUES(1,499,'checkpoint')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO review_turns(review_id,step,fingerprint,reply) VALUES(1,1,X'01','cached')",
+            [],
+        )
+        .unwrap();
+        let head = report(None).head;
+        db.execute(
+            "INSERT INTO automation_jobs(repo,number,head,review_id) VALUES('test/demo',7,?,2)",
+            [&head],
+        )
+        .unwrap();
+        let limited = || crate::provider::RateLimited::new(Some(Duration::from_secs(137))).into();
+        let now: i64 = db
+            .query_row("SELECT unixepoch()", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            run_one_session(&f.db, |id, _, _| {
+                assert_eq!(id, 1);
+                Err(limited())
+            })
+            .unwrap()
+        );
+        let retry_at: i64 = db
+            .query_row(
+                "SELECT retry_at FROM provider_cooldowns WHERE provider=?",
+                [PROVIDER],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(retry_at >= now + 137);
+        for id in [1, 2] {
+            assert!(
+                f.get(&format!("/reviews/{id}"))
+                    .await
+                    .contains("Provider rate limit. Automatic retry after")
+            );
+        }
+        assert!(
+            run_one_session(&f.db, |id, _, _| {
+                assert_eq!(id, 3);
+                Ok(report(None))
+            })
+            .unwrap()
+        );
+        recover(&f.db, PROVIDER).unwrap();
+        assert!(!run_one_session(&f.db, |_, _, _| panic!("provider must wait")).unwrap());
+        let expire = || {
+            db.execute("UPDATE provider_cooldowns SET retry_at=unixepoch()-1", [])
+                .unwrap()
+        };
+        assert_eq!(expire(), 1);
+        assert!(run_one_session(&f.db, |id, _, _| {
+            assert_eq!(id,1);
+            let checkpoint: (i64,String,String) = db.query_row("SELECT turns,snapshot,reply FROM review_runs JOIN review_turns USING(review_id) WHERE review_id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            assert_eq!(checkpoint,(499,"checkpoint".into(),"cached".into()));
+            Ok(report(None))
+        }).unwrap());
+        assert!(
+            run_one_session(&f.db, |id, _, expected| {
+                assert_eq!((id, expected), (2, Some(head.as_str())));
+                Err(limited())
+            })
+            .unwrap()
+        );
+        recover(&f.db, PROVIDER).unwrap();
+        let automatic: (String,String,i64) = db.query_row("SELECT reviews.status,job.state,job.analysis_attempts FROM reviews JOIN automation_jobs job ON reviews.id=job.review_id WHERE reviews.id=2", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(automatic, ("queued".into(), "pending".into(), 0));
+        assert!(!run_one_session(&f.db, |_, _, _| panic!("provider must still wait")).unwrap());
+        assert_eq!(expire(), 1);
+        assert!(
+            run_one_session(&f.db, |id, _, expected| {
+                assert_eq!((id, expected), (2, Some(head.as_str())));
+                Ok(report(None))
+            })
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_retry_hint_backs_off_until_provider_recovers() {
+        let f = Fixture::new();
+        let db = connect(&f.db).unwrap();
+        db.execute(
+            "INSERT INTO reviews(url,provider,status) VALUES(?,?,'queued')",
+            [URL, PROVIDER],
+        )
+        .unwrap();
+        let input = serde_json::json!({"step":"discovery"});
+        let reply = || {
+            Ok(crate::provider::ModelReply {
+                value: serde_json::json!({}),
+                usage: Default::default(),
+            })
+        };
+        session::Session::open(&f.db, 1)
+            .unwrap()
+            .ask("first", &input, reply)
+            .unwrap();
+        for expected in [60, 120] {
+            assert!(
+                run_one_session(&f.db, |id, _, _| {
+                    let mut session = session::Session::open(&f.db, id)?;
+                    session.ask("first", &input, || {
+                        panic!("cached reply must not reset backoff")
+                    })?;
+                    session.ask("second", &input, || {
+                        Err(crate::provider::RateLimited::new(None).into())
+                    })?;
+                    unreachable!()
+                })
+                .unwrap()
+            );
+            let delay: i64 = db
+                .query_row(
+                    "SELECT backoff_seconds FROM provider_cooldowns WHERE retry_at>unixepoch()",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(delay, expected);
+            db.execute("UPDATE provider_cooldowns SET retry_at=unixepoch()", [])
+                .unwrap();
+        }
+        assert!(
+            run_one_session(&f.db, |id, _, _| {
+                let mut session = session::Session::open(&f.db, id)?;
+                session.ask("first", &input, || panic!("cached reply expected"))?;
+                session.ask("second", &input, reply)?;
+                session.ask("third", &input, || {
+                    Err(crate::provider::RateLimited::new(None).into())
+                })?;
+                unreachable!()
+            })
+            .unwrap()
+        );
+        let delay: i64 = db
+            .query_row("SELECT backoff_seconds FROM provider_cooldowns", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(delay, 60);
     }
 
     fn form_body(token: &str, url: &str, consent: Option<&str>) -> String {
