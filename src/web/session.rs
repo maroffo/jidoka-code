@@ -332,6 +332,40 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn manual_replay_keeps_the_selected_report_and_has_no_publication_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.db");
+        crate::web::recover(&path, "provider").unwrap();
+        let conn = connect(&path).unwrap();
+        let record = json!({"repo":"owner/repo","base":"a".repeat(40),"head":"b".repeat(40),"findings":[],"focus":[],"limits":["Undecided at src/file.rs:1. Inspect the caller."]});
+        conn.execute("INSERT INTO reviews(url,provider,status,report) VALUES ('https://github.com/owner/repo/pull/1','provider','partial',?)",[record.to_string()]).unwrap();
+        let source = conn.last_insert_rowid();
+        let new = replay(&path, source, "provider").unwrap();
+        let session = Session::open(&path, new).unwrap();
+        assert_eq!(
+            session
+                .replay_source()
+                .unwrap()
+                .unwrap()
+                .report
+                .limits
+                .len(),
+            1
+        );
+        assert_eq!(session.revisions().unwrap().unwrap().1, "b".repeat(40));
+        let jobs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM automation_jobs WHERE review_id=?",
+                [new],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(jobs, 0);
+        let other = Session::open(&path, replay(&path, source, "other-provider").unwrap()).unwrap();
+        assert!(other.replay_source().unwrap().is_none());
+    }
+
+    #[test]
     fn recovery_requeues_checkpointed_manual_work_for_the_same_provider() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reviews.db");

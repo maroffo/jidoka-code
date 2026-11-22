@@ -1106,6 +1106,9 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
                 html_list("ul", &text_list(files), "No patches were supplied.")
             )
         });
+    let unfinished = report.unfinished_patches().filter(|paths| !paths.is_empty()).map_or_else(String::new, |paths| {
+        format!("<details><summary>Patches with unfinished review ({})</summary><ul>{}</ul></details>", paths.len(), text_list(paths))
+    });
     let limits = text_list(report.report.limits.iter().filter(|limit| {
         !report
             .scan
@@ -1125,12 +1128,21 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
     let files = report.patch_files.as_ref().map_or_else(String::new, |v| {
         format!("<div><dt>Files with patches</dt><dd>{}</dd></div>", v.len())
     });
+    let checked = report
+        .reviewed_files
+        .as_ref()
+        .map_or_else(String::new, |paths| {
+            format!(
+                "<div><dt>Files with completed review</dt><dd>{}</dd></div>",
+                paths.len()
+            )
+        });
     format!(
         r##"<div class="workspace"><div>{warnings}{content}</div>
         <aside><section class="panel inspect"><div class="panel-head"><h2>Review summary</h2></div><dl>
-        <div><dt>Verified findings</dt><dd>{}</dd></div><div><dt>Manual checks</dt><dd>{}</dd></div>{files}</dl>
+        <div><dt>Verified findings</dt><dd>{}</dd></div><div><dt>Manual checks</dt><dd>{}</dd></div>{files}{checked}</dl>
         <details><summary>Git revisions</summary><div class="detail-body"><b>Reviewed revision</b><code>{}</code><b>Base revision</b><code>{}</code></div></details></section>
-        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Review coverage</h2></div>{coverage_limits}{patches}
+        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Review coverage</h2></div>{coverage_limits}{unfinished}{patches}
         <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section></aside></div>"##,
         report.report.findings.len(),
         manual.len(),
@@ -1263,6 +1275,18 @@ mod tests {
         let (row, _) = row.split_once("</a>").unwrap();
         assert!(row.contains(&format!("{repo} <b>#{number}</b>")));
         assert!(row.contains(&format!(">{status}</span>")));
+    }
+
+    #[test]
+    fn html_distinguishes_collected_and_finished_file_counts() {
+        let mut report = report(None);
+        report.patch_files = Some(vec!["src/a.rs".into(), "src/b.rs".into()]);
+        assert!(!report_html(&report, false).contains("Files with completed review"));
+        report.reviewed_files = Some(vec!["src/a.rs".into()]);
+        let html = report_html(&report, true);
+        assert!(html.contains("Files with patches</dt><dd>2"));
+        assert!(html.contains("Files with completed review</dt><dd>1"));
+        assert!(html.contains("Patches with unfinished review (1)</summary><ul><li>src/b.rs</li>"));
     }
 
     #[test]
@@ -1622,6 +1646,7 @@ mod tests {
             base: "a".repeat(40),
             head: "b".repeat(40),
             report: Report::default(),
+            reviewed_files: None,
             patch_files: None,
             diff: None,
             scan,

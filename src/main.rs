@@ -139,7 +139,11 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
                     expected_head.is_none_or(|expected| expected == head),
                     "Checkpoint revision changed"
                 );
-                source::collect_repository_at(url, &allowed, &base, &head)?
+                if expected_head.is_some() {
+                    source::resume_automatic_repository(url, &allowed, &base, &head)?
+                } else {
+                    source::collect_repository_at(url, &allowed, &base, &head)?
+                }
             } else {
                 source::collect_repository(
                     url,
@@ -149,7 +153,12 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
                     &paths,
                 )?
             };
-            let origin = session.remember_origin(repository.private_source_repo())?;
+            let current_origin = repository.private_source_repo();
+            let origin = session.remember_origin(current_origin)?;
+            anyhow::ensure!(
+                current_origin.is_none_or(|repo| Some(repo) == origin.as_deref()),
+                "The private source repository changed since the checkpoint"
+            );
             anyhow::ensure!(
                 origin.as_ref().is_none_or(|r| allowed.contains(r)),
                 "Source repository is no longer authorized"

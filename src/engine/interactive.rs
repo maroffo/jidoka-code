@@ -131,6 +131,12 @@ type Read<'f> = dyn FnMut(&Snapshot, &[ContextRead]) -> Result<Vec<SourceWindow>
 type Fits<'f> = dyn FnMut(&str, &Value) -> Result<bool> + 'f;
 type Model<'f> = dyn FnMut(&str, &Value) -> Result<Value> + 'f;
 
+struct ChunkResult {
+    report: Result<(Report, BatchCoverage)>,
+    stop: Option<Stop>,
+    displayed: HashSet<String>,
+}
+
 fn review_chunk(
     chunk: &Snapshot,
     full: &Snapshot,
@@ -139,12 +145,13 @@ fn review_chunk(
     model: &mut Model<'_>,
     read: &mut Read<'_>,
     fits: &mut Fits<'_>,
-) -> (Result<(Report, bool)>, Option<Stop>) {
+) -> ChunkResult {
     let read = RefCell::new(read);
     // Fixed slots provide stable references to tool evidence while citations are live.
     let evidence_turns: Vec<_> = (0..ReviewTurnLimit::MAX).map(|_| OnceCell::new()).collect();
     let mut turns = evidence_turns.iter();
     let mut stop = None;
+    let mut displayed = None;
     let result = review_passes(
         chunk,
         scan,
@@ -177,6 +184,15 @@ fn review_chunk(
                     }
                     other => other?,
                 };
+                displayed.get_or_insert_with(|| {
+                    data["snapshot"]["files"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|file| file["scope"] == "hunks")
+                        .filter_map(|file| file["path"].as_str().map(str::to_owned))
+                        .collect::<HashSet<_>>()
+                });
                 let Some(request) = read_request(&response)? else {
                     return Ok(response);
                 };
@@ -215,7 +231,11 @@ fn review_chunk(
         prior,
         CitationProtocol::Interactive,
     );
-    (result, stop)
+    ChunkResult {
+        report: result,
+        stop,
+        displayed: displayed.unwrap_or_default(),
+    }
 }
 
 fn merge_report(report: &mut Report, next: Report) {
@@ -250,13 +270,27 @@ pub fn review_snapshot_iterative(
     first.diff = None; // The review representation consists of indexed source, never a second copy of the diff.
     let mut queue = vec![first];
     while let Some(chunk) = queue.pop() {
-        let (result, stop) = review_chunk(
+        let ChunkResult {
+            report: result,
+            stop,
+            displayed,
+        } = review_chunk(
             &chunk, &snapshot, &scan, prior, &mut ask, &mut read, &mut fits,
         );
         match stop {
             None => {
-                let (batch, complete) = result?;
-                coverage.record(&chunk, complete);
+                let (batch, outcome) = result?;
+                coverage.record(&chunk, outcome.stages_finished);
+                coverage.missed.extend(outcome.unfinished_paths);
+                if outcome.stages_finished {
+                    for file in chunk
+                        .files
+                        .iter()
+                        .filter(|file| !file.patch.is_empty() && !displayed.contains(&file.path))
+                    {
+                        coverage.missed.insert(file.path.to_owned());
+                    }
+                }
                 merge_report(&mut report, batch);
             }
             Some(Stop::Context) => {
@@ -292,7 +326,7 @@ pub fn review_snapshot_iterative(
             Some(Stop::Error(error)) => return Err(error),
         }
     }
-    let patch_files = snapshot
+    let reviewed_files = snapshot
         .files
         .iter()
         .filter(|file| {
@@ -300,13 +334,6 @@ pub fn review_snapshot_iterative(
         })
         .map(|file| file.path.clone())
         .collect();
-    let mut missed: Vec<_> = coverage.missed.into_iter().collect();
-    missed.sort();
-    for path in missed {
-        report
-            .limits
-            .push(format!("Review of the diff for {path} was incomplete."));
-    }
     Ok(PublishedReport {
         repo: snapshot.repo,
         base: snapshot.base,
@@ -314,7 +341,15 @@ pub fn review_snapshot_iterative(
         diff: snapshot.diff,
         report,
         scan: Some(scan),
-        patch_files: Some(patch_files),
+        patch_files: Some(
+            snapshot
+                .files
+                .into_iter()
+                .filter(|file| !file.patch.is_empty())
+                .map(|file| file.path)
+                .collect(),
+        ),
+        reviewed_files: Some(reviewed_files),
     })
 }
 
@@ -454,7 +489,7 @@ mod tests {
             result.report.limits
         );
         assert!(result.report.findings.is_empty());
-        assert_eq!(result.patch_files.unwrap(), ["src/feature.rs"]);
+        assert_eq!(result.reviewed_files.unwrap(), ["src/feature.rs"]);
     }
 
     #[test]
@@ -489,7 +524,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lines, ["old1", "old2", "old3", "new1", "new2", "new3"]);
-        assert_eq!(result.patch_files.unwrap(), ["src/feature.rs"]);
+        assert_eq!(result.reviewed_files.unwrap(), ["src/feature.rs"]);
         assert!(result.report.limits.is_empty());
         let input = "@@ -8,3 +8,3 @@\n-old1\n-old2\n-old3\n+new1\n+new2\n+new3";
         let parts = split_patch(input).unwrap();
@@ -527,15 +562,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(calls, 3);
-        assert_eq!(result.patch_files, Some(vec![]));
+        assert_eq!(result.unfinished_patches().unwrap().len(), 1);
+        assert_eq!(result.patch_files.unwrap(), ["src/feature.rs"]);
+        assert!(result.reviewed_files.unwrap().is_empty());
         assert!(result.report.limits.contains(&ReviewTurnLimit.to_string()));
-        assert!(
-            result
-                .report
-                .limits
-                .iter()
-                .any(|l| l.contains("src/feature.rs"))
-        );
     }
 
     #[test]
@@ -566,7 +596,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!((turns, reads), (3, 1));
-        assert!(result.patch_files.unwrap().is_empty());
+        assert!(result.reviewed_files.unwrap().is_empty());
         assert!(
             result
                 .report
@@ -592,7 +622,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(result.patch_files.unwrap().is_empty());
+        assert!(result.reviewed_files.unwrap().is_empty());
         assert!(
             result
                 .report
@@ -619,7 +649,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(result.patch_files.unwrap().is_empty());
+        assert!(result.reviewed_files.unwrap().is_empty());
         assert!(
             result
                 .report
@@ -650,7 +680,7 @@ mod tests {
                 _ => panic!("The patch already fits.")
             }
         }, |_,_| Ok(Vec::new()), |_,data| Ok(data.to_string().len()<8192), &[]).unwrap();
-        assert_eq!(result.patch_files.unwrap(), ["src/feature.rs"]);
+        assert_eq!(result.reviewed_files.unwrap(), ["src/feature.rs"]);
         assert!(
             result.report.limits.is_empty(),
             "{:?}",

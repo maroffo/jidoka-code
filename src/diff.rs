@@ -290,6 +290,7 @@ mod tests {
             head: "b".repeat(40),
             report: Report::default(),
             scan: None,
+            reviewed_files: None,
             patch_files: Some(vec!["original.rs".into()]),
             diff,
         }

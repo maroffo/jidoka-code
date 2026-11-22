@@ -1633,6 +1633,12 @@ fn recheck_input<'a>(
     Ok(())
 }
 
+#[derive(Default)]
+struct BatchCoverage {
+    stages_finished: bool,
+    unfinished_paths: HashSet<String>,
+}
+
 fn live_assessments<'a>(
     data: &mut Value,
     hypotheses: &[Value],
@@ -1641,7 +1647,7 @@ fn live_assessments<'a>(
     ask: &mut Ask<'a, '_>,
     mut reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
     limits: &mut Vec<String>,
-) -> Result<Vec<Assessment<'a>>> {
+) -> Result<(Vec<Assessment<'a>>, BatchCoverage)> {
     let initial = request(
         Pass::Challenge,
         reader.protocol,
@@ -1652,7 +1658,7 @@ fn live_assessments<'a>(
     );
     let (initial, initial_error) = match initial {
         Ok(Some(reply)) => (reply, None),
-        Ok(None) => return Ok(Vec::new()),
+        Ok(None) => return Ok((Vec::new(), BatchCoverage::default())),
         Err(error) if hypotheses.is_empty() => return Err(error),
         Err(error) => (
             Reply {
@@ -1763,7 +1769,15 @@ fn live_assessments<'a>(
     accepted.sort_by_key(|(order, _, _)| *order);
     if pending.is_empty() {
         initial.report_incomplete(Pass::Challenge, limits);
-        return Ok(accepted.into_iter().map(|(_, _, item)| item).collect());
+        let examined =
+            initial.complete && !initial.overflow && (!unexpected || !accepted.is_empty());
+        return Ok((
+            accepted.into_iter().map(|(_, _, item)| item).collect(),
+            BatchCoverage {
+                stages_finished: examined,
+                ..BatchCoverage::default()
+            },
+        ));
     }
 
     let reads = pending_reads(&pending);
@@ -1801,6 +1815,7 @@ fn live_assessments<'a>(
         recovered = reply.complete && !reply.overflow && !unexpected_retry;
     }
     let mut recovered_items = Vec::new();
+    let mut unfinished_paths = HashSet::new();
     for entry in pending {
         let outcome = match &repaired {
             Some(reply) => checked_assessment(&reply.items, entry.id, entry.anchor, evidence),
@@ -1818,6 +1833,7 @@ fn live_assessments<'a>(
                 if let Some(accepted_outcome) = entry.accepted_outcome {
                     if text(&raw["outcome"]) != Some(accepted_outcome.as_str()) {
                         recovered = false;
+                        unfinished_paths.insert(entry.anchor.path.to_owned());
                         accepted.retain(|(_, id, _)| *id != entry.id);
                         limits.push(format!(
                             "The recheck did not confirm the accepted outcome at {}:{}.",
@@ -1830,6 +1846,7 @@ fn live_assessments<'a>(
             }
             Err(feedback) => {
                 recovered = false;
+                unfinished_paths.insert(entry.anchor.path.to_owned());
                 if let Some(item) = entry.undecided {
                     if let Some(reason) = &item.undecided {
                         recorded_undecided(limits, entry.anchor, reason);
@@ -1850,11 +1867,21 @@ fn live_assessments<'a>(
             initial.report_incomplete(Pass::Challenge, limits);
         }
     }
-    Ok(accepted
-        .into_iter()
-        .map(|(_, _, item)| item)
-        .chain(recovered_items)
-        .collect())
+    let examined = recovered
+        || (initial.complete
+            && !initial.overflow
+            && (!accepted.is_empty() || !recovered_items.is_empty()));
+    Ok((
+        accepted
+            .into_iter()
+            .map(|(_, _, item)| item)
+            .chain(recovered_items)
+            .collect(),
+        BatchCoverage {
+            stages_finished: examined,
+            unfinished_paths,
+        },
+    ))
 }
 
 /// Review pinned source with a proposal, a challenge and one targeted recheck when needed.
@@ -2003,9 +2030,8 @@ fn review_passes<'a>(
     reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
     prior: &[Finding],
     protocol: CitationProtocol,
-) -> Result<(Report, bool)> {
+) -> Result<(Report, BatchCoverage)> {
     let mut report = collection_report(snapshot, scan);
-    let original_limits = report.limits.len();
     let source = source_index(snapshot, &mut report.limits);
     let (mut data, references) = match protocol {
         CitationProtocol::Indexed | CitationProtocol::Interactive => {
@@ -2024,9 +2050,10 @@ fn review_passes<'a>(
         &mut report.limits,
     )?
     else {
-        return Ok((report, false));
+        return Ok((report, BatchCoverage::default()));
     };
     proposed.report_incomplete(Pass::Proposal, &mut report.limits);
+    let discovery_complete = proposed.complete && !proposed.overflow;
     let proposed = proposed.items;
     let fresh: Vec<_> = proposed
         .iter()
@@ -2038,6 +2065,7 @@ fn review_passes<'a>(
             .limits
             .push("Some hypotheses contain invalid details or citations.".into());
     }
+    let discovery_complete = discovery_complete && (proposed.is_empty() || !fresh.is_empty());
     let capacity = if matches!(protocol, CitationProtocol::Interactive) {
         usize::MAX
     } else {
@@ -2055,7 +2083,7 @@ fn review_passes<'a>(
     }
 
     data["hypotheses"] = json!(hypotheses);
-    let assessments = match protocol {
+    let (assessments, mut coverage) = match protocol {
         CitationProtocol::Indexed | CitationProtocol::Interactive => live_assessments(
             &mut data,
             &hypotheses,
@@ -2065,14 +2093,14 @@ fn review_passes<'a>(
             reader,
             &mut report.limits,
         )?,
-        CitationProtocol::Verbatim => {
-            replay_assessments(&mut data, &anchors, &mut evidence, ask, &mut report.limits)?
-        }
+        CitationProtocol::Verbatim => (
+            replay_assessments(&mut data, &anchors, &mut evidence, ask, &mut report.limits)?,
+            BatchCoverage {
+                stages_finished: true,
+                ..BatchCoverage::default()
+            },
+        ),
     };
-    let unsettled = assessments
-        .iter()
-        .filter(|assessment| assessment.undecided.is_some())
-        .count();
     let mut findings = Vec::new();
     let mut priorities = Vec::new();
     for assessment in assessments {
@@ -2106,10 +2134,8 @@ fn review_passes<'a>(
             break;
         }
     }
-    // A locally validated indeterminate outcome still means the model examined that source.
-    // Ordinary scanner/source exclusions were collected before issuing this model batch.
-    let complete = report.limits.len() == original_limits + unsettled;
-    Ok((report, complete))
+    coverage.stages_finished &= discovery_complete;
+    Ok((report, coverage))
 }
 
 #[cfg(test)]
@@ -3970,6 +3996,39 @@ mod tests {
         .unwrap();
         assert_eq!(result.report.findings.len(), 1);
         assert!(result.report.limits.contains(&ReviewTurnLimit.to_string()));
-        assert!(result.patch_files.unwrap().is_empty());
+        assert!(result.reviewed_files.unwrap().is_empty());
+    }
+
+    #[test]
+    fn unpublished_assessment_leaves_only_its_own_patch_unfinished() {
+        let mut replies = [
+            json!({"complete":true,"hypotheses":[
+                indexed_proposal("H2", "The caller configures one slot."),
+                indexed_proposal("H8", "A public feed might contain drafts.")
+            ]}),
+            json!({"complete":true,"assessments":[indexed_capacity_finding(1, "H4", "B2", "B4")]}),
+            json!({"complete":true,"assessments":[]}),
+        ]
+        .into_iter();
+        let result = review_snapshot_iterative(
+            indexed_snapshot(),
+            |_, _| Ok(replies.next().unwrap()),
+            |_, _| Ok(Vec::new()),
+            |_, _| Ok(true),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(result.report.findings.len(), 1);
+        assert_eq!(
+            result
+                .unfinished_patches()
+                .unwrap()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["feed.ts"]
+        );
+        assert_eq!(result.patch_files.unwrap(), ["cache.go", "feed.ts"]);
+        assert_eq!(result.reviewed_files.unwrap(), ["cache.go"]);
     }
 }

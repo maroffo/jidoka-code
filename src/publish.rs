@@ -321,6 +321,36 @@ fn coverage(body: &mut String, report: &PublishedReport) {
         (None, None) => writeln!(body, "- Patch collection was not recorded."),
     }
     .unwrap();
+    if let (Some(reviewed), Some(collected)) = (&report.reviewed_files, collected) {
+        let count = reviewed
+            .iter()
+            .filter(|path| safe_path(path))
+            .collect::<HashSet<_>>()
+            .len();
+        writeln!(
+            body,
+            "- Completed model review for {count} of {collected} collected patches."
+        )
+        .unwrap();
+        if let Some(unfinished) = report
+            .unfinished_patches()
+            .filter(|paths| !paths.is_empty())
+        {
+            let samples = unfinished
+                .iter()
+                .take(3)
+                .map(|path| summary_text(path))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let remaining = unfinished.len().saturating_sub(3);
+            let suffix = if remaining > 0 {
+                format!(" and {remaining} more")
+            } else {
+                String::new()
+            };
+            writeln!(body, "- Unfinished patches: {samples}{suffix}.").unwrap();
+        }
+    }
     let Some(scan) = &report.scan else {
         body.push_str("- Semgrep coverage was not recorded.\n");
         return coverage_limits(body, report);
@@ -1131,6 +1161,7 @@ mod tests {
                 ..Report::default()
             },
             scan: None,
+            reviewed_files: None,
             patch_files: None,
             diff: Some(PinnedDiff {
                 total_files: 1,
@@ -1205,6 +1236,22 @@ mod tests {
         );
         assert!(summary.body.contains("Partial coverage"));
         assert!(summary.body.contains("Scan budget reached"));
+    }
+
+    #[test]
+    fn distinguishes_collected_patches_from_completed_review_including_legacy() {
+        let mut report = report();
+        report.patch_files = Some(vec!["a.rs".into(), "b.rs".into()]);
+        assert!(
+            !prepare(&report, &[], false)
+                .body
+                .contains("Completed model review")
+        );
+        report.reviewed_files = Some(vec!["a.rs".into()]);
+        let body = prepare(&report, &[], false).body;
+        assert!(body.contains("Collected patches for 2"));
+        assert!(body.contains("Completed model review for 1 of 2 collected patches."));
+        assert!(body.contains("Unfinished patches: b\\.rs."));
     }
 
     #[test]

@@ -106,6 +106,79 @@ fn commit_messages(hub: &mut GitHub<Http>, route: &str, total: usize) -> Vec<Str
     messages
 }
 
+#[derive(Copy, Clone)]
+enum ReviewTarget<'a> {
+    Current(Option<&'a str>),
+    AutomaticResume { base: &'a str, head: &'a str },
+    Historical { base: &'a str, head: &'a str },
+}
+
+impl<'a> ReviewTarget<'a> {
+    fn saved(self) -> Option<(&'a str, &'a str)> {
+        match self {
+            Self::Current(_) => None,
+            Self::Historical { base, head } | Self::AutomaticResume { base, head } => {
+                Some((base, head))
+            }
+        }
+    }
+
+    fn check_head(self, current: &str) -> Result<()> {
+        let expected = match self {
+            Self::Current(expected) => expected,
+            Self::AutomaticResume { head, .. } => Some(head),
+            Self::Historical { .. } => None,
+        };
+        ensure!(
+            expected.is_none_or(|head| head.eq_ignore_ascii_case(current)),
+            HeadChanged("The pull request changed before review.")
+        );
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct RepositoryPull {
+    #[serde(flatten)]
+    refs: DiffPull,
+    title: String,
+    body: Option<String>,
+}
+
+impl RepositoryPull {
+    fn authorized(self, repo: &str, number: u64, allowed: &HashSet<String>) -> Result<Pull> {
+        let refs = self.refs;
+        let mut pull = Pull {
+            number: refs.number, title: self.title, body: self.body, base: refs.base,
+            head: Revision { sha: refs.head.sha, repo: refs.head.repo.context(
+                "Cannot verify the pull request's source repository. Its fork may have been deleted.")? },
+            changed_files: refs.changed_files,
+        };
+        pull.validate(repo, number, allowed)?;
+        Ok(pull)
+    }
+}
+
+fn check_collection(target: ReviewTarget<'_>, first: &Pull, last: &Pull) -> Result<()> {
+    if matches!(target, ReviewTarget::Historical { .. }) {
+        // The saved commits stay fixed across ordinary pushes and base updates.
+        ensure!(
+            first.head.repo == last.head.repo && first.base.repo == last.base.repo,
+            "The source repository changed during collection."
+        );
+    } else {
+        ensure!(
+            first.head.sha == last.head.sha,
+            HeadChanged("The pull request head changed during collection.")
+        );
+        ensure!(
+            first.same_revisions(last),
+            "The pull request base or metadata changed during collection."
+        );
+    }
+    Ok(())
+}
+
 /// Collect all changed paths and retain a read-only handle to the pinned source for the review.
 pub fn collect_repository(
     url: &str,
@@ -117,10 +190,28 @@ pub fn collect_repository(
     collect(
         url,
         allowed,
-        expected_head,
-        None,
+        ReviewTarget::Current(expected_head),
         previous_head,
         prior_paths,
+    )
+}
+
+/// Resume an automatic run only while its recorded head is still the PR head.
+pub fn resume_automatic_repository(
+    url: &str,
+    allowed: &HashSet<String>,
+    base: &str,
+    head: &str,
+) -> Result<(Snapshot, ReviewRepository)> {
+    collect(
+        url,
+        allowed,
+        ReviewTarget::AutomaticResume {
+            base: sha(base)?,
+            head: sha(head)?,
+        },
+        None,
+        &[],
     )
 }
 
@@ -131,38 +222,46 @@ pub fn collect_repository_at(
     base: &str,
     head: &str,
 ) -> Result<(Snapshot, ReviewRepository)> {
-    collect(url, allowed, Some(sha(head)?), Some(sha(base)?), None, &[])
+    collect(
+        url,
+        allowed,
+        ReviewTarget::Historical {
+            base: sha(base)?,
+            head: sha(head)?,
+        },
+        None,
+        &[],
+    )
 }
 
 fn collect(
     url: &str,
     allowed: &HashSet<String>,
-    expected_head: Option<&str>,
-    historical_base: Option<&str>,
+    target: ReviewTarget<'_>,
     previous_head: Option<&str>,
     prior_paths: &[String],
 ) -> Result<(Snapshot, ReviewRepository)> {
     let (repo, number) = pull_url(url, allowed)?;
     let mut hub = github()?;
     let route = format!("{repo}/pulls/{number}");
-    let mut pull: Pull = hub.get(&route, PULL_BYTES, false)?;
-    pull.validate(&repo, number, allowed)?;
-    ensure!(
-        historical_base.is_some()
-            || expected_head.is_none_or(|id| id.eq_ignore_ascii_case(&pull.head.sha)),
-        HeadChanged("The pull request changed before review.")
-    );
+    let metadata: RepositoryPull = hub.get(&route, PULL_BYTES, false)?;
+    let pull = metadata.authorized(&repo, number, allowed)?;
+    target.check_head(&pull.head.sha)?;
 
     // The first comparison page can contain megabytes of unrelated file JSON.
     // Later pages contain the same pinned commit metadata without the file list.
-    let historical = historical_base.zip(expected_head);
-    let head = historical.map_or(pull.head.sha.as_str(), |(_, head)| head);
-    let head_repo = if historical.is_some() {
+    let saved = target.saved();
+    let saved_base = saved.map(|(base, _)| base);
+    let head = saved.map_or(pull.head.sha.as_str(), |(_, head)| head);
+    let head_repo = if matches!(target, ReviewTarget::Historical { .. }) {
         &repo
     } else {
         &pull.head.repo.full_name
     };
-    let compare_base = historical_base.unwrap_or(&pull.base.sha);
+    let compare_base = match target {
+        ReviewTarget::Historical { base, .. } => base,
+        _ => &pull.base.sha,
+    };
     let head_ref = if &repo == head_repo {
         head.to_owned()
     } else {
@@ -176,7 +275,7 @@ fn collect(
     )?;
     let base = sha(&comparison.merge_base_commit.sha)?;
     ensure!(
-        comparison.base_commit.sha == compare_base && historical_base.is_none_or(|id| id == base),
+        comparison.base_commit.sha == compare_base && saved_base.is_none_or(|id| id == base),
         "GitHub returned an unexpected comparison base."
     );
     let messages = if head == pull.head.sha && comparison.total_commits > 1 {
@@ -196,10 +295,12 @@ fn collect(
         fetch(directory.path(), &repo, &[base])?;
         fetch(directory.path(), head_repo, &[head])?;
     }
-    let fork = (&repo != head_repo && pull.head.repo.private).then(|| head_repo.clone());
+    let fork = (pull.head.repo.full_name != repo && pull.head.repo.private)
+        .then(|| pull.head.repo.full_name.clone());
     let repository = ReviewRepository::open(directory, base, head, fork)?;
     let (mut files, diff, mut limits) = repository.changes()?;
-    if historical_base.is_none() && diff.total_files != pull.changed_files {
+    if !matches!(target, ReviewTarget::Historical { .. }) && diff.total_files != pull.changed_files
+    {
         limits.push(format!(
             "The pinned Git diff lists {} changed files; GitHub reported {} for the pull request.",
             diff.total_files, pull.changed_files
@@ -213,12 +314,9 @@ fn collect(
         )
     });
     // Use a fresh HTTP deadline after fetching the Git objects.
-    let mut final_pull: Pull = github()?.get(&route, PULL_BYTES, true)?;
-    final_pull.validate(&repo, number, allowed)?;
-    ensure!(
-        pull.same_revisions(&final_pull),
-        HeadChanged("The pull request changed during collection.")
-    );
+    let final_metadata: RepositoryPull = github()?.get(&route, PULL_BYTES, true)?;
+    let final_pull = final_metadata.authorized(&repo, number, allowed)?;
+    check_collection(target, &pull, &final_pull)?;
     let mut intent = Vec::new();
     if head == pull.head.sha {
         intent.push(pull.title);
@@ -707,6 +805,76 @@ mod tests {
         )
         .unwrap();
         String::from_utf8(bytes).unwrap().trim().to_owned()
+    }
+
+    fn pr(head: &str, base: &str, origin: serde_json::Value) -> RepositoryPull {
+        serde_json::from_value(serde_json::json!({
+            "number": 1, "title": "Fix", "body": null, "changed_files": 2,
+            "base": {"sha": base, "repo":{"full_name":"review/project","private":true}},
+            "head": {"sha": head, "repo": origin}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn automatic_checkpoints_require_the_current_head_and_historical_replays_keep_their_sha() {
+        let saved = "a".repeat(40);
+        let pushed = "b".repeat(40);
+        let base = "c".repeat(40);
+        let target = ReviewTarget::AutomaticResume {
+            base: &base,
+            head: &saved,
+        };
+        assert!(target.check_head(&saved).is_ok());
+        assert!(target.check_head(&pushed).unwrap_err().is::<HeadChanged>());
+        let replay = ReviewTarget::Historical {
+            base: &base,
+            head: &saved,
+        };
+        assert!(replay.check_head(&pushed).is_ok());
+        assert_eq!(replay.saved(), Some((base.as_str(), saved.as_str())));
+
+        let repo = "review/project";
+        let allowed = HashSet::from([repo.to_owned()]);
+        let origin = serde_json::json!({"full_name":repo, "private":true});
+        let authorized = |head: &str, base: &str| {
+            pr(head, base, origin.clone())
+                .authorized(repo, 1, &allowed)
+                .unwrap()
+        };
+        let before = authorized(&saved, &base);
+        let after = authorized(&pushed, &base);
+        assert!(
+            check_collection(target, &before, &after)
+                .unwrap_err()
+                .is::<HeadChanged>()
+        );
+        assert!(check_collection(replay, &before, &after).is_ok());
+        let new_base = authorized(&saved, &pushed);
+        assert!(
+            !check_collection(target, &before, &new_base)
+                .unwrap_err()
+                .is::<HeadChanged>()
+        );
+    }
+
+    #[test]
+    fn source_fetch_requires_verifiable_and_approved_fork_metadata() {
+        let repo = "review/project";
+        let allowed = HashSet::from([repo.to_owned()]);
+        let denied = serde_json::json!({"full_name":"private/fork", "private":true});
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        for origin in [denied, serde_json::Value::Null] {
+            let meta = pr(&head, &base, origin);
+            assert!(meta.authorized(repo, 1, &allowed).is_err());
+        }
+        let public = serde_json::json!({"full_name":"public/fork", "private":false});
+        assert!(
+            pr(&head, &base, public)
+                .authorized(repo, 1, &allowed)
+                .is_ok()
+        );
     }
 
     #[test]

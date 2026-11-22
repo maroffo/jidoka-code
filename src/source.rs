@@ -7,7 +7,9 @@ mod reads;
 mod repository;
 
 pub use reads::read_context;
-pub use repository::{ReviewRepository, collect_repository, collect_repository_at};
+pub use repository::{
+    ReviewRepository, collect_repository, collect_repository_at, resume_automatic_repository,
+};
 
 #[derive(Debug)]
 pub struct HeadChanged(pub(crate) &'static str);
