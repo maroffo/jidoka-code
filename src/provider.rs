@@ -1183,7 +1183,7 @@ mod tests {
         let url = format!("http://{}/chat", listener.local_addr().unwrap());
         let client = Client::builder()
             .no_proxy()
-            .connect_timeout(Duration::from_millis(30))
+            .connect_timeout(Duration::from_secs(2))
             .build()
             .unwrap();
         let timeout = Duration::from_millis(180);
@@ -1194,8 +1194,17 @@ mod tests {
             error.downcast_ref::<InvalidReply>().unwrap().reason,
             "Provider generation timed out before response headers."
         );
-        drop(listener);
-        let error = send_generation(client.post(url).timeout(timeout), Some(timeout)).unwrap_err();
+        // Reserve a distinct port without ever listening on it. Reusing the
+        // port of the timed-out request can race another loopback listener.
+        let refused = tokio::net::TcpSocket::new_v4().unwrap();
+        refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let refused_url = format!("http://{}/chat", refused.local_addr().unwrap());
+        let refusal_deadline = Duration::from_secs(5);
+        let error = send_generation(
+            client.post(refused_url).timeout(refusal_deadline),
+            Some(refusal_deadline),
+        )
+        .unwrap_err();
         assert!(
             error
                 .downcast_ref::<reqwest::Error>()
