@@ -62,14 +62,14 @@ async fn check_service_restart(scan_limited: bool) {
         }],
         supporting_paths: vec![],
     });
-    let scanner_limit = "File fixtures/oversized.py exceeds scan limits.";
+    let scanner_limit = "File fixtures/binary.py exceeds scan limits.";
     if scan_limited {
         // The scanner rejects this input before looking for an installed executable.
         snapshot.files.push(SourceFile {
-            path: "fixtures/oversized.py".into(),
+            path: "fixtures/binary.py".into(),
             patch: String::new(),
             before: String::new(),
-            after: "x = 1\n".repeat(5_000),
+            after: "value\0".to_owned(),
         });
     }
     let file_count = snapshot.files.len();

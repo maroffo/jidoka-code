@@ -24,9 +24,8 @@ use std::{
 use tempfile::TempDir;
 
 const RULE: &str = include_str!("../rules/python.yml");
-const TARGETS: usize = 28;
-const TARGET_BYTES: usize = 24_000;
-const INPUT_BYTES: usize = 96_000;
+const BATCH_SIZE: usize = 28;
+const TARGET_BYTES: usize = 1_000_000;
 const OUTPUT_BYTES: usize = 1_000_000;
 const SIGNALS: usize = 100;
 const SCAN_TIME: Duration = Duration::from_secs(20);
@@ -39,13 +38,16 @@ fn applicable(path: &str) -> bool {
     )
 }
 
+pub(crate) fn source_bytes(path: &str) -> Option<usize> {
+    applicable(path).then_some(TARGET_BYTES)
+}
+
 fn targets<'a>(snapshot: &'a Snapshot, limits: &mut Vec<String>) -> Vec<(&'a str, &'a str)> {
     let mut counts = HashMap::new();
     for file in &snapshot.files {
         *counts.entry(file.path.as_str()).or_insert(0) += 1;
     }
     let mut targets = Vec::new();
-    let mut remaining = INPUT_BYTES;
     for file in &snapshot.files {
         let path = file.path.as_str();
         let text = file.after.as_str();
@@ -65,13 +67,9 @@ fn targets<'a>(snapshot: &'a Snapshot, limits: &mut Vec<String>) -> Vec<(&'a str
         }
         if !safe_path(path) || counts[path] != 1 {
             limits.push("Skipped files with invalid or duplicate paths.".into());
-        } else if targets.len() >= TARGETS
-            || text.len() > remaining.min(TARGET_BYTES)
-            || text.contains('\0')
-        {
+        } else if text.len() > TARGET_BYTES || text.contains('\0') {
             limits.push(format!("File {path} exceeds scan limits."));
         } else {
-            remaining -= text.len();
             targets.push((path, text));
         }
     }
@@ -424,27 +422,29 @@ fn scan_using(snapshot: &Snapshot, configured_path: impl FnOnce() -> Option<OsSt
         report.limits.push("Invalid Semgrep search path.".into());
         return report;
     };
-    let Ok(prepared) = Prepared::new(targets, &mut report.limits) else {
-        report
-            .limits
-            .push("Could not prepare the Semgrep scan.".into());
-        return report;
-    };
-    if prepared.files.is_empty() {
-        return report;
-    }
-    match run(
-        &mut prepared.command(&executable, &search_path),
-        SCAN_TIME,
-        OUTPUT_BYTES,
-    ) {
-        Ok((status, output)) => {
-            if !status.success() {
-                report.limits.push("Semgrep exited with an error.".into());
-            }
-            result(&output, &prepared.files, &mut report);
+    for batch in targets.chunks(BATCH_SIZE) {
+        let Ok(prepared) = Prepared::new(batch.to_vec(), &mut report.limits) else {
+            report
+                .limits
+                .push("Could not prepare the Semgrep scan.".into());
+            continue;
+        };
+        if prepared.files.is_empty() {
+            continue;
         }
-        Err(error) => report.limits.push(error.description().into()),
+        match run(
+            &mut prepared.command(&executable, &search_path),
+            SCAN_TIME,
+            OUTPUT_BYTES,
+        ) {
+            Ok((status, output)) => {
+                if !status.success() {
+                    report.limits.push("Semgrep exited with an error.".into());
+                }
+                result(&output, &prepared.files, &mut report);
+            }
+            Err(error) => report.limits.push(error.description().into()),
+        }
     }
     report
 }

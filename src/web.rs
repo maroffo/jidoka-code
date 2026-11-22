@@ -1,5 +1,6 @@
 //! Review pages and the persistent, single-user work queue.
 
+pub mod session;
 mod workflow;
 
 use std::{
@@ -66,7 +67,8 @@ fn init_db(connection: &Connection) -> rusqlite::Result<()> {
             report TEXT,
             error TEXT
         )",
-    )
+    )?;
+    session::init(connection)
 }
 
 /// Recover interrupted work and invalidate old consent before starting the worker.
@@ -76,6 +78,12 @@ pub fn recover(db: &Path, provider: &str) -> Result<()> {
     crate::automation::init(&connection)?;
     crate::automation::recover(&connection, provider)?;
     let transaction = connection.transaction()?;
+    transaction.execute(
+        "UPDATE reviews SET status='queued', error=NULL WHERE status='running' AND provider=?
+         AND EXISTS (SELECT 1 FROM review_runs WHERE review_id=reviews.id)
+         AND NOT EXISTS (SELECT 1 FROM automation_jobs WHERE review_id=reviews.id)",
+        [provider],
+    )?;
     transaction.execute(
         "UPDATE reviews SET status = 'failed', error = ?1 WHERE status = 'running'",
         [INTERRUPTED],
@@ -168,6 +176,13 @@ pub fn run_one_pinned<F>(db: &Path, process: F) -> Result<bool>
 where
     F: FnOnce(&str, Option<&str>) -> Result<PublishedReport>,
 {
+    run_one_session(db, |_, url, head| process(url, head))
+}
+
+pub fn run_one_session<F>(db: &Path, process: F) -> Result<bool>
+where
+    F: FnOnce(i64, &str, Option<&str>) -> Result<PublishedReport>,
+{
     let mut connection = connect(db)?;
     let transaction = connection.transaction()?;
     let job: Option<(i64, String)> = transaction
@@ -192,7 +207,7 @@ where
         .optional()?;
     transaction.commit()?;
 
-    let outcome = process(&url, expected_head.as_deref()).and_then(|report| {
+    let outcome = process(id, &url, expected_head.as_deref()).and_then(|report| {
         anyhow::ensure!(
             expected_head
                 .as_deref()
@@ -208,6 +223,13 @@ where
     });
     let (status, report, error) = match outcome {
         Ok((status, report)) => (status, Some(report), None),
+        Err(error) if error.is::<session::Paused>() => {
+            connection.execute(
+                "UPDATE reviews SET status='queued' WHERE id=? AND status='running'",
+                [id],
+            )?;
+            return Ok(true);
+        }
         Err(error) if expected_head.is_some() && error.is::<crate::source::HeadChanged>() => {
             ("superseded", None, None)
         }
@@ -223,6 +245,20 @@ where
         "UPDATE reviews SET status = ?1, report = ?2, error = ?3 WHERE id = ?4 AND status = 'running'",
         params![status, report, error, id],
     )?;
+    if updated != 0 {
+        let reason = report
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<PublishedReport>(raw).ok())
+            .and_then(|r| {
+                r.report
+                    .limits
+                    .into_iter()
+                    .chain(r.scan.into_iter().flat_map(|s| s.limits))
+                    .next()
+            })
+            .unwrap_or_else(|| error.clone().unwrap_or_else(|| status.to_string()));
+        session::finish(&tx, id, status, &reason)?;
+    }
     if updated != 0 && status == "superseded" {
         tx.execute("UPDATE automation_jobs SET state='canceled', retry_at=0 WHERE review_id=?1 AND state='pending'", [id])?;
         tx.execute("UPDATE automation_settings SET review_error=NULL, review_error_job=NULL WHERE review_error_job=?1", [id])?;
@@ -665,7 +701,7 @@ async fn review(
                 let error: Option<String> = row.get(5)?;
                 let stored: String = row.get(2)?;
                 let (status, replacement) = displayed_status(&connection, id, &stored, error.as_deref())?;
-                Ok(review_page((id, &token, replacement), &row.get::<_, String>(0)?, &row.get::<_, String>(1)?,
+                Ok(review_page((id, &token, replacement, session::metrics(&connection,id)?), &row.get::<_, String>(0)?, &row.get::<_, String>(1)?,
                     status, &row.get::<_, String>(3)?,
                     raw_report.as_deref(), error.as_deref()))
             },
@@ -1105,7 +1141,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
 }
 
 fn review_page(
-    (id, token, replacement): (i64, &str, Option<i64>),
+    (id, token, replacement, metrics): (i64, &str, Option<i64>, Option<String>),
     url: &str,
     provider: &str,
     status: &str,
@@ -1159,12 +1195,15 @@ fn review_page(
         }
         _ => ("failed", failure_html(failure)),
     };
+    let metrics = metrics.map_or_else(String::new, |value| {
+        format!(r#"<p class="meta">{}</p>"#, escape(&value))
+    });
     page(
         &format!("Review {id}"),
         &format!(
             r##"<div class="hero"><div class="trail"><a href="/#history">Review history</a><span>/</span>Review {id}</div>
 <div class="title-line"><h1>{heading}</h1>{}</div>
-<div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div></div>{details}"##,
+<div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div>{metrics}</div>{details}"##,
             status_badge(status),
             escape(created),
             escape(provider_name(provider)),

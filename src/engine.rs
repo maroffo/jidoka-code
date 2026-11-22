@@ -1,4 +1,7 @@
-//! Review pinned source and challenge each hypothesis, with one targeted recheck if needed.
+//! Review pinned source and verify proposed findings against counterevidence.
+
+mod interactive;
+pub use interactive::{ReviewContextExceeded, ReviewTurnLimit, review_snapshot_iterative};
 
 use crate::{
     contracts::{Attribution, ContextRead, Finding, Focus, Report, Scan, Snapshot, SourceWindow},
@@ -19,7 +22,7 @@ const MAX_SUPPORT: usize = 4;
 const MAX_COUNTEREVIDENCE: usize = 6;
 const MAX_TEXT: usize = 400;
 const MAX_QUOTE: usize = 1_000;
-const MAX_INPUT_BYTES: usize = 900_000;
+const REPLAY_INPUT_BYTES: usize = 900_000;
 const MAX_PRIOR_ASSESSMENT_BYTES: usize = 4_096;
 const MAX_CONTEXT_READS: usize = 3;
 const MAX_READ_TERM_BYTES: usize = 128;
@@ -109,7 +112,7 @@ const CHALLENGE_DISCOVERY: &str = r#"
 Trace the change once as its caller and once as its release maintainer. Consider
 what each can observe or enforce. Also review the diff independently for important concerns missed by the initial
 reviewer, even if the hypotheses list is empty. You may include an additional
-top-level "leads" array with up to three distinct new hypotheses in impact order.
+top-level "leads" array with distinct new hypotheses in impact order.
 Use a different anchor from those already under review. Each lead has "anchor" (head citation), "expected", "scenario" and "consequence".
 They will be checked separately. Return an empty array or omit it when none merit
 a check. Keep assessments limited to the supplied IDs.
@@ -204,12 +207,15 @@ finding. The previous title and impact are claims to assess.
   (specific input and steps), "expected" (observable expected behavior), and
   "severity" (high, medium, or low). It is a suggested test, not a verified finding.
   A grounded manual test is a complete assessment. Keep its execution status explicit.
-- indeterminate: use this when necessary material is unavailable. During the
+- indeterminate: use this when necessary material is unavailable. If you can suggest a specific manual
+  check, add the same four fields as manual_test. The outcome stays unverified.
+"#;
+
+const LEGACY_READS: &str = r#"During the
   challenge, you may add "reads": [{"path": str, "term": str}] to request useful
   pinned context for the recheck. Use a pinned path or exact source file stem
   (such as Field) and a literal symbol or property to look up. The whole review
-  can request at most three reads. If you can also suggest a specific manual
-  check, add the same four fields as manual_test. The outcome stays unverified.
+  can request at most three reads.
 "#;
 
 const RECHECK: &str = r#"
@@ -243,6 +249,7 @@ impl Pass {
 
 #[derive(Clone, Copy)]
 enum CitationProtocol {
+    Interactive,
     Indexed,
     Verbatim,
 }
@@ -775,14 +782,18 @@ fn request_bytes(data: &Value) -> Result<usize> {
     Ok(serde_json::to_vec(&serde_json::to_string(data)?)?.len())
 }
 
-fn request(
+type Ask<'a, 'f> = dyn FnMut(&str, &mut Value, &mut Evidence<'a>) -> Result<Value> + 'f;
+
+fn request<'a>(
     pass: Pass,
     protocol: CitationProtocol,
-    data: &Value,
-    ask: &mut impl FnMut(&str, &Value) -> Result<Value>,
+    data: &mut Value,
+    evidence: &mut Evidence<'a>,
+    ask: &mut Ask<'a, '_>,
     limits: &mut Vec<String>,
 ) -> Result<Option<Reply>> {
     let (citation_instructions, maximum) = match protocol {
+        CitationProtocol::Interactive => (INDEXED_CITATIONS, usize::MAX),
         CitationProtocol::Indexed => (INDEXED_CITATIONS, MAX_HYPOTHESES),
         CitationProtocol::Verbatim => (VERBATIM_CITATIONS, MAX_REPLAY_HYPOTHESES),
     };
@@ -791,6 +802,7 @@ fn request(
         Pass::Proposal => (
             "hypotheses",
             match protocol {
+                CitationProtocol::Interactive => format!("{DISCOVER}{PROPOSE}"),
                 CitationProtocol::Indexed => {
                     format!("{DISCOVER}Return up to {maximum} hypotheses.\n{PROPOSE}")
                 }
@@ -802,8 +814,11 @@ fn request(
         Pass::Challenge => (
             "assessments",
             match protocol {
-                CitationProtocol::Indexed => {
+                CitationProtocol::Interactive => {
                     format!("{CHALLENGE}{LIVE_CHECKS}{CHALLENGE_DISCOVERY}")
+                }
+                CitationProtocol::Indexed => {
+                    format!("{CHALLENGE}{LIVE_CHECKS}{LEGACY_READS}{CHALLENGE_DISCOVERY}")
                 }
                 CitationProtocol::Verbatim => {
                     format!("{CHALLENGE}\nFor confirmed, also give an action string.")
@@ -812,19 +827,23 @@ fn request(
         ),
         Pass::Recheck => ("assessments", format!("{RECHECK}{CHALLENGE}{LIVE_CHECKS}")),
     };
-    if request_bytes(data)? > MAX_INPUT_BYTES {
+    if matches!(protocol, CitationProtocol::Verbatim) && request_bytes(data)? > REPLAY_INPUT_BYTES {
         limits.push(format!("Review input exceeds the size limit for {stage}."));
         return Ok(None);
     }
     let mut response = ask(
         &format!("{GROUNDING}{citation_instructions}\n{instructions}"),
         data,
+        evidence,
     )
     .map_err(|_| anyhow!("The provider failed while {stage}."))?;
     let mut leads = Vec::new();
     if matches!(
         (protocol, pass),
-        (CitationProtocol::Indexed, Pass::Challenge)
+        (
+            CitationProtocol::Indexed | CitationProtocol::Interactive,
+            Pass::Challenge
+        )
     ) && let Some(value) = response.as_object_mut().and_then(|o| o.remove("leads"))
     {
         match value {
@@ -882,6 +901,7 @@ fn retain_history<'a>(
     mut fresh: Vec<(Citation<'a>, Value)>,
     prior: &[Finding],
     first_history_id: usize,
+    capacity: usize,
     evidence: &Evidence<'a>,
 ) -> Vec<(Citation<'a>, Value)> {
     let Some(references) = evidence.references.as_ref().filter(|_| !prior.is_empty()) else {
@@ -929,7 +949,7 @@ fn retain_history<'a>(
         }
         selected.insert(anchor);
     }
-    let mut spare = MAX_HYPOTHESES - selected.len();
+    let mut spare = capacity.saturating_sub(selected.len());
     fresh.retain(|(anchor, _)| {
         if keep_fresh.remove(anchor) {
             return true;
@@ -1450,6 +1470,7 @@ struct Pending<'a, 'input> {
 }
 
 struct RecheckReader<'a, F> {
+    protocol: CitationProtocol,
     read: F,
     windows: &'a mut Vec<SourceWindow>,
 }
@@ -1472,6 +1493,7 @@ fn recheck_input<'a>(
     previous: &[Value],
     evidence: &mut Evidence<'a>,
     read_windows: &'a [SourceWindow],
+    protocol: CitationProtocol,
 ) -> Result<()> {
     data["hypotheses"] = json!(
         pending
@@ -1493,12 +1515,44 @@ fn recheck_input<'a>(
     }).collect();
     data["recheck"] = json!(details);
 
-    let mut remaining =
-        MAX_RECHECK_CONTEXT_BYTES.min(MAX_INPUT_BYTES.saturating_sub(request_bytes(data)?));
+    // Interactive reviews explicitly open additional files through the repository tools.
+    let interactive = matches!(protocol, CitationProtocol::Interactive);
+    let mut remaining = if interactive {
+        usize::MAX
+    } else {
+        MAX_RECHECK_CONTEXT_BYTES.min(REPLAY_INPUT_BYTES.saturating_sub(request_bytes(data)?))
+    };
     let references = evidence
         .references
         .as_mut()
         .expect("live rechecks use indexed source");
+    let windows = data["snapshot"]["head_context"]
+        .as_array_mut()
+        .expect("head context array");
+
+    // The source adapter resolves stems to pinned paths. Index its verified windows as returned.
+    for window in read_windows.iter().filter(|window| safe_path(&window.path)) {
+        let path = window.path.as_str();
+        let full_head = evidence
+            .source
+            .get(path)
+            .map_or(&[][..], |file| file.head.as_slice());
+        let lines: Vec<_> = window.text.lines().collect();
+        references.append_context_window(
+            path,
+            window.start,
+            &lines,
+            full_head,
+            &mut remaining,
+            windows,
+        )?;
+    }
+
+    if interactive {
+        data["snapshot"]["complete_head_paths"] =
+            json!(references.complete_head_paths(&evidence.source));
+        return Ok(());
+    }
     let mut sources: Vec<_> = pending
         .iter()
         .filter_map(|entry| {
@@ -1537,24 +1591,6 @@ fn recheck_input<'a>(
     let windows = data["snapshot"]["head_context"]
         .as_array_mut()
         .expect("head context array");
-
-    // The source adapter resolves stems to pinned paths. Index its verified windows as returned.
-    for window in read_windows.iter().filter(|window| safe_path(&window.path)) {
-        let path = window.path.as_str();
-        let full_head = evidence
-            .source
-            .get(path)
-            .map_or(&[][..], |file| file.head.as_slice());
-        let lines: Vec<_> = window.text.lines().collect();
-        references.append_context_window(
-            path,
-            window.start,
-            &lines,
-            full_head,
-            &mut remaining,
-            windows,
-        )?;
-    }
 
     // Keep nearby context for every pending hypothesis before spending budget on full files.
     for &(path, line, head, _) in &sources {
@@ -1602,14 +1638,15 @@ fn live_assessments<'a>(
     hypotheses: &[Value],
     anchors: &HashMap<u64, Citation<'a>>,
     evidence: &mut Evidence<'a>,
-    ask: &mut impl FnMut(&str, &Value) -> Result<Value>,
+    ask: &mut Ask<'a, '_>,
     mut reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
     limits: &mut Vec<String>,
 ) -> Result<Vec<Assessment<'a>>> {
     let initial = request(
         Pass::Challenge,
-        CitationProtocol::Indexed,
+        reader.protocol,
         data,
+        evidence,
         ask,
         limits,
     );
@@ -1701,7 +1738,9 @@ fn live_assessments<'a>(
         if !seen_anchors.insert(anchor) {
             continue;
         }
-        if pending.len() + discovered.len() >= MAX_HYPOTHESES {
+        if !matches!(reader.protocol, CitationProtocol::Interactive)
+            && pending.len() + discovered.len() >= MAX_HYPOTHESES
+        {
             limits.push("Additional review leads exceeded the recheck capacity.".into());
             break;
         }
@@ -1734,8 +1773,15 @@ fn live_assessments<'a>(
             Err(_) => limits.push("Requested pinned source context could not be read.".into()),
         }
     }
-    recheck_input(data, &pending, &initial.items, evidence, reader.windows)?;
-    let repaired = match request(Pass::Recheck, CitationProtocol::Indexed, data, ask, limits) {
+    recheck_input(
+        data,
+        &pending,
+        &initial.items,
+        evidence,
+        reader.windows,
+        reader.protocol,
+    )?;
+    let repaired = match request(Pass::Recheck, reader.protocol, data, evidence, ask, limits) {
         Ok(reply) => reply,
         Err(error) => {
             limits.push(error.to_string());
@@ -1865,16 +1911,17 @@ fn verbatim_input(snapshot: &Snapshot, scan: &Scan) -> Value {
 }
 
 fn replay_assessments<'a>(
-    data: &Value,
+    data: &mut Value,
     anchors: &HashMap<u64, Citation<'a>>,
-    evidence: &Evidence<'a>,
-    ask: &mut impl FnMut(&str, &Value) -> Result<Value>,
+    evidence: &mut Evidence<'a>,
+    ask: &mut Ask<'a, '_>,
     limits: &mut Vec<String>,
 ) -> Result<Vec<Assessment<'a>>> {
     let Some(reply) = request(
         Pass::Challenge,
         CitationProtocol::Verbatim,
         data,
+        evidence,
         ask,
         limits,
     )?
@@ -1920,8 +1967,24 @@ fn review_with_protocol<F>(
 where
     F: FnMut(&str, &Value) -> Result<Value>,
 {
+    review_passes(
+        snapshot,
+        scan,
+        &mut |system, data, _| ask(system, data),
+        RecheckReader {
+            protocol,
+            read,
+            windows: &mut Vec::new(),
+        },
+        prior,
+        protocol,
+    )
+    .map(|(report, _)| report)
+}
+
+fn collection_report(snapshot: &Snapshot, scan: &Scan) -> Report {
     let mut seen_limits = HashSet::new();
-    let mut report = Report {
+    Report {
         limits: snapshot
             .limits
             .iter()
@@ -1930,11 +1993,22 @@ where
             .cloned()
             .collect(),
         ..Report::default()
-    };
+    }
+}
+
+fn review_passes<'a>(
+    snapshot: &'a Snapshot,
+    scan: &Scan,
+    ask: &mut Ask<'a, '_>,
+    reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
+    prior: &[Finding],
+    protocol: CitationProtocol,
+) -> Result<(Report, bool)> {
+    let mut report = collection_report(snapshot, scan);
+    let original_limits = report.limits.len();
     let source = source_index(snapshot, &mut report.limits);
-    let mut read_windows = Vec::new();
     let (mut data, references) = match protocol {
-        CitationProtocol::Indexed => {
+        CitationProtocol::Indexed | CitationProtocol::Interactive => {
             let (data, references) = indexed_input(snapshot, scan, &source, &mut report.limits);
             (data, Some(references))
         }
@@ -1944,12 +2018,13 @@ where
     let Some(proposed) = request(
         Pass::Proposal,
         protocol,
-        &data,
-        &mut ask,
+        &mut data,
+        &mut evidence,
+        ask,
         &mut report.limits,
     )?
     else {
-        return Ok(report);
+        return Ok((report, false));
     };
     proposed.report_incomplete(Pass::Proposal, &mut report.limits);
     let proposed = proposed.items;
@@ -1963,7 +2038,12 @@ where
             .limits
             .push("Some hypotheses contain invalid details or citations.".into());
     }
-    let candidates = retain_history(fresh, prior, proposed.len() + 1, &evidence);
+    let capacity = if matches!(protocol, CitationProtocol::Interactive) {
+        usize::MAX
+    } else {
+        MAX_HYPOTHESES
+    };
+    let candidates = retain_history(fresh, prior, proposed.len() + 1, capacity, &evidence);
     let mut anchors = HashMap::new();
     let mut hypotheses = Vec::new();
     for (anchor, item) in candidates {
@@ -1976,22 +2056,23 @@ where
 
     data["hypotheses"] = json!(hypotheses);
     let assessments = match protocol {
-        CitationProtocol::Indexed => live_assessments(
+        CitationProtocol::Indexed | CitationProtocol::Interactive => live_assessments(
             &mut data,
             &hypotheses,
             &anchors,
             &mut evidence,
-            &mut ask,
-            RecheckReader {
-                read,
-                windows: &mut read_windows,
-            },
+            ask,
+            reader,
             &mut report.limits,
         )?,
         CitationProtocol::Verbatim => {
-            replay_assessments(&data, &anchors, &evidence, &mut ask, &mut report.limits)?
+            replay_assessments(&mut data, &anchors, &mut evidence, ask, &mut report.limits)?
         }
     };
+    let unsettled = assessments
+        .iter()
+        .filter(|assessment| assessment.undecided.is_some())
+        .count();
     let mut findings = Vec::new();
     let mut priorities = Vec::new();
     for assessment in assessments {
@@ -2025,7 +2106,10 @@ where
             break;
         }
     }
-    Ok(report)
+    // A locally validated indeterminate outcome still means the model examined that source.
+    // Ordinary scanner/source exclusions were collected before issuing this model batch.
+    let complete = report.limits.len() == original_limits + unsettled;
+    Ok((report, complete))
 }
 
 #[cfg(test)]
@@ -3841,7 +3925,7 @@ mod tests {
         snapshot.intent = vec!["é😀\n\t\"\\".to_owned()];
         let data = json!({"snapshot":snapshot, "scan":scan});
         let base_size = json!(data.to_string()).to_string().len();
-        snapshot.intent[0].push_str(&"x".repeat(MAX_INPUT_BYTES - base_size));
+        snapshot.intent[0].push_str(&"x".repeat(REPLAY_INPUT_BYTES - base_size));
         let mut calls = 0;
         let report = review_replay(&snapshot, &scan, |_, _| {
             calls += 1;
@@ -3862,5 +3946,30 @@ mod tests {
             report.limits,
             ["Review input exceeds the size limit for proposing hypotheses."]
         );
+    }
+
+    #[test]
+    fn interactive_turn_limit_during_recheck_keeps_a_validated_sibling_finding() {
+        let mut replies = [
+            json!({"complete":true,"hypotheses":[
+                indexed_proposal("H2", "The caller configures one slot."),
+                indexed_proposal("H8", "A public feed might contain drafts.")
+            ]}),
+            json!({"complete":true,"assessments":[
+                indexed_capacity_finding(1, "H4", "B2", "B4"),
+                {"id":2,"outcome":"indeterminate","countercheck":"The visibility policy is unavailable."}
+            ]})
+        ].into_iter();
+        let result = review_snapshot_iterative(
+            indexed_snapshot(),
+            |_, _| replies.next().ok_or_else(|| ReviewTurnLimit.into()),
+            |_, _| Ok(Vec::new()),
+            |_, _| Ok(true),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(result.report.findings.len(), 1);
+        assert!(result.report.limits.contains(&ReviewTurnLimit.to_string()));
+        assert!(result.patch_files.unwrap().is_empty());
     }
 }

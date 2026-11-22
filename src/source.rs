@@ -1,11 +1,13 @@
-//! Collect a pinned, bounded snapshot without cloning or executing repository code.
+//! Collect pinned repository source without checking out or executing pull request code.
 
 mod callers;
 mod local_dependencies;
 mod pull_files;
 mod reads;
+mod repository;
 
 pub use reads::read_context;
+pub use repository::{ReviewRepository, collect_repository, collect_repository_at};
 
 #[derive(Debug)]
 pub struct HeadChanged(pub(crate) &'static str);

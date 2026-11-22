@@ -1,20 +1,38 @@
-use anyhow::{Context, Result, ensure};
+mod context;
+
+use anyhow::{Context, Result, bail, ensure};
+use context::GeminiContext;
 use reqwest::{
     Url,
-    blocking::Client,
+    blocking::{Client, Response},
     header::{AUTHORIZATION, HeaderValue},
     redirect::Policy,
 };
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
 use std::{io::Read, time::Duration};
 
-const MAX_BYTES: usize = 1_000_000;
+const MAX_REPLY_BYTES: usize = 1_000_000;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cached: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct ModelReply {
+    pub value: Value,
+    pub usage: TokenUsage,
+}
 
 pub struct Provider {
     client: Client,
     endpoint: Url,
     model: String,
     authorization: Option<HeaderValue>,
+    context: Option<GeminiContext>,
     label: String,
 }
 
@@ -52,8 +70,10 @@ impl Provider {
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300))
             .build()?;
+        let context = GeminiContext::for_endpoint(&endpoint, model, &key)?;
         Ok(Self {
             client,
+            context,
             endpoint,
             model: model.to_owned(),
             authorization,
@@ -70,47 +90,142 @@ impl Provider {
     }
 
     pub fn ask_with_timeout(&self, system: &str, data: &Value, timeout: Duration) -> Result<Value> {
+        Ok(self.ask_metered(system, data, timeout)?.value)
+    }
+
+    /// Check the same serialized user message that the chat adapter will receive.
+    /// Generic chat endpoints can report a context overflow on the request itself.
+    pub fn fits_context(&self, system: &str, data: &Value) -> Result<bool> {
+        let Some(context) = &self.context else {
+            return Ok(true);
+        };
+        match context.output_budget(&self.client, system, &user_content(data)?) {
+            Ok(_) => Ok(true),
+            Err(error) if error.is::<crate::ReviewContextExceeded>() => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn ask_metered(&self, system: &str, data: &Value, timeout: Duration) -> Result<ModelReply> {
         ensure!(
             !timeout.is_zero(),
             "The review exhausted its model time budget"
         );
-        let body = serde_json::to_vec(&json!({
+        let content = user_content(data)?;
+        let mut body = json!({
             "model": self.model, "messages": [
                 {"role":"system","content":system},
-                {"role":"user","content":serde_json::to_string(data)?}],
+                {"role":"user","content":content}],
             "response_format":{"type":"json_object"}
-        }))?;
-        ensure!(
-            body.len() <= MAX_BYTES,
-            "Provider request exceeds the size limit"
-        );
+        });
+        if let Some(context) = &self.context {
+            body["max_tokens"] = context
+                .output_budget(&self.client, system, &content)?
+                .into();
+        }
         let mut request = self
             .client
             .post(self.endpoint.clone())
             .timeout(timeout)
-            .header("Content-Type", "application/json")
-            .body(body);
+            .json(&body);
         if let Some(authorization) = &self.authorization {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
         let response = request.send().context("Provider is unavailable")?;
-        ensure!(
-            response.status().is_success(),
-            "The provider rejected the request"
-        );
+        let response = check_status(response)?;
         let mut bytes = Vec::new();
         response
-            .take(MAX_BYTES as u64 + 1)
+            .take(MAX_REPLY_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
         ensure!(
-            bytes.len() <= MAX_BYTES,
+            bytes.len() <= MAX_REPLY_BYTES,
             "Provider response exceeds the size limit"
         );
         decode_reply(&bytes)
     }
 }
 
-fn decode_reply(bytes: &[u8]) -> Result<Value> {
+// Implicit provider caching matches prompt prefixes. Keep the pinned diff ahead
+// of appended tool results and the status that is replaced on each read.
+fn user_content(data: &Value) -> Result<String> {
+    if data["snapshot"]["files"].is_array() && data["snapshot"]["head_context"].is_array() {
+        let fields = ReviewFields {
+            object: data.as_object().context("Invalid review input")?,
+            trailing: &["snapshot", "last_read"],
+        };
+        Ok(serde_json::to_string(&fields)?)
+    } else {
+        Ok(serde_json::to_string(data)?)
+    }
+}
+
+struct ReviewFields<'a> {
+    object: &'a serde_json::Map<String, Value>,
+    trailing: &'static [&'static str],
+}
+
+impl Serialize for ReviewFields<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.object.len()))?;
+        for (key, value) in self.object {
+            if !self.trailing.contains(&key.as_str()) {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        for &key in self.trailing {
+            let Some(value) = self.object.get(key) else {
+                continue;
+            };
+            if key == "snapshot"
+                && let Some(object) = value.as_object()
+            {
+                map.serialize_entry(
+                    key,
+                    &ReviewFields {
+                        object,
+                        trailing: &["head_context", "complete_head_paths"],
+                    },
+                )?;
+            } else {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+fn check_status(response: Response) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        return response.error_for_status().map_err(Into::into);
+    }
+    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        return Err(crate::ReviewContextExceeded.into());
+    }
+    if matches!(status.as_u16(), 400 | 422) {
+        // Provider errors may quote private input. Classify them without logging the body.
+        let error: Value = serde_json::from_reader(response.take(32_768)).unwrap_or_default();
+        let error = &error["error"];
+        let message = error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if error["code"] == "context_length_exceeded"
+            || message.contains("maximum context length")
+            || message.contains("context window")
+                && (message.contains("exceed") || message.contains("too long"))
+            || message.contains("input token count") && message.contains("exceed")
+        {
+            return Err(crate::ReviewContextExceeded.into());
+        }
+    }
+    bail!("The provider rejected the request (HTTP {status})")
+}
+
+fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
     let reply: Value = serde_json::from_slice(bytes)?;
     let first = &reply["choices"][0];
     ensure!(
@@ -123,7 +238,15 @@ fn decode_reply(bytes: &[u8]) -> Result<Value> {
             .context("Provider response is missing text")?,
     )?;
     ensure!(value.is_object(), "Expected a JSON object");
-    Ok(value)
+    let usage = &reply["usage"];
+    Ok(ModelReply {
+        value,
+        usage: TokenUsage {
+            input: usage["prompt_tokens"].as_u64(),
+            output: usage["completion_tokens"].as_u64(),
+            cached: usage["prompt_tokens_details"]["cached_tokens"].as_u64(),
+        },
+    })
 }
 
 #[cfg(test)]
@@ -206,7 +329,7 @@ mod tests {
             let provider = Provider::new(&endpoint, "  test  ", "fixture-token".into()).unwrap();
             assert_eq!(
                 provider
-                    .ask("instruction", &json!({"fixture": true}))
+                    .ask("instruction", &json!({"diff": "x".repeat(1_200_000)}))
                     .unwrap(),
                 json!({})
             );
@@ -278,10 +401,11 @@ mod tests {
         assert!(child.wait().unwrap().success());
         assert_eq!(request, "POST /chat HTTP/1.1\r\n");
         assert!(authorized);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).unwrap()["model"],
-            "test"
-        );
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["model"], "test");
+        let user: Value =
+            serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(user["diff"].as_str().unwrap().len(), 1_200_000);
     }
     #[test]
     fn rejects_incomplete_or_malformed_model_results() {
@@ -296,13 +420,68 @@ mod tests {
     }
 
     #[test]
-    fn caps_input_before_making_a_request() {
-        let p = Provider::new("http://127.0.0.1:1/chat", "test", String::new()).unwrap();
-        assert_eq!(
-            p.ask("", &json!("x".repeat(MAX_BYTES)))
-                .unwrap_err()
-                .to_string(),
-            "Provider request exceeds the size limit"
+    fn generic_provider_offers_the_whole_request_to_its_model() {
+        let provider = Provider::new("http://127.0.0.1:1/chat", "test", String::new()).unwrap();
+        assert!(
+            provider
+                .fits_context("review", &json!("x".repeat(2_000_000)))
+                .unwrap()
         );
+    }
+
+    #[test]
+    fn reports_token_usage_without_inventing_provider_counts() {
+        let mut response = json!({"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]});
+        assert_eq!(
+            decode_reply(&serde_json::to_vec(&response).unwrap())
+                .unwrap()
+                .usage,
+            TokenUsage::default()
+        );
+        response["usage"] = json!({"prompt_tokens":512,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":256}});
+        assert_eq!(
+            decode_reply(&serde_json::to_vec(&response).unwrap())
+                .unwrap()
+                .usage,
+            TokenUsage {
+                input: Some(512),
+                output: Some(20),
+                cached: Some(256),
+            }
+        );
+    }
+
+    #[test]
+    fn successive_tool_turns_keep_the_full_diff_in_the_common_prefix() {
+        let patch = "function sample() {}\n".repeat(10_000);
+        let mut data = json!({
+            "snapshot":{"files":[{"patch":patch}], "complete_head_paths":["old"], "head_context":[{"line":1}],"head":"abc"},
+            "scan":{"ran":true}, "last_read":{"term":"a"},
+        });
+        let start = user_content(&data).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&start).unwrap(), data);
+        data["snapshot"]["head_context"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"line":2}));
+        data["last_read"]["term"] = json!("other");
+        data["snapshot"]["complete_head_paths"] = json!(["new", "old"]);
+        let next = user_content(&data).unwrap();
+        let shared = start
+            .bytes()
+            .zip(next.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(shared > patch.len());
+        assert_eq!(serde_json::from_str::<Value>(&next).unwrap(), data);
+        for other in [
+            json!({"last_read":"first","snapshot":{"unknown":true}}),
+            json!(42),
+        ] {
+            assert_eq!(
+                user_content(&other).unwrap(),
+                serde_json::to_string(&other).unwrap()
+            );
+        }
     }
 }
