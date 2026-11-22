@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use context::GeminiContext;
 use reqwest::{
     Url,
-    blocking::{Client, Response},
+    blocking::{Client, RequestBuilder, Response},
     header::{AUTHORIZATION, HeaderValue},
     redirect::Policy,
 };
@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const MAX_REPLY_BYTES: usize = 1_000_000;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TokenUsage {
@@ -73,7 +74,7 @@ impl Provider {
         let client = Client::builder()
             .redirect(Policy::none())
             .no_proxy()
-            .connect_timeout(Duration::from_secs(15))
+            .connect_timeout(CONNECT_TIMEOUT)
             .timeout(Duration::from_secs(300))
             .build()?;
         let context = GeminiContext::for_endpoint(&endpoint, model, &key)?;
@@ -153,7 +154,10 @@ impl Provider {
         if let Some(authorization) = &self.authorization {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
-        let response = request.send().context("Provider is unavailable")?;
+        // A short caller-supplied deadline can expire during connection setup.
+        let generation_deadline =
+            (self.context.is_some() && timeout > CONNECT_TIMEOUT).then_some(timeout);
+        let response = send_generation(request, generation_deadline)?;
         let response = check_status(response)?;
         // A gateway may return an ordinary JSON error envelope even for a streaming request.
         let is_json = response
@@ -174,6 +178,31 @@ impl Provider {
             "Provider response exceeds the size limit"
         );
         decode_reply(&bytes, answer_shape)
+    }
+}
+
+fn send_generation(
+    request: RequestBuilder,
+    generation_deadline: Option<Duration>,
+) -> Result<Response> {
+    let started = Instant::now();
+    match request.send() {
+        Err(error)
+            if error.is_timeout()
+                && !error.is_connect()
+                && generation_deadline.is_some_and(|deadline| started.elapsed() >= deadline) =>
+        {
+            // No response headers arrived. Retrying the identical generation
+            // at the same deadline may use an entire additional model turn.
+            Err(
+                anyhow::Error::new(crate::ReviewBatchInterrupted).context(InvalidReply {
+                    reason: "Provider generation timed out before response headers.",
+                    usage: TokenUsage::default(),
+                    diagnostics: None,
+                }),
+            )
+        }
+        result => result.context("Provider is unavailable"),
     }
 }
 
@@ -990,6 +1019,50 @@ mod tests {
                 .downcast_ref::<reqwest::Error>()
                 .is_some_and(reqwest::Error::is_timeout)
         );
+    }
+
+    #[test]
+    fn a_generation_deadline_before_headers_is_distinct_from_an_interrupted_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/chat", listener.local_addr().unwrap());
+        let client = Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(30))
+            .build()
+            .unwrap();
+        let timeout = Duration::from_millis(180);
+        // The socket completes the handshake but sends no HTTP headers.
+        let error = send_generation(client.post(&url).timeout(timeout), Some(timeout)).unwrap_err();
+        assert!(error.is::<crate::ReviewBatchInterrupted>());
+        assert_eq!(
+            error.downcast_ref::<InvalidReply>().unwrap().reason,
+            "Provider generation timed out before response headers."
+        );
+        drop(listener);
+        let error = send_generation(client.post(url).timeout(timeout), Some(timeout)).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_connect)
+        );
+        assert!(!error.is::<crate::ReviewBatchInterrupted>());
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/chat", listener.local_addr().unwrap());
+        let worker = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            // A delta arrives normally; the final usage and [DONE] never arrive.
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"{\"}}]}\n\n").unwrap();
+            thread::sleep(timeout * 2);
+        });
+        let response = send_generation(client.post(url).timeout(timeout), Some(timeout)).unwrap();
+        let error = super::decode_stream(response, None).unwrap_err();
+        assert!(error.is::<crate::ReviewBatchInterrupted>());
+        assert_eq!(
+            error.downcast_ref::<InvalidReply>().unwrap().reason,
+            "Provider stream ended before completing its reply."
+        );
+        worker.join().unwrap();
     }
 
     #[test]
