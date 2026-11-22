@@ -5,7 +5,7 @@ use reqwest::{
     header::HeaderValue,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::{Mutex, OnceLock};
 
@@ -118,17 +118,23 @@ impl GeminiContext {
         client: &Client,
         system: &str,
         content: &str,
+        format: Option<&Value>,
     ) -> Result<u64> {
         let limits = self.limits(client)?;
         let max_output = limits.output_token_limit.min(limits.input_token_limit - 1);
         let min_output = MIN_OUTPUT_TOKENS
             .min(max_output)
             .min(limits.input_token_limit / 2);
+        // countTokens measures the messages. Reserve a conservative byte bound
+        // for the separate response schema in both budgeting paths.
+        let schema_bytes =
+            format.map_or(Ok(0), |f| serde_json::to_vec(f).map(|v| v.len() as u64))?;
+        let framing = CHAT_FRAMING_TOKENS.saturating_add(schema_bytes);
         let text_bytes = system.len().saturating_add(content.len()) as u64;
         // UTF-8 bytes bound the text tokens. Use the tokenizer only when that
         // conservative bound would reduce the available context or output.
         if text_bytes
-            .saturating_add(CHAT_FRAMING_TOKENS)
+            .saturating_add(framing)
             .saturating_add(max_output)
             <= limits.input_token_limit
         {
@@ -137,7 +143,7 @@ impl GeminiContext {
         let input_tokens = self.count(client, system, content)?;
         let available = limits
             .input_token_limit
-            .saturating_sub(input_tokens.saturating_add(CHAT_FRAMING_TOKENS));
+            .saturating_sub(input_tokens.saturating_add(framing));
         if available < min_output {
             return Err(crate::ReviewContextExceeded.into());
         }
@@ -233,9 +239,23 @@ mod tests {
             (1_047_000, None),
         ] {
             *context.last_count.lock().unwrap() = Some((digest, tokens));
-            let result = context.output_budget(&client, system, &content);
+            let result = context.output_budget(&client, system, &content, None);
             if let Some(expected) = expected {
                 assert_eq!(result.unwrap(), expected);
+                if tokens == 1_032_000 {
+                    let format = super::super::AnswerShape::Assessments {
+                        leads: true,
+                        reads: false,
+                    }
+                    .format(&json!({"hypotheses":[{"id":3},{"id":9}]}));
+                    let size = serde_json::to_vec(&format).unwrap().len() as u64;
+                    assert_eq!(
+                        context
+                            .output_budget(&client, system, &content, Some(&format))
+                            .unwrap(),
+                        expected - size
+                    );
+                }
             } else {
                 assert!(result.unwrap_err().is::<crate::ReviewContextExceeded>());
             }

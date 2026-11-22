@@ -27,7 +27,7 @@ const MAX_TEXT: usize = 400;
 const MAX_QUOTE: usize = 1_000;
 const REPLAY_INPUT_BYTES: usize = 900_000;
 const MAX_PRIOR_ASSESSMENT_BYTES: usize = 4_096;
-const MAX_CONTEXT_READS: usize = 3;
+pub(crate) const MAX_CONTEXT_READS: usize = 3;
 const MAX_READ_TERM_BYTES: usize = 128;
 const MAX_RECHECK_CONTEXT_BYTES: usize = 96_000;
 const RECHECK_CONTEXT_RADIUS: usize = 6;
@@ -678,6 +678,7 @@ fn indexed_input<'a>(
 struct Evidence<'a> {
     source: Source<'a>,
     references: Option<ReferenceIndex<'a>>,
+    interactive: bool,
 }
 
 #[derive(Default)]
@@ -687,6 +688,17 @@ struct Counterevidence<'a> {
 }
 
 impl<'a> Evidence<'a> {
+    fn requested_reads(&self, value: &Value) -> Option<Vec<ContextRead>> {
+        if !self.interactive {
+            return context_reads(value);
+        }
+        value
+            .as_array()
+            .filter(|items| items.len() <= MAX_CONTEXT_READS)?
+            .iter()
+            .map(|item| interactive::read_request(&json!({"read":item})).ok()?)
+            .collect()
+    }
     fn citation(&self, value: &Value, revision: Revision) -> Option<Citation<'a>> {
         match &self.references {
             Some(references) => references.resolve(value, revision),
@@ -1276,6 +1288,16 @@ fn assessment_fields(
     })
 }
 
+fn placeholder_countercheck(value: &str) -> bool {
+    matches!(
+        value
+            .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+            .to_ascii_lowercase()
+            .as_str(),
+        "" | "wait" | "waiting" | "pending" | "todo" | "tbd" | "n/a"
+    )
+}
+
 fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Option<Assessment<'a>> {
     let object = item.as_object()?;
     let outcome = text(&item["outcome"])?;
@@ -1284,6 +1306,9 @@ fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Opti
         return None;
     }
     let countercheck = text(&item["countercheck"])?;
+    if source.interactive && placeholder_countercheck(countercheck) {
+        return None;
+    }
     if matches!(outcome, "indeterminate" | "manual_test") {
         let priority = if object.contains_key("action") {
             let basis = source.citation(&item["basis"], Revision::Head)?;
@@ -1296,7 +1321,7 @@ fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Opti
             None
         };
         let reads = match object.get("reads") {
-            Some(value) => context_reads(value)?,
+            Some(value) => source.requested_reads(value)?,
             None => Vec::new(),
         };
         return Some(Assessment {
@@ -1341,6 +1366,9 @@ fn assess<'a>(item: &Value, anchor: Citation<'a>, source: &Evidence<'a>) -> Opti
 }
 
 fn validation_feedback(item: &Value, anchor: Citation<'_>, evidence: &Evidence<'_>) -> String {
+    if evidence.interactive && text(&item["countercheck"]).is_some_and(placeholder_countercheck) {
+        return "Replace the placeholder countercheck with the condition checked, or the concrete missing evidence.".into();
+    }
     let Some(object) = item.as_object() else {
         return "The assessment must be a JSON object.".into();
     };
@@ -1383,7 +1411,7 @@ fn validation_feedback(item: &Value, anchor: Citation<'_>, evidence: &Evidence<'
     }
     if object
         .get("reads")
-        .is_some_and(|value| context_reads(value).is_none())
+        .is_some_and(|value| evidence.requested_reads(value).is_none())
     {
         return format!(
             "reads must contain at most {MAX_CONTEXT_READS} objects with a safe path or exact file stem and a literal symbol or property term."
@@ -1476,20 +1504,23 @@ struct Pending<'a, 'input> {
     provisional_outcome: Option<String>,
 }
 
-struct RecheckReader<'a, F> {
+struct RecheckReader<F> {
     protocol: CitationProtocol,
     read: F,
-    windows: &'a mut Vec<SourceWindow>,
 }
 
-fn pending_reads(pending: &[Pending<'_, '_>]) -> Vec<ContextRead> {
+fn pending_reads(pending: &[Pending<'_, '_>], interactive: bool) -> Vec<ContextRead> {
     let mut seen = HashSet::new();
     pending
         .iter()
         .filter_map(|entry| entry.undecided.as_ref())
         .flat_map(|entry| &entry.reads)
         .filter(|read| seen.insert((read.path.as_str(), read.term.as_str())))
-        .take(MAX_CONTEXT_READS)
+        .take(if interactive {
+            usize::MAX
+        } else {
+            MAX_CONTEXT_READS
+        })
         .cloned()
         .collect()
 }
@@ -1523,12 +1554,12 @@ fn recheck_input<'a>(
     data["recheck"] = json!(details);
 
     // Interactive reviews explicitly open additional files through the repository tools.
-    let interactive = matches!(protocol, CitationProtocol::Interactive);
-    let mut remaining = if interactive {
-        usize::MAX
-    } else {
-        MAX_RECHECK_CONTEXT_BYTES.min(REPLAY_INPUT_BYTES.saturating_sub(request_bytes(data)?))
-    };
+    if matches!(protocol, CitationProtocol::Interactive) {
+        interactive::extend_evidence(data, evidence, read_windows);
+        return Ok(());
+    }
+    let mut remaining =
+        MAX_RECHECK_CONTEXT_BYTES.min(REPLAY_INPUT_BYTES.saturating_sub(request_bytes(data)?));
     let references = evidence
         .references
         .as_mut()
@@ -1555,11 +1586,6 @@ fn recheck_input<'a>(
         )?;
     }
 
-    if interactive {
-        data["snapshot"]["complete_head_paths"] =
-            json!(references.complete_head_paths(&evidence.source));
-        return Ok(());
-    }
     let mut sources: Vec<_> = pending
         .iter()
         .filter_map(|entry| {
@@ -1662,7 +1688,7 @@ fn live_assessments<'a>(
     anchors: &HashMap<u64, Citation<'a>>,
     evidence: &mut Evidence<'a>,
     ask: &mut Ask<'a, '_>,
-    mut reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
+    mut reader: RecheckReader<impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
     limits: &mut Vec<String>,
 ) -> Result<(Vec<Assessment<'a>>, BatchCoverage)> {
     let initial = request(
@@ -1699,6 +1725,8 @@ fn live_assessments<'a>(
 
     let mut accepted = Vec::new();
     let mut pending = Vec::new();
+    let mut settled = Vec::new();
+    let interactive = matches!(reader.protocol, CitationProtocol::Interactive);
     // An unscoped incomplete reply can only be superseded by rechecking the entire set.
     let recheck_all = !initial.complete;
     for hypothesis in hypotheses {
@@ -1723,6 +1751,9 @@ fn live_assessments<'a>(
                         .position(|item| item["id"].as_u64() == Some(id))
                         .expect("accepted assessment order");
                     accepted.push((order, item));
+                    if interactive {
+                        settled.push(json!({"id":id,"outcome":raw["outcome"]}));
+                    }
                     continue;
                 }
                 (
@@ -1800,29 +1831,188 @@ fn live_assessments<'a>(
         ));
     }
 
-    let reads = pending_reads(&pending);
-    if !reads.is_empty() {
-        match (reader.read)(&reads) {
-            Ok(windows) => *reader.windows = windows,
-            Err(_) => limits.push("Requested pinned source context could not be read.".into()),
+    let mut seen = HashSet::new();
+    let mut previous_items = initial.items.clone();
+    let mut previous_complete = initial.complete;
+    let mut best_repair = None;
+    let mut repaired_ids = HashSet::new();
+    let repaired = loop {
+        let requests = pending_reads(&pending, interactive);
+        let requested = !requests.is_empty();
+        let fresh: Vec<_> = requests
+            .into_iter()
+            .filter(|r| seen.insert((r.path.clone(), r.term.clone())))
+            .collect();
+        let windows = if fresh.is_empty() {
+            &[][..]
+        } else {
+            match (reader.read)(&fresh) {
+                Ok(windows) => windows,
+                Err(_) => {
+                    limits.push("Requested pinned source context could not be read.".into());
+                    &[]
+                }
+            }
+        };
+        let before = data["snapshot"]["head_context"]
+            .as_array()
+            .map_or(0, Vec::len);
+        if !settled.is_empty() {
+            data["settled_assessments"] = json!(&settled);
         }
-    }
-    recheck_input(
-        data,
-        &pending,
-        &initial.items,
-        evidence,
-        reader.windows,
-        reader.protocol,
-    )?;
-    let repaired = match request(Pass::Recheck, reader.protocol, data, evidence, ask, limits) {
-        Ok(reply) => reply,
-        Err(error) => {
-            limits.push(error.to_string());
-            None
+        recheck_input(
+            data,
+            &pending,
+            &previous_items,
+            evidence,
+            windows,
+            reader.protocol,
+        )?;
+        let gained = data["snapshot"]["head_context"]
+            .as_array()
+            .is_some_and(|items| items.len() > before);
+        if interactive
+            && requested
+            && !gained
+            && previous_complete
+            && pending.iter().all(|p| p.undecided.is_some())
+        {
+            previous_items.retain(|item| pending.iter().any(|p| item["id"].as_u64() == Some(p.id)));
+            break Some(Reply {
+                complete: true,
+                overflow: false,
+                items: previous_items,
+                leads: Vec::new(),
+                valid_leads: true,
+            });
         }
+
+        let mut reply = match request(Pass::Recheck, reader.protocol, data, evidence, ask, limits) {
+            Ok(Some(reply)) => reply,
+            Ok(None) => break None,
+            Err(error) => {
+                limits.push(error.to_string());
+                break None;
+            }
+        };
+        if !interactive || reply.overflow {
+            break Some(reply);
+        }
+
+        let unknown_ids =
+            unexpected_assessments(&reply.items, |id| pending.iter().any(|p| p.id == id));
+        let checked: Vec<_> = pending
+            .iter()
+            .map(|p| checked_assessment(&reply.items, p.id, p.anchor, evidence))
+            .collect();
+        let defects = checked.iter().filter(|r| r.is_err()).count()
+            + usize::from(!reply.complete)
+            + usize::from(unknown_ids);
+        if defects > 0 {
+            let mut improved = gained;
+            for (entry, result) in pending.iter().zip(&checked) {
+                if result.is_ok() {
+                    improved |= repaired_ids.insert(entry.id);
+                }
+            }
+            let new_queries = checked
+                .iter()
+                .filter_map(|r| r.as_ref().ok())
+                .flat_map(|(_, item)| &item.reads)
+                .any(|r| !seen.contains(&(r.path.clone(), r.term.clone())));
+            // One correction without new source or fewer defects is sufficient. Never
+            // promote a provisional verdict from a truncated or malformed envelope.
+            if !improved
+                && best_repair.is_some_and(|best| defects >= best)
+                && !(new_queries && !requested)
+            {
+                // Keep the scope of locally attributable omissions, but a decisive
+                // result still needs an independently complete, valid envelope.
+                reply.items.retain(|item| {
+                    item["outcome"] == "indeterminate"
+                        || !pending.iter().any(|p| item["id"].as_u64() == Some(p.id))
+                });
+                break Some(reply);
+            }
+            best_repair = Some(if improved {
+                defects
+            } else {
+                defects.min(best_repair.unwrap_or(defects))
+            });
+            let mut latest = Vec::new();
+            for (entry, result) in pending.iter_mut().zip(checked) {
+                match result {
+                    Ok((raw, mut item)) => {
+                        latest.push(raw.clone());
+                        if let Some(reason) = &item.undecided {
+                            entry.feedback = reason.clone();
+                            if item.priority.is_none() {
+                                item.priority =
+                                    entry.undecided.take().and_then(|prior| prior.priority);
+                            }
+                            entry.undecided = Some(item);
+                        } else {
+                            entry.provisional_outcome.get_or_insert_with(|| {
+                                raw["outcome"]
+                                    .as_str()
+                                    .expect("validated outcome")
+                                    .to_owned()
+                            });
+                            entry.feedback = "The response did not cover every requested ID. Independently verify this provisional outcome and return a complete assessment set.".into();
+                        }
+                    }
+                    Err(feedback) => {
+                        entry.feedback = feedback;
+                        latest.extend(
+                            previous_items
+                                .iter()
+                                .filter(|raw| raw["id"].as_u64() == Some(entry.id))
+                                .cloned(),
+                        );
+                    }
+                }
+            }
+            previous_items = latest;
+            previous_complete = false;
+            continue;
+        }
+        best_repair = None;
+        let checked: Vec<_> = checked
+            .into_iter()
+            .map(|r| r.expect("validated assessment"))
+            .collect();
+        if !checked.iter().any(|(_, item)| !item.reads.is_empty())
+            || pending.iter().zip(&checked).any(|(entry, (raw, _))| {
+                entry
+                    .provisional_outcome
+                    .as_ref()
+                    .is_some_and(|prior| text(&raw["outcome"]) != Some(prior.as_str()))
+            })
+        {
+            break Some(reply);
+        }
+        previous_complete = true;
+        pending = pending
+            .into_iter()
+            .zip(checked)
+            .filter_map(|(mut entry, (raw, mut item))| {
+                if let Some(reason) = &item.undecided {
+                    entry.feedback = reason.clone();
+                    if item.priority.is_none() {
+                        item.priority = entry.undecided.take().and_then(|prior| prior.priority);
+                    }
+                    entry.undecided = Some(item);
+                    Some(entry)
+                } else {
+                    accepted.push((accepted.len(), item));
+                    settled.push(json!({"id":entry.id,"outcome":raw["outcome"]}));
+                    None
+                }
+            })
+            .collect();
+        previous_items = reply.items;
     };
-    let mut recovered = false;
+    let mut valid_recheck = false;
     if let Some(reply) = &repaired {
         reply.report_incomplete(Pass::Recheck, limits);
         let unexpected_retry = unexpected_assessments(&reply.items, |id| {
@@ -1832,8 +2022,8 @@ fn live_assessments<'a>(
             limits
                 .push("The recheck returned assessments without a requested hypothesis ID.".into());
         }
-        recovered = reply.complete && !reply.overflow && !unexpected_retry;
-        coverage.stages_finished &= recovered;
+        valid_recheck = reply.complete && !reply.overflow && !unexpected_retry;
+        coverage.stages_finished &= valid_recheck;
     }
     let mut recovered_items = Vec::new();
     for entry in pending {
@@ -1852,7 +2042,8 @@ fn live_assessments<'a>(
         match outcome {
             Ok((raw, mut item)) => {
                 if let Some(reason) = &item.undecided {
-                    recovered = false;
+                    // An explicit unknown is a valid disposition with a file-specific limit.
+                    coverage.unresolved(Some(entry.anchor));
                     recorded_undecided(limits, entry.anchor, reason);
                     if item.priority.is_none() {
                         item.priority = entry.undecided.and_then(|prior| prior.priority);
@@ -1861,7 +2052,7 @@ fn live_assessments<'a>(
                 if let Some(previous) = entry.provisional_outcome
                     && text(&raw["outcome"]) != Some(previous.as_str())
                 {
-                    recovered = false;
+                    valid_recheck = false;
                     coverage.unresolved(Some(entry.anchor));
                     limits.push(format!(
                         "The recheck did not confirm the provisional outcome at {}:{}.",
@@ -1874,7 +2065,7 @@ fn live_assessments<'a>(
                 }
             }
             Err(feedback) => {
-                recovered = false;
+                valid_recheck = false;
                 coverage.unresolved(Some(entry.anchor));
                 if let Some(item) = entry.undecided {
                     if let Some(reason) = &item.undecided {
@@ -1889,14 +2080,14 @@ fn live_assessments<'a>(
             }
         }
     }
-    if !recovered || unexpected {
+    if !valid_recheck || unexpected {
         if let Some(error) = initial_error {
             limits.push(error);
         } else {
             initial.report_incomplete(Pass::Challenge, limits);
         }
     }
-    coverage.stages_finished &= recovered
+    coverage.stages_finished &= valid_recheck
         || (initial.complete
             && !initial.overflow
             && (!accepted.is_empty() || !recovered_items.is_empty()));
@@ -2013,21 +2204,24 @@ fn review_with_protocol<F>(
     snapshot: &Snapshot,
     scan: &Scan,
     mut ask: F,
-    read: impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>,
+    mut read: impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>,
     prior: &[Finding],
     protocol: CitationProtocol,
 ) -> Result<Report>
 where
     F: FnMut(&str, &Value) -> Result<Value>,
 {
+    let windows = std::cell::OnceCell::new();
     review_passes(
         snapshot,
         scan,
         &mut |system, data, _| ask(system, data),
         RecheckReader {
             protocol,
-            read,
-            windows: &mut Vec::new(),
+            read: |requests: &[ContextRead]| {
+                let result = read(requests)?;
+                Ok(windows.get_or_init(|| result).as_slice())
+            },
         },
         prior,
         protocol,
@@ -2118,7 +2312,7 @@ fn review_passes<'a>(
     snapshot: &'a Snapshot,
     scan: &Scan,
     ask: &mut Ask<'a, '_>,
-    reader: RecheckReader<'a, impl FnMut(&[ContextRead]) -> Result<Vec<SourceWindow>>>,
+    reader: RecheckReader<impl FnMut(&[ContextRead]) -> Result<&'a [SourceWindow]>>,
     prior: &[Finding],
     protocol: CitationProtocol,
 ) -> Result<BatchResult> {
@@ -2131,7 +2325,20 @@ fn review_passes<'a>(
         }
         CitationProtocol::Verbatim => (verbatim_input(snapshot, scan), None),
     };
-    let mut evidence = Evidence { source, references };
+    let mut evidence = Evidence {
+        source,
+        references,
+        interactive: matches!(protocol, CitationProtocol::Interactive),
+    };
+    if matches!(protocol, CitationProtocol::Interactive) && !prior.is_empty() {
+        let leads: Vec<_> = retain_history(Vec::new(), prior, 1, usize::MAX, &evidence)
+            .into_iter()
+            .map(|(_, item)| item)
+            .collect();
+        if !leads.is_empty() {
+            data["prior_leads"] = json!(leads);
+        }
+    }
     let Some(proposed) = request(
         Pass::Proposal,
         protocol,
@@ -2147,6 +2354,9 @@ fn review_passes<'a>(
             items: RankedItems::default(),
         });
     };
+    data.as_object_mut()
+        .expect("review request")
+        .remove("prior_leads");
     proposed.report_incomplete(Pass::Proposal, &mut report.limits);
     let mut discovery = BatchCoverage {
         stages_finished: proposed.complete && !proposed.overflow,
@@ -4099,7 +4309,11 @@ mod tests {
         .into_iter();
         let result = review_snapshot_iterative(
             indexed_snapshot(),
-            |_, _| Ok(replies.next().unwrap()),
+            |_, _| {
+                Ok(replies
+                    .next()
+                    .unwrap_or_else(|| json!({"complete":true,"assessments":[]})))
+            },
             |_, _| Ok(Vec::new()),
             |_, _| Ok(true),
             &[],
@@ -4209,7 +4423,11 @@ mod tests {
             ].into_iter();
             let result = review_snapshot_iterative(
                 indexed_snapshot(),
-                |_, _| Ok(replies.next().unwrap()),
+                |_, _| {
+                    Ok(replies
+                        .next()
+                        .unwrap_or_else(|| json!({"complete":true,"assessments":[]})))
+                },
                 |_, _| Ok(vec![]),
                 |_, _| Ok(true),
                 &[],
@@ -4285,5 +4503,268 @@ mod tests {
         assert!(result.report.findings[0].evidence.contains("caller.go:21"));
         assert!(result.unfinished_patches().unwrap().is_empty());
         assert!(result.report.limits.is_empty());
+    }
+
+    #[test]
+    fn interrupted_challenge_synthesizes_a_verified_finding_from_its_prior_read() {
+        let mut calls = 0;
+        let result = review_snapshot_iterative(indexed_snapshot(), |_, data| {
+            calls += 1;
+            match calls {
+                1 => {
+                    assert_eq!(data["answer_shape"], "hypotheses");
+                    Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))
+                }
+                2 => {
+                    assert_eq!(data["answer_shape"],"assessments");
+                    assert_eq!(data["allow_assessment_reads"],true);
+                    Ok(json!({"read":{"path":"caller.go","term":"#L21"}}))
+                }
+                3 => Err(ReviewBatchInterrupted.into()),
+                4 => {
+                    assert_eq!(data["answer_shape"], "assessments");
+                    let caller = data["snapshot"]["head_context"].as_array().unwrap().iter().find(|w| w["path"]=="caller.go").unwrap();
+                    let mut item = indexed_capacity_finding(1,"H4","B2","B4");
+                    item["counterevidence"]["references"] = json!(["H2",caller["rows"][0][1]]);
+                    Ok(json!({"complete":true,"assessments":[item],"leads":[]}))
+                }
+                _ => panic!("The completed stage must not be partitioned and replayed"),
+            }
+        }, |_,_| Ok(vec![SourceWindow{path:"caller.go".into(),start:21,text:"return new_cache(1)".into()}]), |_,_|Ok(true),&[]).unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(result.report.findings.len(), 1);
+        assert!(result.report.findings[0].evidence.contains("caller.go:21"));
+        assert!(result.unfinished_patches().unwrap().is_empty());
+        assert!(result.report.limits.is_empty());
+    }
+
+    #[test]
+    fn incomplete_synthesis_reopens_investigation_and_still_obeys_the_turn_limit() {
+        let mut calls = 0;
+        let result = review_snapshot_iterative(indexed_snapshot(), |_, data| {
+            calls += 1;
+            match calls {
+                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]})),
+                2 => Ok(json!({"read":{"path":"caller.go","term":"#L21"}})),
+                3 => Err(ReviewBatchInterrupted.into()),
+                4 => {
+                    assert_eq!(data["answer_shape"],"assessments");
+                    Ok(json!({"complete":false,"assessments":[indexed_capacity_finding(1,"H4","B2","B4")],
+                        "leads":[indexed_proposal("H8","Check the publication path.")]}))
+                }
+                5 => {
+                    assert_eq!(data["recheck"].as_array().unwrap().len(),2);
+                    assert!(data.get("last_read").is_none());
+                    assert_eq!(data["allow_assessment_reads"],true);
+                    Err(ReviewTurnLimit.into())
+                }
+                _ => panic!("No further dispatch after the limit"),
+            }
+        }, |_,_| Ok(vec![SourceWindow{path:"caller.go".into(),start:21,text:"return new_cache(1)".into()}]), |_,_|Ok(true),&[]).unwrap();
+        assert_eq!(calls, 5);
+        assert!(result.report.findings.is_empty());
+        assert!(result.reviewed_files.unwrap().is_empty());
+        assert!(result.report.limits.contains(&ReviewTurnLimit.to_string()));
+    }
+    #[test]
+    fn targeted_assessments_keep_verified_siblings_and_only_revisit_the_unresolved_id() {
+        let mut calls = 0;
+        let mut reads = Vec::new();
+        let undecided = |read: Value| json!({"id":2,"outcome":"indeterminate","countercheck":"Check whether the publisher suppresses the draft.","reads":[read]});
+        let result = review_snapshot_iterative(indexed_snapshot(), |_,data| {
+            calls+=1;
+            if calls>1 { assert_eq!(data["answer_shape"], "assessments"); assert_eq!(data["allow_assessment_reads"],true); }
+            match calls {
+                1 => Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot."),indexed_proposal("H8","The publisher exposes a draft.")]})),
+                2 => {
+                    let mut question = undecided(json!({"path":"*","term":"publish draft"}));
+                    question["reads"].as_array_mut().unwrap().push(json!({"path":"*:13","term":"publish draft"}));
+                    Ok(json!({"complete":true,"assessments":[indexed_capacity_finding(1,"H4","B2","B4"),question]}))
+                },
+                3 | 4 => {
+                    assert_eq!(data["hypotheses"].as_array().unwrap().len(),1);
+                    assert_eq!(data["hypotheses"][0]["id"],2);
+                    assert_eq!(data["settled_assessments"],json!([{"id":1,"outcome":"confirmed"}]));
+                    let prev=&data["recheck"][0]["prior_assessments"][0];
+                    assert_eq!(prev["outcome"],"indeterminate");
+                    let windows=data["snapshot"]["head_context"].as_array().unwrap();
+                    assert!(windows.iter().any(|w|w["path"]=="publisher.go"));
+                    if calls==3 {return Ok(json!({"complete":true,"assessments":[undecided(json!({"path":"guard.go","term":""}))]}))}
+                    let guard=windows.iter().find(|w|w["path"]=="guard.go").unwrap();
+                    Ok(json!({"complete":true,"assessments":[{"id":2,"outcome":"refuted","basis":guard["rows"][0][1],"countercheck":"The guard excludes unpublished entries."}]}))
+                }
+                _=>panic!("No unresolved hypothesis remains")
+            }
+        }, |_,requests| {
+            assert_eq!(requests.len(),1);
+            reads.push((requests[0].path.clone(),requests[0].term.clone()));
+            let path=match requests[0].path.as_str() { "*" => "publisher.go", "*:13" => "publisher_test.go", _ => "guard.go" };
+            Ok(vec![SourceWindow{path:path.into(),start:11,text:"publish_if_ready(entry)".into()}])
+        }, |_,_| Ok(true), &[]).unwrap();
+        assert_eq!(
+            reads,
+            [
+                ("*".into(), "publish draft".into()),
+                ("*:13".into(), "publish draft".into()),
+                ("guard.go".into(), "".into())
+            ]
+        );
+        assert_eq!(calls, 4);
+        assert_eq!(result.report.findings.len(), 1);
+        assert!(result.unfinished_patches().unwrap().is_empty());
+        assert!(result.report.limits.is_empty());
+    }
+
+    #[test]
+    fn repeated_or_unproductive_targeted_reads_preserve_human_checks_and_unknown_ids_cannot_read() {
+        for mode in ["empty", "repeat", "unknown"] {
+            let mut calls = 0;
+            let mut reads = 0;
+            let result=review_snapshot_iterative(indexed_snapshot(), |_,_| {
+                calls+=1;
+                if calls==1 {return Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","The caller configures one slot.")]}))}
+                let check=json!({"id":if mode=="unknown"{99}else{1},"outcome":"indeterminate","countercheck":"The caller configuration must be checked.","basis":"H2","action":"Supply one slot and record the configured capacity.","expected":"The configured capacity remains one.","severity":"medium","reads":[{"path":"caller.go","term":"#L81"}]});
+                Ok(json!({"complete":true,"assessments":[check]}))
+            }, |_,_| {
+                reads+=1;
+                if mode=="unknown"{panic!("unknown ID triggered a source read")}
+                Ok(if mode=="empty" {vec![]} else {vec![SourceWindow{path:"caller.go".into(),start:81,text:"configure_cache()".into()}]})
+            },|_,_|Ok(true),&[]).unwrap();
+            assert_eq!(reads, usize::from(mode != "unknown"));
+            assert_eq!(
+                calls,
+                match mode {
+                    "empty" => 2,
+                    "unknown" => 4,
+                    _ => 3,
+                }
+            );
+            assert!(result.report.findings.is_empty());
+            assert!(!result.report.limits.is_empty());
+            if mode != "unknown" {
+                assert!(
+                    result
+                        .report
+                        .focus
+                        .iter()
+                        .any(|focus| focus.action.contains("one slot"))
+                );
+            }
+        }
+    }
+    #[test]
+    fn repairs_a_truncated_recheck_without_replacing_grounded_questions_with_placeholders() {
+        for repair_succeeds in [true, false] {
+            let mut calls = 0;
+            let mut reads = Vec::new();
+            let reason = |id| {
+                format!(
+                    "Check whether publisher {id} filters draft entries in the active configuration."
+                )
+            };
+            let result=review_snapshot_iterative(indexed_snapshot(), |_,data| {
+                calls+=1;
+                match calls {
+                    1=>Ok(json!({"complete":true,"hypotheses":(["H2","H4","H6","H8"].map(|h|indexed_proposal(h,"Check the published entry.")))})),
+                    2=>Ok(json!({"complete":true,"assessments":(1..=4).map(|id|json!({"id":id,"outcome":"indeterminate","countercheck":reason(id),"reads":[{"path":"publish.rs","term":"#L1"}]})).collect::<Vec<_>>()})),
+                    3=>Ok(json!({"complete":false,"assessments":[{"id":1,"outcome":"indeterminate","countercheck":reason(1),"reads":[{"path":"publisher.rs","term":"#L3"}]},{"id":2,"outcome":"indeterminate","countercheck":"wait"}]})),
+                    next if next<=6=>{
+                        assert!(data["snapshot"]["head_context"].as_array().unwrap().iter().any(|v|v["path"]=="publisher.rs"));
+                        let recheck=data["recheck"].as_array().unwrap();
+                        assert!(recheck.iter().any(|r|r["id"]==2 && r["feedback"].as_str().unwrap().contains("countercheck")));
+                        assert!(recheck.iter().any(|r|r["id"]==3 && r["feedback"].as_str().unwrap().contains("No assessment")));
+                        assert!(recheck.iter().any(|r|r["id"]==4 && r["prior_assessments"][0]["countercheck"]==reason(4)));
+                        if repair_succeeds {return Ok(json!({"complete":true,"assessments":recheck.iter().map(|r|json!({"id":r["id"],"outcome":"refuted","basis":"H4","countercheck":"The checked path filters the caller configuration."})).collect::<Vec<_>>() }))}
+                        Ok(json!({"complete":false,"assessments":[{"id":2,"outcome":"indeterminate","countercheck":"wait"}]}))
+                    }
+                    _=>panic!("Repeated malformed answers must terminate")
+                }
+            }, |_,requests|{
+                reads.push(requests[0].path.clone());
+                Ok(vec![SourceWindow{path:requests[0].path.clone(),start:1,text:"publish_if_ready()".into()}])
+            },|_,_|Ok(true),&[]).unwrap();
+            assert_eq!(reads, ["publish.rs", "publisher.rs"]);
+            assert!(calls >= 4);
+            assert_eq!(result.report.limits.is_empty(), repair_succeeds);
+            assert!(result.report.findings.is_empty());
+            if !repair_succeeds {
+                let limits = result.report.limits.join(" ");
+                assert!(
+                    limits.contains(&reason(2)) && limits.contains(&reason(4)),
+                    "{limits}"
+                );
+                assert!(!limits.contains(": wait"));
+            }
+        }
+    }
+    #[test]
+    fn duplicate_and_unknown_ids_never_authorize_a_read_or_confirm_a_provisional_item() {
+        for repaired in [true, false] {
+            let mut calls = 0;
+            let result = review_snapshot_iterative(indexed_snapshot(), |_,data| {
+                calls+=1;
+                let tentative=indexed_capacity_finding(1,"H4","B2","B4");
+                let missing=json!({"id":2,"outcome":"indeterminate","countercheck":"Determine if the published feed excludes drafts."});
+                match calls {
+                    1=>Ok(json!({"complete":true,"hypotheses":[indexed_proposal("H2","Check cache size."),indexed_proposal("H8","Check the publisher.")]})),
+                    2=>Ok(json!({"complete":false,"assessments":[tentative,missing]})),
+                    3|4=>{
+                        if calls==4{
+                            assert!(data["recheck"].as_array().unwrap().iter().any(|r|r["id"]==2 && r["feedback"].as_str().unwrap().contains("More than one")));
+                            if repaired {return Ok(json!({"complete":true,"assessments":[tentative,{"id":2,"outcome":"refuted","countercheck":"The publisher excludes drafts.","basis":"H8"}]}))}
+                        }
+                        Ok(json!({"complete":true,"assessments":[tentative,missing,missing,{"id":99,"outcome":"indeterminate","countercheck":"Inspect target configuration.","reads":[{"path":"forbidden.rs","term":""}]}]}))
+                    }
+                    _=>panic!("Repeated malformed envelopes must stop")
+                }
+            },|_,_|panic!("Unexpected lookup from a duplicate or unknown ID"),|_,_|Ok(true),&[]).unwrap();
+            assert_eq!(calls, 4);
+            assert_eq!(result.report.findings.len(), usize::from(repaired));
+            assert_eq!(result.report.limits.is_empty(), repaired);
+        }
+    }
+    #[test]
+    fn complete_recheck_keeps_only_the_still_indeterminate_file_unfinished() {
+        let mut source = indexed_snapshot();
+        for path in ["replica.go", "policy.go"] {
+            let mut file = source.files[0].clone();
+            file.path = path.into();
+            source.files.push(file);
+        }
+        let mut calls = 0;
+        let mut anchors = Vec::new();
+        let result=review_snapshot_iterative(source, |_,data|{
+            calls+=1;
+            match calls {
+                1=>{
+                    for path in ["cache.go","replica.go","feed.ts","policy.go"] {
+                        let file=data["snapshot"]["files"].as_array().unwrap().iter().find(|f|f["path"]==path).unwrap();
+                        let row = file["sections"][0].as_array().unwrap().iter().find(|row|row[0].is_null() && row[1].is_string()).unwrap();
+                        anchors.push(row[1].as_str().unwrap().to_owned());
+                    }
+                    Ok(json!({"complete":true,"hypotheses":anchors.iter().map(|anchor|indexed_proposal(anchor,"Check the observable behavior.")).collect::<Vec<_>>()}))
+                }
+                2=>Ok(json!({"complete":false,"assessments":(1..=4).map(|id|json!({"id":id,"outcome":"indeterminate","countercheck":"Inspect the caller to establish the intended behavior.","reads":[{"path":"caller.go","term":"#L1"}]})).collect::<Vec<_>>()})),
+                3=>{
+                    let mut first=indexed_capacity_finding(1,"H4","B2","B4");
+                    first["comparison"]=Value::Null;
+                    let mut second=first.clone();
+                    second["id"]=json!(2);
+                    second["counterevidence"]["references"]=json!([anchors[1]]);
+                    Ok(json!({"complete":true,"assessments":[first,second,
+                        {"id":3,"outcome":"human","basis":anchors[2],"countercheck":"The publisher omits draft entries.","severity":"medium","reason":"Whether moderators should see drafts is a product choice.","question":"Should moderators see drafts?","alternatives":["Show drafts","Hide drafts"]},
+                        {"id":4,"outcome":"indeterminate","countercheck":"The deployed policy configuration was unavailable."}]}))
+                }
+                _=>panic!("All requested IDs already have valid dispositions")
+            }
+        },|_,_|Ok(vec![SourceWindow{path:"caller.go".into(),start:1,text:"publish(entries)".into()}]),|_,_|Ok(true),&[]).unwrap();
+        assert_eq!(result.report.findings.len(), 2);
+        assert_eq!(result.report.focus.len(), 1);
+        assert_eq!(result.reviewed_files.as_ref().unwrap().len(), 3);
+        assert_eq!(result.unfinished_patches().unwrap(), ["policy.go"]);
+        assert_eq!(
+            result.report.limits,
+            ["Undecided at policy.go:2. The deployed policy configuration was unavailable."]
+        );
     }
 }
