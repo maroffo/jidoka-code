@@ -251,7 +251,7 @@ where
                 .is_none_or(|head| report.head.eq_ignore_ascii_case(head)),
             "The report does not match the requested revision."
         );
-        let status = if partial(&report) {
+        let status = if report.is_partial() {
             "partial"
         } else {
             "completed"
@@ -999,14 +999,6 @@ fn source_link(report: &PublishedReport, head: &str, path: &str, line: usize) ->
     )
 }
 
-fn partial(report: &PublishedReport) -> bool {
-    !report.report.limits.is_empty()
-        || report
-            .scan
-            .as_ref()
-            .is_some_and(|scan| !scan.limits.is_empty())
-}
-
 fn scanner_html(report: &PublishedReport, scan: Option<&Scan>) -> String {
     let Some(scan) = scan else {
         return "<p>No Semgrep coverage data for this review.</p>".to_owned();
@@ -1281,9 +1273,15 @@ fn review_page(
                             r#"<form method="post" class="archive" action="/reviews/{id}/diff"><input type="hidden" name="csrf_token" value="{token}"><button>Load reviewed diff from GitHub</button></form>"#
                         )
                     };
+                    let is_partial = status == "partial" || report.is_partial();
+                    let submit = if is_partial {
+                        String::new()
+                    } else {
+                        format!(r#"<a class="primary-link" href="/reviews/{id}/submit">Submit review</a>"#)
+                    };
                     let details = format!(
-                        r##"<nav class="review-tools" aria-label="Review actions"><a href="#review-diff">View diff</a><a class="primary-link" href="/reviews/{id}/submit">Submit review</a></nav>{}{}{load}"##,
-                        report_html(&report, status == "partial"),
+                        r##"<nav class="review-tools" aria-label="Review actions"><a href="#review-diff">View diff</a>{submit}</nav>{}{}{load}"##,
+                        report_html(&report, is_partial),
                         crate::diff::render(&report)
                     );
                     (status, details)
@@ -1998,6 +1996,44 @@ mod tests {
             body.append_pair("consent", consent);
         }
         body.finish()
+    }
+
+    #[tokio::test]
+    async fn partial_reviews_stay_readable_and_cannot_be_submitted_to_github() {
+        let fixture = Fixture::new();
+        for (id, status) in [(1, "partial"), (2, "completed")] {
+            let mut saved = report(None);
+            if status == "completed" {
+                saved.report.limits.push("Unverified coverage".into());
+            }
+            connect(&fixture.db)
+                .unwrap()
+                .execute(
+                    "INSERT INTO reviews(id,url,provider,status,report) VALUES(?,?,?,?,?)",
+                    params![
+                        id,
+                        URL,
+                        PROVIDER,
+                        status,
+                        serde_json::to_string(&saved).unwrap()
+                    ],
+                )
+                .unwrap();
+            let review = format!("/reviews/{id}");
+            let html = fixture.get(&review).await;
+            assert!(html.contains("View diff"));
+            assert!(!html.contains("Submit review"));
+            for (method, path) in [
+                (Method::GET, "submit"),
+                (Method::POST, "submit"),
+                (Method::POST, "publish"),
+            ] {
+                let (code, _, _) = fixture
+                    .request(method, &format!("{review}/{path}"), &[], "")
+                    .await;
+                assert_eq!(code, StatusCode::CONFLICT);
+            }
+        }
     }
 
     fn allowed_repos() -> HashSet<String> {

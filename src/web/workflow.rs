@@ -6,6 +6,7 @@ use axum::response::Redirect;
 struct Target {
     number: u64,
     report: PublishedReport,
+    is_partial: bool,
 }
 
 fn review_id(raw: &str) -> Result<i64, PageError> {
@@ -18,12 +19,12 @@ fn review_id(raw: &str) -> Result<i64, PageError> {
 async fn target(state: &WebState, id: i64) -> Result<Target, PageError> {
     let row = with_db(state, move |connection| {
         connection.query_row(
-            "SELECT url, report FROM reviews WHERE id = ?1 AND status IN ('completed','partial')",
-            [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            "SELECT url, report, status FROM reviews WHERE id = ?1 AND status IN ('completed','partial')",
+            [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,r.get::<_, String>(2)?)),
         ).optional()
     })
     .await?;
-    let (url, raw) = row.ok_or_else(PageError::missing)?;
+    let (url, raw, status) = row.ok_or_else(PageError::missing)?;
     let (repo, number) = parse_pull_url(&url).ok_or_else(PageError::missing)?;
     let report: PublishedReport = serde_json::from_str(&raw).map_err(|_| PageError::missing())?;
     if !report.repo.eq_ignore_ascii_case(repo)
@@ -39,8 +40,20 @@ async fn target(state: &WebState, id: i64) -> Result<Target, PageError> {
     }
     Ok(Target {
         number: number.parse().map_err(|_| PageError::missing())?,
+        is_partial: status == "partial" || report.is_partial(),
         report,
     })
+}
+
+async fn submission_target(state: &WebState, id: i64) -> Result<Target, PageError> {
+    let target = target(state, id).await?;
+    if target.is_partial {
+        return Err(PageError::new(
+            StatusCode::CONFLICT,
+            "Only completed reviews can be submitted to GitHub.",
+        ));
+    }
+    Ok(target)
 }
 
 const EVENTS: [(&str, &str); 3] = [
@@ -64,7 +77,7 @@ pub(super) async fn compose(
     headers: HeaderMap,
 ) -> Result<Response, PageError> {
     let id = review_id(&id)?;
-    let target = target(&state, id).await?;
+    let target = submission_target(&state, id).await?;
     let (token, cookie) = page_token(&state, &headers);
     let mut body = heading(id, &target.report, target.number, "Submit review");
     write!(body,r#"<form class="panel workflow" method="post" action="/reviews/{id}/submit"><input type="hidden" name="csrf_token" value="{token}"><fieldset><legend>Verified findings</legend>"#).unwrap();
@@ -123,7 +136,7 @@ async fn decision(
     id: i64,
     confirm: bool,
 ) -> Result<Response, PageError> {
-    let target = target(state, id).await?;
+    let target = submission_target(state, id).await?;
     let fields = checked_form(
         state,
         request,

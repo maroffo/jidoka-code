@@ -124,6 +124,14 @@ pub struct PublishedReport {
 }
 
 impl PublishedReport {
+    pub fn is_partial(&self) -> bool {
+        !self.report.limits.is_empty()
+            || self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| !scan.limits.is_empty())
+    }
+
     /// Available only for reviews that tracked completion of each collected patch.
     pub fn unfinished_patches(&self) -> Option<Vec<&String>> {
         let reviewed: HashSet<_> = self.reviewed_files.as_ref()?.iter().collect();
