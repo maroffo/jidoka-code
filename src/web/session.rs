@@ -2,7 +2,7 @@
 use super::{connect, parse_pull_url};
 use crate::contracts::{Finding, PublishedReport, Snapshot};
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -20,6 +20,15 @@ pub(crate) fn init(db: &Connection) -> rusqlite::Result<()> {
     CREATE TABLE IF NOT EXISTS review_splits (
         review_id INTEGER NOT NULL,step INTEGER NOT NULL,fingerprint BLOB NOT NULL,interrupted INTEGER NOT NULL,
         PRIMARY KEY(review_id,step)
+    );
+    CREATE TABLE IF NOT EXISTS review_budgets (
+        review_id INTEGER PRIMARY KEY, cap INTEGER NOT NULL, final_reserve INTEGER NOT NULL,
+        spent INTEGER NOT NULL DEFAULT 0 CHECK(spent>=0),
+        CHECK(cap>0 AND final_reserve>0 AND final_reserve<=cap)
+    );
+    CREATE TABLE IF NOT EXISTS review_budget_closures (
+        review_id INTEGER NOT NULL, step INTEGER NOT NULL, fingerprint BLOB NOT NULL, attempt INTEGER,
+        PRIMARY KEY(review_id,step,fingerprint)
     );
     CREATE TABLE IF NOT EXISTS review_replays (review_id INTEGER PRIMARY KEY,source_id INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS review_origins (review_id INTEGER PRIMARY KEY,repo TEXT NOT NULL);
@@ -70,6 +79,12 @@ pub fn replay(
     Ok(new_id)
 }
 
+enum Admission {
+    Dispatch(u32),
+    Cached(Value),
+    Closed,
+}
+
 pub struct Session {
     db: Connection,
     id: i64,
@@ -86,6 +101,33 @@ impl Session {
         Ok(Self { db, id, step: 0 })
     }
 
+    /// Pin a prospective spending limit on first use. Existing reviews keep their original limit.
+    pub fn configure_budget(&self, cap: u64, final_reserve: u64) -> Result<()> {
+        ensure!(
+            final_reserve > 0 && final_reserve <= cap,
+            "Invalid final review reserve"
+        );
+        self.db.execute(
+            "INSERT INTO review_budgets(review_id, cap, final_reserve) VALUES(?,?,?)
+             ON CONFLICT(review_id) DO NOTHING",
+            params![self.id, i64::try_from(cap)?, i64::try_from(final_reserve)?],
+        )?;
+        Ok(())
+    }
+
+    /// Available nanoUSD for this stage, or zero when its remaining turns are exhausted.
+    pub fn budget_remaining(&self, final_turn: bool) -> Result<u64> {
+        Ok(self.db.query_row(
+            "SELECT CASE WHEN turns < ?3 THEN max(0,cap-spent-CASE WHEN ?2 THEN 0 ELSE final_reserve END) ELSE 0 END
+             FROM review_budgets JOIN review_runs USING(review_id) WHERE review_id=?1",
+            params![self.id, final_turn, Self::turn_limit(final_turn)], |row| row.get(0),
+        )?)
+    }
+
+    fn turn_limit(final_turn: bool) -> usize {
+        crate::ReviewTurnLimit::MAX - usize::from(!final_turn)
+    }
+
     pub fn replay_source(&self) -> Result<Option<PublishedReport>> {
         let raw:Option<String>=self.db.query_row("SELECT source.report FROM review_replays
             JOIN reviews source ON source.id=review_replays.source_id
@@ -97,7 +139,10 @@ impl Session {
     pub fn reset(&mut self) -> Result<()> {
         let tx = self.db.transaction()?;
         clear(&tx, self.id)?;
-        tx.execute("INSERT INTO review_runs(review_id) VALUES(?)", [self.id])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO review_runs(review_id) VALUES(?)",
+            [self.id],
+        )?;
         tx.commit()?;
         self.step = 0;
         Ok(())
@@ -178,7 +223,8 @@ impl Session {
         let fingerprint = Self::fingerprint(system, data)?;
         let restored: bool = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM review_turns WHERE review_id=?1 AND step=?2 AND fingerprint=?3
-             UNION ALL SELECT 1 FROM review_splits WHERE review_id=?1 AND step=?2 AND fingerprint=?3)",
+             UNION ALL SELECT 1 FROM review_splits WHERE review_id=?1 AND step=?2 AND fingerprint=?3
+             UNION ALL SELECT 1 FROM review_budget_closures WHERE review_id=?1 AND step=?2 AND fingerprint=?3)",
             params![self.id, self.step + 1, fingerprint], |row| row.get(0),
         )?;
         if restored { Ok(true) } else { measure() }
@@ -200,21 +246,112 @@ impl Session {
         eligible: impl Fn() -> Result<()>,
         mut call: impl FnMut() -> Result<crate::provider::ModelReply>,
     ) -> Result<Value> {
-        self.step += 1;
-        let fingerprint = Self::fingerprint(system, data)?;
-        let cached: Option<String> = self
+        self.run_step(system, data, eligible, |session, fingerprint| {
+            let turn: Option<u32> = session.db.query_row("UPDATE review_runs SET turns=turns+1
+                WHERE review_id=?1 AND turns < ?2 AND NOT EXISTS(SELECT 1 FROM review_budgets WHERE review_id=?1)
+                RETURNING turns", params![session.id,crate::ReviewTurnLimit::MAX], |r| r.get(0)).optional()?;
+            session.dispatch(fingerprint, turn.ok_or(crate::ReviewTurnLimit)?, None, &mut call, |_| None)
+        })
+    }
+
+    /// Prepare the exact bounded request outside a write transaction. Admission rechecks both
+    /// money and turns under the write lock before any provider generation can start.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ask_budgeted<T>(
+        &mut self,
+        system: &str,
+        data: &Value,
+        final_turn: bool,
+        eligible: impl Fn() -> Result<()>,
+        mut prepare: impl FnMut(u64) -> Result<Option<(u64, T)>>,
+        mut call: impl FnMut(T) -> Result<crate::provider::ModelReply>,
+        charge: impl Fn(crate::provider::TokenUsage) -> Option<u64>,
+    ) -> Result<Value> {
+        self.run_step(system, data, &eligible, |session, fingerprint| {
+            let available = session.budget_remaining(final_turn)?;
+            if available == 0 {
+                return session.close_budget(fingerprint);
+            }
+            let Some((maximum, request)) = prepare(available)? else {
+                return session.close_budget(fingerprint);
+            };
+            ensure!(maximum > 0, "Review call has no positive cost estimate");
+            if maximum > available {
+                return session.close_budget(fingerprint);
+            }
+            eligible()?;
+            let maximum = i64::try_from(maximum)?;
+            let turn = match session.reserve_budgeted(maximum, final_turn, fingerprint)? {
+                Admission::Dispatch(turn) => turn,
+                Admission::Cached(value) => return Ok(value),
+                Admission::Closed => return session.close_budget(fingerprint),
+            };
+            // A crash from here on leaves the complete maximum charged for the unknown outcome.
+            session.dispatch(fingerprint, turn, Some(maximum), || call(request), &charge)
+        })
+    }
+
+    fn reserve_budgeted(
+        &mut self,
+        maximum: i64,
+        final_turn: bool,
+        fingerprint: &[u8],
+    ) -> Result<Admission> {
+        let tx = self
             .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(reply) = Self::saved_step(&tx, self.id, self.step, fingerprint)? {
+            return Ok(Admission::Cached(reply));
+        }
+        let admitted = tx.execute(
+            "UPDATE review_budgets SET spent=spent+?2 WHERE review_id=?1
+             AND cap-spent-CASE WHEN ?3 THEN 0 ELSE final_reserve END >= ?2",
+            params![self.id, maximum, final_turn],
+        )?;
+        if admitted == 0 {
+            return Ok(Admission::Closed);
+        }
+        let turn: Option<u32> = tx.query_row(
+            "UPDATE review_runs SET turns=turns+1 WHERE review_id=?1 AND turns < ?2 RETURNING turns",
+            params![self.id, Self::turn_limit(final_turn)], |row| row.get(0),
+        ).optional()?;
+        let Some(turn) = turn else {
+            return Ok(Admission::Closed);
+        };
+        // Until reply and usage commit together, the outcome is unknown. A restart follows
+        // the same budget-close path instead of paying a second time for this generation.
+        tx.execute(
+            "INSERT INTO review_budget_closures(review_id,step,fingerprint,attempt) VALUES(?,?,?,?)",
+            params![self.id, self.step, fingerprint, turn],
+        )?;
+        tx.commit()?;
+        Ok(Admission::Dispatch(turn))
+    }
+
+    fn close_budget(&self, fingerprint: &[u8]) -> Result<Value> {
+        self.db.execute("INSERT OR IGNORE INTO review_budget_closures(review_id,step,fingerprint) VALUES(?,?,?)",
+            params![self.id,self.step,fingerprint])?;
+        Err(crate::engine::ReviewBudgetClosed.into())
+    }
+
+    fn saved_step(
+        db: &Connection,
+        id: i64,
+        step: usize,
+        fingerprint: &[u8],
+    ) -> Result<Option<Value>> {
+        let cached: Option<String> = db
             .query_row(
                 "SELECT reply FROM review_turns WHERE review_id=? AND step=? AND fingerprint=?",
-                params![self.id, self.step, fingerprint],
+                params![id, step, fingerprint],
                 |r| r.get(0),
             )
             .optional()?;
         if let Some(reply) = cached {
-            return Ok(serde_json::from_str(&reply)?);
+            return Ok(Some(serde_json::from_str(&reply)?));
         }
 
-        let split:Option<bool>=self.db.query_row("SELECT interrupted FROM review_splits WHERE review_id=? AND step=? AND fingerprint=?",params![self.id,self.step,fingerprint],|r|r.get(0)).optional()?;
+        let split:Option<bool>=db.query_row("SELECT interrupted FROM review_splits WHERE review_id=? AND step=? AND fingerprint=?",params![id,step,fingerprint],|r|r.get(0)).optional()?;
         if let Some(interrupted) = split {
             return if interrupted {
                 Err(crate::ReviewBatchInterrupted.into())
@@ -223,10 +360,29 @@ impl Session {
             };
         }
 
+        if db.query_row("SELECT EXISTS(SELECT 1 FROM review_budget_closures WHERE review_id=? AND step=? AND fingerprint=?)",
+            params![id,step,fingerprint], |r|r.get::<_,bool>(0))? {
+            return Err(crate::engine::ReviewBudgetClosed.into());
+        }
+        Ok(None)
+    }
+
+    fn run_step(
+        &mut self,
+        system: &str,
+        data: &Value,
+        eligible: impl Fn() -> Result<()>,
+        mut dispatch: impl FnMut(&mut Self, &[u8]) -> Result<Value>,
+    ) -> Result<Value> {
+        self.step += 1;
+        let fingerprint = Self::fingerprint(system, data)?;
+        if let Some(reply) = Self::saved_step(&self.db, self.id, self.step, &fingerprint)? {
+            return Ok(reply);
+        }
         let mut retries = 0;
         loop {
             eligible()?;
-            let result = self.dispatch(&fingerprint, &mut call);
+            let result = dispatch(self, &fingerprint);
             if result.as_ref().is_err_and(|e| {
                 e.is::<crate::ReviewBatchInterrupted>() || e.is::<crate::ReviewContextExceeded>()
             }) {
@@ -262,11 +418,11 @@ impl Session {
     fn dispatch(
         &mut self,
         fingerprint: &[u8],
+        turn: u32,
+        maximum: Option<i64>,
         call: impl FnOnce() -> Result<crate::provider::ModelReply>,
+        charge: impl Fn(crate::provider::TokenUsage) -> Option<u64>,
     ) -> Result<Value> {
-        // Reserve before dispatch, including an in-flight request lost to a crash.
-        let turn: Option<u32> = self.db.query_row("UPDATE review_runs SET turns=turns+1 WHERE review_id=?1 AND turns < ?2 RETURNING turns", params![self.id,crate::ReviewTurnLimit::MAX], |r| r.get(0)).optional()?;
-        let turn = turn.ok_or(crate::ReviewTurnLimit)?;
         let started = std::time::Instant::now();
         let result = call();
         let ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
@@ -281,12 +437,33 @@ impl Session {
                 .downcast_ref::<crate::provider::InvalidReply>()
                 .map(|r| r.usage),
         };
+        let mut current = true;
+        if let Some(maximum) = maximum {
+            current = tx.execute(
+                "DELETE FROM review_budget_closures WHERE review_id=? AND step=? AND fingerprint=? AND attempt=?",
+                params![self.id, self.step, fingerprint, turn],
+            )? == 1;
+            // A length stop can be reported as a context error after paid generation.
+            // Only an explicit quota rejection with no usage establishes no generation.
+            let actual = settled_charge(maximum, result.as_ref().err(), usage.and_then(charge));
+            // Saturate the ledger on unrepresentable provider overruns, always denying later calls.
+            tx.execute(
+                "UPDATE review_budgets SET spent=min(spent-?2,9223372036854775807-?3)+?3
+                WHERE review_id=?1",
+                params![self.id, maximum, actual],
+            )?;
+        }
         if let Some(usage) = usage {
             tx.execute("UPDATE review_runs SET
                 input_tokens=CASE WHEN ?1 IS NULL THEN input_tokens ELSE coalesce(input_tokens,0)+?1 END,
                 output_tokens=CASE WHEN ?2 IS NULL THEN output_tokens ELSE coalesce(output_tokens,0)+?2 END,
                 cached_tokens=CASE WHEN ?3 IS NULL THEN cached_tokens ELSE coalesce(cached_tokens,0)+?3 END
                 WHERE review_id=?4",params![usage.input,usage.output,usage.cached,self.id])?;
+        }
+        if !current {
+            // A reset while this generation was in flight supersedes its checkpoint.
+            tx.commit()?;
+            return Err(Paused.into());
         }
         if let Ok(reply) = &result {
             tx.execute("INSERT OR REPLACE INTO review_turns(review_id,step,fingerprint,reply) VALUES(?,?,?,?)",params![self.id,self.step,fingerprint,serde_json::to_string(&reply.value)?])?;
@@ -306,6 +483,14 @@ impl Session {
         };
         eprintln!("Review {} turn {turn}: {status} ({ms} ms)", self.id);
         result.map(|r| r.value)
+    }
+}
+
+fn settled_charge(maximum: i64, error: Option<&anyhow::Error>, priced: Option<u64>) -> i64 {
+    match priced {
+        Some(cost) => i64::try_from(cost).unwrap_or(i64::MAX),
+        None if error.is_some_and(|e| e.is::<crate::provider::RateLimited>()) => 0,
+        None => maximum,
     }
 }
 
@@ -336,13 +521,17 @@ pub(crate) fn clear(db: &Connection, id: i64) -> rusqlite::Result<()> {
     for table in [
         "review_turns",
         "review_splits",
+        "review_budget_closures",
         "review_reads",
         "review_origins",
         "review_replays",
-        "review_runs",
     ] {
         db.execute(&format!("DELETE FROM {table} WHERE review_id=?"), [id])?;
     }
+    // Paid attempts belong to the review ID, including when an automatic review restarts
+    // on a fresh merge base. Legacy unbudgeted jobs retain their original reset behavior.
+    db.execute("DELETE FROM review_runs WHERE review_id=?1 AND NOT EXISTS (SELECT 1 FROM review_budgets WHERE review_id=?1)",[id])?;
+    db.execute("UPDATE review_runs SET base=NULL,head=NULL,snapshot=NULL,prior=NULL,stop_reason=NULL WHERE review_id=?",[id])?;
     Ok(())
 }
 
@@ -354,6 +543,7 @@ pub(super) fn finish(db: &Connection, id: i64, status: &str, reason: &str) -> Re
     if matches!(status, "completed" | "partial" | "superseded" | "canceled") {
         db.execute("DELETE FROM review_splits WHERE review_id=?", [id])?;
         db.execute("DELETE FROM review_turns WHERE review_id=?", [id])?;
+        db.execute("DELETE FROM review_budget_closures WHERE review_id=?", [id])?;
         db.execute(
             "UPDATE review_runs SET snapshot=NULL,prior=NULL WHERE review_id=?",
             [id],
@@ -672,5 +862,261 @@ mod tests {
                 .unwrap()
                 .contains("40 input tokens")
         );
+    }
+
+    fn budget_fixture() -> (tempfile::TempDir, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reviews.db");
+        super::super::init_db(&connect(&path).unwrap()).unwrap();
+        let session = Session::open(&path, 1).unwrap();
+        session.configure_budget(100, 20).unwrap();
+        (dir, session)
+    }
+
+    fn ledger(session: &Session) -> (u64, u32) {
+        session.db.query_row("SELECT spent,turns FROM review_budgets JOIN review_runs USING(review_id) WHERE review_id=?",
+            [session.id],|r| Ok((r.get(0)?,r.get(1)?))).unwrap()
+    }
+
+    fn priced_reply(actual: Option<u64>) -> Result<ModelReply> {
+        Ok(ModelReply {
+            value: json!({"complete":true}),
+            usage: TokenUsage {
+                input: actual,
+                ..Default::default()
+            },
+        })
+    }
+
+    fn saved(session: &mut Session, step: &str) -> Result<Value> {
+        let input = json!({});
+        assert!(session.fits_context(step, &input, || panic!("resized a saved step"))?);
+        session.ask_budgeted(
+            step,
+            &input,
+            false,
+            || panic!("rechecked a saved step"),
+            |_| -> Result<Option<(u64, ())>> { panic!("repriced a saved step") },
+            |_| panic!("sent a saved step"),
+            |_| panic!("recharged a saved step"),
+        )
+    }
+
+    fn send(
+        session: &mut Session,
+        system: &str,
+        final_turn: bool,
+        mut quote: impl FnMut(u64) -> Option<u64>,
+        mut generate: impl FnMut() -> Result<ModelReply>,
+    ) -> Result<Value> {
+        session.ask_budgeted(
+            system,
+            &json!({}),
+            final_turn,
+            || Ok(()),
+            |available| Ok(quote(available).map(|maximum| (maximum, ()))),
+            |_| generate(),
+            |usage| usage.input,
+        )
+    }
+
+    #[test]
+    fn admission_rechecks_a_stale_quote_and_replays_the_same_close_and_final() {
+        let (dir, mut outer) = budget_fixture();
+        let path = dir.path().join("reviews.db");
+        let mut concurrent = Session::open(&path, 1).unwrap();
+        let denied = send(
+            &mut outer,
+            "work",
+            false,
+            |available| {
+                assert_eq!(available, 80);
+                send(
+                    &mut concurrent,
+                    "other",
+                    false,
+                    |_| Some(60),
+                    || priced_reply(Some(35)),
+                )
+                .unwrap();
+                Some(80)
+            },
+            || panic!("stale quote crossed the final reserve"),
+        )
+        .unwrap_err();
+        assert!(denied.is::<crate::engine::ReviewBudgetClosed>());
+        assert_eq!(ledger(&outer), (35, 1));
+        send(
+            &mut outer,
+            "final",
+            true,
+            |available| {
+                assert_eq!(available, 65);
+                Some(available)
+            },
+            || priced_reply(None),
+        )
+        .unwrap();
+        assert_eq!(ledger(&outer), (100, 2));
+        let mut resumed = Session::open(&path, 1).unwrap();
+        resumed.configure_budget(1_000, 100).unwrap();
+        assert!(
+            saved(&mut resumed, "work")
+                .unwrap_err()
+                .is::<crate::engine::ReviewBudgetClosed>()
+        );
+        assert_eq!(
+            saved(&mut resumed, "final").unwrap(),
+            json!({"complete":true})
+        );
+        resumed.reset().unwrap();
+        assert_eq!(ledger(&resumed), (100, 2));
+        assert!(
+            send(
+                &mut resumed,
+                "after base change",
+                true,
+                |_| panic!("changed cap"),
+                || panic!()
+            )
+            .unwrap_err()
+            .is::<crate::engine::ReviewBudgetClosed>()
+        );
+    }
+
+    #[test]
+    fn an_inflight_unknown_charge_survives_process_loss_without_duplicate_generation() {
+        let (dir, mut session) = budget_fixture();
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            send(
+                &mut session,
+                "work",
+                false,
+                |_| Some(50),
+                || panic!("simulated worker exit"),
+            )
+        }));
+        assert!(crashed.is_err());
+        drop(session);
+        let mut resumed = Session::open(&dir.path().join("reviews.db"), 1).unwrap();
+        assert!(
+            saved(&mut resumed, "work")
+                .unwrap_err()
+                .is::<crate::engine::ReviewBudgetClosed>()
+        );
+        assert_eq!(ledger(&resumed), (50, 1));
+        resumed
+            .db
+            .execute("UPDATE review_runs SET turns=499", [])
+            .unwrap();
+        assert!(
+            send(
+                &mut resumed,
+                "next",
+                false,
+                |_| panic!("priced a protected turn"),
+                || panic!()
+            )
+            .unwrap_err()
+            .is::<crate::engine::ReviewBudgetClosed>()
+        );
+        send(&mut resumed, "final", true, Some, || priced_reply(Some(22))).unwrap();
+        assert_eq!(ledger(&resumed), (72, 500));
+    }
+
+    #[test]
+    fn quota_rejections_refund_but_context_errors_with_unknown_usage_retain_the_reservation() {
+        let (dir, mut session) = budget_fixture();
+        assert!(
+            send(
+                &mut session,
+                "limited",
+                false,
+                |_| Some(40),
+                || Err(crate::provider::RateLimited::new(None).into())
+            )
+            .unwrap_err()
+            .is::<crate::provider::RateLimited>()
+        );
+        assert_eq!(ledger(&session), (0, 1));
+        let mut resumed = Session::open(&dir.path().join("reviews.db"), 1).unwrap();
+        assert!(
+            send(
+                &mut resumed,
+                "limited",
+                false,
+                |_| Some(40),
+                || Err(crate::ReviewContextExceeded.into())
+            )
+            .unwrap_err()
+            .is::<crate::ReviewContextExceeded>()
+        );
+        assert_eq!(ledger(&resumed), (40, 2));
+        let mut replay = Session::open(&dir.path().join("reviews.db"), 1).unwrap();
+        assert!(
+            saved(&mut replay, "limited")
+                .unwrap_err()
+                .is::<crate::ReviewContextExceeded>()
+        );
+        assert_eq!(ledger(&replay), (40, 2));
+        let length = anyhow::Error::new(crate::ReviewContextExceeded);
+        assert_eq!(settled_charge(40, Some(&length), Some(11)), 11);
+    }
+
+    #[test]
+    fn a_reported_overrun_charges_the_actual_amount_and_blocks_further_spend() {
+        let (_dir, mut session) = budget_fixture();
+        send(
+            &mut session,
+            "work",
+            false,
+            |_| Some(50),
+            || priced_reply(Some(130)),
+        )
+        .unwrap();
+        assert_eq!(ledger(&session), (130, 1));
+        assert!(
+            send(
+                &mut session,
+                "final",
+                true,
+                |_| panic!("priced overrun"),
+                || panic!()
+            )
+            .unwrap_err()
+            .is::<crate::engine::ReviewBudgetClosed>()
+        );
+    }
+
+    #[test]
+    fn a_transient_generation_failure_cannot_retry_into_the_reserved_money() {
+        let (_dir, mut session) = budget_fixture();
+        let mut quoted = Vec::new();
+        let mut calls = 0;
+        let error = send(
+            &mut session,
+            "work",
+            false,
+            |available| {
+                quoted.push(available);
+                (available >= 60).then_some(60)
+            },
+            || {
+                calls += 1;
+                let response = axum::http::Response::builder()
+                    .status(503)
+                    .body("")
+                    .unwrap();
+                Err(reqwest::Response::from(response)
+                    .error_for_status()
+                    .unwrap_err()
+                    .into())
+            },
+        )
+        .unwrap_err();
+        assert!(error.is::<crate::engine::ReviewBudgetClosed>());
+        assert_eq!(quoted, [80, 20]);
+        assert_eq!(calls, 1);
+        assert_eq!(ledger(&session), (60, 1));
     }
 }

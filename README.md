@@ -31,6 +31,10 @@ Open [Jidoka](http://localhost:8080), enter a pull request URL, and confirm the 
 
 On shutdown, Jidoka waits for the in-flight model call, saves its response and requeues the active review. The same provider can resume eligible work on restart. Each generation request has a ten-minute timeout. A review can use up to 500 generation requests in total, including retries and restarts. The review page shows model calls, reported token usage, time spent waiting for the model, and which changed files completed review.
 
+With `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` and `gemini-4-carbon`, Carbon reviews the diff and decides the findings. Gemini 3.8 Flash selects evidence to read from the pinned repository. Carbon can request one more lookup when the evidence leaves a specific question open. The review page identifies both models. Switching an existing installation to this pair uses Jidoka's usual provider-change handling. Re-enable automatic review in **Repositories** when ready.
+
+Each review using this pair has a default allowance of US$1. Set `JIDOKA_REVIEW_BUDGET_CENTS` to a positive whole number of US cents to change the allowance for new reviews. Jidoka holds half of the allowance and one generation slot for a closing assessment. Jidoka reserves input and output before each generation, counts retries, and keeps the debit for an interrupted call whose usage is unknown. A restart keeps the same allowance. The budget uses conservative standard text rates and includes thinking tokens. When funds run low, Carbon uses the remaining allowance to close the review with the evidence collected. If the closing request cannot fit, the report keeps verified findings and identifies gaps in coverage. [Google API pricing](https://aistudio.google.com/docs/pricing)
+
 When the model provider returns HTTP 429, Jidoka keeps the review in the queue with its completed work. Reviews for that provider resume after the wait shown on the review page. The wait survives a service restart.
 
 ## Reviewing and publishing

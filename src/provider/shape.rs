@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AnswerShape {
     Hypotheses,
+    EvidenceReads,
     Assessments { leads: bool, reads: bool },
 }
 
@@ -13,6 +14,11 @@ impl AnswerShape {
         // PR text, metadata and source rows are nested under snapshot, never merged here.
         match data.get("answer_shape")?.as_str()? {
             "hypotheses" => Some(Self::Hypotheses),
+            "evidence_reads" if data["review_role"] == "scout" => Some(Self::EvidenceReads),
+            "assessments" if data["review_role"] == "final" => Some(Self::Assessments {
+                leads: false,
+                reads: false,
+            }),
             "assessments" => Some(Self::Assessments {
                 leads: data["hypotheses"].is_array() && data.get("recheck").is_none(),
                 reads: data["allow_assessment_reads"].as_bool() == Some(true),
@@ -24,6 +30,7 @@ impl AnswerShape {
     fn key(self) -> &'static str {
         match self {
             Self::Hypotheses => "hypotheses",
+            Self::EvidenceReads => "reads",
             Self::Assessments { .. } => "assessments",
         }
     }
@@ -33,18 +40,34 @@ impl AnswerShape {
         // The engine replaces the hypotheses list with the unresolved subset
         // before each recheck. Use only its validated, distinct positive IDs.
         let ids = match self {
-            Self::Assessments { .. } => data["hypotheses"].as_array().and_then(|items| {
-                let ids: BTreeSet<_> = items
-                    .iter()
-                    .map(|item| item["id"].as_u64().filter(|id| *id > 0))
-                    .collect::<Option<_>>()?;
-                (ids.len() == items.len()).then_some(ids)
-            }),
+            Self::EvidenceReads | Self::Assessments { .. } => {
+                data["hypotheses"].as_array().and_then(|items| {
+                    let ids: BTreeSet<_> = items
+                        .iter()
+                        .map(|item| item["id"].as_u64().filter(|id| *id > 0))
+                        .collect::<Option<_>>()?;
+                    (ids.len() == items.len()).then_some(ids)
+                })
+            }
             Self::Hypotheses => None,
         };
+        if self == Self::EvidenceReads {
+            let mut id = json!({"type":"integer"});
+            if let Some(ids) = ids.as_ref().filter(|ids| !ids.is_empty()) {
+                id["enum"] = json!(ids);
+            }
+            let mut reads = json!({"type":"array","items":{"type":"object","additionalProperties":false,
+                "properties":{"id":id,"path":{"type":"string"},"term":{"type":"string"}},"required":["id","path","term"]}});
+            if let Some(max) = data["max_reads"].as_u64() {
+                reads["maxItems"] = max.into();
+            }
+            return json!({"type":"json_schema","json_schema":{"name":"evidence_reads","schema":{"type":"object",
+                "additionalProperties":false,"properties":{"reads":reads},"required":["reads"]}}});
+        }
         let limit_ids = ids.as_ref().is_some_and(|ids| !ids.is_empty());
         let item = match self {
             Self::Hypotheses => hypothesis(),
+            Self::EvidenceReads => unreachable!("evidence reads use their own response envelope"),
             Self::Assessments { reads, .. } => assessment(reads, limit_ids),
         };
         let mut schema = json!({
@@ -74,6 +97,15 @@ impl AnswerShape {
         let Some(items) = value[self.key()].as_array() else {
             return false;
         };
+        if self == Self::EvidenceReads {
+            return object.len() == 1
+                && items.iter().all(|row| {
+                    row.as_object().is_some_and(|o| o.len() == 3)
+                        && row["id"].as_u64().is_some_and(|id| id > 0)
+                        && row["path"].is_string()
+                        && row["term"].is_string()
+                });
+        }
         let allowed_reads = matches!(self, Self::Assessments { reads: true, .. });
         value["complete"].is_boolean()
             && items.iter().all(|item| {

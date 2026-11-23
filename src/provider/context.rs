@@ -41,9 +41,6 @@ impl GeminiContext {
         {
             return Ok(None);
         }
-        let model_id = format!("models/{model}");
-        let model_url = endpoint.join(&format!("/v1beta/{model_id}"))?;
-        let count_url = endpoint.join(&format!("/v1beta/{model_id}:countTokens"))?;
         let api_key = if key.is_empty() {
             None
         } else {
@@ -51,14 +48,42 @@ impl GeminiContext {
             header.set_sensitive(true);
             Some(header)
         };
-        Ok(Some(Self {
-            model_url,
-            count_url,
+        Ok(Some(Self::new_at(endpoint, model, api_key)?))
+    }
+
+    fn new_at(endpoint: &Url, model: &str, api_key: Option<HeaderValue>) -> Result<Self> {
+        let model_id = format!("models/{model}");
+        Ok(Self {
+            model_url: endpoint.join(&format!("/v1beta/{model_id}"))?,
+            count_url: endpoint.join(&format!("/v1beta/{model_id}:countTokens"))?,
             model_id,
             api_key,
             limits: OnceLock::new(),
             last_count: Mutex::new(None),
-        }))
+        })
+    }
+
+    pub(super) fn companion(&self, model: &str) -> Result<Self> {
+        Self::new_at(&self.model_url, model, self.api_key.clone())
+    }
+
+    pub(super) fn counted_limits(
+        &self,
+        client: &Client,
+        system: &str,
+        content: &str,
+        format: Option<&Value>,
+    ) -> Result<(u64, u64)> {
+        let limits = self.limits(client)?;
+        let input = self
+            .count(client, system, content)?
+            .saturating_add(framing(format)?);
+        Ok((
+            input,
+            limits
+                .output_token_limit
+                .min(limits.input_token_limit.saturating_sub(input)),
+        ))
     }
 
     fn authenticate(&self, request: RequestBuilder) -> RequestBuilder {
@@ -127,9 +152,7 @@ impl GeminiContext {
             .min(limits.input_token_limit / 2);
         // countTokens measures the messages. Reserve a conservative byte bound
         // for the separate response schema in both budgeting paths.
-        let schema_bytes =
-            format.map_or(Ok(0), |f| serde_json::to_vec(f).map(|v| v.len() as u64))?;
-        let framing = CHAT_FRAMING_TOKENS.saturating_add(schema_bytes);
+        let framing = framing(format)?;
         let text_bytes = system.len().saturating_add(content.len()) as u64;
         // UTF-8 bytes bound the text tokens. Use the tokenizer only when that
         // conservative bound would reduce the available context or output.
@@ -150,12 +173,35 @@ impl GeminiContext {
         Ok(max_output.min(available))
     }
 
-    fn count(&self, client: &Client, system: &str, content: &str) -> Result<u64> {
+    #[cfg(test)]
+    pub(super) fn seed_count(
+        &mut self,
+        system: &str,
+        content: &str,
+        input: u64,
+        window: u64,
+        max_output: u64,
+    ) {
+        // A mismatched test request must never contact a configured model.
+        self.count_url = Url::parse("http://127.0.0.1:0/count").unwrap();
+        self.model_url = self.count_url.clone();
+        self.limits = OnceLock::from(Limits {
+            input_token_limit: window,
+            output_token_limit: max_output,
+        });
+        *self.last_count.lock().unwrap() = Some((Self::count_key(system, content), input));
+    }
+
+    fn count_key(system: &str, content: &str) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(system.len().to_le_bytes());
         hasher.update(system);
         hasher.update(content);
-        let digest: [u8; 32] = hasher.finalize().into();
+        hasher.finalize().into()
+    }
+
+    fn count(&self, client: &Client, system: &str, content: &str) -> Result<u64> {
+        let digest = Self::count_key(system, content);
         if let Some((last, tokens)) = *self.last_count.lock().expect("token count cache poisoned")
             && last == digest
         {
@@ -182,6 +228,11 @@ impl GeminiContext {
             Some((digest, count.total_tokens));
         Ok(count.total_tokens)
     }
+}
+
+fn framing(format: Option<&Value>) -> Result<u64> {
+    let schema_bytes = format.map_or(Ok(0), |f| serde_json::to_vec(f).map(|v| v.len() as u64))?;
+    Ok(CHAT_FRAMING_TOKENS.saturating_add(schema_bytes))
 }
 
 #[cfg(test)]
