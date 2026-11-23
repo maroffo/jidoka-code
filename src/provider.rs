@@ -1,4 +1,6 @@
+mod budget;
 mod context;
+pub use budget::{BudgetQuote, PreparedGeneration};
 mod shape;
 
 use shape::AnswerShape;
@@ -37,6 +39,7 @@ pub struct ModelReply {
 
 pub struct Provider {
     client: Client,
+    budget_client: std::sync::OnceLock<Client>,
     endpoint: Url,
     model: String,
     authorization: Option<HeaderValue>,
@@ -72,21 +75,25 @@ impl Provider {
             value.set_sensitive(true);
             Some(value)
         };
-        let client = Client::builder()
-            .redirect(Policy::none())
-            .no_proxy()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(Duration::from_secs(300))
-            .build()?;
+        let client = Self::client_builder().build()?;
         let context = GeminiContext::for_endpoint(&endpoint, model, &key)?;
         Ok(Self {
             client,
+            budget_client: Default::default(),
             context,
             endpoint,
             model: model.to_owned(),
             authorization,
             label: format!("{address} ({model})"),
         })
+    }
+
+    fn client_builder() -> reqwest::blocking::ClientBuilder {
+        Client::builder()
+            .redirect(Policy::none())
+            .no_proxy()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(Duration::from_secs(300))
     }
 
     pub fn label(&self) -> &str {
@@ -125,27 +132,43 @@ impl Provider {
         let shape = AnswerShape::from_input(data);
         let system = system_content(system, shape);
         let content = user_content(data)?;
-        let mut body = json!({
-            "model": self.model, "messages": [
-                {"role":"system","content":system},
-                {"role":"user","content":content}],
-            "response_format":{"type":"json_object"}
-        });
         let answer_shape = shape.filter(|_| self.context.is_some());
-        if let Some(context) = &self.context {
-            let format = answer_shape.map(|shape| shape.format(data));
-            let max_tokens =
-                context.output_budget(&self.client, &system, &content, format.as_ref())?;
-            if let Some(format) = format {
-                body["response_format"] = format;
-            }
-            // Jidoka reads a pinned repository itself; Gemini returns only JSON text.
+        let format = answer_shape.map(|shape| shape.format(data));
+        let max_tokens = self
+            .context
+            .as_ref()
+            .map(|context| context.output_budget(&self.client, &system, &content, format.as_ref()))
+            .transpose()?;
+        let body = self.chat_body(&system, &content, format, max_tokens);
+        let response = self.submit_generation(body, timeout)?;
+        self.read_response(response, answer_shape, None)
+    }
+
+    fn chat_body(
+        &self,
+        system: &str,
+        content: &str,
+        format: Option<Value>,
+        max_tokens: Option<u64>,
+    ) -> Value {
+        let mut body = json!({"model":self.model, "messages":[
+            {"role":"system","content":system}, {"role":"user","content":content}],
+            "response_format":format.unwrap_or_else(|| json!({"type":"json_object"}))});
+        if let Some(max_tokens) = max_tokens {
             body["tool_choice"] = "none".into();
             body["stream"] = true.into();
             body["stream_options"] = json!({"include_usage":true});
             body["max_tokens"] = max_tokens.into();
         }
-        let response = self.submit_generation(body, timeout)?;
+        body
+    }
+
+    fn read_response(
+        &self,
+        response: Response,
+        answer_shape: Option<AnswerShape>,
+        reserved_output: Option<u64>,
+    ) -> Result<ModelReply> {
         // A gateway may return an ordinary JSON error envelope even for a streaming request.
         let is_json = response
             .headers()
@@ -154,7 +177,7 @@ impl Provider {
             .and_then(|s| s.split(';').next())
             .is_some_and(|s| s.trim().eq_ignore_ascii_case("application/json"));
         if self.context.is_some() && !is_json {
-            return decode_stream(response, answer_shape);
+            return decode_stream(response, answer_shape, reserved_output);
         }
         let mut bytes = Vec::new();
         response
@@ -164,13 +187,23 @@ impl Provider {
             bytes.len() <= MAX_REPLY_BYTES,
             "Provider response exceeds the size limit"
         );
-        decode_reply(&bytes, answer_shape)
+        decode_reply(&bytes, answer_shape, reserved_output)
     }
-    fn submit_generation(&self, mut body: Value, timeout: Duration) -> Result<Response> {
+    fn submit_generation(&self, body: Value, timeout: Duration) -> Result<Response> {
+        self.submit_with(&self.client, body, timeout, true)
+    }
+
+    fn submit_with(
+        &self,
+        client: &Client,
+        mut body: Value,
+        timeout: Duration,
+        allow_schema_retry: bool,
+    ) -> Result<Response> {
         let google = self.context.is_some();
         let started = Instant::now();
         loop {
-            let mut request = self.client.post(self.endpoint.clone()).json(&body);
+            let mut request = client.post(self.endpoint.clone()).json(&body);
             if google {
                 request = request.header(reqwest::header::ACCEPT, "text/event-stream");
             }
@@ -188,10 +221,12 @@ impl Provider {
             let result = check_http_status(response, google);
             // Google rejected this schema before inference. Retry the same turn
             // once, retaining the allowed IDs, evidence rules and output budget.
-            if result.as_ref().is_err_and(|e| {
-                e.downcast_ref::<InvalidReply>()
-                    .is_some_and(|issue| issue.reason == SCHEMA_TOO_COMPLEX)
-            }) && remove_assessment_count(&mut body)
+            if allow_schema_retry
+                && result.as_ref().is_err_and(|e| {
+                    e.downcast_ref::<InvalidReply>()
+                        .is_some_and(|issue| issue.reason == SCHEMA_TOO_COMPLEX)
+                })
+                && remove_assessment_count(&mut body)
             {
                 continue;
             }
@@ -354,8 +389,13 @@ impl RateLimited {
 const SCHEMA_TOO_COMPLEX: &str = "Gemini rejected the review response schema as too complex.";
 
 fn remove_assessment_count(body: &mut Value) -> bool {
-    let Some(array) = body
-        .pointer_mut("/response_format/json_schema/schema/properties/assessments")
+    body.get_mut("response_format")
+        .is_some_and(remove_format_count)
+}
+
+fn remove_format_count(format: &mut Value) -> bool {
+    let Some(array) = format
+        .pointer_mut("/json_schema/schema/properties/assessments")
         .and_then(Value::as_object_mut)
     else {
         return false;
@@ -615,7 +655,11 @@ fn first_present<const N: usize>(values: [&Value; N]) -> &Value {
         .unwrap_or(&Value::Null)
 }
 
-fn decode_stream(reader: impl Read, answer_shape: Option<AnswerShape>) -> Result<ModelReply> {
+fn decode_stream(
+    reader: impl Read,
+    answer_shape: Option<AnswerShape>,
+    reserved_output: Option<u64>,
+) -> Result<ModelReply> {
     // SSE adds a JSON envelope to each output chunk. Bound both transport overhead
     // and reassembled model text, including the case of one unterminated long line.
     const MAX_STREAM_BYTES: usize = 16 * MAX_REPLY_BYTES;
@@ -697,7 +741,7 @@ fn decode_stream(reader: impl Read, answer_shape: Option<AnswerShape>) -> Result
     if !reply["choices"][0].is_null() {
         reply["choices"][0]["message"]["content"] = text.into();
     }
-    decode_message(&reply, Some(done), answer_shape)
+    decode_message(&reply, Some(done), answer_shape, reserved_output)
 }
 
 fn append_chunk(reply: &mut Value, text: &mut String, frame: &Value) -> Result<()> {
@@ -747,7 +791,11 @@ fn append_chunk(reply: &mut Value, text: &mut String, frame: &Value) -> Result<(
     Ok(())
 }
 
-fn decode_reply(bytes: &[u8], answer_shape: Option<AnswerShape>) -> Result<ModelReply> {
+fn decode_reply(
+    bytes: &[u8],
+    answer_shape: Option<AnswerShape>,
+    reserved_output: Option<u64>,
+) -> Result<ModelReply> {
     let reply: Value = serde_json::from_slice(bytes).map_err(|error| {
         let issue = InvalidReply {
             reason: "Provider returned incomplete JSON.",
@@ -760,7 +808,7 @@ fn decode_reply(bytes: &[u8], answer_shape: Option<AnswerShape>) -> Result<Model
             anyhow::Error::new(issue)
         }
     })?;
-    decode_message(&reply, None, answer_shape)
+    decode_message(&reply, None, answer_shape, reserved_output)
 }
 
 impl ReplyDiagnostics {
@@ -878,15 +926,36 @@ fn decode_message(
     reply: &Value,
     stream_done: Option<bool>,
     answer_shape: Option<AnswerShape>,
+    reserved_output: Option<u64>,
 ) -> Result<ModelReply> {
     let first = &reply["choices"][0];
     let message = &first["message"];
     let d = ReplyDiagnostics::read(reply);
     let usage = &reply["usage"];
     let reasoning_tokens = usage["completion_tokens_details"]["reasoning_tokens"].as_u64();
+    let input = usage["prompt_tokens"].as_u64();
+    let output = usage["completion_tokens"].as_u64();
+    let length_stop = [d.finish, d.native_finish]
+        .iter()
+        .any(|reason| matches!(*reason, "length" | "max_tokens"));
+    let output = if let Some(reserved) = reserved_output {
+        // Preserve billed reasoning when the compatibility response separates
+        // candidate and total usage. Missing or contradictory counters keep
+        // the output reservation rather than releasing unverified savings.
+        let residual = usage["total_tokens"]
+            .as_u64()
+            .zip(input)
+            .and_then(|(total, prompt)| total.checked_sub(prompt));
+        output
+            .zip(residual)
+            .map(|(output, residual)| output.max(residual).max(reasoning_tokens.unwrap_or(0)))
+            .filter(|costed| !length_stop || *costed >= reserved)
+    } else {
+        output
+    };
     let usage = TokenUsage {
-        input: usage["prompt_tokens"].as_u64(),
-        output: usage["completion_tokens"].as_u64(),
+        input,
+        output,
         cached: usage["prompt_tokens_details"]["cached_tokens"].as_u64(),
     };
     let issue = |reason| InvalidReply {
@@ -902,10 +971,7 @@ fn decode_message(
     if !reply["error"].is_null() || !first["error"].is_null() {
         return Err(issue("Provider reported an error in its reply.").into());
     }
-    if [d.finish, d.native_finish]
-        .iter()
-        .any(|reason| matches!(*reason, "length" | "max_tokens"))
-    {
+    if length_stop {
         return Err(anyhow::Error::new(crate::ReviewContextExceeded)
             .context(issue("Provider reached the output token limit.")));
     }
@@ -994,11 +1060,11 @@ mod tests {
     use super::*;
 
     fn decode_reply(bytes: &[u8]) -> Result<ModelReply> {
-        super::decode_reply(bytes, None)
+        super::decode_reply(bytes, None, None)
     }
 
     fn decode_stream(reader: impl Read) -> Result<ModelReply> {
-        super::decode_stream(reader, None)
+        super::decode_stream(reader, None, None)
     }
     use std::{
         env,
@@ -1091,6 +1157,16 @@ mod tests {
         body: Value,
         responses: Vec<(u16, Value)>,
     ) -> (Result<Response>, Vec<Value>) {
+        with_http_fixture(google, responses, |provider| {
+            provider.submit_generation(body, Duration::from_secs(3))
+        })
+    }
+
+    pub(super) fn with_http_fixture<T>(
+        google: bool,
+        responses: Vec<(u16, Value)>,
+        call: impl FnOnce(&Provider) -> Result<T>,
+    ) -> (Result<T>, Vec<Value>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let local = format!("http://{}/chat", listener.local_addr().unwrap());
@@ -1146,7 +1222,7 @@ mod tests {
             }
             requests
         });
-        let result = provider.submit_generation(body, Duration::from_secs(3));
+        let result = call(&provider);
         (result, server.join().unwrap())
     }
 
@@ -1236,7 +1312,7 @@ mod tests {
             thread::sleep(timeout * 2);
         });
         let response = send_generation(client.post(url).timeout(timeout), Some(timeout)).unwrap();
-        let error = super::decode_stream(response, None).unwrap_err();
+        let error = super::decode_stream(response, None, None).unwrap_err();
         assert!(error.is::<crate::ReviewBatchInterrupted>());
         assert_eq!(
             error.downcast_ref::<InvalidReply>().unwrap().reason,
@@ -1512,25 +1588,25 @@ mod tests {
             ("stop", answer.clone(), json!({})),
         ] {
             let reply = json!({"choices":[{"finish_reason":finish,"message":{"content":content.to_string(),"tool_calls":tool}}]});
-            let error = super::decode_message(&reply, Some(true), shape).unwrap_err();
+            let error = super::decode_message(&reply, Some(true), shape, None).unwrap_err();
             assert!(error.is::<crate::ReviewBatchInterrupted>());
         }
         let normal =
             json!({"choices":[{"finish_reason":"stop","message":{"content":answer.to_string()}}]});
         assert_eq!(
-            super::decode_message(&normal, Some(true), shape)
+            super::decode_message(&normal, Some(true), shape, None)
                 .unwrap()
                 .value,
             answer
         );
         assert!(
-            super::decode_message(&normal, Some(false), shape)
+            super::decode_message(&normal, Some(false), shape, None)
                 .unwrap_err()
                 .is::<crate::ReviewBatchInterrupted>()
         );
         let refusal = json!({"choices":[{"finish_reason":"content_filter","message":{"content":answer.to_string()}}]});
         assert_eq!(
-            super::decode_message(&refusal, Some(true), shape)
+            super::decode_message(&refusal, Some(true), shape, None)
                 .unwrap_err()
                 .downcast_ref::<InvalidReply>()
                 .unwrap()

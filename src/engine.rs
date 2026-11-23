@@ -5,7 +5,8 @@ mod focus;
 mod interactive;
 pub(crate) use interactive::read_request;
 pub use interactive::{
-    ReviewBatchInterrupted, ReviewContextExceeded, ReviewTurnLimit, review_snapshot_iterative,
+    ReviewBatchInterrupted, ReviewBudgetClosed, ReviewContextExceeded, ReviewTurnLimit,
+    review_snapshot_iterative, review_snapshot_with_planner,
 };
 
 use crate::{
@@ -892,12 +893,25 @@ fn request<'a>(
         limits.push(format!("Review input exceeds the size limit for {stage}."));
         return Ok(None);
     }
-    let mut response = ask(
+    let mut response = match ask(
         &format!("{GROUNDING}{citation_instructions}\n{instructions}"),
         data,
         evidence,
-    )
-    .map_err(|_| anyhow!("The provider failed while {stage}."))?;
+    ) {
+        Ok(response) => response,
+        Err(error)
+            if matches!(protocol, CitationProtocol::Interactive)
+                && error.is::<ReviewBudgetClosed>() =>
+        {
+            limits.push(match pass {
+                Pass::Proposal => "The review budget did not permit discovery for this batch.",
+                Pass::Challenge => "The review budget did not permit the independent check for missed issues in this batch.",
+                Pass::Recheck => "The review budget did not permit rechecking this batch.",
+            }.into());
+            return Ok(None);
+        }
+        Err(_) => anyhow::bail!("The provider failed while {stage}."),
+    };
     let mut leads = Vec::new();
     let mut valid_leads = true;
     if matches!(
@@ -1569,6 +1583,7 @@ struct RecheckReader<'a, F> {
     protocol: CitationProtocol,
     read: F,
     projection: Option<&'a ProjectionGain<'a>>,
+    budgeted_final: Option<&'a std::cell::Cell<bool>>,
 }
 
 fn pending_reads(pending: &[Pending<'_, '_>], interactive: bool) -> Vec<ContextRead> {
@@ -1893,16 +1908,73 @@ fn live_assessments<'a>(
         ));
     }
 
+    // A closed verdict cannot open more source. Keep specific human follow-ups
+    // and verified siblings, and leave unsupported or provisional outcomes open.
+    if let Some(final_sent) = reader.budgeted_final
+        && (final_sent.get()
+            || (initial.complete
+                && !initial.overflow
+                && pending
+                    .iter()
+                    .all(|p| p.undecided.as_ref().is_some_and(|v| v.reads.is_empty()))))
+    {
+        initial.report_incomplete(Pass::Challenge, limits);
+        coverage.stages_finished &= initial.complete && !initial.overflow;
+        for entry in pending {
+            coverage.unresolved(Some(entry.anchor));
+            if let Some(item) = entry.undecided {
+                if let Some(reason) = &item.undecided {
+                    recorded_undecided(limits, entry.anchor, reason);
+                }
+                accepted.push((accepted.len(), item));
+            } else {
+                limits.push(format!(
+                    "No verified adjudication at {}:{}. {}",
+                    entry.anchor.path, entry.anchor.line, entry.feedback
+                ));
+            }
+        }
+        return Ok((
+            accepted.into_iter().map(|(_, item)| item).collect(),
+            coverage,
+        ));
+    }
+
     let mut seen = HashSet::new();
     let mut previous_items = initial.items.clone();
     let mut previous_complete = initial.complete;
     let mut best_repair = None;
     let mut repaired_ids = HashSet::new();
     let repaired = loop {
-        let requests = pending_reads(&pending, interactive);
+        let mut requests = pending_reads(&pending, interactive);
+        if reader.budgeted_final.is_some() {
+            let mut selected_new = false;
+            let mut omitted = Vec::new();
+            requests.retain(|r| {
+                let key = (r.path.clone(), r.term.clone());
+                if evidence.read_owners.contains_key(&key) {
+                    seen.insert(key);
+                    true
+                } else if !selected_new {
+                    selected_new = true;
+                    true
+                } else {
+                    omitted.push(r.clone());
+                    false
+                }
+            });
+            data["additional_reads"] = json!({"selected":requests,"not_executed":omitted});
+        }
         if interactive {
             for entry in &pending {
                 for read in entry.undecided.iter().flat_map(|item| &item.reads) {
+                    if reader.budgeted_final.is_some()
+                        && !requests
+                            .iter()
+                            .any(|r| r.path == read.path && r.term == read.term)
+                    {
+                        continue;
+                    }
                     evidence
                         .read_owners
                         .entry((read.path.clone(), read.term.clone()))
@@ -1946,6 +2018,7 @@ fn live_assessments<'a>(
             .is_some_and(|items| items.len() > before)
             || (requested && reader.projection.is_some_and(|adds| adds(data, evidence)));
         if interactive
+            && reader.budgeted_final.is_none()
             && requested
             && !gained
             && previous_complete
@@ -1969,7 +2042,7 @@ fn live_assessments<'a>(
                 break None;
             }
         };
-        if !interactive || reply.overflow {
+        if !interactive || reader.budgeted_final.is_some() || reply.overflow {
             break Some(reply);
         }
 
@@ -2293,6 +2366,7 @@ where
         RecheckReader {
             protocol,
             projection: None,
+            budgeted_final: None,
             read: |requests: &[ContextRead]| {
                 let result = read(requests)?;
                 Ok(windows.get_or_init(|| result).as_slice())
@@ -2416,30 +2490,35 @@ fn review_passes<'a>(
             data["prior_leads"] = json!(leads);
         }
     }
-    let Some(proposed) = request(
+    let (proposed, discovery_complete) = match request(
         Pass::Proposal,
         protocol,
         &mut data,
         &mut evidence,
         ask,
         &mut report.limits,
-    )?
-    else {
-        return Ok(BatchResult {
-            report,
-            coverage: BatchCoverage::default(),
-            items: RankedItems::default(),
-        });
+    )? {
+        Some(reply) => {
+            reply.report_incomplete(Pass::Proposal, &mut report.limits);
+            (reply.items, reply.complete && !reply.overflow)
+        }
+        // Even when discovery was not admitted, valid prior anchors can still use final adjudication.
+        None if data.get("prior_leads").is_some() => (Vec::new(), false),
+        None => {
+            return Ok(BatchResult {
+                report,
+                coverage: BatchCoverage::default(),
+                items: RankedItems::default(),
+            });
+        }
     };
     data.as_object_mut()
         .expect("review request")
         .remove("prior_leads");
-    proposed.report_incomplete(Pass::Proposal, &mut report.limits);
     let mut discovery = BatchCoverage {
-        stages_finished: proposed.complete && !proposed.overflow,
+        stages_finished: discovery_complete,
         ..BatchCoverage::default()
     };
-    let proposed = proposed.items;
     let mut fresh = Vec::new();
     for (index, item) in proposed.iter().enumerate() {
         if let Some(valid) = proposal(item, index + 1, &evidence) {
@@ -4860,5 +4939,138 @@ mod tests {
             result.report.limits,
             ["Undecided at policy.go:2. The deployed policy configuration was unavailable."]
         );
+    }
+    #[test]
+    fn planner_collects_flash_evidence_then_allows_one_more_carbon_read() {
+        let mut turn = 0;
+        let mut paths = Vec::new();
+        let result=review_snapshot_with_planner(indexed_snapshot(),|system,data|{
+            turn+=1;
+            match turn {
+                1=>{
+                    assert_eq!(data["answer_shape"],"hypotheses");
+                    assert!(data.get("review_role").is_none());
+                    Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot."),indexed_proposal("H8","A public feed might contain drafts.")]}))
+                }
+                2=>{
+                    assert_eq!(data["review_role"],"scout");
+                    assert_eq!(data["answer_shape"],"evidence_reads");
+                    Ok(json!({"reads":[{"id":1,"path":"caller.go","term":"#L8"},{"id":2,"path":"caller.go","term":"#L8"}]}))
+                }
+                3=>{
+                    assert!(data.get("review_role").is_none());
+                    assert_eq!(data["allow_assessment_reads"],true);
+                    assert_eq!(data["scout_evidence"][0]["ids"],json!([1,2]));
+                    let caller=data["snapshot"]["head_context"].as_array().unwrap().iter().find(|w|w["path"]=="caller.go").unwrap();
+                    let mut finding=indexed_capacity_finding(1,"H4","B2","B4");
+                    finding["counterevidence"]["references"]=json!(["H2",caller["rows"][0][1]]);
+                    Ok(json!({"complete":true,"assessments":[finding,{"id":2,"outcome":"indeterminate","countercheck":"Check the publication guard.","reads":[{"path":"caller.go","term":"#L8"},{"path":"guard.go","term":"#L9"},{"path":"unopened.go","term":"policy"}]}]}))
+                }
+                4=>{
+                    assert_eq!(data["review_role"],"final");
+                    assert_eq!(data["answer_shape"],"assessments");
+                    assert!(data.get("allow_assessment_reads").is_none());
+                    assert!(system.contains("Repository reads are closed"));
+                    assert_eq!(data["hypotheses"].as_array().unwrap().len(),1);
+                    assert_eq!(data["additional_reads"]["not_executed"][0]["path"],"unopened.go");
+                    let guard=data["snapshot"]["head_context"].as_array().unwrap().iter().find(|w|w["path"]=="guard.go").unwrap();
+                    Ok(json!({"complete":true,"assessments":[{"id":2,"outcome":"refuted","basis":guard["rows"][0][1],"countercheck":"The publication guard excludes drafts."}]}))
+                }
+                _=>panic!("Only one additional Carbon lookup and a final adjudication are allowed")
+            }
+        },|_,requests|{
+            assert_eq!(requests.len(),1);
+            let path=requests[0].path.clone();
+            paths.push(path.clone());
+            Ok(vec![SourceWindow{path,start:8,text:"enforce_contract(input)".into()}])
+        },|_,_|Ok(true),&[]).unwrap();
+        assert_eq!(turn, 4);
+        assert_eq!(paths, ["caller.go", "guard.go"]);
+        assert_eq!(result.report.findings.len(), 1);
+        assert!(result.report.findings[0].evidence.contains("caller.go:8"));
+        assert!(result.report.limits.is_empty());
+    }
+
+    #[test]
+    fn budget_denial_closes_carbon_with_existing_flash_evidence_and_no_exploratory_retry() {
+        let mut turns = 0;
+        let mut open_denials = 0;
+        let result=review_snapshot_with_planner(indexed_snapshot(),|_,data|{
+            turns+=1;
+            match turns {
+                1=>Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot.")]})),
+                2=>Ok(json!({"reads":[{"id":1,"path":"caller.go","term":"#L21"}]})),
+                3=>{
+                    assert_eq!(data["review_role"],"final");
+                    let w=data["snapshot"]["head_context"].as_array().unwrap().iter().find(|w|w["path"]=="caller.go").unwrap();
+                    let mut finding=indexed_capacity_finding(1,"H4","B2","B4");
+                    finding["counterevidence"]["references"]=json!(["H2",w["rows"][0][1]]);
+                    Ok(json!({"complete":true,"assessments":[finding]}))
+                }
+                _=>panic!("The admitted final verdict must end the investigation")
+            }
+        },|_,_|Ok(vec![SourceWindow{path:"caller.go".into(),start:21,text:"configure(1)".into()}]),
+        |_,data|{if data["allow_assessment_reads"]==true{open_denials+=1;Err(ReviewBudgetClosed.into())}else{Ok(true)}},&[]).unwrap();
+        assert_eq!((turns, open_denials), (3, 1));
+        assert!(result.report.limits.is_empty());
+        assert!(result.report.findings[0].evidence.contains("caller.go:21"));
+    }
+
+    #[test]
+    fn denied_discovery_reserves_final_only_for_actionable_prior_hypotheses() {
+        for path in ["cache.go", "no-longer-present.go"] {
+            let prior = prior_finding(
+                path,
+                2,
+                "Possible slot undercount",
+                "One slot could be reported as zero.",
+            );
+            let mut calls = 0;
+            let result = review_snapshot_with_planner(indexed_snapshot(), |_, data| {
+                calls += 1;
+                if calls == 1 {
+                    assert_eq!(data["answer_shape"], "hypotheses");
+                    return Err(ReviewBudgetClosed.into());
+                }
+                assert_eq!(path, "cache.go", "An empty final cannot adjudicate any prior concern");
+                assert_eq!(calls, 2);
+                assert_eq!(data["review_role"], "final");
+                assert_eq!(data["hypotheses"][0]["origin"], "prior_review");
+                Ok(json!({"complete":true,"assessments":[{"id":1,"outcome":"refuted","basis":"H2","countercheck":"The reviewed expression directly specifies the new capacity."}]}))
+            }, |_, _| panic!("No exploration was admitted"), |_, _| Ok(true), &[prior]).unwrap();
+            assert_eq!(calls, if path == "cache.go" { 2 } else { 1 });
+            assert!(result.reviewed_files.unwrap().is_empty());
+            assert_eq!(
+                result.report.limits,
+                ["The review budget did not permit discovery for this batch."]
+            );
+        }
+    }
+
+    #[test]
+    fn denied_final_keeps_an_already_adjudicated_sibling_and_marks_coverage_incomplete() {
+        for interrupted in [true, false] {
+            let mut turns = 0;
+            let result=review_snapshot_with_planner(indexed_snapshot(),|_,data|{
+            turns+=1;
+            match turns {
+                1=>Ok(json!({"complete":true,"hypotheses":[capacity_proposal("The caller configures one slot."),indexed_proposal("H8","The publisher may show drafts.")]})),
+                2=>Ok(json!({"reads":[]})),
+                3=>Ok(json!({"complete":true,"assessments":[indexed_capacity_finding(1,"H4","B2","B4"),{"id":2,"outcome":"indeterminate","countercheck":"Check the publisher's guard.","reads":[{"path":"caller.go","term":"guard"}]}]})),
+                4=>{assert_eq!(data["review_role"],"final");if interrupted {Err(ReviewBatchInterrupted.into())} else {Err(ReviewBudgetClosed.into())}}
+                _=>panic!("No more model calls after final admission was refused")
+            }
+        },|_,_|Ok(vec![]),|_,_|Ok(true),&[]).unwrap();
+            assert_eq!(turns, 4);
+            assert_eq!(result.report.findings.len(), 1);
+            assert_eq!(result.unfinished_patches().unwrap(), ["feed.ts"]);
+            assert!(
+                result
+                    .report
+                    .limits
+                    .iter()
+                    .any(|l| l.contains("final adjudication"))
+            );
+        }
     }
 }

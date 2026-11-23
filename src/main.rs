@@ -1,5 +1,8 @@
+mod reviewer;
+
 use anyhow::{Context, Result};
 use jidoka_code::{provider::Provider, review_snapshot_iterative, source, web};
+use reviewer::Reviewer;
 use std::{
     collections::HashSet,
     env,
@@ -23,6 +26,15 @@ fn main() -> Result<()> {
         &required("JIDOKA_PROVIDER_URL")?,
         &required("JIDOKA_MODEL")?,
         env::var("JIDOKA_API_KEY").unwrap_or_default(),
+    )?;
+    let budget = env::var("JIDOKA_REVIEW_BUDGET_CENTS");
+    let provider = Reviewer::new(
+        provider,
+        match &budget {
+            Ok(value) => Some(value.as_str()),
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => anyhow::bail!("Invalid review budget setting"),
+        },
     )?;
     let repositories: HashSet<String> = env::var("JIDOKA_REPOS")
         .unwrap_or_default()
@@ -109,7 +121,7 @@ async fn supervise(
     Ok(())
 }
 
-fn poll(db: &Path, provider: &Provider, repositories: &HashSet<String>, next: &mut Instant) {
+fn poll(db: &Path, provider: &Reviewer, repositories: &HashSet<String>, next: &mut Instant) {
     if Instant::now() >= *next {
         if jidoka_code::automation::tick(db, provider.label(), repositories).is_err() {
             eprintln!("Could not complete repository polling");
@@ -118,7 +130,7 @@ fn poll(db: &Path, provider: &Provider, repositories: &HashSet<String>, next: &m
     }
 }
 
-fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mpsc::Receiver<()>) {
+fn work(db: &Path, provider: Reviewer, repositories: &HashSet<String>, stop: mpsc::Receiver<()>) {
     let mut next_poll = Instant::now();
     while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
         poll(db, &provider, repositories, &mut next_poll);
@@ -198,6 +210,7 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
                 session.save_inputs(&snapshot, &prior)?;
                 (snapshot, prior)
             };
+            provider.configure_session(&mut session)?;
             let reviewed_repo = snapshot.repo.to_ascii_lowercase();
             let stopping = || !matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty));
             let eligible = || -> Result<()> {
@@ -214,29 +227,25 @@ fn work(db: &Path, provider: Provider, repositories: &HashSet<String>, stop: mps
                 Ok(())
             };
             let session = std::cell::RefCell::new(session);
-            let outcome = review_snapshot_iterative(
-                snapshot,
-                |system, data| {
-                    session
-                        .borrow_mut()
-                        .ask_when_eligible(system, data, eligible, || {
-                            provider.ask_metered(system, data, Duration::from_secs(10 * 60))
-                        })
-                },
-                |snapshot, requests| {
-                    let windows = repository.read_context(snapshot, requests)?;
-                    web::session::record_reads(db, id, &windows)?;
-                    Ok(windows)
-                },
-                |system, data| {
-                    poll(db, &provider, repositories, &mut next_poll);
-                    eligible()?;
-                    session
-                        .borrow()
-                        .fits_context(system, data, || provider.fits_context(system, data))
-                },
-                &prior,
-            );
+            let ask = |system: &str, data: &serde_json::Value| {
+                provider.ask(&mut session.borrow_mut(), system, data, eligible)
+            };
+            let read = |snapshot: &_, requests: &[_]| {
+                let windows = repository.read_context(snapshot, requests)?;
+                web::session::record_reads(db, id, &windows)?;
+                Ok(windows)
+            };
+            let fits = |system: &str, data: &serde_json::Value| {
+                poll(db, &provider, repositories, &mut next_poll);
+                eligible()?;
+                let session = session.borrow();
+                session.fits_context(system, data, || provider.fits(&session, system, data))
+            };
+            let outcome = if provider.uses_planner() {
+                jidoka_code::engine::review_snapshot_with_planner(snapshot, ask, read, fits, &prior)
+            } else {
+                review_snapshot_iterative(snapshot, ask, read, fits, &prior)
+            };
             if stopping() {
                 return Err(web::session::Paused.into());
             }
