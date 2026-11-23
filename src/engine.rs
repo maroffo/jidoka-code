@@ -893,12 +893,25 @@ fn request<'a>(
         limits.push(format!("Review input exceeds the size limit for {stage}."));
         return Ok(None);
     }
-    let mut response = ask(
+    let mut response = match ask(
         &format!("{GROUNDING}{citation_instructions}\n{instructions}"),
         data,
         evidence,
-    )
-    .map_err(|_| anyhow!("The provider failed while {stage}."))?;
+    ) {
+        Ok(response) => response,
+        Err(error)
+            if matches!(protocol, CitationProtocol::Interactive)
+                && error.is::<ReviewBudgetClosed>() =>
+        {
+            limits.push(match pass {
+                Pass::Proposal => "The review budget did not permit discovery for this batch.",
+                Pass::Challenge => "The review budget did not permit the independent check for missed issues in this batch.",
+                Pass::Recheck => "The review budget did not permit rechecking this batch.",
+            }.into());
+            return Ok(None);
+        }
+        Err(_) => anyhow::bail!("The provider failed while {stage}."),
+    };
     let mut leads = Vec::new();
     let mut valid_leads = true;
     if matches!(
@@ -2477,30 +2490,35 @@ fn review_passes<'a>(
             data["prior_leads"] = json!(leads);
         }
     }
-    let Some(proposed) = request(
+    let (proposed, discovery_complete) = match request(
         Pass::Proposal,
         protocol,
         &mut data,
         &mut evidence,
         ask,
         &mut report.limits,
-    )?
-    else {
-        return Ok(BatchResult {
-            report,
-            coverage: BatchCoverage::default(),
-            items: RankedItems::default(),
-        });
+    )? {
+        Some(reply) => {
+            reply.report_incomplete(Pass::Proposal, &mut report.limits);
+            (reply.items, reply.complete && !reply.overflow)
+        }
+        // Even when discovery was not admitted, valid prior anchors can still use final adjudication.
+        None if data.get("prior_leads").is_some() => (Vec::new(), false),
+        None => {
+            return Ok(BatchResult {
+                report,
+                coverage: BatchCoverage::default(),
+                items: RankedItems::default(),
+            });
+        }
     };
     data.as_object_mut()
         .expect("review request")
         .remove("prior_leads");
-    proposed.report_incomplete(Pass::Proposal, &mut report.limits);
     let mut discovery = BatchCoverage {
-        stages_finished: proposed.complete && !proposed.overflow,
+        stages_finished: discovery_complete,
         ..BatchCoverage::default()
     };
-    let proposed = proposed.items;
     let mut fresh = Vec::new();
     for (index, item) in proposed.iter().enumerate() {
         if let Some(valid) = proposal(item, index + 1, &evidence) {
@@ -4996,6 +5014,37 @@ mod tests {
         assert_eq!((turns, open_denials), (3, 1));
         assert!(result.report.limits.is_empty());
         assert!(result.report.findings[0].evidence.contains("caller.go:21"));
+    }
+
+    #[test]
+    fn denied_discovery_reserves_final_only_for_actionable_prior_hypotheses() {
+        for path in ["cache.go", "no-longer-present.go"] {
+            let prior = prior_finding(
+                path,
+                2,
+                "Possible slot undercount",
+                "One slot could be reported as zero.",
+            );
+            let mut calls = 0;
+            let result = review_snapshot_with_planner(indexed_snapshot(), |_, data| {
+                calls += 1;
+                if calls == 1 {
+                    assert_eq!(data["answer_shape"], "hypotheses");
+                    return Err(ReviewBudgetClosed.into());
+                }
+                assert_eq!(path, "cache.go", "An empty final cannot adjudicate any prior concern");
+                assert_eq!(calls, 2);
+                assert_eq!(data["review_role"], "final");
+                assert_eq!(data["hypotheses"][0]["origin"], "prior_review");
+                Ok(json!({"complete":true,"assessments":[{"id":1,"outcome":"refuted","basis":"H2","countercheck":"The reviewed expression directly specifies the new capacity."}]}))
+            }, |_, _| panic!("No exploration was admitted"), |_, _| Ok(true), &[prior]).unwrap();
+            assert_eq!(calls, if path == "cache.go" { 2 } else { 1 });
+            assert!(result.reviewed_files.unwrap().is_empty());
+            assert_eq!(
+                result.report.limits,
+                ["The review budget did not permit discovery for this batch."]
+            );
+        }
     }
 
     #[test]

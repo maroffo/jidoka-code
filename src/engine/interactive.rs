@@ -478,8 +478,9 @@ fn review_chunk(
                             stop = Some(Stop::Budget);
                             anyhow::bail!("Final adjudication exceeded the review budget.")
                         }
-                        if planning {
-                            return Ok(json!({"complete":false,"hypotheses":[]}));
+                        if planning || data["hypotheses"].as_array().is_some_and(Vec::is_empty) {
+                            // A closed verdict can assess retained anchors, but cannot discover new ones.
+                            return Err(error);
                         }
                         scouting = false;
                         synthesis_turn = 1;
