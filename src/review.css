@@ -182,7 +182,11 @@ button span { float: right }button:hover { background: #285458 }.error { padding
   .nav .brand { flex: 1 0 60% }
   .nav .nav-new { margin-left: auto; order: 1 }
   .nav .nav-history,.nav .nav-settings { order: 2; margin: 0; font-size: .82rem }
-  .pr-search input { width: min(49vw,18rem) }
+  .nav:not(:has(.nav-new)) .brand { flex-basis: 100% }
+  .list-toolbar > div { flex-wrap: wrap; min-width: 0; max-width: 100% }
+  .pr-search { flex: 1 1 auto; min-width: 0; max-width: 100% }
+  .pr-search input { flex: 1 1 9rem; width: 9rem }
+  .pr-search button,.list-toolbar > div > a { flex: none; white-space: nowrap }
   .list-toolbar,.history-row { padding: .85rem }
   .history-row { gap: .6rem; grid-template-columns: minmax(0,1fr) auto }
   .history-row .arrow { display: none }.earlier { margin-inline: .85rem }

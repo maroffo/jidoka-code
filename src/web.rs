@@ -69,6 +69,7 @@ fn init_db(connection: &Connection) -> rusqlite::Result<()> {
             report TEXT,
             error TEXT
         );
+        CREATE INDEX IF NOT EXISTS reviews_pull_history ON reviews(lower(rtrim(url,'/')), id DESC);
         CREATE TABLE IF NOT EXISTS provider_cooldowns (
             provider TEXT PRIMARY KEY,
             retry_at INTEGER NOT NULL,
