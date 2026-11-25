@@ -107,13 +107,13 @@ impl Session {
         Ok(Self { db, id, step: 0 })
     }
 
-    pub fn review_method(&self) -> Result<String> {
+    pub fn review_prompt(&self) -> Result<String> {
         let saved: Option<String> = self.db.query_row(
             "SELECT (SELECT instructions FROM review_prompts WHERE review_id=?)",
             [self.id],
             |r| r.get(0),
         )?;
-        Ok(saved.unwrap_or_else(|| crate::prompt::DEFAULT_METHOD.to_owned()))
+        Ok(saved.unwrap_or_else(crate::prompt::default_prompt))
     }
 
     pub fn agy_invoked(&self) -> Result<bool> {

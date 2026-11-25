@@ -1911,6 +1911,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legacy_prompt_migration_preserves_settings_and_pins_once() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE reviews(id INTEGER PRIMARY KEY);
+            CREATE TABLE prompt_settings(id INTEGER PRIMARY KEY, instructions TEXT NOT NULL);
+            CREATE TABLE review_prompts(review_id INTEGER PRIMARY KEY, instructions TEXT NOT NULL,
+                dry_run INTEGER NOT NULL DEFAULT 0, trial_key TEXT UNIQUE);
+            INSERT INTO prompt_settings VALUES(1,'Current custom method');
+            INSERT INTO review_prompts VALUES(4,'Older custom method',0,NULL),(9,'Dry run draft',1,'trial');").unwrap();
+        for _ in 0..2 {
+            prompt_settings::init(&db).unwrap();
+            for (id, text, dry_run) in [
+                (4, "Older custom method", false),
+                (9, "Dry run draft", true),
+            ] {
+                let pin: (String, bool) = db
+                    .query_row(
+                        "SELECT instructions,dry_run FROM review_prompts WHERE review_id=?",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(pin, (crate::prompt::from_legacy_method(text), dry_run));
+            }
+        }
+        db.execute("INSERT INTO reviews VALUES(10)", []).unwrap();
+        let pinned: String = db
+            .query_row(
+                "SELECT instructions FROM review_prompts WHERE review_id=10",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pinned,
+            crate::prompt::from_legacy_method("Current custom method")
+        );
+        assert!(pinned.contains("score how safe it is to merge"));
+    }
+
     #[tokio::test]
     async fn prompt_preview_trials_and_saves_are_isolated() {
         let f = Fixture::new();
@@ -1933,7 +1973,7 @@ mod tests {
                 .finish()
         };
         let endpoint = "/review-prompt";
-        let draft = "Check <caller> contracts.";
+        let draft = "\n--Check <caller> contracts.\n ";
         let (status, _, html) = f
             .request(
                 Method::POST,
@@ -1943,7 +1983,7 @@ mod tests {
             )
             .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(html.contains(&escape(&crate::prompt::render(draft, "/jobs/review-{id}"))));
+        assert!(html.contains(&format!("<pre>\n{}</pre>", escape(draft))));
         assert!(!html.contains("<caller>"));
         assert!(!f.get(endpoint).await.contains("Check &lt;caller&gt;"));
         for (url, consent) in [
@@ -1985,7 +2025,7 @@ mod tests {
         assert_eq!(
             session::Session::open(&f.db, 1)
                 .unwrap()
-                .review_method()
+                .review_prompt()
                 .unwrap(),
             draft
         );
@@ -2027,14 +2067,14 @@ mod tests {
         assert_eq!(
             session::Session::open(&f.db, 2)
                 .unwrap()
-                .review_method()
+                .review_prompt()
                 .unwrap(),
-            crate::prompt::DEFAULT_METHOD
+            crate::prompt::default_prompt()
         );
         assert_eq!(
             session::Session::open(&f.db, 3)
                 .unwrap()
-                .review_method()
+                .review_prompt()
                 .unwrap(),
             "Use the saved method."
         );
@@ -2045,13 +2085,13 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(pinned, crate::prompt::DEFAULT_METHOD);
+        assert_eq!(pinned, crate::prompt::default_prompt());
         let replay =
             session::replay(&f.db, 1, PROVIDER, &HashSet::from(["test/demo".to_owned()])).unwrap();
         assert_eq!(
             session::Session::open(&f.db, replay)
                 .unwrap()
-                .review_method()
+                .review_prompt()
                 .unwrap(),
             draft
         );

@@ -82,9 +82,9 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
     let home = tempfile::Builder::new().prefix("agy-home-").tempdir()?;
     chown(home.path(), Some(USER), Some(USER))?;
     let output = tempfile::tempfile()?;
-    let method = fs::read_to_string(Path::new(&job).join("review-method.txt"))?;
-    ensure!(jidoka_code::prompt::valid(&method), "Invalid review method");
-    let prompt = jidoka_code::prompt::render(&method, &job);
+    std::os::unix::fs::symlink(&job, home.path().join("workspace"))?;
+    let prompt = fs::read_to_string(Path::new(&job).join("review-prompt.txt"))?;
+    ensure!(jidoka_code::prompt::valid(&prompt), "Invalid review prompt");
     // Refresh outside the agent identity. Never pass refresh tokens, signing keys or the ADC file to tools.
     let proxy = std::env::var("HTTPS_PROXY").unwrap_or_default();
     let mut auth = ProcessGroup(
@@ -159,8 +159,7 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
         .gid(USER)
         .process_group(0)
         .args([
-            "-p",
-            &prompt,
+            &format!("-p={prompt}"),
             "--dangerously-skip-permissions",
             "--disable-slash-commands",
             "--model",

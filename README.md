@@ -61,7 +61,7 @@ With Semgrep installed, run `cargo test --locked -- --include-ignored` to exerci
 
 ### Editing the review prompt
 
-Open **Review prompt** to edit the instructions used across authorized repositories. **Preview prompt** shows the final instructions for free, with a placeholder for the temporary review directory. **Run AGY dry run** uses the current draft on one authorized PR, consumes model credits, and opens a local report in a new tab. The results stay out of GitHub and subsequent reviews. **Save prompt** applies the draft to reviews queued afterwards. Each queued review keeps its original instructions.
+Open **Review prompt** to edit or replace the entire prompt Jidoka sends to AGY across authorized repositories, including the evidence and scoring instructions. **Preview prompt** shows that exact text for free. The runner exposes the review manifest and pinned source under `./workspace` and passes the JSON report schema separately. **Run AGY dry run** uses the current draft on one authorized PR, consumes model credits, and opens a local report in a new tab. The results stay out of GitHub and subsequent reviews. **Save prompt** applies the draft to reviews queued afterwards. Each queued review keeps its original instructions.
 
 ### Tests during AGY reviews
 

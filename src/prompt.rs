@@ -1,19 +1,23 @@
-//! Shared by the prompt preview and the executable that calls AGY.
-pub const DEFAULT_METHOD: &str = include_str!("../runner/review-method.txt");
-pub const MAX_METHOD_BYTES: usize = 8192;
+//! The web editor and AGY runner share one plain-text prompt.
+pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
 
-pub fn valid(method: &str) -> bool {
-    !method.trim().is_empty()
-        && method.len() <= MAX_METHOD_BYTES
-        && !method
-            .chars()
-            .any(|c| c.is_control() && !matches!(c, '\r' | '\n' | '\t'))
+pub fn default_prompt() -> String {
+    from_legacy_method(include_str!("../runner/review-method.txt"))
 }
 
-pub fn render(method: &str, workspace: &str) -> String {
+/// Preserve the instructions used before the editor exposed the whole prompt.
+pub fn from_legacy_method(method: &str) -> String {
     format!(
-        "{}\nReviewer instructions:\n{}\n\nThe review workspace is {workspace}.",
+        "{}\nReviewer instructions:\n{}\n\nThe review workspace is ./workspace.",
         include_str!("../runner/prompt.txt").trim_end(),
         method.trim()
     )
+}
+
+pub fn valid(prompt: &str) -> bool {
+    !prompt.trim().is_empty()
+        && prompt.len() <= MAX_PROMPT_BYTES
+        && !prompt
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\r' | '\n' | '\t'))
 }
