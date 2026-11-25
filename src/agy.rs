@@ -1,7 +1,10 @@
 //! One Antigravity session for a pinned PR. The runner has its own OS environment.
 use anyhow::{Context, Result, ensure};
 use jidoka_code::{
-    contracts::{Finding, FindingEvidence, PublishedReport, Report, Snapshot},
+    contracts::{
+        Finding, FindingEvidence, PublishedReport, Report, Snapshot, valid_review_location,
+        valid_review_text,
+    },
     diff,
     provider::TokenUsage,
     scanner,
@@ -290,8 +293,26 @@ fn apply_verdict(
             .push("AGY did not confirm reviewing every changed text file.".into());
     }
     output.reviewed_files = Some(coverage);
-    output.report.limits.extend(verdict.limits);
-    output.report.notes = verdict.notes;
+    for limit in verdict.limits {
+        if valid_review_text(&limit, 400) {
+            output.report.limits.push(limit);
+        } else {
+            output
+                .report
+                .limits
+                .push("AGY returned an invalid coverage limit.".into());
+        }
+    }
+    for note in verdict.notes {
+        if valid_review_text(&note, 400) {
+            output.report.notes.push(note);
+        } else {
+            output
+                .report
+                .notes
+                .push("An invalid reviewer note was omitted.".into());
+        }
+    }
     let mut score = 100;
     for value in verdict.findings {
         // A malformed finding should not erase valid siblings or the file coverage record.
@@ -303,7 +324,10 @@ fn apply_verdict(
             continue;
         };
         let finding = cited.finding;
-        let valid_quote = !cited.quote.trim().is_empty()
+        let quote = cited.quote.strip_suffix('\r').unwrap_or(&cited.quote);
+        let valid_quote = valid_review_location(&finding.path, finding.line)
+            && valid_review_text(quote, 4096)
+            && !quote.contains(['\n', '\r'])
             && (diff::matches_quote(output, &finding.path, finding.line, &cited.quote)
                 || head_line(&finding.path, finding.line)
                     .is_some_and(|line| line == cited.quote.trim_end_matches('\r')));
@@ -312,7 +336,11 @@ fn apply_verdict(
                 diff::anchor(output, path, line).is_some()
                     || diff::base_citation_path(output, path, line).is_some()
                     || head_line(path, line).is_some()));
-        if !valid_quote || finding.title.trim().is_empty() || !valid_evidence {
+        if !valid_quote
+            || !valid_review_text(&finding.title, 400)
+            || finding.title.contains(['\n', '\r', '\t'])
+            || !valid_evidence
+        {
             output.report.limits.push(
                 "An AGY finding lacked a verified source line or supporting evidence.".into(),
             );
@@ -328,12 +356,13 @@ fn apply_verdict(
         }
     }
     for focus in verdict.focus {
-        if (diff::anchor(output, &focus.path, focus.line).is_some()
-            || diff::base_citation_path(output, &focus.path, focus.line).is_some()
-            || head_line(&focus.path, focus.line).is_some())
+        if valid_review_location(&focus.path, focus.line)
             && [&focus.checked, &focus.outcome, &focus.action]
                 .iter()
-                .all(|s| !s.trim().is_empty())
+                .all(|s| valid_review_text(s, 400))
+            && (diff::anchor(output, &focus.path, focus.line).is_some()
+                || diff::base_citation_path(output, &focus.path, focus.line).is_some()
+                || head_line(&focus.path, focus.line).is_some())
         {
             output.report.focus.push(focus);
         } else {
@@ -406,6 +435,17 @@ mod tests {
         let good = sample_finding();
         for (pointer, invalid) in [
             ("/evidence", json!("Old unstructured result")),
+            ("/title", json!("t".repeat(401))),
+            ("/title", json!("Invalid\nheading")),
+            ("/impact", json!("Invalid\u{1b}impact")),
+            ("/evidence/trigger", json!("t".repeat(601))),
+            ("/evidence/test_gap", json!("g".repeat(401))),
+            ("/evidence/countercheck", json!("c".repeat(401))),
+            ("/evidence/steps/0/explanation", json!("e".repeat(241))),
+            (
+                "/evidence/steps/0/explanation",
+                json!("Hidden\u{202e}direction"),
+            ),
             ("/impact", json!("a".repeat(241))),
             ("/evidence/trigger", json!("   ")),
             ("/evidence/steps", json!([])),
@@ -425,6 +465,36 @@ mod tests {
             assert_eq!(report.report.findings.len(), 1, "{pointer}");
             assert_eq!(report.mergeability_label(), None);
         }
+    }
+
+    #[test]
+    fn bounds_model_prose_before_storage_and_preserves_real_coverage_limits() {
+        let allowed = "é".repeat(400);
+        let over = format!("{allowed}é");
+        let base = json!({"reviewed_files":["x.rs"], "findings":[], "focus":[],
+                          "notes":[allowed, over], "limits":[]});
+        let report = run("SUCCESS", base.clone());
+        assert!(!report.is_partial());
+        assert_eq!(
+            report.report.notes,
+            [allowed.as_str(), "An invalid reviewer note was omitted."]
+        );
+        let mut verdict = base;
+        let formatted = "First paragraph.\r\n\tSecond paragraph.";
+        verdict["limits"] = json!([formatted, over]);
+        verdict["focus"] = json!([{"path":"x.rs","line":1,"action":"Verify the store","outcome":"Needs confirmation","checked":over}]);
+        let report = run("SUCCESS", verdict);
+        assert!(report.is_partial());
+        assert!(report.report.focus.is_empty());
+        assert!(report.report.limits.iter().any(|s| s == formatted));
+        assert!(
+            report
+                .report
+                .limits
+                .iter()
+                .any(|s| s == "AGY returned an invalid coverage limit.")
+        );
+        assert!(!serde_json::to_string(&report).unwrap().contains(&over));
     }
 
     #[test]

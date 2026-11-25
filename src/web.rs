@@ -1034,7 +1034,7 @@ fn source_href(report: &PublishedReport, head: &str, path: &str, line: usize) ->
 /// patch is read once, however many of its lines the prose cites.
 struct Citations<'a> {
     report: &'a PublishedReport,
-    files: RefCell<HashMap<String, Option<crate::diff::HeadLines>>>,
+    files: RefCell<HashMap<String, Option<crate::diff::CitationLines>>>,
 }
 
 impl<'a> Citations<'a> {
@@ -1049,11 +1049,15 @@ impl<'a> Citations<'a> {
         let mut files = self.files.borrow_mut();
         let shown = files
             .entry(path.to_owned())
-            .or_insert_with(|| crate::diff::head_lines(self.report, path));
-        if let Some((file, lines)) = shown
-            && lines.contains(&line)
-        {
-            return Some(format!("#{}", crate::diff::head_id(file, line)));
+            .or_insert_with(|| crate::diff::citation_lines(self.report, path));
+        match shown {
+            Some(crate::diff::CitationLines::Head(file, lines)) if lines.contains(&line) => {
+                return Some(format!("#{}", crate::diff::head_id(file, line)));
+            }
+            Some(crate::diff::CitationLines::Base { path, lines, .. }) if lines.contains(&line) => {
+                return source_href(self.report, &self.report.base, path, line);
+            }
+            _ => {}
         }
         path.contains('/')
             .then(|| source_href(self.report, &self.report.head, path, line))
@@ -1152,13 +1156,9 @@ fn finding_evidence_html(
     let mut steps = String::new();
     for step in &proof.steps {
         let label = format!("{}:{}", escape(&step.path), step.line);
-        let url = match citations.href(&step.path, step.line) {
-            Some(anchor) if anchor.starts_with('#') => Some(anchor),
-            head => match crate::diff::base_citation_path(report, &step.path, step.line) {
-                Some(path) => source_href(report, &report.base, path, step.line),
-                None => head.or_else(|| source_href(report, &report.head, &step.path, step.line)),
-            },
-        };
+        let url = citations
+            .href(&step.path, step.line)
+            .or_else(|| source_href(report, &report.head, &step.path, step.line));
         let location = match url {
             Some(url) => format!(r#"<a href="{}">{label}</a>"#, escape(&url)),
             None => label,
@@ -3203,6 +3203,15 @@ mod tests {
         assert!(
             position(&report, "gone.rs", 1).contains(&format!("/blob/{}/gone.rs#L1", report.base))
         );
+        let citations = Citations::new(&report);
+        assert!(
+            citations
+                .href("gone.rs", 1)
+                .unwrap()
+                .contains(&format!("/blob/{}/gone.rs#L1", report.base))
+        );
+        assert_eq!(citations.href("gone.rs", 999), None);
+        assert_eq!(citations.files.borrow().len(), 1);
     }
 
     #[test]

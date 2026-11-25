@@ -4,13 +4,17 @@
     "reviewed_files": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
       }
     },
     "limits": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 400
       },
       "description": "Material unresolved questions that prevent a reliable verdict on a changed behavior."
     },
@@ -20,14 +24,18 @@
         "type": "object",
         "properties": {
           "path": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
           },
           "line": {
             "type": "integer",
             "minimum": 1
           },
           "title": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
           },
           "impact": {
             "type": "string",
@@ -101,7 +109,9 @@
             ]
           },
           "quote": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
           },
           "mergeability_score": {
             "type": "integer",
@@ -129,20 +139,28 @@
         "type": "object",
         "properties": {
           "path": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
           },
           "line": {
             "type": "integer",
             "minimum": 1
           },
           "checked": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
           },
           "outcome": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
           },
           "action": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
           }
         },
         "required": [
@@ -158,7 +176,9 @@
     "notes": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 400
       },
       "description": "Non-blocking scope and method notes."
     }

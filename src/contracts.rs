@@ -129,20 +129,37 @@ pub struct EvidenceStep {
     pub line: usize,
 }
 
+/// Bounds reviewer-controlled text before it is stored or rendered. Markdown may
+/// use line breaks and tabs; other invisible controls are rejected just as in engine prose.
+pub fn valid_review_text(value: &str, max_chars: usize) -> bool {
+    value.len() <= max_chars.saturating_mul(4)
+        && !value.trim().is_empty()
+        && value.chars().count() <= max_chars
+        && value.split_inclusive('\n').all(|line| {
+            let line = line
+                .strip_suffix("\r\n")
+                .or_else(|| line.strip_suffix('\n'))
+                .unwrap_or(line);
+            line.split('\t').all(crate::source::printable)
+        })
+}
+
+pub fn valid_review_location(path: &str, line: usize) -> bool {
+    line > 0 && crate::source::safe_path(path)
+}
+
 impl StructuredEvidence {
     /// Validate the runner's response again at ingestion, including every pinned location.
     pub fn valid(&self, impact: &str, mut has_line: impl FnMut(&str, usize) -> bool) -> bool {
-        let text = |s: &str, max| !s.trim().is_empty() && s.chars().count() <= max;
-        text(impact, 240)
-            && !impact.trim().contains(['\n', '\r'])
-            && text(&self.trigger, 600)
-            && text(&self.test_gap, 400)
-            && text(&self.countercheck, 400)
+        valid_review_text(impact, 240)
+            && !impact.contains(['\n', '\r', '\t'])
+            && valid_review_text(&self.trigger, 600)
+            && valid_review_text(&self.test_gap, 400)
+            && valid_review_text(&self.countercheck, 400)
             && (1..=6).contains(&self.steps.len())
             && self.steps.iter().all(|step| {
-                text(&step.explanation, 240)
-                    && crate::source::safe_path(&step.path)
-                    && step.line > 0
+                valid_review_text(&step.explanation, 240)
+                    && valid_review_location(&step.path, step.line)
                     && has_line(&step.path, step.line)
             })
     }
