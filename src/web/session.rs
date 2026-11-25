@@ -13,6 +13,7 @@ pub(crate) fn init(db: &Connection) -> rusqlite::Result<()> {
         turns INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER,
         cached_tokens INTEGER, model_ms INTEGER NOT NULL DEFAULT 0, stop_reason TEXT
     );
+    CREATE TABLE IF NOT EXISTS review_subjects (review_id INTEGER PRIMARY KEY, subject TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS review_turns (
         review_id INTEGER NOT NULL, step INTEGER NOT NULL, fingerprint BLOB NOT NULL, reply TEXT NOT NULL,
         PRIMARY KEY(review_id,step)
@@ -572,6 +573,7 @@ pub(crate) fn clear(db: &Connection, id: i64) -> rusqlite::Result<()> {
         "review_splits",
         "review_budget_closures",
         "review_reads",
+        "review_subjects",
         "review_origins",
         "review_replays",
     ] {
@@ -593,6 +595,14 @@ pub(super) fn finish(db: &Connection, id: i64, status: &str, reason: &str) -> Re
         db.execute("DELETE FROM review_splits WHERE review_id=?", [id])?;
         db.execute("DELETE FROM review_turns WHERE review_id=?", [id])?;
         db.execute("DELETE FROM review_budget_closures WHERE review_id=?", [id])?;
+        // Keep the short change subject after discarding the full review input.
+        db.execute(
+            "INSERT OR REPLACE INTO review_subjects(review_id, subject)
+             SELECT review_id, substr(json_extract(snapshot, '$.intent[0]'),1,240)
+             FROM review_runs WHERE review_id=? AND CASE WHEN json_valid(snapshot)
+             THEN json_type(snapshot,'$.intent[0]')='text' ELSE 0 END",
+            [id],
+        )?;
         db.execute(
             "UPDATE review_runs SET snapshot=NULL,prior=NULL WHERE review_id=?",
             [id],

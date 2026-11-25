@@ -1,5 +1,6 @@
 //! Review pages and the persistent, single-user work queue.
 
+mod dashboard;
 mod prompt_settings;
 pub mod session;
 mod workflow;
@@ -68,6 +69,7 @@ fn init_db(connection: &Connection) -> rusqlite::Result<()> {
             report TEXT,
             error TEXT
         );
+        CREATE INDEX IF NOT EXISTS reviews_pull_history ON reviews(lower(rtrim(url,'/')), id DESC);
         CREATE TABLE IF NOT EXISTS provider_cooldowns (
             provider TEXT PRIMARY KEY,
             retry_at INTEGER NOT NULL,
@@ -598,10 +600,11 @@ impl WebState {
 
 async fn home(
     State(state): State<Arc<WebState>>,
+    axum::extract::Query(query): axum::extract::Query<dashboard::HistoryQuery>,
     headers: HeaderMap,
 ) -> Result<Response, StorageError> {
     let (token, cookie) = page_token(&state, &headers);
-    let html = home_page(&state, &token, "", "").await?;
+    let html = home_page(&state, &token, "", "", query).await?;
     Ok(form_page(html, cookie))
 }
 
@@ -733,7 +736,14 @@ async fn submit(
                 .into_response());
         }
     };
-    let html = home_page(&state, token, value, message).await?;
+    let html = home_page(
+        &state,
+        token,
+        value,
+        message,
+        dashboard::HistoryQuery::default(),
+    )
+    .await?;
     Ok((StatusCode::BAD_REQUEST, Html(html)).into_response())
 }
 
@@ -798,7 +808,7 @@ async fn review(
                     let (status, replacement) =
                         displayed_status(&connection, id, &stored, error.as_deref())?;
                     Ok(review_page(
-                        (id, &token, replacement, session::metrics(&connection, id)?, row.get(6)?),
+                        (id, &token, replacement, session::metrics(&connection, id)?, row.get(6)?, dashboard::subject(&connection,id)?),
                         &row.get::<_, String>(0)?,
                         &row.get::<_, String>(1)?,
                         status,
@@ -842,6 +852,11 @@ fn escape(value: &str) -> String {
 }
 
 fn page(title: &str, body: &str) -> String {
+    let new_review = if title == "Review history" {
+        ""
+    } else {
+        r#"<a class="nav-new" href="/#new-review"><span aria-hidden="true">+</span> New review</a>"#
+    };
     format!(
         r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -849,7 +864,7 @@ fn page(title: &str, body: &str) -> String {
 <body><a class="skip" href="#main">Skip to content</a>
 <header class="mast"><nav class="wrap nav" aria-label="Main navigation">
 <a class="brand" href="/"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>Jidoka<span class="brand-code">Code</span></a>
-<a class="nav-history" href="/#history">Review history</a><a class="nav-settings" href="/repositories">Repositories</a><a class="nav-settings" href="/review-prompt">Review prompt</a><a class="nav-new" href="/#new-review"><span aria-hidden="true">+</span> New review</a>
+<a class="nav-history" href="/#history">Review history</a><a class="nav-settings" href="/repositories">Repositories</a><a class="nav-settings" href="/review-prompt">Review prompt</a>{new_review}
 </nav></header><main class="wrap" id="main">{body}</main></body></html>"##,
         escape(title),
         include_str!("review.css"),
@@ -901,46 +916,14 @@ async fn home_page(
     token: &str,
     value: &str,
     error: &str,
+    query: dashboard::HistoryQuery,
 ) -> Result<String, StorageError> {
-    let history = with_db(state, |connection| {
-        let mut stmt = connection.prepare(
-            "SELECT id, url, status, created_at, CASE WHEN json_valid(report)
-                THEN json_array_length(report, '$.findings') END, error,
-                EXISTS (SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run)
-             FROM reviews ORDER BY id DESC",
-        )?;
-        let mut rows = stmt.query([])?;
-        let mut items = String::new();
-        while let Some(row) = rows.next()? {
-            let id: i64 = row.get(0)?;
-            let url: String = row.get(1)?;
-            let stored: String = row.get(2)?;
-            let error: Option<String> = row.get(5)?;
-            let (status, _) = displayed_status(&connection, id, &stored, error.as_deref())?;
-            let created: String = row.get(3)?;
-            let findings = match row.get::<_, Option<usize>>(4)? {
-                Some(1) => " · 1 finding".to_owned(),
-                Some(n) => format!(" · {n} findings"),
-                None => String::new(),
-            };
-            let kind = if row.get::<_, bool>(6)? { "Dry run" } else { "Review" };
-            let name = parse_pull_url(&url).map_or_else(|| escape(&url), |(repo, number)| {
-                format!("{} <b>#{number}</b>", escape(repo))
-            });
-            write!(
-                items,
-                r#"<li><a class="history-row" href="/reviews/{id}"><span><strong>{name}</strong>
-                <small>{kind} {id}{findings} · {} UTC</small></span>{}<span class="arrow" aria-hidden="true">→</span></a></li>"#,
-                escape(&created), status_badge(status)
-            ).unwrap();
-        }
-        Ok(if items.is_empty() {
-            "<p>No reviews yet.</p>".to_owned()
-        } else {
-            format!(r#"<ul class="history-list">{items}</ul>"#)
-        })
+    let history = with_db(state, move |mut connection| {
+        let tx = connection.transaction()?;
+        dashboard::history(&tx, &query)
     })
     .await?;
+    let open = if error.is_empty() { "" } else { " open" };
     let error = if error.is_empty() {
         String::new()
     } else if error == UNAPPROVED {
@@ -951,19 +934,17 @@ async fn home_page(
         format!(r#"<p class="error" role="alert">{}</p>"#, escape(error))
     };
     Ok(page(
-        "New review",
+        "Review history",
         &format!(
-            r#"<div class="hero"><h1>Pull request reviews</h1></div>
-<div class="workspace home">
-<section class="panel history" id="history"><div class="panel-head"><h2>Review history</h2></div>{history}</section>
-<section class="panel compose" id="new-review"><div class="panel-head"><h2>New review</h2></div>{error}
+            r#"<div class="dashboard"><div class="dashboard-head"><h1>Review history</h1>
+<details class="compose start-review"{open}><summary>New review</summary><div id="new-review">{error}
 <form action="/" method="post">
 <input type="hidden" name="csrf_token" value="{token}">
 <label for="url">GitHub pull request URL</label>
 <input id="url" name="url" type="url" placeholder="https://github.com/owner/repo/pull/123" value="{}" required>
 <label class="consent"><input name="consent" type="checkbox" value="yes" required><span>Send this pull request’s code to <strong>{}</strong> for review.</span></label>
 <details class="destination"><summary>Provider details</summary><code>{}</code></details>
-<button type="submit">Start review <span aria-hidden="true">→</span></button></form></section></div>"#,
+<button type="submit">Start review <span aria-hidden="true">→</span></button></form></div></details></div><section class="pr-list" id="history">{history}</section></div>"#,
             escape(value),
             escape(provider_name(&state.provider)),
             escape(&state.provider),
@@ -1128,6 +1109,21 @@ fn evidence_html(report: &PublishedReport, evidence: &str) -> String {
     html
 }
 
+/// Render inline code inside labels while keeping the surrounding prose plain text.
+fn inline_code(source: &str) -> String {
+    let mut html = String::new();
+    let mut cursor = 0;
+    for (event, range) in pulldown_cmark::Parser::new(source).into_offset_iter() {
+        if let pulldown_cmark::Event::Code(code) = event {
+            html.push_str(&escape(&source[cursor..range.start]));
+            write!(html, "<code>{}</code>", escape(&code)).unwrap();
+            cursor = range.end;
+        }
+    }
+    html.push_str(&escape(&source[cursor..]));
+    html
+}
+
 fn finding_card(
     report: &PublishedReport,
     item: &Finding,
@@ -1136,17 +1132,17 @@ fn finding_card(
     let action = focus.map_or_else(String::new, |f| {
         format!(
             r#"<div class="action"><b>Reviewer action</b><p>{}</p></div>"#,
-            escape(&f.action)
+            inline_code(&f.action)
         )
     });
     let check = focus.map_or_else(String::new, |f| format!("<p>{}</p>", escape(&f.checked)));
     format!(
-        r#"<article class="card"><span class="kind"><i></i>Verified finding</span><h3>{}</h3>
-        <div class="location">{}</div><p>{}</p>{action}
+        r#"<article class="card"><h3>{}</h3>
+        <div class="location">{}</div><p class="finding-impact">{}</p>{action}
         <details class="proof"><summary>View evidence</summary><div class="detail-body"><b>{}</b>{check}{}</div></details></article>"#,
         escape(&item.title),
         position(report, &item.path, item.line),
-        escape(&item.impact),
+        inline_code(&item.impact),
         attribution_label(&item.attribution),
         evidence_html(report, &item.evidence)
     )
@@ -1156,19 +1152,36 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
     let manual: Vec<_> = report.human_focus().take(3).collect();
     let mut focus = String::new();
     for item in &manual {
-        write!(focus, r#"<details class="manual-check"><summary>{}</summary><div class="detail-body">{}<p>{}</p><h3>What Jidoka checked</h3>{}</div></details>"#,
-            escape(&item.action),position(report,&item.path,item.line),escape(&item.outcome),evidence_html(report,&item.checked)).unwrap();
+        write!(focus, r#"<details class="manual-check"><summary><span>{}</span></summary><div class="detail-body">{}<p>{}</p><h3>What Jidoka checked</h3>{}</div></details>"#,
+            inline_code(&item.action),position(report,&item.path,item.line),inline_code(&item.outcome),evidence_html(report,&item.checked)).unwrap();
     }
     if focus.is_empty() {
         focus.push_str("<p class=empty>No additional manual checks.</p>");
     }
     let score = (!is_partial).then(|| report.mergeability_label()).flatten();
-    let mut content = score.as_deref().map_or_else(String::new, |label| {
+    let tone = match (
+        is_partial,
+        score.is_some(),
+        report.report.mergeability_score,
+    ) {
+        (true, _, _) | (false, true, Some(0..=89)) => "caution",
+        (false, true, _) => "positive",
+        _ => "neutral",
+    };
+    let mut verdict = score.as_deref().map_or_else(String::new, |label| {
         format!("<p class=decision><strong>{label}</strong></p>")
     });
-    if !is_partial && score.is_none() {
-        content.push_str("<p class=meta>No mergeability score was recorded for this review.</p>");
+    if is_partial {
+        verdict.push_str("<p class=decision><strong>Review incomplete</strong></p>");
+    } else if score.is_none() {
+        let findings = match report.report.findings.len() {
+            0 => "No verified findings".into(),
+            1 => "1 verified finding".into(),
+            n => format!("{n} verified findings"),
+        };
+        write!(verdict, "<div><p class=decision><strong>{findings}</strong></p><p class=meta>No mergeability score was recorded for this review.</p></div>").unwrap();
     }
+    let mut content = String::new();
     let mut extra = String::new();
     for item in &report.report.findings {
         // Earlier reports stored the suggested action for a finding in its focus row.
@@ -1274,8 +1287,8 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
         }
     };
     format!(
-        r##"<div class="review-report">{warnings}<p class="coverage-line">{coverage}</p>
-        <nav class="section-links" aria-label="Report sections"><a href="#findings">Findings ({})</a><a href="#manual">Manual checks ({})</a><a href="#coverage">Tests and coverage</a></nav>
+        r##"<div class="review-report"><div class="review-decision {tone}">{verdict}<p class="coverage-line">{coverage}</p></div>{warnings}
+        <nav class="section-links" aria-label="Report sections"><a href="#findings">Findings ({})</a><a href="#manual">Manual checks ({})</a><a href="#review-diff">View diff</a><a href="#coverage">Tests and coverage</a></nav>
         <div id="findings">{content}</div>
         <section id="manual"><h2>What to check manually</h2>{focus}</section>
         <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Tests and coverage</h2></div>{tests}{notes}{unfinished}{patches}
@@ -1295,7 +1308,14 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
 }
 
 fn review_page(
-    (id, token, replacement, metrics, dry_run): (i64, &str, Option<i64>, Option<String>, bool),
+    (id, token, replacement, metrics, dry_run, subject): (
+        i64,
+        &str,
+        Option<i64>,
+        Option<String>,
+        bool,
+        Option<String>,
+    ),
     url: &str,
     provider: &str,
     status: &str,
@@ -1308,9 +1328,12 @@ fn review_page(
         || (format!("Review {id}"), escape(url)),
         |(repo, number)| {
             (
-                format!("Pull request <span>#{number}</span>"),
+                subject
+                    .as_deref()
+                    .map(escape)
+                    .unwrap_or_else(|| format!("Pull request #{number}")),
                 format!(
-                    r#"<a href="{}">{} ↗</a>"#,
+                    r#"<a href="{}">{} #{number} ↗</a>"#,
                     canonical_pull_url(repo, number),
                     escape(repo)
                 ),
@@ -1345,7 +1368,7 @@ fn review_page(
                         format!(r#"<a class="primary-link" href="/reviews/{id}/submit">Submit review</a>"#)
                     };
                     let details = format!(
-                        r##"<nav class="review-tools" aria-label="Review actions"><a href="#review-diff">View diff</a>{submit}</nav>{}{}{load}"##,
+                        r##"{submit}{}{}{load}"##,
                         report_html(&report, is_partial),
                         crate::diff::render(&report)
                     );
@@ -1369,7 +1392,7 @@ fn review_page(
     page(
         &format!("Review {id}"),
         &format!(
-            r##"<div class="hero"><div class="trail"><a href="/#history">Review history</a><span>/</span>{kind} {id}</div>
+            r##"<div class="hero report-head"><div class="trail"><a href="/#history">Review history</a><span>/</span>{kind} {id}</div>
 <div class="title-line"><h1>{heading}</h1>{}</div>
 <div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div>{metrics}</div>{details}"##,
             status_badge(status),
