@@ -1,0 +1,1 @@
+Review every changed text patch. Try to disprove each candidate before retaining it. For a finding, identify the triggering input, observable impact, and a testable source citation or authoritative reference. Include only verified problems. Give particular attention to regressions, affected callers and missing safeguards.

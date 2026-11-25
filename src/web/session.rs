@@ -67,6 +67,10 @@ pub fn replay(
         params![url, provider],
     )?;
     let new_id = tx.last_insert_rowid();
+    if original.report.dry_run {
+        ensure!(tx.execute("UPDATE review_prompts SET (instructions,dry_run)=(SELECT instructions,1 FROM review_prompts WHERE review_id=?1 AND dry_run) WHERE review_id=?2", params![id,new_id])? == 1,
+            "The original dry-run prompt is unavailable.");
+    }
     tx.execute(
         "INSERT INTO review_runs(review_id,base,head) VALUES(?,?,?)",
         params![new_id, original.base, original.head],
@@ -100,6 +104,15 @@ impl Session {
             [id],
         )?;
         Ok(Self { db, id, step: 0 })
+    }
+
+    pub fn review_method(&self) -> Result<String> {
+        let saved: Option<String> = self.db.query_row(
+            "SELECT (SELECT instructions FROM review_prompts WHERE review_id=?)",
+            [self.id],
+            |r| r.get(0),
+        )?;
+        Ok(saved.unwrap_or_else(|| crate::prompt::DEFAULT_METHOD.to_owned()))
     }
 
     pub fn agy_invoked(&self) -> Result<bool> {

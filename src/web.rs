@@ -1,5 +1,6 @@
 //! Review pages and the persistent, single-user work queue.
 
+mod prompt_settings;
 pub mod session;
 mod workflow;
 
@@ -73,6 +74,7 @@ fn init_db(connection: &Connection) -> rusqlite::Result<()> {
             backoff_seconds INTEGER NOT NULL
         )",
     )?;
+    prompt_settings::init(connection)?;
     session::init(connection)
 }
 
@@ -110,7 +112,7 @@ pub fn latest_review(db: &Path, provider: &str, url: &str) -> Result<Option<Publ
     let raw: Option<String> = connect(db)?
         .query_row(
             "SELECT report FROM reviews WHERE url = ?1 COLLATE NOCASE AND provider = ?2
-         AND status IN ('completed','partial') AND CASE WHEN json_valid(report) THEN
+         AND status IN ('completed','partial') AND NOT EXISTS (SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run) AND CASE WHEN json_valid(report) THEN
          json_extract(report,'$.repo') = ?3 COLLATE NOCASE END ORDER BY id DESC LIMIT 1",
             params![url, provider, repo],
             |row| row.get(0),
@@ -155,6 +157,7 @@ pub fn previous_findings(db: &Path, provider: &str, snapshot: &Snapshot) -> Resu
         .query_row(
             "SELECT json_extract(report, '$.findings') FROM reviews
          WHERE url = ?1 COLLATE NOCASE AND provider = ?2 AND status IN ('partial','completed')
+           AND NOT EXISTS (SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run)
            AND CASE WHEN json_valid(report) THEN
                json_extract(report, '$.repo') = ?3 COLLATE NOCASE
                AND json_extract(report, '$.base') = ?4 AND json_extract(report, '$.head') = ?5
@@ -235,16 +238,16 @@ where
         transaction.commit()?;
         return Ok(false);
     };
-    let expected_head: Option<String> = transaction
-        .query_row(
-            "SELECT head FROM automation_jobs WHERE review_id = ?1",
-            [id],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let (expected_head, dry_run): (Option<String>, bool) = transaction.query_row(
+        "SELECT (SELECT head FROM automation_jobs WHERE review_id=?1),
+                EXISTS (SELECT 1 FROM review_prompts WHERE review_id=?1 AND dry_run)",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     transaction.commit()?;
 
-    let outcome = process(id, &url, expected_head.as_deref()).and_then(|report| {
+    let outcome = process(id, &url, expected_head.as_deref()).and_then(|mut report| {
+        report.report.dry_run = dry_run;
         anyhow::ensure!(
             expected_head
                 .as_deref()
@@ -350,6 +353,10 @@ pub fn router(db: &Path, provider: &str, allowed_repos: &HashSet<String>) -> Res
     });
     Ok(Router::new()
         .route("/", get(home).post(submit))
+        .route(
+            "/review-prompt",
+            get(prompt_settings::show).post(prompt_settings::update),
+        )
         .route("/reviews/{id}", get(review))
         .route(
             "/reviews/{id}/diff",
@@ -622,6 +629,21 @@ async fn checked_form(
     request: Request,
     max_fields: usize,
 ) -> Result<HashMap<String, String>, PageError> {
+    checked_form_with_limit(
+        state,
+        request,
+        max_fields,
+        FORM_LIMIT.max(max_fields.saturating_mul(32)),
+    )
+    .await
+}
+
+async fn checked_form_with_limit(
+    state: &WebState,
+    request: Request,
+    max_fields: usize,
+    limit: usize,
+) -> Result<HashMap<String, String>, PageError> {
     let Some(cookie) = csrf_cookie(request.headers()).filter(|_| same_origin(request.headers()))
     else {
         return Err(PageError::new(StatusCode::FORBIDDEN, FORBIDDEN));
@@ -640,12 +662,7 @@ async fn checked_form(
     }) {
         return Err(PageError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, BAD_FORM));
     }
-    let Ok(body) = to_bytes(
-        request.into_body(),
-        FORM_LIMIT.max(max_fields.saturating_mul(32)),
-    )
-    .await
-    else {
+    let Ok(body) = to_bytes(request.into_body(), limit).await else {
         return Err(PageError::new(StatusCode::PAYLOAD_TOO_LARGE, BAD_FORM));
     };
     if std::str::from_utf8(&body).is_err() {
@@ -772,7 +789,7 @@ async fn review(
                 CASE WHEN status='queued' THEN (SELECT 'Provider rate limit. Automatic retry after '
                     ||datetime(retry_at,'unixepoch')||' UTC.' FROM provider_cooldowns
                     WHERE provider=reviews.provider AND retry_at>unixepoch()) ELSE error END
-             FROM reviews WHERE id = ?1",
+             , EXISTS (SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run) FROM reviews WHERE id = ?1",
                 [id],
                 |row| {
                     let raw_report: Option<String> = row.get(4)?;
@@ -781,7 +798,7 @@ async fn review(
                     let (status, replacement) =
                         displayed_status(&connection, id, &stored, error.as_deref())?;
                     Ok(review_page(
-                        (id, &token, replacement, session::metrics(&connection, id)?),
+                        (id, &token, replacement, session::metrics(&connection, id)?, row.get(6)?),
                         &row.get::<_, String>(0)?,
                         &row.get::<_, String>(1)?,
                         status,
@@ -832,7 +849,7 @@ fn page(title: &str, body: &str) -> String {
 <body><a class="skip" href="#main">Skip to content</a>
 <header class="mast"><nav class="wrap nav" aria-label="Main navigation">
 <a class="brand" href="/"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>Jidoka<span class="brand-code">Code</span></a>
-<a class="nav-history" href="/#history">Review history</a><a class="nav-settings" href="/repositories">Repositories</a><a class="nav-new" href="/#new-review"><span aria-hidden="true">+</span> New review</a>
+<a class="nav-history" href="/#history">Review history</a><a class="nav-settings" href="/repositories">Repositories</a><a class="nav-settings" href="/review-prompt">Review prompt</a><a class="nav-new" href="/#new-review"><span aria-hidden="true">+</span> New review</a>
 </nav></header><main class="wrap" id="main">{body}</main></body></html>"##,
         escape(title),
         include_str!("review.css"),
@@ -888,7 +905,8 @@ async fn home_page(
     let history = with_db(state, |connection| {
         let mut stmt = connection.prepare(
             "SELECT id, url, status, created_at, CASE WHEN json_valid(report)
-                THEN json_array_length(report, '$.findings') END, error
+                THEN json_array_length(report, '$.findings') END, error,
+                EXISTS (SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run)
              FROM reviews ORDER BY id DESC",
         )?;
         let mut rows = stmt.query([])?;
@@ -905,13 +923,14 @@ async fn home_page(
                 Some(n) => format!(" · {n} findings"),
                 None => String::new(),
             };
+            let kind = if row.get::<_, bool>(6)? { "Dry run" } else { "Review" };
             let name = parse_pull_url(&url).map_or_else(|| escape(&url), |(repo, number)| {
                 format!("{} <b>#{number}</b>", escape(repo))
             });
             write!(
                 items,
                 r#"<li><a class="history-row" href="/reviews/{id}"><span><strong>{name}</strong>
-                <small>Review {id}{findings} · {} UTC</small></span>{}<span class="arrow" aria-hidden="true">→</span></a></li>"#,
+                <small>{kind} {id}{findings} · {} UTC</small></span>{}<span class="arrow" aria-hidden="true">→</span></a></li>"#,
                 escape(&created), status_badge(status)
             ).unwrap();
         }
@@ -1245,7 +1264,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
 }
 
 fn review_page(
-    (id, token, replacement, metrics): (i64, &str, Option<i64>, Option<String>),
+    (id, token, replacement, metrics, dry_run): (i64, &str, Option<i64>, Option<String>, bool),
     url: &str,
     provider: &str,
     status: &str,
@@ -1253,6 +1272,7 @@ fn review_page(
     raw_report: Option<&str>,
     failure: Option<&str>,
 ) -> String {
+    let kind = if dry_run { "Dry run" } else { "Review" };
     let (heading, link) = parse_pull_url(url).map_or_else(
         || (format!("Review {id}"), escape(url)),
         |(repo, number)| {
@@ -1288,7 +1308,7 @@ fn review_page(
                         )
                     };
                     let is_partial = status == "partial" || report.is_partial();
-                    let submit = if is_partial {
+                    let submit = if is_partial || report.report.dry_run {
                         String::new()
                     } else {
                         format!(r#"<a class="primary-link" href="/reviews/{id}/submit">Submit review</a>"#)
@@ -1311,7 +1331,7 @@ fn review_page(
     page(
         &format!("Review {id}"),
         &format!(
-            r##"<div class="hero"><div class="trail"><a href="/#history">Review history</a><span>/</span>Review {id}</div>
+            r##"<div class="hero"><div class="trail"><a href="/#history">Review history</a><span>/</span>{kind} {id}</div>
 <div class="title-line"><h1>{heading}</h1>{}</div>
 <div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div>{metrics}</div>{details}"##,
             status_badge(status),
@@ -1518,6 +1538,149 @@ mod tests {
             assert_eq!(status, StatusCode::SEE_OTHER, "{html}");
             headers[header::LOCATION].to_str().unwrap().to_owned()
         }
+    }
+
+    #[tokio::test]
+    async fn prompt_preview_trials_and_saves_are_isolated() {
+        let f = Fixture::new();
+        let (cookie, token) = f.form().await;
+        let headers = [
+            ("cookie", cookie.as_str()),
+            ("origin", ORIGIN),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ];
+        let form = |action: &str, method: &str, url: &str, consent: &str| {
+            url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("csrf_token", token.as_str()),
+                    ("action", action),
+                    ("instructions", method),
+                    ("url", url),
+                    ("nonce", "deadbeefdeadbeefdeadbeefdeadbeef"),
+                    ("consent", consent),
+                ])
+                .finish()
+        };
+        let endpoint = "/review-prompt";
+        let draft = "Check <caller> contracts.";
+        let (status, _, html) = f
+            .request(
+                Method::POST,
+                endpoint,
+                &headers,
+                form("preview", draft, "", ""),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&escape(&crate::prompt::render(draft, "/jobs/review-{id}"))));
+        assert!(!html.contains("<caller>"));
+        assert!(!f.get(endpoint).await.contains("Check &lt;caller&gt;"));
+        for (url, consent) in [
+            (URL, ""),
+            ("https://github.com/unapproved/repo/pull/2", "yes"),
+        ] {
+            assert_eq!(
+                f.request(
+                    Method::POST,
+                    endpoint,
+                    &headers,
+                    form("trial", draft, url, consent)
+                )
+                .await
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        for _ in 0..2 {
+            let (status, h, _) = f
+                .request(
+                    Method::POST,
+                    endpoint,
+                    &headers,
+                    form("trial", draft, URL, "yes"),
+                )
+                .await;
+            assert_eq!(status, StatusCode::SEE_OTHER);
+            assert_eq!(h[header::LOCATION], "/reviews/1");
+        }
+        let conn = connect(&f.db).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM automation_jobs", [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert!(f.get("/reviews/1").await.contains("Dry run 1"));
+        assert_eq!(
+            session::Session::open(&f.db, 1)
+                .unwrap()
+                .review_method()
+                .unwrap(),
+            draft
+        );
+        assert!(run_one(&f.db, |_| Ok(report(None))).unwrap());
+        assert!(latest_review(&f.db, PROVIDER, URL).unwrap().is_none());
+        let page = f.get("/reviews/1").await;
+        assert!(!page.contains("Submit review"));
+        assert_eq!(
+            f.request(Method::GET, "/reviews/1/submit", &[], "").await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            f.request(
+                Method::POST,
+                "/reviews/1/publish",
+                &headers,
+                format!("csrf_token={token}&event=COMMENT")
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        f.enqueue(URL).await;
+        assert_eq!(
+            f.request(
+                Method::POST,
+                endpoint,
+                &headers,
+                form("save", "Use the saved method.", "", "")
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        f.enqueue(URL).await;
+        assert_eq!(
+            session::Session::open(&f.db, 2)
+                .unwrap()
+                .review_method()
+                .unwrap(),
+            crate::prompt::DEFAULT_METHOD
+        );
+        assert_eq!(
+            session::Session::open(&f.db, 3)
+                .unwrap()
+                .review_method()
+                .unwrap(),
+            "Use the saved method."
+        );
+        let replay =
+            session::replay(&f.db, 1, PROVIDER, &HashSet::from(["test/demo".to_owned()])).unwrap();
+        assert_eq!(
+            session::Session::open(&f.db, replay)
+                .unwrap()
+                .review_method()
+                .unwrap(),
+            draft
+        );
+        assert!(
+            conn.query_row(
+                "SELECT dry_run FROM review_prompts WHERE review_id=?",
+                [replay],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
     }
 
     #[tokio::test]

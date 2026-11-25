@@ -56,3 +56,7 @@ cargo test --locked
 With Semgrep installed, run `cargo test --locked -- --include-ignored` to exercise the bundled rule against positive and negative fixtures.
 
 [Product specifications](docs/specifications.md) · [Implementation plan](docs/implementation-plan.md)
+
+### Editing the review prompt
+
+Open **Review prompt** to edit the instructions used across authorized repositories. **Preview prompt** shows the final instructions for free, with a placeholder for the temporary review directory. **Run AGY dry run** uses the current draft on one authorized PR, consumes model credits, and opens a local report in a new tab. The results stay out of GitHub and subsequent reviews. **Save prompt** applies the draft to reviews queued afterwards. Each queued review keeps its original instructions.

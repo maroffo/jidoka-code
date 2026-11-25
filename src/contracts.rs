@@ -101,6 +101,8 @@ pub enum Attribution {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Report {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mergeability_score: Option<u8>,
     pub focus: Vec<Focus>,

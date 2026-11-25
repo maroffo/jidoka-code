@@ -3,6 +3,7 @@ pub mod contracts;
 pub mod diff;
 pub mod engine;
 pub(crate) mod hunks;
+pub mod prompt;
 pub mod provider;
 pub mod publish;
 pub mod scanner;

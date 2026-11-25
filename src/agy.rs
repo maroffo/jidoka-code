@@ -130,6 +130,10 @@ impl Reviewer {
         let input = json!({"base":output.base,"head":output.head,"intent":snapshot.intent,
             "changed_files":output.diff,"previous_findings":prior,
             "semgrep":output.scan.as_ref().map(|scan| &scan.signals)});
+        fs::write(
+            directory.join("review-method.txt"),
+            session.review_method()?,
+        )?;
         fs::write(directory.join("review.json"), serde_json::to_vec(&input)?)?;
         fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?;
         eligible()?;

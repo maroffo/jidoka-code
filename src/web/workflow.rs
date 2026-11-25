@@ -47,6 +47,12 @@ async fn target(state: &WebState, id: i64) -> Result<Target, PageError> {
 
 async fn submission_target(state: &WebState, id: i64) -> Result<Target, PageError> {
     let target = target(state, id).await?;
+    if target.report.report.dry_run {
+        return Err(PageError::new(
+            StatusCode::CONFLICT,
+            "Dry runs cannot be submitted to GitHub.",
+        ));
+    }
     if target.is_partial {
         return Err(PageError::new(
             StatusCode::CONFLICT,
