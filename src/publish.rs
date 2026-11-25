@@ -105,6 +105,9 @@ fn prepare_findings(
         selected: selected.to_vec(),
         inline,
     };
+    if compact && let Some(label) = report.mergeability_label() {
+        writeln!(prepared.body, "\n**{label}**").unwrap();
+    }
     let mut seen = HashSet::new();
     let mut inline_evidence = HashSet::new();
     let mut findings = selected
@@ -482,7 +485,11 @@ fn location(report: &PublishedReport, path: &str, line: usize) -> String {
     // A delimiter longer than any run of backticks in the path keeps its spelling verbatim.
     let ticks = "`".repeat(1 + path.split(|ch| ch != '`').map(str::len).max().unwrap_or(0));
     let label = format!("{ticks} {path} {ticks}, line {line}");
-    if line == 0 || !valid_repo(&report.repo) || !valid_sha(&report.head) {
+    let (revision, path) = crate::diff::base_citation_path(report, path, line)
+        .map_or((report.head.as_str(), path), |base_path| {
+            (report.base.as_str(), base_path)
+        });
+    if line == 0 || !valid_repo(&report.repo) || !valid_sha(revision) {
         return label;
     }
     let mut encoded = String::new();
@@ -495,7 +502,7 @@ fn location(report: &PublishedReport, path: &str, line: usize) -> String {
     }
     format!(
         "[{label}]({WEB}/{}/blob/{}/{encoded}#L{line})",
-        report.repo, report.head
+        report.repo, revision
     )
 }
 
@@ -518,6 +525,10 @@ pub fn submit(
     ensure!(
         !report.is_partial(),
         "Only completed reviews can be submitted to GitHub."
+    );
+    ensure!(
+        !report.report.dry_run,
+        "Dry runs cannot be submitted to GitHub."
     );
     let submission = Submission::new(report, number, prepared, event, automatic)?;
     let token = token(automatic, |name| env::var(name).ok())?;

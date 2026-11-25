@@ -101,6 +101,10 @@ pub enum Attribution {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Report {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mergeability_score: Option<u8>,
     pub focus: Vec<Focus>,
     pub findings: Vec<Finding>,
     pub limits: Vec<String>,
@@ -124,6 +128,20 @@ pub struct PublishedReport {
 }
 
 impl PublishedReport {
+    /// Older and incomplete reviews do not have a merge recommendation.
+    pub fn mergeability_label(&self) -> Option<String> {
+        let score = self
+            .report
+            .mergeability_score
+            .filter(|&n| n <= 100 && !self.is_partial())?;
+        let decision = if score >= 90 {
+            "Ready to merge"
+        } else {
+            "Hold merge"
+        };
+        Some(format!("Mergeability: {score}/100 · {decision}"))
+    }
+
     pub fn is_partial(&self) -> bool {
         !self.report.limits.is_empty()
             || self

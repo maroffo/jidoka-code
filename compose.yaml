@@ -1,20 +1,69 @@
 services:
   web:
-    build: .
-    # Finish the in-flight model call and checkpoint the review before shutdown.
-    stop_grace_period: 17m
+    build:
+      context: .
+      target: web
+    depends_on:
+      - agy
+    stop_grace_period: 1m
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       JIDOKA_REPOS: ${JIDOKA_REPOS:-}
-      JIDOKA_PROVIDER_URL: ${JIDOKA_PROVIDER_URL:?set the full provider URL}
+      JIDOKA_MODEL: ${JIDOKA_MODEL:-Gemini 4 Carbon (High)}
       JIDOKA_REVIEW_BUDGET_CENTS: ${JIDOKA_REVIEW_BUDGET_CENTS:-}
-      JIDOKA_MODEL: ${JIDOKA_MODEL:?set the model name}
       JIDOKA_GITHUB_TOKEN: ${JIDOKA_GITHUB_TOKEN:-}
       JIDOKA_REVIEWER_TOKEN: ${JIDOKA_REVIEWER_TOKEN:-}
       JIDOKA_BOT_TOKEN: ${JIDOKA_BOT_TOKEN:-}
-      JIDOKA_API_KEY: ${JIDOKA_API_KEY:-}
     volumes:
       - reviews:/data
+      - jobs:/jobs
+      - control:/control
+  egress:
+    build:
+      context: .
+      target: agy-egress
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs: [/tmp, /run]
+    networks: [reviewer, cloud]
+  agy:
+    depends_on:
+      - egress
+    networks: [reviewer]
+    build:
+      context: .
+      target: agy-runner
+    restart: unless-stopped
+    read_only: true
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID, KILL]
+    environment:
+      HTTPS_PROXY: http://egress:3128
+      GOOGLE_CLOUD_QUOTA_PROJECT: ${GOOGLE_CLOUD_QUOTA_PROJECT:?set the AGY billing project}
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-global}
+    secrets:
+      - source: agy_adc
+        target: /authority/adc.json
+    tmpfs:
+      - /tmp:mode=1777,size=1g
+    volumes:
+      - jobs:/jobs:ro
+      - control:/control
 volumes:
   reviews:
+  jobs:
+  control:
+secrets:
+  agy_adc:
+    file: ${JIDOKA_AGY_ADC_FILE:?set the path to reviewer Application Default Credentials}
+networks:
+  reviewer:
+    internal: true
+  cloud: {}

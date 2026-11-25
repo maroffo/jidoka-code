@@ -17,6 +17,7 @@ pub(crate) fn init(db: &Connection) -> rusqlite::Result<()> {
         review_id INTEGER NOT NULL, step INTEGER NOT NULL, fingerprint BLOB NOT NULL, reply TEXT NOT NULL,
         PRIMARY KEY(review_id,step)
     );
+    CREATE TABLE IF NOT EXISTS agy_invocations (review_id INTEGER PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS review_splits (
         review_id INTEGER NOT NULL,step INTEGER NOT NULL,fingerprint BLOB NOT NULL,interrupted INTEGER NOT NULL,
         PRIMARY KEY(review_id,step)
@@ -66,6 +67,10 @@ pub fn replay(
         params![url, provider],
     )?;
     let new_id = tx.last_insert_rowid();
+    if original.report.dry_run {
+        ensure!(tx.execute("UPDATE review_prompts SET (instructions,dry_run)=(SELECT instructions,1 FROM review_prompts WHERE review_id=?1 AND dry_run) WHERE review_id=?2", params![id,new_id])? == 1,
+            "The original dry-run prompt is unavailable.");
+    }
     tx.execute(
         "INSERT INTO review_runs(review_id,base,head) VALUES(?,?,?)",
         params![new_id, original.base, original.head],
@@ -99,6 +104,50 @@ impl Session {
             [id],
         )?;
         Ok(Self { db, id, step: 0 })
+    }
+
+    pub fn review_method(&self) -> Result<String> {
+        let saved: Option<String> = self.db.query_row(
+            "SELECT (SELECT instructions FROM review_prompts WHERE review_id=?)",
+            [self.id],
+            |r| r.get(0),
+        )?;
+        Ok(saved.unwrap_or_else(|| crate::prompt::DEFAULT_METHOD.to_owned()))
+    }
+
+    pub fn agy_invoked(&self) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agy_invocations WHERE review_id=?)",
+            [self.id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Claim one AGY process per review. An interrupted paid run needs an explicit replay.
+    pub fn claim_agy(&mut self) -> Result<bool> {
+        let tx = self.db.transaction()?;
+        let claimed = tx.execute(
+            "INSERT OR IGNORE INTO agy_invocations(review_id) VALUES(?)",
+            [self.id],
+        )? == 1;
+        if claimed {
+            tx.execute(
+                "UPDATE review_runs SET turns=1 WHERE review_id=?",
+                [self.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(claimed)
+    }
+
+    pub fn record_agy_usage(
+        &self,
+        usage: crate::provider::TokenUsage,
+        elapsed_ms: i64,
+    ) -> Result<()> {
+        self.db.execute("UPDATE review_runs SET input_tokens=?,output_tokens=?,cached_tokens=?,model_ms=? WHERE review_id=?",
+            params![usage.input,usage.output,usage.cached,elapsed_ms,self.id])?;
+        Ok(())
     }
 
     /// Pin a prospective spending limit on first use. Existing reviews keep their original limit.
@@ -530,7 +579,7 @@ pub(crate) fn clear(db: &Connection, id: i64) -> rusqlite::Result<()> {
     }
     // Paid attempts belong to the review ID, including when an automatic review restarts
     // on a fresh merge base. Legacy unbudgeted jobs retain their original reset behavior.
-    db.execute("DELETE FROM review_runs WHERE review_id=?1 AND NOT EXISTS (SELECT 1 FROM review_budgets WHERE review_id=?1)",[id])?;
+    db.execute("DELETE FROM review_runs WHERE review_id=?1 AND NOT EXISTS (SELECT 1 FROM review_budgets WHERE review_id=?1) AND NOT EXISTS (SELECT 1 FROM agy_invocations WHERE review_id=?1)",[id])?;
     db.execute("UPDATE review_runs SET base=NULL,head=NULL,snapshot=NULL,prior=NULL,stop_reason=NULL WHERE review_id=?",[id])?;
     Ok(())
 }
@@ -586,13 +635,18 @@ pub fn record_reads(db: &Path, id: i64, windows: &[crate::contracts::SourceWindo
 
 pub(super) fn metrics(db: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
     db.query_row(
-        "SELECT turns,input_tokens,output_tokens,model_ms,CASE WHEN (SELECT status FROM reviews WHERE id=review_id)='failed' THEN stop_reason END FROM review_runs WHERE review_id=?",
+        "SELECT turns,input_tokens,output_tokens,model_ms,CASE WHEN (SELECT status FROM reviews WHERE id=review_id)='failed' THEN stop_reason END, EXISTS(SELECT 1 FROM agy_invocations a WHERE a.review_id=review_runs.review_id), cached_tokens FROM review_runs WHERE review_id=?",
         [id],
         |r| {
             let turns: i64 = r.get(0)?;
             let ms: i64 = r.get(3)?;
             let unit = if turns == 1 { "turn" } else { "turns" };
-            let mut summary = format!("{turns} model {unit} · {}s waiting for model", ms / 1000);
+            let agy = r.get::<_,bool>(5)?;
+            let mut summary = if agy { format!("1 AGY session · {}s elapsed", ms / 1000) }
+                else { format!("{turns} model {unit} · {}s waiting for model", ms / 1000) };
+            if agy && let Some(cached) = r.get::<_,Option<i64>>(6)? {
+                summary.push_str(&format!(" · {cached} cached input tokens"));
+            }
             if let Some(tokens) = r.get::<_, Option<i64>>(1)? {
                 summary.push_str(&format!(" · {tokens} input tokens"));
             }

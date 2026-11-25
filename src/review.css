@@ -118,3 +118,8 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 .setup-help p { margin-top: 4px }
 
 .settings-feedback { margin-bottom: 16px; font-size: .875rem; color: var(--sub) }
+
+.prompt-editor { max-width: 54rem; display: grid; gap: 1rem; }
+.prompt-editor textarea { box-sizing: border-box; width: 100%; padding: .7rem; font: inherit; resize: vertical; }
+.prompt-editor .prompt-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.prompt-editor pre { white-space: pre-wrap; overflow-wrap: anywhere; }
