@@ -24,18 +24,116 @@ pub(super) fn subject(connection: &Connection, id: i64) -> rusqlite::Result<Opti
     }))
 }
 
-fn run_rows(db: &Connection, key: &str, latest: i64) -> rusqlite::Result<String> {
+/// The signal tone and the words beside it for one run. The words carry the outcome on their own.
+///
+/// `partial` also covers a completed row whose saved report lists coverage limits.
+fn outcome(
+    status: &str,
+    partial: bool,
+    score: Option<u8>,
+    findings: Option<usize>,
+) -> (&'static str, String) {
+    let count = |n: usize| match n {
+        1 => "1 finding".to_owned(),
+        n => format!("{n} findings"),
+    };
+    let finished = matches!(status, "completed" | "partial");
+    let partial = partial || status == "partial";
+    let Some(found) = findings.filter(|_| finished) else {
+        return match status {
+            "partial" => ("hold", "Review incomplete".into()),
+            "queued" | "running" => ("busy", status_label(status).into()),
+            _ => ("off", status_label(status).into()),
+        };
+    };
+    let score = score.filter(|_| !partial);
+    let words = match (partial, score) {
+        (true, _) if found > 0 => format!("Review incomplete · {}", count(found)),
+        (true, _) => "Review incomplete".into(),
+        (false, Some(n)) if n >= crate::contracts::MERGE_READY => {
+            format!("{n}/100 · Ready to merge")
+        }
+        (false, Some(n)) => format!("{n}/100 · Hold merge"),
+        (false, None) if found == 0 => "No findings".into(),
+        (false, None) => count(found),
+    };
+    (crate::contracts::outcome_tone(partial, score, found), words)
+}
+
+/// Name a UTC day relative to today, falling back to the weekday and date.
+fn day_label(day: &str, today: &str, yesterday: &str) -> String {
+    if day == today {
+        return "Today".into();
+    }
+    if day == yesterday {
+        return "Yesterday".into();
+    }
+    let mut parts = day.splitn(3, '-').map(|part| part.parse::<usize>().ok());
+    let (Some(Some(year)), Some(Some(month)), Some(Some(date))) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return day.to_owned();
+    };
+    if !(1..=12).contains(&month) {
+        return day.to_owned();
+    }
+    // Sakamoto's method for the Gregorian weekday.
+    let shifted = if month < 3 {
+        year.saturating_sub(1)
+    } else {
+        year
+    };
+    let weekday = (shifted + shifted / 4 - shifted / 100
+        + shifted / 400
+        + [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4][month - 1]
+        + date)
+        % 7;
+    let weekday = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ][weekday];
+    let month = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ][month - 1];
+    if today.starts_with(&format!("{year:04}-")) {
+        format!("{weekday} {date} {month}")
+    } else {
+        format!("{weekday} {date} {month} {year}")
+    }
+}
+
+/// Render one pull request and return it with the UTC day of its latest run.
+fn run_rows(db: &Connection, key: &str, latest: i64) -> rusqlite::Result<(String, String)> {
     let mut stmt = db.prepare("SELECT id,url,status,created_at,error,
         CASE WHEN json_valid(report) THEN json_array_length(report,'$.findings') END,
         CASE WHEN json_valid(report) THEN CASE WHEN json_type(report,'$.mergeability_score')='integer'
           AND coalesce(json_array_length(report,'$.limits'),0)=0 AND coalesce(json_array_length(report,'$.scan.limits'),0)=0
           THEN json_extract(report,'$.mergeability_score') END END,
-        EXISTS(SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run)
+        EXISTS(SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run),
+        CASE WHEN json_valid(report) THEN coalesce(json_array_length(report,'$.limits'),0)
+          + coalesce(json_array_length(report,'$.scan.limits'),0) > 0 ELSE 0 END
         FROM reviews WHERE lower(rtrim(url,'/'))=? ORDER BY id DESC")?;
     let mut rows = stmt.query([key])?;
     let mut primary = String::new();
     let mut earlier = String::new();
     let mut count = 0;
+    let mut day = String::new();
     let title = subject(db, latest)?;
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
@@ -44,26 +142,24 @@ fn run_rows(db: &Connection, key: &str, latest: i64) -> rusqlite::Result<String>
         let created: String = row.get(3)?;
         let error: Option<String> = row.get(4)?;
         let (status, _) = displayed_status(db, id, &stored, error.as_deref())?;
-        let findings = match row.get::<_, Option<usize>>(5)? {
-            Some(1) => "1 finding".into(),
-            Some(n) => format!("{n} findings"),
-            None => String::new(),
-        };
+        let findings = row.get::<_, Option<usize>>(5)?;
         let score = row
             .get::<_, Option<i64>>(6)?
-            .filter(|n| (0..=100).contains(n) && status == "completed");
-        let result = match score {
-            Some(n) => format!(
-                r#"<span class="recommend {}">{n}/100 · {}</span><span class="diff-sr-only">{}</span>"#,
-                if n >= 90 { "ready" } else { "hold" },
-                if n >= 90 {
-                    "Ready to merge"
-                } else {
-                    "Hold merge"
-                },
-                status_label(status)
-            ),
-            None => status_badge(status),
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| *n <= 100 && status == "completed");
+        let partial: bool = row.get(8)?;
+        let (tone, words) = outcome(status, partial, score, findings);
+        // The state read aloud matches the words: a completed row with coverage limits is partial.
+        let shown = if partial && status == "completed" {
+            "partial"
+        } else {
+            status
+        };
+        // A scored row leads with the recommendation, so its finding count moves below.
+        let detail = match (score, findings) {
+            (Some(_), Some(1)) => "1 finding".to_owned(),
+            (Some(_), Some(n)) => format!("{n} findings"),
+            _ => String::new(),
         };
         let kind = if row.get::<_, bool>(7)? {
             "Dry run"
@@ -81,19 +177,21 @@ fn run_rows(db: &Connection, key: &str, latest: i64) -> rusqlite::Result<String>
         } else {
             String::new()
         };
-        let dst = if id == latest {
-            &mut primary
+        // The day heading already dates the latest run; earlier runs can be older.
+        let (dst, when) = if id == latest {
+            day = created.get(..10).unwrap_or(&created).to_owned();
+            (&mut primary, created.get(11..16).unwrap_or(&created))
         } else {
             count += 1;
-            &mut earlier
+            (&mut earlier, created.get(..16).unwrap_or(&created))
         };
-        write!(dst,r#"<a class="history-row" href="/reviews/{id}"><span class="pr-identity"><strong>{headline}</strong><small>{repo}{kind} {id} · {} UTC</small></span><span class="row-outcome">{result}<small>{findings}</small></span><span class="arrow" aria-hidden="true">›</span></a>"#,escape(created.get(..16).unwrap_or(&created))).unwrap();
+        write!(dst,r#"<a class="history-row" href="/reviews/{id}">{}<span class="pr-identity"><strong>{headline}</strong><small>{repo}{kind} {id}</small></span><span class="row-outcome {tone}">{} <span class="diff-sr-only">{}</span><small>{detail}</small></span><span class="row-when">{} UTC</span></a>"#,lamp(tone),escape(&words),status_label(shown),escape(when)).unwrap();
     }
     if count > 0 {
         let noun = if count == 1 { "run" } else { "runs" };
         write!(primary,r#"<details class="earlier"><summary>{count} earlier {noun}</summary>{earlier}</details>"#).unwrap();
     }
-    Ok(format!("<li>{primary}</li>"))
+    Ok((day, format!("<li>{primary}</li>")))
 }
 
 pub(super) fn history(db: &Connection, query: &HistoryQuery) -> rusqlite::Result<String> {
@@ -117,9 +215,30 @@ pub(super) fn history(db: &Connection, query: &HistoryQuery) -> rusqlite::Result
     let page = query.page.clamp(1, pages);
     let mut stmt = db.prepare(&format!("SELECT lower(rtrim(url,'/')) AS pr,max(id) AS latest FROM reviews WHERE {matches} GROUP BY pr ORDER BY latest DESC LIMIT ?2 OFFSET ?3"))?;
     let mut rows = stmt.query(params![needle, PAGE, (page - 1) * PAGE])?;
+    let (today, yesterday): (String, String) =
+        db.query_row("SELECT date('now'), date('now','-1 day')", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
     let mut items = String::new();
+    let mut current: Option<String> = None;
     while let Some(row) = rows.next()? {
-        items.push_str(&run_rows(db, &row.get::<_, String>(0)?, row.get(1)?)?);
+        let (day, item) = run_rows(db, &row.get::<_, String>(0)?, row.get(1)?)?;
+        if current.as_deref() != Some(&day) {
+            if current.is_some() {
+                items.push_str("</ul>");
+            }
+            write!(
+                items,
+                r#"<h3 class="day">{}</h3><ul class="history-list">"#,
+                escape(&day_label(&day, &today, &yesterday))
+            )
+            .unwrap();
+            current = Some(day);
+        }
+        items.push_str(&item);
+    }
+    if current.is_some() {
+        items.push_str("</ul>");
     }
     let form = format!(
         r#"<form class="pr-search" method="get" action="/"><label class="diff-sr-only" for="q">Search by repository or PR number</label><input id="q" type="search" name="q" placeholder="Repository or #PR" value="{}"><button>Search</button></form>"#,
@@ -137,7 +256,7 @@ pub(super) fn history(db: &Connection, query: &HistoryQuery) -> rusqlite::Result
             "<p class=empty>No matching pull requests.</p>".into()
         }
     } else {
-        format!(r#"<ul class="history-list">{items}</ul>"#)
+        items
     };
     let mut paging = String::new();
     if pages > 1 {
@@ -166,6 +285,75 @@ pub(super) fn history(db: &Connection, query: &HistoryQuery) -> rusqlite::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_outcome_reads_without_its_signal_and_days_are_named_in_utc() {
+        for (status, partial, score, findings, tone, words) in [
+            (
+                "completed",
+                false,
+                Some(90),
+                Some(2),
+                "clear",
+                "90/100 · Ready to merge",
+            ),
+            (
+                "completed",
+                false,
+                Some(89),
+                Some(0),
+                "stop",
+                "89/100 · Hold merge",
+            ),
+            ("completed", false, None, Some(0), "clear", "No findings"),
+            ("completed", false, None, Some(1), "stop", "1 finding"),
+            ("completed", false, None, None, "off", "Completed"),
+            // A completed row whose saved report lists limits reads as the report page shows it.
+            (
+                "completed",
+                true,
+                Some(95),
+                Some(0),
+                "hold",
+                "Review incomplete",
+            ),
+            (
+                "partial",
+                false,
+                None,
+                Some(2),
+                "stop",
+                "Review incomplete · 2 findings",
+            ),
+            ("partial", false, None, Some(0), "hold", "Review incomplete"),
+            ("partial", false, None, None, "hold", "Review incomplete"),
+            ("running", false, None, None, "busy", "In progress"),
+            ("canceled", false, None, None, "off", "Canceled"),
+            ("failed", false, None, Some(3), "off", "Failed"),
+        ] {
+            assert_eq!(
+                outcome(status, partial, score, findings),
+                (tone, words.to_owned()),
+                "{status}"
+            );
+        }
+        let (today, yesterday) = ("2026-11-25", "2026-11-24");
+        assert_eq!(day_label("2026-11-25", today, yesterday), "Today");
+        assert_eq!(day_label("2026-11-24", today, yesterday), "Yesterday");
+        assert_eq!(
+            day_label("2026-11-23", today, yesterday),
+            "Monday 23 November"
+        );
+        assert_eq!(
+            day_label("2026-01-01", today, yesterday),
+            "Thursday 1 January"
+        );
+        assert_eq!(
+            day_label("2024-02-29", today, yesterday),
+            "Thursday 29 February 2024"
+        );
+        assert_eq!(day_label("unknown", today, yesterday), "unknown");
+    }
 
     #[test]
     fn dashboard_groups_runs_preserves_subject_and_matches_exact_pr_numbers() {
@@ -204,6 +392,9 @@ mod tests {
         )
         .unwrap();
         assert!(html.contains("Fix &lt;parser&gt;"));
+        assert_eq!(html.matches(r#"<h3 class="day">Today</h3>"#).count(), 1);
+        assert!(html.contains(r#"<span class="lamp off" aria-hidden="true"></span>"#));
+        assert!(html.contains(r#"<span class="diff-sr-only">Completed</span>"#));
         assert!(html.contains("1 earlier run"));
         assert!(html.find("/reviews/2").unwrap() < html.find("/reviews/1").unwrap());
         assert!(!html.contains("/reviews/3"));
@@ -223,6 +414,7 @@ mod tests {
         )
         .unwrap();
         assert!(page.contains("Page 2 of 2"));
+        assert_eq!(page.matches(r#"<ul class="history-list">"#).count(), 1);
         assert!(page.contains("1 earlier run"));
         assert!(!page.contains("/reviews/25"));
     }

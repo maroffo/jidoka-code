@@ -5,7 +5,10 @@ use crate::{
     hunks,
     source::{safe_path, safe_previous_path},
 };
-use std::{collections::HashMap, fmt::Write};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+};
 
 type Row<'a> = (Option<usize>, Option<usize>, &'a str);
 
@@ -53,13 +56,19 @@ fn file_id(index: usize) -> String {
     format!("diff-file-{}", index + 1)
 }
 
-fn head_id(file: &str, line: usize) -> String {
+pub(crate) fn head_id(file: &str, line: usize) -> String {
     format!("{file}-head-{line}")
 }
 
-/// Return the rendered ID only for a head line in a saved hunk.
-pub fn anchor(report: &PublishedReport, path: &str, line: usize) -> Option<String> {
-    if !safe_path(path) || line == 0 {
+/// The rendered ID of a changed file, with the head lines its saved hunks show.
+pub type HeadLines = (String, HashSet<usize>);
+
+/// The rendered ID of a file and the head lines its saved hunks show.
+///
+/// Parsing a patch is the costly part of resolving a line, so callers that resolve many lines
+/// of one file ask once.
+pub fn head_lines(report: &PublishedReport, path: &str) -> Option<HeadLines> {
+    if !safe_path(path) {
         return None;
     }
     let diff = report.diff.as_ref()?;
@@ -68,10 +77,14 @@ pub fn anchor(report: &PublishedReport, path: &str, line: usize) -> Option<Strin
         .iter()
         .enumerate()
         .find(|(_, file)| file.path == path)?;
-    rows(diff, file)?
-        .iter()
-        .any(|row| row.1 == Some(line))
-        .then(|| head_id(&file_id(index), line))
+    let lines = rows(diff, file)?.iter().filter_map(|row| row.1).collect();
+    Some((file_id(index), lines))
+}
+
+/// Return the rendered ID only for a head line in a saved hunk.
+pub fn anchor(report: &PublishedReport, path: &str, line: usize) -> Option<String> {
+    let (file, lines) = head_lines(report, path)?;
+    lines.contains(&line).then(|| head_id(&file, line))
 }
 
 /// A patch with no head lines can only cite the base revision.
@@ -139,20 +152,22 @@ fn change_label(file: &DiffFile) -> &str {
     }
 }
 
-type Findings<'a> = HashMap<(&'a str, usize), Vec<&'a Finding>>;
+type Findings<'a> = HashMap<(&'a str, usize), Vec<(usize, &'a Finding)>>;
 
 fn render_rows(
     html: &mut String,
     file: &DiffFile,
     id: &str,
-    rows: Vec<Row<'_>>,
+    rows: &[Row<'_>],
     findings: &Findings<'_>,
 ) {
     write!(html, r#"<div class="diff-scroll" role="region" aria-label="Diff for {}" tabindex="0">
         <table><thead><tr><th scope="col">Base</th><th scope="col">Head</th><th scope="col">Source</th></tr></thead><tbody>"#,
         escape(&file.path)).unwrap();
     let (mut last_base, mut last_head): (Option<usize>, Option<usize>) = (None, None);
-    for (base, head, text) in rows {
+    // A removed or emptied file has no head lines, so its findings cite the base.
+    let removed = rows.iter().all(|row| row.1.is_none());
+    for &(base, head, text) in rows {
         let gap = |current: Option<usize>, previous: Option<usize>| {
             current
                 .zip(previous)
@@ -173,7 +188,10 @@ fn render_rows(
             (Some(_), None) => ("diff-removed", "−", "Removed line"),
             _ => ("diff-context", " ", "Context line"),
         };
-        write!(html, r#"<tr class="{class}""#).unwrap();
+        let cited = head.or(if removed { base } else { None });
+        let noted = cited.and_then(|line| findings.get(&(file.path.as_str(), line)));
+        let flag = if noted.is_some() { " diff-flagged" } else { "" };
+        write!(html, r#"<tr class="{class}{flag}""#).unwrap();
         let head_anchor = head.map(|line| head_id(id, line));
         if let Some(anchor) = &head_anchor {
             write!(html, r#" id="{anchor}""#).unwrap();
@@ -192,16 +210,17 @@ fn render_rows(
         }
         write!(html, r#"</td><td class="diff-code"><span class="diff-sr-only">{label} </span><span aria-hidden="true" class="diff-sign">{sign}</span><code>{}</code></td></tr>"#, escape(text)).unwrap();
 
-        if let Some(items) = head.and_then(|line| findings.get(&(file.path.as_str(), line))) {
+        if let Some(items) = noted {
             html.push_str(
                 r#"<tr class="diff-findings"><td colspan="3"><ul aria-label="Verified findings">"#,
             );
-            for item in items {
+            for (number, item) in items {
                 write!(
                     html,
-                    "<li><strong>{}</strong><p>{}</p></li>",
-                    escape(&item.title),
-                    escape(&item.impact)
+                    r##"<li><strong>{}</strong><p>{}</p><a href="#{}">Read the finding</a></li>"##,
+                    crate::markdown::inline(&item.title),
+                    crate::markdown::inline(&item.impact),
+                    finding_id(*number)
                 )
                 .unwrap();
             }
@@ -211,87 +230,252 @@ fn render_rows(
     html.push_str("</tbody></table></div>");
 }
 
-pub fn render(report: &PublishedReport) -> String {
+/// The ID of a finding card, shared by the report and the notes inside the diff.
+pub fn finding_id(index: usize) -> String {
+    format!("finding-{}", index + 1)
+}
+
+/// What the report says about a changed file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    Finding(usize),
+    Manual,
+    Quiet,
+}
+
+impl Mark {
+    /// The display rank of the group and its heading.
+    fn group(self) -> (u8, &'static str) {
+        match self {
+            Mark::Finding(_) => (0, "Files with findings"),
+            Mark::Manual => (1, "Files named in manual checks"),
+            Mark::Quiet => (2, "Other changed files"),
+        }
+    }
+}
+
+struct Listed<'a> {
+    index: usize,
+    file: &'a DiffFile,
+    mark: Mark,
+    rows: Option<Vec<Row<'a>>>,
+}
+
+impl Listed<'_> {
+    /// Added and removed line counts, when a text patch was saved.
+    fn counts(&self) -> Option<(usize, usize)> {
+        let rows = self.rows.as_ref()?;
+        Some((
+            rows.iter().filter(|row| row.0.is_none()).count(),
+            rows.iter().filter(|row| row.1.is_none()).count(),
+        ))
+    }
+}
+
+fn listed<'a>(report: &'a PublishedReport, diff: &'a PinnedDiff) -> Vec<Listed<'a>> {
+    let manual: HashSet<&str> = report
+        .manual_checks()
+        .map(|focus| focus.path.as_str())
+        .collect();
+    diff.files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| safe_path(&file.path))
+        .map(|(index, file)| {
+            let findings = report
+                .report
+                .findings
+                .iter()
+                .filter(|finding| finding.path == file.path)
+                .count();
+            let mark = if findings > 0 {
+                Mark::Finding(findings)
+            } else if manual.contains(file.path.as_str()) {
+                Mark::Manual
+            } else {
+                Mark::Quiet
+            };
+            Listed {
+                index,
+                file,
+                mark,
+                rows: rows(diff, file),
+            }
+        })
+        .collect()
+}
+
+fn split_path(path: &str) -> (&str, &str) {
+    path.rfind('/')
+        .map_or(("", path), |slash| path.split_at(slash + 1))
+}
+
+fn counts_html(counts: Option<(usize, usize)>) -> String {
+    let Some((added, removed)) = counts else {
+        return String::new();
+    };
+    let mut html = String::from(r#"<span class="diff-stat">"#);
+    if added > 0 {
+        write!(html, r#"<span class="diff-plus">+{added}</span>"#).unwrap();
+    }
+    if removed > 0 {
+        write!(html, r#"<span class="diff-minus">−{removed}</span>"#).unwrap();
+    }
+    html.push_str("</span>");
+    html
+}
+
+/// List the changed files under one heading per directory, in order of first appearance.
+fn navigation(files: &[Listed<'_>]) -> String {
+    let mut dirs: Vec<(&str, Vec<(&Listed<'_>, &str)>)> = Vec::new();
+    for item in files {
+        let (dir, name) = split_path(&item.file.path);
+        match dirs.iter_mut().find(|(known, _)| *known == dir) {
+            Some((_, items)) => items.push((item, name)),
+            None => dirs.push((dir, vec![(item, name)])),
+        }
+    }
+    let mut html = String::from(r#"<h2>Changed files</h2><ul class="rail-files">"#);
+    for (position, (dir, items)) in dirs.iter().enumerate() {
+        // Root files need no heading when nothing else is listed.
+        if !(position == 0 && dir.is_empty() && dirs.len() == 1) {
+            let shown = if dir.is_empty() { "./" } else { dir };
+            write!(
+                html,
+                r#"<li class="rail-dir" title="{0}">{0}</li>"#,
+                escape(shown)
+            )
+            .unwrap();
+        }
+        for (item, name) in items {
+            let (tone, note) = match item.mark {
+                Mark::Finding(1) => ("stop", " 1 finding".to_owned()),
+                Mark::Finding(count) => ("stop", format!(" {count} findings")),
+                Mark::Manual => ("hold", " manual check".to_owned()),
+                Mark::Quiet => ("", String::new()),
+            };
+            let marked = if tone.is_empty() {
+                ""
+            } else {
+                " class=\"marked\""
+            };
+            write!(
+                html,
+                r##"<li><a href="#{}"{marked}><span class="lamp {tone}" aria-hidden="true"></span><code>{}</code><span class="diff-sr-only">{note}</span>{}</a></li>"##,
+                file_id(item.index),
+                escape(name),
+                counts_html(item.counts())
+            )
+            .unwrap();
+        }
+    }
+    html.push_str("</ul>");
+    html
+}
+
+/// The two places a saved diff appears on a report page.
+pub struct Rendered {
+    /// The file list for the side rail. Empty when no file can be listed.
+    pub nav: String,
+    /// The changed files section.
+    pub section: String,
+}
+
+/// Render the file navigation for the side rail and the changed files section.
+///
+/// Files with findings come first, then files named in manual checks. Only those start open:
+/// a long pull request stays readable, and every in-page citation lands on a visible row.
+pub fn render(report: &PublishedReport) -> Rendered {
     let mut html = String::from(
         r#"<section id="review-diff" class="review-diff" aria-labelledby="diff-heading"><h2 id="diff-heading">Changed files</h2>"#,
     );
     let Some(diff) = &report.diff else {
         html.push_str("<p>The pinned diff was not saved for this review.</p></section>");
-        return html;
+        return Rendered {
+            nav: String::new(),
+            section: html,
+        };
     };
 
-    let files: Vec<_> = diff
-        .files
-        .iter()
-        .enumerate()
-        .filter(|(_, file)| safe_path(&file.path))
-        .collect();
-    let listed = files.len() as u64;
-    if listed < diff.total_files {
+    let mut files = listed(report, diff);
+    let shown = files.len() as u64;
+    if shown < diff.total_files {
         write!(
             html,
-            "<p>The saved list includes {listed} of {} changed files.</p>",
+            "<p>The saved list includes {shown} of {} changed files.</p>",
             diff.total_files
         )
         .unwrap();
-    } else if listed > diff.total_files {
+    } else if shown > diff.total_files {
         html.push_str("<p>The saved file list differs from the reported change count.</p>");
     } else if files.is_empty() {
         html.push_str("<p>No changed files were recorded.</p>");
     }
 
-    if !files.is_empty() {
-        html.push_str(
-            r#"<div class="diff-layout"><nav class="diff-nav" aria-label="Changed files"><ul>"#,
-        );
-        for &(index, file) in &files {
-            let count = report
-                .report
-                .findings
-                .iter()
-                .filter(|f| f.path == file.path)
-                .count();
-            let noun = if count == 1 { "finding" } else { "findings" };
+    let nav = if files.is_empty() {
+        String::new()
+    } else {
+        navigation(&files)
+    };
+    let mut findings = Findings::new();
+    for (number, item) in report.report.findings.iter().enumerate() {
+        findings
+            .entry((item.path.as_str(), item.line))
+            .or_default()
+            .push((number, item));
+    }
+    files.sort_by_key(|item| item.mark.group().0);
+    let grouped = files
+        .first()
+        .zip(files.last())
+        .is_some_and(|(first, last)| first.mark.group() != last.mark.group());
+    let mut group = None;
+    for item in &files {
+        if grouped && group != Some(item.mark.group()) {
+            group = Some(item.mark.group());
             write!(
                 html,
-                r##"<li><a href="#{}"><code>{}</code><small>{count} {noun}</small></a></li>"##,
-                file_id(index),
-                escape(&file.path)
+                r#"<h3 class="diff-group">{}</h3>"#,
+                item.mark.group().1
             )
             .unwrap();
         }
-        html.push_str(r#"</ul></nav><div class="diff-content">"#);
-
-        let mut findings = Findings::new();
-        for item in &report.report.findings {
-            findings
-                .entry((item.path.as_str(), item.line))
-                .or_default()
-                .push(item);
+        let id = file_id(item.index);
+        let (dir, name) = split_path(&item.file.path);
+        let (open, tag) = match item.mark {
+            Mark::Finding(1) => (
+                " open",
+                r#"<span class="diff-tag stop">1 finding</span>"#.to_owned(),
+            ),
+            Mark::Finding(count) => (
+                " open",
+                format!(r#"<span class="diff-tag stop">{count} findings</span>"#),
+            ),
+            Mark::Manual => (
+                " open",
+                r#"<span class="diff-tag hold">Manual check</span>"#.to_owned(),
+            ),
+            Mark::Quiet => ("", String::new()),
+        };
+        write!(
+            html,
+            r#"<details class="diff-file" id="{id}"{open}><summary><code class="diff-path"><span>{}</span>{}</code>{tag}<span class="diff-kind">{}"#,
+            escape(dir),
+            escape(name),
+            change_label(item.file)
+        )
+        .unwrap();
+        if let Some(previous) = previous_path(item.file) {
+            write!(html, " from <code>{}</code>", escape(previous)).unwrap();
         }
-        for (index, file) in files {
-            let id = file_id(index);
-            write!(
-                html,
-                r#"<section class="diff-file" id="{id}" aria-labelledby="{id}-title"><header>
-                <h3 id="{id}-title"><code>{}</code></h3><p>{}"#,
-                escape(&file.path),
-                change_label(file)
-            )
-            .unwrap();
-            if let Some(previous) = previous_path(file) {
-                write!(html, " from <code>{}</code>", escape(previous)).unwrap();
-            }
-            html.push_str("</p></header>");
-            match rows(diff, file) {
-                Some(lines) => render_rows(&mut html, file, &id, lines, &findings),
-                None => html.push_str(
-                    r#"<p class="diff-unavailable">No text patch was saved for this change.</p>"#,
-                ),
-            }
-            html.push_str("</section>");
+        write!(html, "</span>{}</summary>", counts_html(item.counts())).unwrap();
+        match &item.rows {
+            Some(lines) => render_rows(&mut html, item.file, &id, lines, &findings),
+            None => html.push_str(
+                r#"<p class="diff-unavailable">No text patch was saved for this change.</p>"#,
+            ),
         }
-        html.push_str("</div></div>");
+        html.push_str("</details>");
     }
 
     let mut supporting = diff
@@ -307,7 +491,7 @@ pub fn render(report: &PublishedReport) -> String {
         html.push_str("</ul></details>");
     }
     html.push_str("</section>");
-    html
+    Rendered { nav, section: html }
 }
 
 #[cfg(test)]
@@ -395,9 +579,36 @@ mod tests {
             evidence: String::new(),
             attribution: Attribution::Unknown,
         });
-        let html = render(&report);
-        assert_eq!(html.matches("<nav ").count(), 1);
-        assert!(html.contains(r#"aria-label="Changed files""#));
+        report.report.findings.push(Finding {
+            path: "src/gone.rs".into(),
+            line: 1,
+            title: "Removed guard".into(),
+            impact: "Callers lose the check".into(),
+            evidence: String::new(),
+            attribution: Attribution::Unknown,
+        });
+        let Rendered { nav, section: html } = render(&report);
+        // The page wraps the rail in its one navigation landmark; the diff adds none.
+        assert!(!html.contains("<nav"));
+        // A removed file shows its finding on the base line it cites.
+        assert!(html.contains(
+            r##"<strong>Removed guard</strong><p>Callers lose the check</p><a href="#finding-2">"##
+        ));
+        assert_eq!(
+            html.matches(r#"class="diff-removed diff-flagged""#).count(),
+            1
+        );
+        for text in ["views&lt;&amp;&gt;.rs", "image.dat", "gone.rs", "quiet.rs"] {
+            assert_eq!(nav.matches(text).count(), 1, "{text}");
+        }
+        assert_eq!(nav.matches(r#"class="rail-dir""#).count(), 2);
+        assert!(nav.find("gone.rs").unwrap() < nav.find("assets/").unwrap());
+        assert!(nav.contains(r##"<a href="#diff-file-1" class="marked"><span class="lamp stop""##));
+        assert!(
+            nav.contains(r#"<span class="diff-plus">+2</span><span class="diff-minus">−2</span>"#)
+        );
+        assert!(html.contains(r##"<a href="#finding-1">Read the finding</a>"##));
+        assert_eq!(html.matches("Read the finding").count(), 2);
         assert!(html.contains("4 of 5 changed files"));
         assert!(html.contains("No text patch was saved for this change."));
         assert!(html.contains("Supporting context"));
@@ -439,7 +650,8 @@ mod tests {
             ],
             supporting_paths: vec![],
         }));
-        let html = render(&report);
+        let Rendered { nav, section: html } = render(&report);
+        assert!(!nav.contains("escape.rs"));
         assert!(!html.contains("escape.rs"));
         assert!(!html.contains("-head-1"));
         for path in ["../escape.rs", "twice.rs", "bad.rs", "removed.rs"] {
@@ -459,7 +671,7 @@ mod tests {
             files: vec![invalid, modified],
             supporting_paths: vec![],
         }));
-        let html = render(&report);
+        let html = render(&report).section;
         assert!(html.contains("Change type unavailable"));
         for text in ["Renamed", "../unsafe.rs", "src/unrelated.rs"] {
             assert!(!html.contains(text));
@@ -474,7 +686,11 @@ mod tests {
         assert!(old.get("diff").is_none());
         let mut report: PublishedReport = serde_json::from_value(old).unwrap();
         assert!(!available(&report));
-        assert!(render(&report).contains("The pinned diff was not saved for this review."));
+        assert!(
+            render(&report)
+                .section
+                .contains("The pinned diff was not saved for this review.")
+        );
         assert!(anchor(&report, "original.rs", 1).is_none());
         let mut snapshot = Snapshot {
             url: "https://github.com/owner/project/pull/1".into(),
