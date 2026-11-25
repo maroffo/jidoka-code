@@ -74,6 +74,21 @@ pub fn anchor(report: &PublishedReport, path: &str, line: usize) -> Option<Strin
         .then(|| head_id(&file_id(index), line))
 }
 
+/// Match the reviewer's quoted source against the pinned head side of a hunk.
+pub fn matches_quote(report: &PublishedReport, path: &str, line: usize, quote: &str) -> bool {
+    let Some(diff) = &report.diff else {
+        return false;
+    };
+    let Some(file) = diff.files.iter().find(|f| f.path == path) else {
+        return false;
+    };
+    !quote.trim().is_empty()
+        && rows(diff, file).is_some_and(|rows| {
+            rows.iter()
+                .any(|(_, head, text)| *head == Some(line) && text.trim() == quote.trim())
+        })
+}
+
 fn escape(text: &str) -> String {
     let mut escaped = String::new();
     for ch in text.chars() {

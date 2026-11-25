@@ -488,6 +488,36 @@ impl ReviewRepository {
         self.private_source_repo.as_deref()
     }
 
+    /// Materialize the pinned head without hooks, Git credentials or live symlinks.
+    pub fn export_head(&self, destination: &Path) -> Result<()> {
+        let index = self.directory.path().join("review.index");
+        run(
+            self.git()
+                .env("GIT_INDEX_FILE", &index)
+                .args(["read-tree", &self.head]),
+            "index pinned source",
+        )?;
+        std::fs::create_dir(destination)?;
+        let mut prefix = std::ffi::OsString::from("--prefix=");
+        prefix.push(destination);
+        prefix.push("/");
+        run(
+            self.git()
+                .env("GIT_INDEX_FILE", index)
+                .args([
+                    "-c",
+                    "core.bare=false",
+                    "-c",
+                    "core.symlinks=false",
+                    "checkout-index",
+                    "--all",
+                ])
+                .arg(prefix),
+            "export pinned source",
+        )?;
+        Ok(())
+    }
+
     fn git(&self) -> Command {
         git(self.directory.path())
     }
@@ -1124,6 +1154,16 @@ mod tests {
             Some("fork/project".into()),
         )
         .unwrap();
+        let transport = tempfile::tempdir().unwrap();
+        let exported = transport.path().join("source");
+        repo.export_head(&exported).unwrap();
+        assert_eq!(
+            fs::read_to_string(exported.join("unsafe.sql")).unwrap(),
+            "helper.sql"
+        );
+        assert!(!exported.join("unsafe.sql").is_symlink());
+        assert!(!exported.join(".git").exists());
+        assert_eq!(fs::read(exported.join("binary.bin")).unwrap(), [0, 1, 2]);
         assert_eq!(repo.private_source_repo(), Some("fork/project"));
         let (files, diff, limits) = repo.changes().unwrap();
         assert_eq!(diff.total_files, 4);
