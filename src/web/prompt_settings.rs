@@ -9,9 +9,15 @@ pub(super) fn init(db: &Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS prompt_settings (
         id INTEGER PRIMARY KEY CHECK(id=1), instructions TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS review_prompts (
-        review_id INTEGER PRIMARY KEY, instructions TEXT, dry_run INTEGER NOT NULL DEFAULT 0,
-        trial_key TEXT UNIQUE);
-        CREATE TRIGGER IF NOT EXISTS pin_review_prompt AFTER INSERT ON reviews
+        review_id INTEGER PRIMARY KEY, instructions TEXT NOT NULL, dry_run INTEGER NOT NULL DEFAULT 0,
+        trial_key TEXT UNIQUE);",
+    )?;
+    db.execute(
+        "INSERT OR IGNORE INTO prompt_settings(id,instructions) VALUES(1,?)",
+        [prompt::DEFAULT_METHOD],
+    )?;
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS pin_review_prompt AFTER INSERT ON reviews
         BEGIN INSERT INTO review_prompts(review_id,instructions) VALUES
         (NEW.id,(SELECT instructions FROM prompt_settings WHERE id=1)); END;",
     )

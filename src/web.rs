@@ -1664,6 +1664,14 @@ mod tests {
                 .unwrap(),
             "Use the saved method."
         );
+        let pinned: String = conn
+            .query_row(
+                "SELECT instructions FROM review_prompts WHERE review_id=2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pinned, crate::prompt::DEFAULT_METHOD);
         let replay =
             session::replay(&f.db, 1, PROVIDER, &HashSet::from(["test/demo".to_owned()])).unwrap();
         assert_eq!(
