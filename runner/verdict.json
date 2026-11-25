@@ -30,10 +30,67 @@
             "type": "string"
           },
           "impact": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 240,
+            "minLength": 1,
+            "description": "One short plain-language sentence naming who is affected and what breaks."
           },
           "evidence": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "trigger": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600
+              },
+              "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 6,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "explanation": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 240
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024
+                    },
+                    "line": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "explanation",
+                    "path",
+                    "line"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "test_gap": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400
+              },
+              "countercheck": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400
+              }
+            },
+            "required": [
+              "trigger",
+              "steps",
+              "test_gap",
+              "countercheck"
+            ],
+            "additionalProperties": false
           },
           "attribution": {
             "type": "string",
@@ -44,9 +101,6 @@
             ]
           },
           "quote": {
-            "type": "string"
-          },
-          "countercheck": {
             "type": "string"
           },
           "mergeability_score": {
@@ -64,7 +118,6 @@
           "evidence",
           "attribution",
           "quote",
-          "countercheck",
           "mergeability_score"
         ],
         "additionalProperties": false
