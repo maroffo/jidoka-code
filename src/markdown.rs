@@ -3,7 +3,9 @@
 
 //! Reviewer prose is untrusted: it comes from a model that read third-party code.
 
-use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, TextMergeStream, html};
+use pulldown_cmark::{
+    CowStr, Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeStream, html,
+};
 
 /// Resolve a `path:line` citation to a link target, or decline to link it.
 pub type Cite<'a> = &'a dyn Fn(&str, usize) -> Option<String>;
@@ -97,9 +99,18 @@ pub fn block(source: &str, cite: Cite<'_>) -> String {
             Event::Html(raw) | Event::InlineHtml(raw) => out.push(Event::Text(raw)),
             Event::Start(Tag::HtmlBlock) => out.push(Event::Start(Tag::Paragraph)),
             Event::End(TagEnd::HtmlBlock) => out.push(Event::End(TagEnd::Paragraph)),
-            Event::Start(Tag::Link { dest_url, .. }) => {
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                ..
+            }) => {
                 let keep = web_link(&dest_url);
-                links.push(keep);
+                // Reviewer-chosen link text can misname its target, so the host is shown too.
+                let host = (keep && !matches!(link_type, LinkType::Autolink))
+                    .then(|| url::Url::parse(&dest_url).ok())
+                    .flatten()
+                    .and_then(|url| url.host_str().map(str::to_owned));
+                links.push((keep, host));
                 if keep {
                     out.push(Event::Html(
                         format!(
@@ -111,8 +122,11 @@ pub fn block(source: &str, cite: Cite<'_>) -> String {
                 }
             }
             Event::End(TagEnd::Link) => {
-                if links.pop() == Some(true) {
+                if let Some((true, host)) = links.pop() {
                     out.push(Event::Html("</a>".into()));
+                    if let Some(host) = host {
+                        out.push(Event::Text(format!(" ({host})").into()));
+                    }
                 }
             }
             // The alternative text stays; nothing is fetched from a host the model chose.
@@ -200,12 +214,15 @@ mod tests {
         }
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(html.contains(
-            r#"<a href="https://example.test/?q=&quot;&gt;&lt;i&gt;" rel="noreferrer noopener">ok</a>"#
+            r#"<a href="https://example.test/?q=&quot;&gt;&lt;i&gt;" rel="noreferrer noopener">ok</a> (example.test)"#
         ));
         assert!(html.contains("run") && html.contains("data") && html.contains("pixel"));
+        // A link that shows its own address needs no host beside it.
         assert!(html.contains(
-            r#"<a href="https://example.test/auto" rel="noreferrer noopener">https://example.test/auto</a>"#
+            r#"<a href="https://example.test/auto" rel="noreferrer noopener">https://example.test/auto</a></p>"#
         ));
+        let spoof = block("[Approve on GitHub](https://evil.test/login)", &none);
+        assert!(spoof.contains(">Approve on GitHub</a> (evil.test)"));
     }
 
     #[test]

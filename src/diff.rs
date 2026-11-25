@@ -56,13 +56,19 @@ fn file_id(index: usize) -> String {
     format!("diff-file-{}", index + 1)
 }
 
-fn head_id(file: &str, line: usize) -> String {
+pub(crate) fn head_id(file: &str, line: usize) -> String {
     format!("{file}-head-{line}")
 }
 
-/// Return the rendered ID only for a head line in a saved hunk.
-pub fn anchor(report: &PublishedReport, path: &str, line: usize) -> Option<String> {
-    if !safe_path(path) || line == 0 {
+/// The rendered ID of a changed file, with the head lines its saved hunks show.
+pub type HeadLines = (String, HashSet<usize>);
+
+/// The rendered ID of a file and the head lines its saved hunks show.
+///
+/// Parsing a patch is the costly part of resolving a line, so callers that resolve many lines
+/// of one file ask once.
+pub fn head_lines(report: &PublishedReport, path: &str) -> Option<HeadLines> {
+    if !safe_path(path) {
         return None;
     }
     let diff = report.diff.as_ref()?;
@@ -71,10 +77,14 @@ pub fn anchor(report: &PublishedReport, path: &str, line: usize) -> Option<Strin
         .iter()
         .enumerate()
         .find(|(_, file)| file.path == path)?;
-    rows(diff, file)?
-        .iter()
-        .any(|row| row.1 == Some(line))
-        .then(|| head_id(&file_id(index), line))
+    let lines = rows(diff, file)?.iter().filter_map(|row| row.1).collect();
+    Some((file_id(index), lines))
+}
+
+/// Return the rendered ID only for a head line in a saved hunk.
+pub fn anchor(report: &PublishedReport, path: &str, line: usize) -> Option<String> {
+    let (file, lines) = head_lines(report, path)?;
+    lines.contains(&line).then(|| head_id(&file, line))
 }
 
 /// A patch with no head lines can only cite the base revision.

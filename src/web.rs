@@ -6,6 +6,7 @@ pub mod session;
 mod workflow;
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::Write,
     path::{Path, PathBuf},
@@ -1026,22 +1027,46 @@ fn source_href(report: &PublishedReport, head: &str, path: &str, line: usize) ->
     ))
 }
 
-/// Link a `path:line` the reviewer cites in prose: to the saved diff when the line is in it,
-/// otherwise to the reviewed revision on GitHub. A bare file name is too ambiguous to link.
-fn citation(report: &PublishedReport, path: &str, line: usize) -> Option<String> {
-    if let Some(anchor) = crate::diff::anchor(report, path, line) {
-        return Some(format!("#{anchor}"));
+/// Links for the `path:line` citations in one piece of reviewer prose.
+///
+/// A line in the saved diff links to its row on the page; any other repository path links to
+/// the reviewed revision on GitHub. A bare file name is too ambiguous to link. Each cited file's
+/// patch is read once, however many of its lines the prose cites.
+struct Citations<'a> {
+    report: &'a PublishedReport,
+    files: RefCell<HashMap<String, Option<crate::diff::HeadLines>>>,
+}
+
+impl<'a> Citations<'a> {
+    fn new(report: &'a PublishedReport) -> Self {
+        Self {
+            report,
+            files: RefCell::default(),
+        }
     }
-    path.contains('/')
-        .then(|| source_href(report, &report.head, path, line))
-        .flatten()
+
+    fn href(&self, path: &str, line: usize) -> Option<String> {
+        let mut files = self.files.borrow_mut();
+        let shown = files
+            .entry(path.to_owned())
+            .or_insert_with(|| crate::diff::head_lines(self.report, path));
+        if let Some((file, lines)) = shown
+            && lines.contains(&line)
+        {
+            return Some(format!("#{}", crate::diff::head_id(file, line)));
+        }
+        path.contains('/')
+            .then(|| source_href(self.report, &self.report.head, path, line))
+            .flatten()
+    }
 }
 
 /// Reviewer prose as a block, with its Markdown rendered and its citations linked.
 fn prose(report: &PublishedReport, text: &str) -> String {
+    let citations = Citations::new(report);
     format!(
         r#"<div class="prose">{}</div>"#,
-        crate::markdown::block(text, &|path, line| citation(report, path, line))
+        crate::markdown::block(text, &|path, line| citations.href(path, line))
     )
 }
 
