@@ -11,7 +11,8 @@
       "type": "array",
       "items": {
         "type": "string"
-      }
+      },
+      "description": "Material unresolved questions that prevent a reliable verdict on a changed behavior."
     },
     "findings": {
       "type": "array",
@@ -100,13 +101,21 @@
         ],
         "additionalProperties": false
       }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Non-blocking scope and method notes."
     }
   },
   "required": [
     "reviewed_files",
     "limits",
     "findings",
-    "focus"
+    "focus",
+    "notes"
   ],
   "additionalProperties": false
 }

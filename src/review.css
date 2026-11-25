@@ -123,3 +123,14 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 .prompt-editor textarea { box-sizing: border-box; width: 100%; padding: .7rem; font: inherit; resize: vertical; }
 .prompt-editor .prompt-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
 .prompt-editor pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.review-report { max-width: 62rem; margin-inline: auto; overflow-wrap: anywhere }
+.review-report section { margin-block: 1.2rem }
+.review-report .coverage-line { font-weight: 600; color: var(--sub) }
+.section-links { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; padding: .75rem 0; border-bottom: 1px solid var(--line) }
+.manual-check { padding: .3rem 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: .35rem }
+.manual-check + .manual-check { margin-top: .35rem }
+.manual-check summary { font-weight: 600 }
+.review-blockers { border-left: .25rem solid var(--accent); padding: .6rem 1rem; background: var(--surface) }
+.review-report .decision { margin: 1rem 0; font-size: 1.25rem }
+.review-report .inspect > p,.review-report .inspect > ul { padding: .8rem 1.2rem }

@@ -60,3 +60,9 @@ With Semgrep installed, run `cargo test --locked -- --include-ignored` to exerci
 ### Editing the review prompt
 
 Open **Review prompt** to edit the instructions used across authorized repositories. **Preview prompt** shows the final instructions for free, with a placeholder for the temporary review directory. **Run AGY dry run** uses the current draft on one authorized PR, consumes model credits, and opens a local report in a new tab. The results stay out of GitHub and subsequent reviews. **Save prompt** applies the draft to reviews queued afterwards. Each queued review keeps its original instructions.
+
+### Tests during AGY reviews
+
+AGY can request a focused test through `jidoka-test COMMAND [ARG ...]`. A trusted relay copies the pinned source to a separate offline container. Each request gets a fresh filesystem. The sandbox has no credentials, Docker socket, repository volume, or network access. Compose limits it to two CPUs, 1 GiB of memory, and 120 seconds per command. The default image includes Go and Python. Repositories that require extra tools or dependencies can supply them in the test-sandbox image or vendor them in the checkout.
+
+The review page shows each requested command and its outcome. Routine scope notes do not change a complete verdict. A missing prerequisite makes a review partial when it leaves a material question unresolved. Historical reports retain their original verdict and may have no test records.

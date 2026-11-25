@@ -182,7 +182,7 @@ async fn check_service_restart(scan_limited: bool) {
     let html = get_html(&client, &permalink).await;
     let expected_status = if scan_limited { "Partial" } else { "Completed" };
     for text in [
-        "Where to focus",
+        "What to check manually",
         "diff-file-1-head-2",
         "Files supplied with a patch (1)",
         "api/capacity.go",

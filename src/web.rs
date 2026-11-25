@@ -1156,26 +1156,16 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
     let manual: Vec<_> = report.human_focus().take(3).collect();
     let mut focus = String::new();
     for item in &manual {
-        write!(focus,r#"<article class="card manual"><span class="kind"><i></i>Manual check</span><h3>{}</h3><div class="location">{}</div><p>{}</p>
-            <details class="proof"><summary>What Jidoka checked</summary><div class="detail-body">{}</div></details></article>"#,
+        write!(focus, r#"<details class="manual-check"><summary>{}</summary><div class="detail-body">{}<p>{}</p><h3>What Jidoka checked</h3>{}</div></details>"#,
             escape(&item.action),position(report,&item.path,item.line),escape(&item.outcome),evidence_html(report,&item.checked)).unwrap();
     }
-    let score = if is_partial {
-        None
-    } else {
-        report.mergeability_label()
-    };
-    let score = score.map_or_else(String::new, |label| {
-        format!("<p><strong>{label}</strong></p>")
+    if focus.is_empty() {
+        focus.push_str("<p class=empty>No additional manual checks.</p>");
+    }
+    let score = (!is_partial).then(|| report.mergeability_label()).flatten();
+    let mut content = score.map_or_else(String::new, |label| {
+        format!("<p class=decision><strong>{label}</strong></p>")
     });
-    let mut content = format!(
-        "{score}<section><h2>Where to focus</h2>{}</section>",
-        if focus.is_empty() {
-            "<p class=empty>No additional manual checks.</p>".into()
-        } else {
-            focus
-        }
-    );
     let mut extra = String::new();
     for item in &report.report.findings {
         // Earlier reports stored the suggested action for a finding in its focus row.
@@ -1215,41 +1205,79 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
     let unfinished = report.unfinished_patches().filter(|paths| !paths.is_empty()).map_or_else(String::new, |paths| {
         format!("<details><summary>Patches with unfinished review ({})</summary><ul>{}</ul></details>", paths.len(), text_list(paths))
     });
-    let limits = text_list(report.report.limits.iter().filter(|limit| {
-        !report
-            .scan
-            .as_ref()
-            .is_some_and(|s| s.limits.contains(limit))
-    }));
-    let coverage_limits = if limits.is_empty() {
-        String::new()
-    } else {
-        format!("<details><summary>Review limits</summary><ul>{limits}</ul></details>")
-    };
+    let limits = text_list(&report.report.limits);
     let warnings = if is_partial {
-        r##"<div class="warning"><b>Partial coverage</b><a href="#coverage">See coverage details ↓</a></div>"##.to_owned()
+        format!(
+            r##"<section class="review-blockers"><h2>Partial coverage</h2>{}<a href="#coverage">See coverage details</a></section>"##,
+            html_list(
+                "ul",
+                &limits,
+                "See unfinished patches and scanner coverage below."
+            )
+        )
     } else {
         String::new()
     };
-    let files = report.patch_files.as_ref().map_or_else(String::new, |v| {
-        format!("<div><dt>Files with patches</dt><dd>{}</dd></div>", v.len())
-    });
-    let checked = report
-        .reviewed_files
-        .as_ref()
-        .map_or_else(String::new, |paths| {
-            format!(
-                "<div><dt>Files with completed review</dt><dd>{}</dd></div>",
-                paths.len()
-            )
-        });
+    let coverage = match (&report.reviewed_files, &report.patch_files) {
+        (Some(done), Some(total)) => format!(
+            "{} of {} changed text files reviewed",
+            done.len(),
+            total.len()
+        ),
+        (_, Some(total)) => format!("{} files supplied with patches", total.len()),
+        _ => "File coverage unavailable".into(),
+    };
+    let notes = if report.report.notes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<details><summary>Reviewer notes</summary><ul>{}</ul></details>",
+            text_list(&report.report.notes)
+        )
+    };
+    let tests = match &report.report.tests {
+        None => "<p>Test execution was not recorded for this review.</p>".to_owned(),
+        Some(tests) if tests.is_empty() => "<p>No sandbox tests were requested.</p>".to_owned(),
+        Some(tests) => {
+            let rows = tests
+                .iter()
+                .map(|test| {
+                    let command = test
+                        .argv
+                        .iter()
+                        .map(|arg| {
+                            if arg.contains(char::is_whitespace) {
+                                format!("{arg:?}")
+                            } else {
+                                arg.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let exit = test
+                        .exit_code
+                        .map_or_else(String::new, |code| format!(" · exit {code}"));
+                    let time = test
+                        .seconds
+                        .map_or_else(String::new, |s| format!(" · {s}s"));
+                    format!(
+                        "<li><strong>{}</strong>{exit}{time}<code>{}</code></li>",
+                        escape(&test.status),
+                        escape(&command)
+                    )
+                })
+                .collect::<String>();
+            format!("<ul>{rows}</ul>")
+        }
+    };
     format!(
-        r##"<div class="workspace"><div>{warnings}{content}</div>
-        <aside><section class="panel inspect"><div class="panel-head"><h2>Review summary</h2></div><dl>
-        <div><dt>Verified findings</dt><dd>{}</dd></div><div><dt>Manual checks</dt><dd>{}</dd></div>{files}{checked}</dl>
-        <details><summary>Git revisions</summary><div class="detail-body"><b>Reviewed revision</b><code>{}</code><b>Base revision</b><code>{}</code></div></details></section>
-        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Review coverage</h2></div>{coverage_limits}{unfinished}{patches}
-        <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section></aside></div>"##,
+        r##"<div class="review-report">{warnings}<p class="coverage-line">{coverage}</p>
+        <nav class="section-links" aria-label="Report sections"><a href="#findings">Findings ({})</a><a href="#manual">Manual checks ({})</a><a href="#coverage">Tests and coverage</a></nav>
+        <div id="findings">{content}</div>
+        <section id="manual"><h2>What to check manually</h2>{focus}</section>
+        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Tests and coverage</h2></div>{tests}{notes}{unfinished}{patches}
+        <details><summary>Git revisions</summary><div class="detail-body"><b>Reviewed revision</b><code>{}</code><b>Base revision</b><code>{}</code></div></details>
+        <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section></div>"##,
         report.report.findings.len(),
         manual.len(),
         escape(&report.head),
@@ -1326,7 +1354,7 @@ fn review_page(
         _ => ("failed", failure_html(failure)),
     };
     let metrics = metrics.map_or_else(String::new, |value| {
-        format!(r#"<p class="meta">{}</p>"#, escape(&value))
+        format!(r#"<details class="run-metrics"><summary>Run details</summary><p class="meta">{}</p></details>"#, escape(&value))
     });
     page(
         &format!("Review {id}"),
@@ -1410,14 +1438,40 @@ mod tests {
     }
 
     #[test]
+    fn optional_tests_and_method_notes_do_not_hide_a_completed_verdict() {
+        let mut report = report(None);
+        report.report.mergeability_score = Some(75);
+        report
+            .report
+            .notes
+            .push("Static checks covered <all> patches.".into());
+        report.report.tests = Some(vec![crate::contracts::SandboxTest {
+            argv: vec!["go".into(), "test".into(), "<package>".into()],
+            status: "failed".into(),
+            exit_code: Some(1),
+            seconds: Some(2),
+        }]);
+        let html = report_html(&report, report.is_partial());
+        for expected in [
+            "Hold merge",
+            "Static checks covered &lt;all&gt; patches.",
+            "go test &lt;package&gt;",
+            "exit 1",
+            "2s",
+        ] {
+            assert!(html.contains(expected));
+        }
+        assert!(!html.contains("Partial coverage"));
+    }
+
+    #[test]
     fn html_distinguishes_collected_and_finished_file_counts() {
         let mut report = report(None);
         report.patch_files = Some(vec!["src/a.rs".into(), "src/b.rs".into()]);
-        assert!(!report_html(&report, false).contains("Files with completed review"));
+        assert!(report_html(&report, false).contains("2 files supplied with patches"));
         report.reviewed_files = Some(vec!["src/a.rs".into()]);
         let html = report_html(&report, true);
-        assert!(html.contains("Files with patches</dt><dd>2"));
-        assert!(html.contains("Files with completed review</dt><dd>1"));
+        assert!(html.contains("1 of 2 changed text files reviewed"));
         assert!(html.contains("Patches with unfinished review (1)</summary><ul><li>src/b.rs</li>"));
     }
 
@@ -2735,7 +2789,7 @@ mod tests {
         let fixture = Fixture { _tmp: tmp, db, app };
         let html = fixture.get("/reviews/9").await;
         assert!(html.contains(r#"<html lang="en">"#));
-        assert!(html.contains("Where to focus"));
+        assert!(html.contains("What to check manually"));
         assert!(html.contains("Python finding"));
         assert!(html.contains("Pre-existing"));
         assert!(html.contains("Risultato originale &lt;esempio&gt;"));
@@ -2832,8 +2886,10 @@ mod tests {
         }];
         assert!(run_one(&fixture.db, |_| Ok(report)).unwrap());
         let html = fixture.get(&location).await;
-        assert!(html.find("Where to focus").unwrap() < html.find("Verified findings").unwrap());
-        assert!(html.find("Verified findings").unwrap() < html.find("Review coverage").unwrap());
+        assert!(
+            html.find("Verified findings").unwrap() < html.find("What to check manually").unwrap()
+        );
+        assert!(html.find("Verified findings").unwrap() < html.find(r#"id="coverage""#).unwrap());
         let link = format!(
             "https://github.com/test/demo/blob/{}/src/sample%20%23%22%3C.py",
             "b".repeat(40)
