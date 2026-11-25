@@ -71,7 +71,7 @@ h3 { font-size: clamp(1.16rem, 2vw, 1.52rem); line-height: 1.23; letter-spacing:
 summary { cursor: pointer; color: var(--ink); font-size: .88rem; font-weight: 620; display: flex; gap: 12px; align-items: baseline; justify-content: space-between; padding: 12px 0 }
 summary::after { content:"+"; font: 1rem var(--mono); color: var(--sub) }details[open]>summary::after { content:"−" }summary::-webkit-details-marker { display: none }
 summary:hover { color: var(--accent) }.proof { margin-top: 18px; border-top: 1px solid var(--line) }.detail-body { padding-bottom: 15px; font-size: .88rem }
-.detail-body p + p, .detail-body figure { margin-top: 10px }.verbatim { white-space: pre-wrap }
+.detail-body p + p, .detail-body figure { margin-top: 10px }
 figure { padding: 10px 12px; background: #edf0e9; border-radius: 3px }figcaption { font-size: .7rem; color: var(--sub) }
 pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; line-height: 1.45 }
 code { font-family: var(--mono) }
@@ -212,11 +212,25 @@ button.primary-link:disabled { background: var(--sunk); color: var(--sub); curso
 .review-report .card + .card { margin-top: .8rem }
 .review-report .card h3 { margin-top: 0; max-width: 60ch; font-size: clamp(1.05rem,2vw,1.25rem); line-height: 1.32; letter-spacing: -.015em }
 .review-report .card > p { max-width: 80ch; color: var(--ink) }
-.review-report .finding-impact { margin-bottom: 1rem; font-size: 1rem; line-height: 1.6; white-space: pre-line }
+.review-report .finding-impact { margin-bottom: 1rem; font-size: 1rem }
 .review-report .location { margin: .5rem 0 .75rem }
 .location a { display: inline-block; padding: .15rem .5rem; border-radius: .25rem; background: var(--sunk); text-decoration: none; font: .78rem var(--mono) }
 .location a:hover { background: var(--line); color: inherit }
-.manual-check code,.action code,.finding-impact code { display: inline; padding: .08em .25em; background: var(--sunk); border-radius: .2rem; font-size: .89em; white-space: pre-wrap }
+/* Reviewer prose: a readable measure, and structure only where the reviewer wrote it. */
+.prose { max-width: 75ch; line-height: 1.6; overflow-wrap: anywhere }
+.prose > * + * { margin-top: .65rem }
+.prose ul,.prose ol { padding-left: 1.4rem }
+.prose li + li { margin-top: .25rem }
+.prose h4 { font-size: .92rem }
+.prose a { text-decoration-color: var(--idle) }
+.prose pre { margin: 0; padding: .6rem .75rem; background: var(--sunk); border-radius: .25rem; white-space: pre-wrap }
+.prose table { border-collapse: collapse; font-size: .9em }
+.prose th,.prose td { padding: .2rem .6rem; border: 1px solid var(--line); text-align: left }
+.prose blockquote { margin: 0; padding-left: .8rem; border-left: 3px solid var(--line); color: var(--sub) }
+.prose :not(pre) > code,.card h3 code,.check-action code,.inspect li > code,.diff-findings code { display: inline; margin: 0; padding: .08em .25em; background: var(--sunk); border-radius: .2rem; font-size: .89em; white-space: pre-wrap }
+.detail-body > h4 { margin: 1rem 0 .3rem; font-size: .8rem; color: var(--sub) }
+.detail-body > h4:first-child { margin-top: 0 }
+.action .prose { margin-top: 2px; font-size: .93rem }
 .checks { list-style: none; padding: 0; counter-reset: check; background: var(--surface); border: 1px solid var(--line); border-radius: .5rem }
 .checks > li { counter-increment: check; position: relative; padding: .85rem 1.1rem .2rem 3.5rem }
 .checks > li::before { content: counter(check); position: absolute; left: 1.1rem; top: .8rem; display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1.5px solid var(--hold); border-radius: 50%; color: var(--hold); font-size: .78rem; font-weight: 650 }

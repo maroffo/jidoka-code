@@ -208,8 +208,8 @@ fn render_rows(
                 write!(
                     html,
                     r##"<li><strong>{}</strong><p>{}</p><a href="#{}">Read the finding</a></li>"##,
-                    escape(&item.title),
-                    escape(&item.impact),
+                    crate::markdown::inline(&item.title),
+                    crate::markdown::inline(&item.impact),
                     finding_id(*number)
                 )
                 .unwrap();

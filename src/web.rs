@@ -996,13 +996,21 @@ fn position(report: &PublishedReport, path: &str, line: usize) -> String {
 
 fn source_link(report: &PublishedReport, head: &str, path: &str, line: usize) -> String {
     let label = format!("{}, line {line}", escape(path));
+    match source_href(report, head, path, line) {
+        Some(href) => format!(r#"<a href="{href}">{label}</a>"#),
+        None => label,
+    }
+}
+
+/// The GitHub address of a line at a pinned revision, when every part of it is safe to link.
+fn source_href(report: &PublishedReport, head: &str, path: &str, line: usize) -> Option<String> {
     if line == 0
         || !valid_repo(&report.repo)
         || head.len() != 40
         || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
         || !safe_path(path)
     {
-        return label;
+        return None;
     }
     let mut encoded = String::new();
     for byte in path.bytes() {
@@ -1012,10 +1020,36 @@ fn source_link(report: &PublishedReport, head: &str, path: &str, line: usize) ->
             write!(encoded, "%{byte:02X}").unwrap();
         }
     }
-    format!(
-        r#"<a href="https://github.com/{}/blob/{head}/{encoded}#L{line}">{label}</a>"#,
+    Some(format!(
+        "https://github.com/{}/blob/{head}/{encoded}#L{line}",
         report.repo
+    ))
+}
+
+/// Link a `path:line` the reviewer cites in prose: to the saved diff when the line is in it,
+/// otherwise to the reviewed revision on GitHub. A bare file name is too ambiguous to link.
+fn citation(report: &PublishedReport, path: &str, line: usize) -> Option<String> {
+    if let Some(anchor) = crate::diff::anchor(report, path, line) {
+        return Some(format!("#{anchor}"));
+    }
+    path.contains('/')
+        .then(|| source_href(report, &report.head, path, line))
+        .flatten()
+}
+
+/// Reviewer prose as a block, with its Markdown rendered and its citations linked.
+fn prose(report: &PublishedReport, text: &str) -> String {
+    format!(
+        r#"<div class="prose">{}</div>"#,
+        crate::markdown::block(text, &|path, line| citation(report, path, line))
     )
+}
+
+fn prose_list<'a>(values: impl IntoIterator<Item = &'a String>) -> String {
+    values
+        .into_iter()
+        .map(|value| format!("<li>{}</li>", crate::markdown::inline(value)))
+        .collect()
 }
 
 fn scanner_html(report: &PublishedReport, scan: Option<&Scan>) -> String {
@@ -1080,9 +1114,22 @@ fn attribution_label(value: &Attribution) -> &'static str {
     }
 }
 
+/// Evidence in two parts when the engine appended what the reviewer ruled out.
 fn evidence_html(report: &PublishedReport, evidence: &str) -> String {
+    match evidence.split_once("\nCountercheck: ") {
+        Some((fails, ruled_out)) => format!(
+            "<h4>How it fails</h4>{}<h4>What was ruled out</h4>{}",
+            cited_prose(report, fails),
+            cited_prose(report, ruled_out)
+        ),
+        None => cited_prose(report, evidence),
+    }
+}
+
+/// Reviewer prose, with each quoted source line shown as a figure at its pinned revision.
+fn cited_prose(report: &PublishedReport, evidence: &str) -> String {
     let mut html = String::new();
-    let mut prose = Vec::new();
+    let mut text = Vec::new();
     for line in evidence.lines() {
         let citation = ["Proposed revision ", "Base revision "]
             .iter()
@@ -1094,46 +1141,21 @@ fn evidence_html(report: &PublishedReport, evidence: &str) -> String {
                 Some((prefix.starts_with("Base"), path, n, quote))
             });
         if let Some((base, path, n, quote)) = citation {
-            if !prose.is_empty() {
-                write!(
-                    html,
-                    r#"<p class="verbatim">{}</p>"#,
-                    escape(&prose.join("\n"))
-                )
-                .unwrap();
-                prose.clear();
+            if !text.is_empty() {
+                html.push_str(&prose(report, &text.join("\n")));
+                text.clear();
             }
             let revision = if base { &report.base } else { &report.head };
             let label = if base { "Base" } else { "Head" };
             write!(html, r#"<figure><figcaption><b>{label}</b> {}</figcaption><pre><code>{}</code></pre></figure>"#,
                 source_link(report, revision, path, n), escape(quote)).unwrap();
         } else {
-            prose.push(line);
+            text.push(line);
         }
     }
-    if !prose.is_empty() {
-        write!(
-            html,
-            r#"<p class="verbatim">{}</p>"#,
-            escape(&prose.join("\n"))
-        )
-        .unwrap();
+    if !text.is_empty() {
+        html.push_str(&prose(report, &text.join("\n")));
     }
-    html
-}
-
-/// Render inline code inside labels while keeping the surrounding prose plain text.
-fn inline_code(source: &str) -> String {
-    let mut html = String::new();
-    let mut cursor = 0;
-    for (event, range) in pulldown_cmark::Parser::new(source).into_offset_iter() {
-        if let pulldown_cmark::Event::Code(code) = event {
-            html.push_str(&escape(&source[cursor..range.start]));
-            write!(html, "<code>{}</code>", escape(&code)).unwrap();
-            cursor = range.end;
-        }
-    }
-    html.push_str(&escape(&source[cursor..]));
     html
 }
 
@@ -1145,19 +1167,19 @@ fn finding_card(
 ) -> String {
     let action = focus.map_or_else(String::new, |f| {
         format!(
-            r#"<div class="action"><b>Reviewer action</b><p>{}</p></div>"#,
-            inline_code(&f.action)
+            r#"<div class="action"><b>Reviewer action</b>{}</div>"#,
+            prose(report, &f.action)
         )
     });
-    let check = focus.map_or_else(String::new, |f| format!("<p>{}</p>", escape(&f.checked)));
+    let check = focus.map_or_else(String::new, |f| prose(report, &f.checked));
     format!(
         r#"<article class="card" id="{}"><h3>{}</h3>
-        <div class="location">{}</div><p class="finding-impact">{}</p>{action}
+        <div class="location">{}</div><div class="finding-impact">{}</div>{action}
         <details class="proof"><summary>View evidence</summary><div class="detail-body"><b>{}</b>{check}{}</div></details></article>"#,
         crate::diff::finding_id(index),
-        escape(&item.title),
+        crate::markdown::inline(&item.title),
         position(report, &item.path, item.line),
-        inline_code(&item.impact),
+        prose(report, &item.impact),
         attribution_label(&item.attribution),
         evidence_html(report, &item.evidence)
     )
@@ -1246,8 +1268,8 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> ReportHtml {
     let manual: Vec<_> = report.manual_checks().collect();
     let mut focus = String::new();
     for item in &manual {
-        write!(focus, r#"<li><p class="location">{}</p><details class="manual-check"><summary><span class="check-action">{}</span></summary><div class="detail-body"><p>{}</p><h3>What Jidoka checked</h3>{}</div></details></li>"#,
-            position(report,&item.path,item.line),inline_code(&item.action),inline_code(&item.outcome),evidence_html(report,&item.checked)).unwrap();
+        write!(focus, r#"<li><p class="location">{}</p><details class="manual-check"><summary><span class="check-action">{}</span></summary><div class="detail-body">{}<h3>What Jidoka checked</h3>{}</div></details></li>"#,
+            position(report,&item.path,item.line),crate::markdown::inline(&item.action),prose(report,&item.outcome),evidence_html(report,&item.checked)).unwrap();
     }
     let focus = if focus.is_empty() {
         "<p class=empty>No additional manual checks.</p>".to_owned()
@@ -1294,7 +1316,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> ReportHtml {
     let unfinished = report.unfinished_patches().filter(|paths| !paths.is_empty()).map_or_else(String::new, |paths| {
         format!("<details><summary>Patches with unfinished review ({})</summary><ul>{}</ul></details>", paths.len(), text_list(paths))
     });
-    let limits = text_list(&report.report.limits);
+    let limits = prose_list(&report.report.limits);
     let warnings = if is_partial {
         format!(
             r##"<section class="review-blockers"><h2>Partial coverage</h2>{}<a href="#coverage">See coverage details</a></section>"##,
@@ -1321,7 +1343,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> ReportHtml {
     } else {
         format!(
             "<details><summary>Reviewer notes</summary><ul>{}</ul></details>",
-            text_list(&report.report.notes)
+            prose_list(&report.report.notes)
         )
     };
     let tests = match &report.report.tests {
@@ -1584,6 +1606,38 @@ mod tests {
         assert!(html.contains("<dt>Mergeability</dt><dd>Not scored</dd>"));
         assert!(!html.contains(r#"href="/reviews/5/submit""#));
         assert!(facts(&report, true, 0).contains("<dt>Mergeability</dt><dd>Not scored</dd>"));
+    }
+
+    #[test]
+    fn reviewer_markdown_renders_with_split_evidence_and_linked_citations() {
+        let mut report = report(None);
+        report.patch_files = Some(vec!["src/task.rs".into()]);
+        report.report.findings.push(Finding {
+            title: "`wait` drops <b>work</b>".into(),
+            path: "src/task.rs".into(),
+            line: 2,
+            impact: "Jobs are **lost**.\n\n- first\n- second".into(),
+            evidence: "At src/task.rs:9 `queue.wait()` returns early; file.rs:3 and ../up/file.rs:4 stay text.\nCountercheck: Checked [the caller](javascript:alert(1)) and <img src=x>.".into(),
+            attribution: Attribution::Introduced,
+        });
+        report.report.notes.push("Read `a.rs` only.".into());
+        let html = report_text(&report, false);
+        assert!(html.contains("<h3><code>wait</code> drops &lt;b&gt;work&lt;/b&gt;</h3>"));
+        assert!(html.contains(r#"<div class="finding-impact"><div class="prose"><p>Jobs are <strong>lost</strong>.</p>"#));
+        assert!(html.contains("<ul>\n<li>first</li>\n<li>second</li>\n</ul>"));
+        assert!(
+            html.contains("<h4>How it fails</h4>") && html.contains("<h4>What was ruled out</h4>")
+        );
+        assert!(!html.contains("Countercheck:"));
+        assert!(html.contains(&format!(
+            r#"At <a href="https://github.com/test/demo/blob/{}/src/task.rs#L9">src/task.rs:9</a> <code>queue.wait()</code>"#,
+            report.head
+        )));
+        assert!(html.contains("file.rs:3 and ../up/file.rs:4 stay text."));
+        assert!(
+            !html.contains("javascript:") && !html.contains("<img") && !html.contains("<b>work")
+        );
+        assert!(html.contains("<li>Read <code>a.rs</code> only.</li>"));
     }
 
     #[test]
@@ -3110,7 +3164,7 @@ mod tests {
         assert!(!html.contains("#L15"));
         assert!(!html.contains("/../other#L2"));
         assert!(!html.contains("<script>"));
-        assert!(html.contains("Line 2\n&lt;evidence&gt;"));
+        assert!(html.contains("<p>Line 2<br />\n&lt;evidence&gt;</p>"));
         assert!(html.contains("Uncertain attribution"));
         assert!(html.contains("1.2.3 &lt;b&gt;"));
         assert!(html.contains("Signals to verify"));
