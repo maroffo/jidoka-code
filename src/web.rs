@@ -852,6 +852,19 @@ fn escape(value: &str) -> String {
 }
 
 fn page(title: &str, body: &str) -> String {
+    shell(title, body, "wrap")
+}
+
+/// The review workbench needs room for its side rail next to the diff.
+fn wide_page(title: &str, body: &str) -> String {
+    shell(title, body, "wrap wide")
+}
+
+fn lamp(tone: &str) -> String {
+    format!(r#"<span class="lamp {tone}" aria-hidden="true"></span>"#)
+}
+
+fn shell(title: &str, body: &str, width: &str) -> String {
     let new_review = if title == "Review history" {
         ""
     } else {
@@ -862,10 +875,10 @@ fn page(title: &str, body: &str) -> String {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{} · Jidoka Code</title><style>{}{}</style></head>
 <body><a class="skip" href="#main">Skip to content</a>
-<header class="mast"><nav class="wrap nav" aria-label="Main navigation">
+<header class="mast"><nav class="{width} nav" aria-label="Main navigation">
 <a class="brand" href="/"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>Jidoka<span class="brand-code">Code</span></a>
 <a class="nav-history" href="/#history">Review history</a><a class="nav-settings" href="/repositories">Repositories</a><a class="nav-settings" href="/review-prompt">Review prompt</a>{new_review}
-</nav></header><main class="wrap" id="main">{body}</main></body></html>"##,
+</nav></header><main class="{width}" id="main">{body}</main></body></html>"##,
         escape(title),
         include_str!("review.css"),
         include_str!("diff.css")
@@ -923,7 +936,6 @@ async fn home_page(
         dashboard::history(&tx, &query)
     })
     .await?;
-    let open = if error.is_empty() { "" } else { " open" };
     let error = if error.is_empty() {
         String::new()
     } else if error == UNAPPROVED {
@@ -936,15 +948,16 @@ async fn home_page(
     Ok(page(
         "Review history",
         &format!(
-            r#"<div class="dashboard"><div class="dashboard-head"><h1>Review history</h1>
-<details class="compose start-review"{open}><summary>New review</summary><div id="new-review">{error}
+            r#"<div class="dashboard"><h1>Review history</h1>
+<section class="compose start-review" id="new-review" aria-labelledby="new-review-title"><h2 id="new-review-title">New review</h2>{error}
 <form action="/" method="post">
 <input type="hidden" name="csrf_token" value="{token}">
 <label for="url">GitHub pull request URL</label>
-<input id="url" name="url" type="url" placeholder="https://github.com/owner/repo/pull/123" value="{}" required>
+<div class="start-row"><input id="url" name="url" type="url" placeholder="https://github.com/owner/repo/pull/123" value="{}" required>
+<button type="submit">Start review</button></div>
 <label class="consent"><input name="consent" type="checkbox" value="yes" required><span>Send this pull request’s code to <strong>{}</strong> for review.</span></label>
 <details class="destination"><summary>Provider details</summary><code>{}</code></details>
-<button type="submit">Start review <span aria-hidden="true">→</span></button></form></div></details></div><section class="pr-list" id="history">{history}</section></div>"#,
+</form></section><section class="pr-list" id="history">{history}</section></div>"#,
             escape(value),
             escape(provider_name(&state.provider)),
             escape(&state.provider),
@@ -1126,6 +1139,7 @@ fn inline_code(source: &str) -> String {
 
 fn finding_card(
     report: &PublishedReport,
+    index: usize,
     item: &Finding,
     focus: Option<&crate::contracts::Focus>,
 ) -> String {
@@ -1137,9 +1151,10 @@ fn finding_card(
     });
     let check = focus.map_or_else(String::new, |f| format!("<p>{}</p>", escape(&f.checked)));
     format!(
-        r#"<article class="card"><h3>{}</h3>
+        r#"<article class="card" id="{}"><h3>{}</h3>
         <div class="location">{}</div><p class="finding-impact">{}</p>{action}
         <details class="proof"><summary>View evidence</summary><div class="detail-body"><b>{}</b>{check}{}</div></details></article>"#,
+        crate::diff::finding_id(index),
         escape(&item.title),
         position(report, &item.path, item.line),
         inline_code(&item.impact),
@@ -1148,47 +1163,98 @@ fn finding_card(
     )
 }
 
-fn report_html(report: &PublishedReport, is_partial: bool) -> String {
-    let manual: Vec<_> = report.human_focus().take(3).collect();
+/// The one-line outcome for the fixed header, with the tone of its signal.
+fn verdict(report: &PublishedReport, is_partial: bool) -> (&'static str, String) {
+    if is_partial {
+        return ("hold", "Review incomplete".into());
+    }
+    if let Some(label) = report.mergeability_label() {
+        let ready = report.report.mergeability_score.is_some_and(|n| n >= 90);
+        return (if ready { "clear" } else { "stop" }, label);
+    }
+    match report.report.findings.len() {
+        0 => ("clear", "No verified findings".into()),
+        1 => ("stop", "1 verified finding".into()),
+        n => ("stop", format!("{n} verified findings")),
+    }
+}
+
+/// The numbers a reviewer needs before reading anything else.
+fn facts(report: &PublishedReport, is_partial: bool, manual: usize) -> String {
+    let findings = report.report.findings.len();
+    let (files_tone, files_label, files) = match (&report.reviewed_files, &report.patch_files) {
+        (Some(done), Some(total)) => (
+            if done.len() < total.len() { "hold" } else { "" },
+            "Files reviewed",
+            format!("{} of {}", done.len(), total.len()),
+        ),
+        (_, Some(total)) => ("", "Files with patches", total.len().to_string()),
+        _ => ("", "Files reviewed", "Unavailable".into()),
+    };
+    let (tests_tone, tests) = match &report.report.tests {
+        None => ("hold", "Not recorded".to_owned()),
+        Some(tests) if tests.is_empty() => ("", "None requested".to_owned()),
+        Some(tests) => ("", format!("{} run", tests.len())),
+    };
+    let score = report
+        .report
+        .mergeability_score
+        .filter(|&n| n <= 100 && !is_partial && !report.is_partial());
+    let (score_tone, score) = match score {
+        Some(n) if n >= 90 => ("clear", format!("{n}/100")),
+        Some(n) => ("stop", format!("{n}/100")),
+        None if is_partial => ("", "Not scored".to_owned()),
+        None => ("", "Not recorded".to_owned()),
+    };
+    let mut html = String::from(r#"<dl class="facts">"#);
+    for (tone, label, value) in [
+        (
+            if findings > 0 { "stop" } else { "" },
+            "Verified findings",
+            findings.to_string(),
+        ),
+        (
+            if manual > 0 { "hold" } else { "" },
+            "Manual checks",
+            manual.to_string(),
+        ),
+        (files_tone, files_label, files),
+        (tests_tone, "Tests", tests),
+        (score_tone, "Mergeability", score),
+    ] {
+        write!(
+            html,
+            r#"<div class="{tone}"><dt>{label}</dt><dd>{value}</dd></div>"#
+        )
+        .unwrap();
+    }
+    html.push_str("</dl>");
+    html
+}
+
+/// Return the report body and, separately, its tests and coverage panel.
+///
+/// The page places the changed files between the two.
+fn report_html(report: &PublishedReport, is_partial: bool) -> (String, String) {
+    let manual: Vec<_> = report.manual_checks().collect();
     let mut focus = String::new();
     for item in &manual {
-        write!(focus, r#"<details class="manual-check"><summary><span>{}</span></summary><div class="detail-body">{}<p>{}</p><h3>What Jidoka checked</h3>{}</div></details>"#,
-            inline_code(&item.action),position(report,&item.path,item.line),inline_code(&item.outcome),evidence_html(report,&item.checked)).unwrap();
+        write!(focus, r#"<li><details class="manual-check"><summary><span class="location">{}</span><span class="check-action">{}</span></summary><div class="detail-body"><p>{}</p><h3>What Jidoka checked</h3>{}</div></details></li>"#,
+            position(report,&item.path,item.line),inline_code(&item.action),inline_code(&item.outcome),evidence_html(report,&item.checked)).unwrap();
     }
-    if focus.is_empty() {
-        focus.push_str("<p class=empty>No additional manual checks.</p>");
-    }
-    let score = (!is_partial).then(|| report.mergeability_label()).flatten();
-    let tone = match (
-        is_partial,
-        score.is_some(),
-        report.report.mergeability_score,
-    ) {
-        (true, _, _) | (false, true, Some(0..=89)) => "caution",
-        (false, true, _) => "positive",
-        _ => "neutral",
+    let focus = if focus.is_empty() {
+        "<p class=empty>No additional manual checks.</p>".to_owned()
+    } else {
+        format!(r#"<ol class="checks">{focus}</ol>"#)
     };
-    let mut verdict = score.as_deref().map_or_else(String::new, |label| {
-        format!("<p class=decision><strong>{label}</strong></p>")
-    });
-    if is_partial {
-        verdict.push_str("<p class=decision><strong>Review incomplete</strong></p>");
-    } else if score.is_none() {
-        let findings = match report.report.findings.len() {
-            0 => "No verified findings".into(),
-            1 => "1 verified finding".into(),
-            n => format!("{n} verified findings"),
-        };
-        write!(verdict, "<div><p class=decision><strong>{findings}</strong></p><p class=meta>No mergeability score was recorded for this review.</p></div>").unwrap();
-    }
     let mut content = String::new();
     let mut extra = String::new();
-    for item in &report.report.findings {
+    for (index, item) in report.report.findings.iter().enumerate() {
         // Earlier reports stored the suggested action for a finding in its focus row.
         let suggestion = report.report.focus.iter().find(|focus| {
             focus.path == item.path && focus.line == item.line && focus.outcome == item.impact
         });
-        extra.push_str(&finding_card(report, item, suggestion));
+        extra.push_str(&finding_card(report, index, item, suggestion));
     }
     if report.report.findings.is_empty() {
         let empty = if is_partial {
@@ -1286,24 +1352,25 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
             format!("<ul>{rows}</ul>")
         }
     };
-    format!(
-        r##"<div class="review-report"><div class="review-decision {tone}">{verdict}<p class="coverage-line">{coverage}</p></div>{warnings}
-        <nav class="section-links" aria-label="Report sections"><a href="#findings">Findings ({})</a><a href="#manual">Manual checks ({})</a><a href="#review-diff">View diff</a><a href="#coverage">Tests and coverage</a></nav>
-        <div id="findings">{content}</div>
-        <section id="manual"><h2>What to check manually</h2>{focus}</section>
-        <section class="panel inspect" id="coverage"><div class="panel-head"><h2>Tests and coverage</h2></div>{tests}{notes}{unfinished}{patches}
+    let scan_open = if report.scan.as_ref().is_some_and(|s| !s.limits.is_empty()) {
+        " open"
+    } else {
+        ""
+    };
+    (
+        format!(
+            r##"{}{warnings}<div id="findings">{content}</div>
+        <section id="manual"><h2>What to check manually</h2>{focus}</section>"##,
+            facts(report, is_partial, manual.len())
+        ),
+        format!(
+            r##"<section class="panel inspect" id="coverage"><div class="panel-head"><h2>Tests and coverage</h2></div><p class="coverage-line">{coverage}</p>{tests}{notes}{unfinished}{patches}
         <details><summary>Git revisions</summary><div class="detail-body"><b>Reviewed revision</b><code>{}</code><b>Base revision</b><code>{}</code></div></details>
-        <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section></div>"##,
-        report.report.findings.len(),
-        manual.len(),
-        escape(&report.head),
-        escape(&report.base),
-        scanner_html(report, report.scan.as_ref()),
-        scan_open = if report.scan.as_ref().is_some_and(|s| !s.limits.is_empty()) {
-            " open"
-        } else {
-            ""
-        }
+        <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section>"##,
+            escape(&report.head),
+            escape(&report.base),
+            scanner_html(report, report.scan.as_ref()),
+        ),
     )
 }
 
@@ -1340,6 +1407,9 @@ fn review_page(
             )
         },
     );
+    // The header carries the outcome and the one action; `details` is everything below it.
+    let mut outcome = String::new();
+    let mut action = String::new();
     let (status, details) = match status {
         "queued" | "running" => {
             let waiting = failure.map_or_else(String::new, |reason| format!("<p>{}</p>", escape(reason)));
@@ -1362,15 +1432,37 @@ fn review_page(
                         )
                     };
                     let is_partial = status == "partial" || report.is_partial();
-                    let submit = if is_partial || report.report.dry_run {
-                        String::new()
+                    // The submit routes refuse the same two cases; say why instead of hiding the action.
+                    let blocked = if report.report.dry_run {
+                        Some("Dry run: nothing is sent to GitHub.")
+                    } else if is_partial {
+                        Some("Coverage is incomplete, so this review cannot be submitted.")
                     } else {
-                        format!(r#"<a class="primary-link" href="/reviews/{id}/submit">Submit review</a>"#)
+                        None
                     };
+                    action = match blocked {
+                        Some(reason) => format!(
+                            r#"<p class="submit-off"><span class="primary-link" aria-disabled="true">Submit review</span><small>{reason}</small></p>"#
+                        ),
+                        None => format!(r#"<a class="primary-link" href="/reviews/{id}/submit">Submit review</a>"#),
+                    };
+                    let (tone, text) = verdict(&report, is_partial);
+                    outcome = format!("{}<strong>{}</strong>", lamp(tone), escape(&text));
+                    let findings = report.report.findings.len();
+                    let manual = report.manual_checks().count();
+                    let (summary, coverage) = report_html(&report, is_partial);
+                    let (files, diff) = crate::diff::render(&report);
                     let details = format!(
-                        r##"{submit}{}{}{load}"##,
-                        report_html(&report, is_partial),
-                        crate::diff::render(&report)
+                        r##"<div class="bench"><nav class="rail" aria-label="Report sections and files"><h2>Report</h2><ul class="rail-sections">
+<li><a href="#findings">{}<span>Verified findings</span><em>{findings}</em></a></li>
+<li><a href="#manual">{}<span>Manual checks</span><em>{manual}</em></a></li>
+<li><a href="#review-diff">{}<span>Changed files</span></a></li>
+<li><a href="#coverage">{}<span>Tests and coverage</span></a></li></ul>{files}</nav>
+<div class="review-report">{summary}{diff}{load}{coverage}</div></div>"##,
+                        lamp(if findings > 0 { "stop" } else { "clear" }),
+                        lamp(if manual > 0 { "hold" } else { "off" }),
+                        lamp("off"),
+                        lamp("off"),
                     );
                     (status, details)
                 }
@@ -1389,12 +1481,12 @@ fn review_page(
             format!(r#"<details class="run-metrics"><summary>{summary}</summary><p class="meta">{}</p></details>"#, escape(usage))
         }
     });
-    page(
+    wide_page(
         &format!("Review {id}"),
         &format!(
-            r##"<div class="hero report-head"><div class="trail"><a href="/#history">Review history</a><span>/</span>{kind} {id}</div>
-<div class="title-line"><h1>{heading}</h1>{}</div>
-<div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div>{metrics}</div>{details}"##,
+            r##"<header class="verdict-bar"><div class="verdict-id"><div class="trail"><a href="/#history">Review history</a><span>/</span>{kind} {id}</div>
+<h1>{heading}</h1></div><p class="verdict-say">{outcome}{}</p>{action}</header>
+<div class="report-meta"><div class="meta">{link}<span>·</span>{} UTC<span>·</span>{}</div>{metrics}</div>{details}"##,
             status_badge(status),
             escape(created),
             escape(provider_name(provider)),
@@ -1426,10 +1518,24 @@ mod tests {
     #[test]
     fn web_report_shows_the_same_recommendation_only_for_scored_completed_reviews() {
         let mut report = report(None);
-        assert!(!report_html(&report, false).contains("Mergeability:"));
+        assert_eq!(
+            verdict(&report, false),
+            ("clear", "No verified findings".into())
+        );
+        assert!(facts(&report, false, 0).contains("<dt>Mergeability</dt><dd>Not recorded</dd>"));
         report.report.mergeability_score = Some(90);
-        assert!(report_html(&report, false).contains("Mergeability: 90/100 · Ready to merge"));
-        assert!(!report_html(&report, true).contains("Mergeability:"));
+        assert_eq!(
+            verdict(&report, false),
+            ("clear", "Mergeability: 90/100 · Ready to merge".into())
+        );
+        assert!(
+            facts(&report, false, 0)
+                .contains(r#"<div class="clear"><dt>Mergeability</dt><dd>90/100</dd>"#)
+        );
+        report.report.mergeability_score = Some(89);
+        assert_eq!(verdict(&report, false).0, "stop");
+        assert_eq!(verdict(&report, true), ("hold", "Review incomplete".into()));
+        assert!(facts(&report, true, 0).contains("<dt>Mergeability</dt><dd>Not scored</dd>"));
     }
 
     #[test]
@@ -1461,6 +1567,11 @@ mod tests {
     const RATE_LIMIT_MESSAGE: &str =
         "GitHub API rate limit reached. Try again after the limit resets.";
 
+    fn report_text(report: &PublishedReport, is_partial: bool) -> String {
+        let (summary, coverage) = report_html(report, is_partial);
+        summary + &coverage
+    }
+
     fn assert_history_row(html: &str, link: &str, repo: &str, number: &str, status: &str) {
         let (_, row) = html
             .split_once(&format!(r#"class="history-row" href="{link}">"#))
@@ -1484,9 +1595,14 @@ mod tests {
             exit_code: Some(1),
             seconds: Some(2),
         }]);
-        let html = report_html(&report, report.is_partial());
+        assert!(
+            verdict(&report, report.is_partial())
+                .1
+                .contains("Hold merge")
+        );
+        let html = report_text(&report, report.is_partial());
         for expected in [
-            "Hold merge",
+            "<dt>Tests</dt><dd>1 run</dd>",
             "Static checks covered &lt;all&gt; patches.",
             "go test &lt;package&gt;",
             "exit 1",
@@ -1501,9 +1617,10 @@ mod tests {
     fn html_distinguishes_collected_and_finished_file_counts() {
         let mut report = report(None);
         report.patch_files = Some(vec!["src/a.rs".into(), "src/b.rs".into()]);
-        assert!(report_html(&report, false).contains("2 files supplied with patches"));
+        assert!(report_text(&report, false).contains("2 files supplied with patches"));
         report.reviewed_files = Some(vec!["src/a.rs".into()]);
-        let html = report_html(&report, true);
+        let html = report_text(&report, true);
+        assert!(html.contains(r#"<div class="hold"><dt>Files reviewed</dt><dd>1 of 2</dd>"#));
         assert!(html.contains("1 of 2 changed text files reviewed"));
         assert!(html.contains("Patches with unfinished review (1)</summary><ul><li>src/b.rs</li>"));
     }
@@ -1527,8 +1644,9 @@ mod tests {
             checked: "Checked pending jobs.".into(),
             action: "Repeat the update with a pending job.".into(),
         });
-        let html = report_html(&report, false);
+        let html = report_text(&report, false);
         assert_eq!(html.matches("<article").count(), 1);
+        assert!(html.contains(r#"<article class="card" id="finding-1">"#));
         assert!(html.contains("Repeat the update with a pending job."));
         assert!(html.contains(&format!("/blob/{}/{path}#L9", report.base)));
         assert!(html.contains("<code>queue.wait();</code>"));
@@ -1708,7 +1826,8 @@ mod tests {
         assert!(run_one(&f.db, |_| Ok(report(None))).unwrap());
         assert!(latest_review(&f.db, PROVIDER, URL).unwrap().is_none());
         let page = f.get("/reviews/1").await;
-        assert!(!page.contains("Submit review"));
+        assert!(page.contains("Dry run: nothing is sent to GitHub."));
+        assert!(!page.contains(r#"href="/reviews/1/submit""#));
         assert_eq!(
             f.request(Method::GET, "/reviews/1/submit", &[], "").await.0,
             StatusCode::CONFLICT
@@ -2312,8 +2431,10 @@ mod tests {
                 .unwrap();
             let review = format!("/reviews/{id}");
             let html = fixture.get(&review).await;
-            assert!(html.contains("View diff"));
-            assert!(!html.contains("Submit review"));
+            assert!(html.contains(r##"<a href="#review-diff">"##));
+            assert!(html.contains("Coverage is incomplete, so this review cannot be submitted."));
+            assert!(html.contains("<strong>Review incomplete</strong>"));
+            assert!(!html.contains(&format!(r#"href="{review}/submit""#)));
             for (method, path) in [
                 (Method::GET, "submit"),
                 (Method::POST, "submit"),

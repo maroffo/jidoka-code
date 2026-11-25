@@ -7,6 +7,12 @@
   --line: #d6dfd7;
   --accent: #17674e;
   --mast: #153e34;
+  --sunk: #e9ede8;
+  --stop: #b23a1e;
+  --hold: #8a5a08;
+  --clear: #1c7350;
+  --idle: #7b8983;
+  --bar: 4.5rem;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
   font: 16px/1.55 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: var(--ink);
@@ -76,7 +82,7 @@ code { font-family: var(--mono) }
 .inspect h4 { margin: 9px 0 2px }.empty,.history > p { padding: 14px; color: var(--sub) }
 .history-list { list-style: none; padding: 0 }.history-list li + li { border-top: 1px solid var(--line) }.history-row { display: grid; align-items: center; grid-template-columns: 1fr auto auto; gap: 14px; padding: 15px 18px; text-decoration: none }
 .history-row:hover { background: #f2f2e9 }.history-row strong,.history-row small { display: block }.history-row b { color: var(--sub); font-weight: 480 }.history-row small { margin-top: 3px; font-size: .72rem }
-.arrow { color: var(--sub) }.compose form { padding: 18px }.compose label { font-weight: 630; font-size: .85rem }
+.compose form { padding: 18px }.compose label { font-weight: 630; font-size: .85rem }
 input[type=url],#repository { width: 100%; font: .85rem var(--mono); padding: 11px 10px; border-radius: 3px; border: 1px solid #8e9b95; background: #fff; color: #172d34; margin-top: 7px }
 .consent { display: flex; align-items: baseline; gap: 8px; margin: 15px 0; color: var(--sub) }.compose .consent { font-weight: 400 }.consent input { accent-color: #245555 }
 button { border: 0; border-radius: 4px; background: #193e42; color: white; padding: 10px 14px; font-family: inherit; font-size: .9rem; font-weight: 650; cursor: pointer; width: 100%; text-align: left }
@@ -88,7 +94,6 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 }
 @media (max-width: 450px) {
   .brand { font-size: 19px }.mark { margin-right: 4px }.nav { gap: 8px }.nav-history { font-size: .75rem }
-  .history-row { gap: 8px; padding: 12px }.arrow { display: none }.history-row { grid-template-columns: 1fr auto }
   .wrap { padding-inline: 15px }
 }
 .destination { margin: -7px 0 12px }.destination summary { color: var(--sub); font-size: .78rem }.destination code { display: block; margin-bottom: 10px; font-size: .75rem }
@@ -120,63 +125,129 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 .prompt-editor .prompt-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
 .prompt-editor pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.review-report { max-width: 62rem; margin-inline: auto; overflow-wrap: anywhere }
-.review-report section { margin-block: 1.2rem }
-.review-report .coverage-line { font-weight: 600; color: var(--sub) }
-.section-links { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; padding: .75rem 0; border-bottom: 1px solid var(--line) }
-.manual-check { padding: .3rem 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: .35rem }
-.manual-check + .manual-check { margin-top: .35rem }
-.manual-check summary { font-weight: 600 }
-.review-blockers { border-left: .25rem solid var(--accent); padding: .6rem 1rem; background: var(--surface) }
-.review-report .decision { margin: 1rem 0; font-size: 1.25rem }
+/* One signal for every state: a bar of the brand mark. The words beside it always carry the outcome. */
+.lamp { flex: none; display: inline-block; width: 16px; height: 6px; transform: skewX(-29deg); background: var(--idle) }
+.lamp.stop { background: var(--stop) }.lamp.hold { background: var(--hold) }.lamp.clear { background: var(--clear) }
+.lamp.off { background: none; box-shadow: inset 0 0 0 1.5px var(--idle) }
+.lamp.busy { background: repeating-linear-gradient(90deg, var(--idle) 0 4px, transparent 4px 6px) }
+.wrap.wide { width: min(1480px, 100%) }
+
+.dashboard { max-width: 66rem; margin: 0 auto 4rem; padding-top: clamp(1.5rem,3.5vw,2.6rem) }
+.dashboard h1 { font-size: clamp(1.6rem,3vw,2rem) }
+.start-review { margin-top: 1.1rem; background: var(--surface); border: 1px solid var(--line); border-radius: .5rem }
+.start-review h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%) }
+.start-review form { padding: .9rem 1rem .2rem }
+.start-review .error { margin: .9rem 1rem 0 }
+.start-row { display: flex; gap: .6rem; margin-top: .4rem }
+.start-row input[type=url] { margin: 0; min-width: 0 }
+.start-row button { width: auto; white-space: nowrap }
+.start-review .consent { margin: .7rem 0 .5rem; font-size: .85rem }
+.start-review .destination { margin: 0 0 .4rem }
+.pr-list { margin-top: 1.6rem }
+.list-toolbar,.list-toolbar>div,.pr-search,.paging { display: flex; align-items: center; gap: .65rem }
+.list-toolbar { justify-content: space-between; flex-wrap: wrap; padding-bottom: .7rem; border-bottom: 1px solid var(--line) }
+.list-toolbar h2 { font-size: 1.06rem }
+.list-toolbar h2 span { padding-inline: .4rem; color: var(--sub); font-weight: 450; font-size: .9rem }
+.pr-search input { min-width: 0; width: clamp(9rem,20vw,18rem); border: 1px solid #b7c6ba; background: var(--surface); color: var(--ink); border-radius: .35rem; padding: .45rem .7rem; font: inherit; font-size: .84rem }
+.pr-search button { width: auto; padding: .45rem .75rem; border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-align: center }
+.day { margin: 1.3rem .25rem .4rem; max-width: none; font-size: .8rem; font-weight: 620; letter-spacing: 0; color: var(--sub) }
+.history-list { background: var(--surface); border: 1px solid var(--line); border-radius: .5rem; overflow: hidden }
+.history-row { grid-template-columns: 16px minmax(0,1.5fr) minmax(0,1fr) 5.2rem; gap: .9rem; padding: .7rem 1rem }
+.history-row:hover { background: var(--canvas) }
+.pr-identity { min-width: 0 }
+.pr-identity strong { font-weight: 630; font-size: .97rem; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.pr-identity small,.row-outcome small { margin-top: 1px; font-family: inherit; font-size: .78rem; line-height: 1.45; color: var(--sub); font-weight: 400 }
+.row-outcome { font-size: .92rem }
+.row-outcome small:empty { display: none }
+.row-outcome.stop { color: var(--stop); font-weight: 620 }.row-outcome.hold { color: var(--hold) }
+.row-outcome.clear { color: var(--clear); font-weight: 620 }.row-outcome.off { color: var(--sub) }
+.row-when { font-size: .78rem; color: var(--sub); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums }
+.earlier { border-top: 1px dashed var(--line); background: var(--canvas) }
+.earlier>summary { width: fit-content; justify-content: flex-start; padding: .3rem 1rem .3rem 2.9rem; color: var(--sub); font-weight: 500; font-size: .8rem }
+.earlier .history-row { grid-template-columns: 16px minmax(0,1.5fr) minmax(0,1fr) 9.5rem; padding-block: .4rem }
+.earlier .pr-identity strong { font-weight: 450; font-size: .88rem; color: var(--sub) }
+.paging { justify-content: center; padding: 1.2rem 0 0; font-size: .85rem }
+
+.verdict-bar { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: .5rem 1.4rem; min-height: var(--bar); padding: .55rem 0; background: var(--canvas); border-bottom: 1px solid var(--line) }
+.verdict-id { min-width: 0; margin-right: auto }
+.verdict-bar .trail { margin: 0; font-size: .72rem }
+.verdict-bar h1 { font-size: 1.2rem; line-height: 1.3; letter-spacing: -.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.verdict-say { display: flex; align-items: center; gap: .6rem; white-space: nowrap; font-size: .95rem }
+.verdict-say .status { background: none; border: 1px solid var(--line); color: var(--sub); font-weight: 500; padding: 1px 9px }
+.verdict-say .status::before { content: none }
+.verdict-bar .primary-link { white-space: nowrap; font-weight: 620; font-size: .9rem }
+.submit-off { display: flex; align-items: center; gap: .7rem }
+.submit-off small { max-width: 15rem; font-size: .76rem; line-height: 1.35; color: var(--sub); order: -1; text-align: right }
+.primary-link[aria-disabled=true] { background: var(--sunk); color: var(--sub); cursor: not-allowed }
+.report-meta { padding: .6rem 0 0 }
+.report-meta .meta { margin: 0 }
+
+.bench { display: grid; grid-template-columns: 17.5rem minmax(0,1fr); gap: 0 2rem; align-items: start; margin-top: .9rem }
+.rail { position: sticky; top: var(--bar); max-height: calc(100vh - var(--bar)); overflow-y: auto; padding: .5rem .4rem 2rem 0; font-size: .86rem }
+.rail h2 { margin: 1.1rem 0 .35rem; font-size: .78rem; font-weight: 620; letter-spacing: 0; color: var(--sub) }
+.rail h2:first-child { margin-top: .3rem }
+.rail ul { list-style: none; padding: 0 }
+.rail a { display: flex; align-items: center; gap: .55rem; min-width: 0; padding: .22rem .5rem; border-radius: .25rem; text-decoration: none }
+.rail a:hover,.rail a:focus-visible { background: var(--sunk); color: inherit }
+.rail a > .lamp + * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.rail a em,.rail .diff-stat { flex: none; margin-left: auto; font-style: normal; font-size: .74rem; color: var(--sub) }
+.rail-files a { font-size: .78rem }
+.rail-files a.marked { font-weight: 650 }
+.rail-files a:not(.marked) .lamp { visibility: hidden }
+.rail-dir { padding: .5rem .5rem .1rem; font: .72rem var(--mono); color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+
+.review-report { min-width: 0; overflow-wrap: anywhere }
+.review-report > section,.review-report > #findings,.review-report > form { margin-top: 2.2rem }
+.review-report section[id],.review-report #findings,.review-report .card { scroll-margin-top: calc(var(--bar) + 1rem) }
+.review-report h2 { margin-bottom: .7rem }
+.facts { display: flex; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--line); border-radius: .5rem; overflow: hidden }
+.facts div { flex: 1 1 9rem; padding: .7rem 1rem; box-shadow: 1px 0 0 var(--line), 0 1px 0 var(--line) }
+.facts dt { font-size: .8rem; color: var(--sub) }
+.facts dd { margin: 1px 0 0; font-size: 1.05rem; font-weight: 640 }
+.facts .stop dd { color: var(--stop) }.facts .hold dd { color: var(--hold) }.facts .clear dd { color: var(--clear) }
+.review-blockers { margin-top: 1rem; border-left: .25rem solid var(--hold); padding: .6rem 1rem; background: var(--surface) }
+.review-blockers ul { padding-left: 1.2rem }
+.review-report .card { padding: 1.05rem 1.35rem 0; border: 1px solid var(--line); border-left: .25rem solid var(--stop) }
+.review-report .card + .card { margin-top: .8rem }
+.review-report .card h3 { margin-top: 0; max-width: 60ch; font-size: clamp(1.05rem,2vw,1.25rem); line-height: 1.32; letter-spacing: -.015em }
+.review-report .card > p { max-width: 80ch; color: var(--ink) }
+.review-report .finding-impact { margin-bottom: 1rem; font-size: 1rem; line-height: 1.6; white-space: pre-line }
+.review-report .location { margin: .5rem 0 .75rem }
+.location a,.checks .location { display: inline-block; padding: .15rem .5rem; border-radius: .25rem; background: var(--sunk); text-decoration: none; font: .78rem var(--mono) }
+.checks .location a { padding: 0; background: none }
+.location a:hover { background: var(--line); color: inherit }
+.manual-check code,.action code,.finding-impact code { display: inline; padding: .08em .25em; background: var(--sunk); border-radius: .2rem; font-size: .89em; white-space: pre-wrap }
+.checks { list-style: none; padding: 0; counter-reset: check; background: var(--surface); border: 1px solid var(--line); border-radius: .5rem }
+.checks > li { counter-increment: check }
+.checks > li + li { border-top: 1px solid var(--line) }
+.manual-check > summary { display: grid; grid-template-columns: 1.6rem minmax(0,1fr) 1rem; gap: .3rem .8rem; align-items: start; padding: .85rem 1.1rem; font-size: .95rem; font-weight: 450 }
+.manual-check > summary::before { content: counter(check); grid-row: 1 / 3; display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1.5px solid var(--hold); border-radius: 50%; color: var(--hold); font-size: .78rem; font-weight: 650 }
+.manual-check > summary::after { grid-column: 3; grid-row: 1 }
+.manual-check .location { grid-column: 2; margin: 0; width: fit-content; max-width: 100% }
+.check-action { grid-column: 2; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; max-width: 90ch; line-height: 1.55 }
+.manual-check[open] .check-action { display: block }
+.manual-check .detail-body { padding: 0 1.1rem 1rem 3.5rem; max-width: 96ch }
+.manual-check .detail-body h3 { margin: .8rem 0 .2rem; font-size: .8rem; letter-spacing: 0; color: var(--sub) }
+.review-report .inspect { background: var(--surface) }
+.review-report .inspect .panel-head h2 { margin: 0; font-size: 1.1rem }
 .review-report .inspect > p,.review-report .inspect > ul { padding: .8rem 1.2rem }
-.review-report h2 + .card,.review-report h2 + .manual-check { margin-top: .55rem }
+.review-report .coverage-line { font-weight: 600; color: var(--sub); padding-bottom: 0 }
 .run-metrics summary { width: fit-content; color: var(--sub); font: .8rem/1.55 var(--mono); padding: .35rem 0 }
 
-.dashboard { max-width: 68rem; margin: 0 auto 4rem }
-.dashboard-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 1rem; padding: clamp(1.7rem,4vw,3.2rem) 0 1.7rem }
-.start-review { flex: 0 1 auto }
-.start-review > summary { background: var(--mast); color: white; padding: .55rem 1rem; border-radius: .5rem; justify-content: center }
-.start-review > summary::before { content: "+"; font-weight: 500 }
-.start-review > summary::after { content: none }
-.start-review[open] { flex-basis: 100%; background: var(--surface); border: 1px solid var(--line); border-radius: .6rem }
-.start-review[open] > summary { width: fit-content; margin: .7rem .85rem 0 }
-.start-review[open] > summary::before { content: "−" }
-.start-review form { max-width: 45rem }
-.pr-list { background: var(--surface); border: 1px solid var(--line); border-radius: .7rem; overflow: hidden }
-.list-toolbar,.list-toolbar>div,.pr-search,.paging { display: flex; align-items: center; gap: .65rem }
-.list-toolbar { justify-content: space-between; flex-wrap: wrap; padding: 1rem 1.3rem; border-bottom: 1px solid var(--line) }
-.list-toolbar h2 { font-size: 1.06rem }
-.list-toolbar h2 span { padding-inline: .4rem; color: var(--sub); font: .85rem var(--mono) }
-.pr-search input { min-width: 0; width: clamp(9rem,20vw,18rem); border: 1px solid #b7c6ba; background: var(--canvas); color: var(--ink); border-radius: .35rem; padding: .5rem .7rem; font: inherit; font-size: .84rem }
-.pr-search button { width: auto; padding: .45rem .75rem; border: 1px solid var(--line); background: white; color: var(--ink); text-align: center }
-.history-row { padding: 1.05rem 1.3rem; min-height: 4.4rem; grid-template-columns: minmax(0,1fr) auto 1rem }
-.history-row:hover { background: #f1f7ee }
-.pr-identity strong { font-weight: 630; font-size: 1rem; line-height: 1.35 }
-.pr-identity small,.row-outcome small { font-family: inherit; font-size: .78rem; letter-spacing: .005em; line-height: 1.5 }
-.row-outcome { display: grid; justify-items: end; align-self: center }
-.row-outcome small:empty { display: none }
-.recommend { font-weight: 650; font-size: .84rem }.ready { color: #155c3d }.hold { color: #893d27 }
-.earlier { margin: -.35rem 1.3rem .65rem; border-inline-start: 2px solid var(--line); padding-inline-start: .8rem }
-.earlier>summary { width: fit-content; padding: .15rem .2rem; color: var(--sub); font-weight: 500; font-size: .8rem }
-.earlier .history-row { background: var(--canvas); padding: .6rem .8rem; margin: .3rem 0; min-height: 3rem }
-.paging { justify-content: center; padding: 1rem; border-top: 1px solid var(--line); font-size: .85rem }
-.report-head { max-width: 62rem; margin-inline: auto; margin-bottom: 0; padding: 1.6rem 0 1.1rem; border: 0 }
-.report-head .title-line { align-items: baseline; gap: .7rem }
-.report-head h1 { max-width: 36ch; font-size: clamp(1.45rem,3vw,2.2rem); line-height: 1.18 }
-.report-head .trail { margin-bottom: .65rem }
-.report-head .meta { margin-top: .45rem }
-.review-decision { border-left: .3rem solid #3c7959; border-radius: .4rem; background: #e9f1e5; padding: .9rem 1.15rem; display: flex; gap: .5rem 2rem; align-items: baseline; justify-content: space-between; flex-wrap: wrap }
-.review-decision .decision,.review-decision .meta { margin: 0 }
-.review-decision .coverage-line { font-size: .9rem; font-weight: 550 }
-.review-report .section-links { gap: .65rem 1.5rem; padding: .9rem 0; font-size: .9rem }
-.section-links a { color: var(--accent); font-weight: 600 }
-.review-report .card { padding: 1rem 1.3rem 0; border: 1px solid var(--line); border-left: .22rem solid #aa6639 }
-.review-report .card h3 { margin-top: .1rem; max-width: 65ch; font: 650 clamp(1.05rem,2vw,1.3rem)/1.32 Inter,system-ui,sans-serif }
-.review-report .card > p { max-width: 83ch; color: var(--ink) }
-.review-report .inspect { background: var(--surface) }
-.review-report .inspect .panel-head h2 { font-size: 1.1rem }
-.report-head + .primary-link { display: block; width: fit-content; margin: 0 max(0px,calc((100% - 62rem)/2)) .8rem auto }
+@media (max-width: 900px) {
+  .verdict-bar { position: static; flex-wrap: wrap }
+  .verdict-id { flex-basis: 100% }
+  .verdict-bar h1 { white-space: normal }
+  .verdict-say { white-space: normal; flex-wrap: wrap }
+  .submit-off { flex-wrap: wrap }.submit-off small { order: 0; text-align: left; max-width: none }
+  .bench { grid-template-columns: minmax(0,1fr) }
+  .rail { position: static; max-height: none; padding: 0 }
+  .rail h2,.rail-files { display: none }
+  .rail-sections { display: flex; gap: .3rem; overflow-x: auto; padding-bottom: .2rem }
+  .rail-sections a { white-space: nowrap; border: 1px solid var(--line); background: var(--surface) }
+  .manual-check .detail-body { padding-left: 1.1rem }
+  .review-report section[id],.review-report #findings,.review-report .card { scroll-margin-top: 1rem }
+}
 @media (max-width: 650px) {
   .nav { flex-wrap: wrap; gap: .35rem 1rem; padding-block: .65rem }
   .nav .brand { flex: 1 0 60% }
@@ -187,15 +258,10 @@ button span { float: right }button:hover { background: #285458 }.error { padding
   .pr-search { flex: 1 1 auto; min-width: 0; max-width: 100% }
   .pr-search input { flex: 1 1 9rem; width: 9rem }
   .pr-search button,.list-toolbar > div > a { flex: none; white-space: nowrap }
-  .list-toolbar,.history-row { padding: .85rem }
-  .history-row { gap: .6rem; grid-template-columns: minmax(0,1fr) auto }
-  .history-row .arrow { display: none }.earlier { margin-inline: .85rem }
-  .section-links { flex-wrap: wrap }
+  .history-row,.earlier .history-row { grid-template-columns: 16px minmax(0,1fr) auto; gap: .1rem .7rem; padding: .7rem .85rem }
+  .history-row .lamp { grid-column: 1; grid-row: 1 }.history-row .pr-identity { grid-column: 2; grid-row: 1 }
+  .history-row .row-outcome { grid-column: 2; grid-row: 2 }.history-row .row-when { grid-column: 3; grid-row: 1 / 3 }
+  .pr-identity strong { white-space: normal }
+  .earlier>summary { padding-left: 2.6rem }
+  .start-row { flex-wrap: wrap }.start-row button { width: 100%; text-align: center }
 }
-
-.review-decision.neutral { background: #eef0ec; border-color: #829185 }
-.review-decision.caution { background: #fbefdc; border-color: #b87931 }
-.review-report .finding-impact { max-width: 84ch; margin-bottom: 1rem; font-size: 1rem; white-space: pre-line }
-.manual-check code,.action code,.finding-impact code { display: inline; padding: .08em .25em; background: #eff2ed; border-radius: .2rem; font-size: .89em; white-space: pre-wrap }
-
-.review-decision .decision + .meta { margin-top: .25rem; font-family: inherit }

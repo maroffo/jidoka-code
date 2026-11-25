@@ -175,6 +175,11 @@ impl PublishedReport {
         )
     }
 
+    /// The human follow-ups a report page shows, capped so the list stays actionable.
+    pub fn manual_checks(&self) -> impl Iterator<Item = &Focus> {
+        self.human_focus().take(3)
+    }
+
     /// Return distinct human follow-ups in report order, including for older saved reports.
     pub fn human_focus(&self) -> impl Iterator<Item = &Focus> {
         let mut seen = HashSet::new();
