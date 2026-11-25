@@ -1138,11 +1138,11 @@ fn finding_card(
     let check = focus.map_or_else(String::new, |f| format!("<p>{}</p>", escape(&f.checked)));
     format!(
         r#"<article class="card"><h3>{}</h3>
-        <div class="location">{}</div><div class="finding-impact">{}</div>{action}
+        <div class="location">{}</div><p class="finding-impact">{}</p>{action}
         <details class="proof"><summary>View evidence</summary><div class="detail-body"><b>{}</b>{check}{}</div></details></article>"#,
         escape(&item.title),
         position(report, &item.path, item.line),
-        workflow::markdown_preview(&item.impact),
+        inline_code(&item.impact),
         attribution_label(&item.attribution),
         evidence_html(report, &item.evidence)
     )

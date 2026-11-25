@@ -195,8 +195,7 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 
 .review-decision.neutral { background: #eef0ec; border-color: #829185 }
 .review-decision.caution { background: #fbefdc; border-color: #b87931 }
-.finding-impact { max-width: 84ch; margin-bottom: 1rem }
-.finding-impact p + p { margin-top: .6rem }
+.review-report .finding-impact { max-width: 84ch; margin-bottom: 1rem; font-size: 1rem; white-space: pre-line }
 .manual-check code,.action code,.finding-impact code { display: inline; padding: .08em .25em; background: #eff2ed; border-radius: .2rem; font-size: .89em; white-space: pre-wrap }
 
 .review-decision .decision + .meta { margin-top: .25rem; font-family: inherit }

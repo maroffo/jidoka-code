@@ -10,11 +10,13 @@ pub(super) struct HistoryQuery {
 
 pub(super) fn subject(connection: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
     let title: Option<String> = connection.query_row(
-        "SELECT coalesce((SELECT subject FROM review_subjects WHERE review_id=?1),(SELECT CASE WHEN json_valid(snapshot) THEN substr(json_extract(snapshot, '$.intent[0]'),1,240) END FROM review_runs WHERE review_id=?1))",
+        "SELECT coalesce((SELECT subject FROM review_subjects WHERE review_id=?1),(SELECT CASE WHEN json_valid(snapshot) THEN CASE WHEN json_type(snapshot, '$.intent[0]')='text' THEN substr(json_extract(snapshot, '$.intent[0]'),1,240) END END FROM review_runs WHERE review_id=?1))",
         [id], |row| row.get(0),
     )?;
     Ok(title.and_then(|s| {
-        s.lines()
+        s.strip_prefix("Commit message\n")
+            .unwrap_or(&s)
+            .lines()
             .next()
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -185,6 +187,12 @@ mod tests {
             [r#"{"intent":["Fix <parser>\nMore detail"]}"#],
         )
         .unwrap();
+        db.execute(
+            "INSERT INTO review_runs(review_id,snapshot) VALUES(1,?)",
+            [r#"{"intent":["Commit message\nHandle retries\nLonger details"]}"#],
+        )
+        .unwrap();
+        assert_eq!(subject(&db, 1).unwrap().as_deref(), Some("Handle retries"));
         session::finish(&db, 2, "completed", "done").unwrap();
         assert_eq!(subject(&db, 2).unwrap().as_deref(), Some("Fix <parser>"));
         let html = history(

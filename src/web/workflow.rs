@@ -104,7 +104,7 @@ pub(super) async fn compose(
 
 // Render the submitted Markdown locally. Literal source stays text, and the
 // only links the review generator emits point to pinned files on GitHub.
-pub(super) fn markdown_preview(source: &str) -> String {
+fn markdown_preview(source: &str) -> String {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd, html::push_html};
     let events = Parser::new(source).filter_map(|event| {
         Some(match event {
