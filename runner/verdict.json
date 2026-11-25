@@ -1,0 +1,105 @@
+{
+  "type": "object",
+  "properties": {
+    "reviewed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limits": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "impact": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "attribution": {
+            "type": "string",
+            "enum": [
+              "introduced",
+              "preexisting",
+              "unknown"
+            ]
+          },
+          "quote": {
+            "type": "string"
+          },
+          "countercheck": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "title",
+          "impact",
+          "evidence",
+          "attribution",
+          "quote",
+          "countercheck"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "focus": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "checked": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "checked",
+          "outcome",
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "reviewed_files",
+    "limits",
+    "findings",
+    "focus"
+  ],
+  "additionalProperties": false
+}

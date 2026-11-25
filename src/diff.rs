@@ -74,6 +74,38 @@ pub fn anchor(report: &PublishedReport, path: &str, line: usize) -> Option<Strin
         .then(|| head_id(&file_id(index), line))
 }
 
+/// A patch with no head lines can only cite the base revision.
+pub fn base_citation_path<'a>(
+    report: &'a PublishedReport,
+    path: &str,
+    line: usize,
+) -> Option<&'a str> {
+    let diff = report.diff.as_ref()?;
+    let file = diff.files.iter().find(|f| f.path == path)?;
+    let lines = rows(diff, file)?;
+    (lines.iter().all(|(_, head, _)| head.is_none())
+        && lines.iter().any(|(base, _, _)| *base == Some(line)))
+    .then(|| previous_path(file).unwrap_or(&file.path))
+}
+
+/// Match the quoted source on the head, or on the base when a file was removed or emptied.
+pub fn matches_quote(report: &PublishedReport, path: &str, line: usize, quote: &str) -> bool {
+    let Some(diff) = &report.diff else {
+        return false;
+    };
+    let Some(file) = diff.files.iter().find(|f| f.path == path) else {
+        return false;
+    };
+    !quote.trim().is_empty()
+        && rows(diff, file).is_some_and(|rows| {
+            let removed = rows.iter().all(|(_, head, _)| head.is_none());
+            rows.iter().any(|(base, head, text)| {
+                (*head == Some(line) || (removed && *base == Some(line)))
+                    && text.trim_end_matches('\r') == quote.trim_end_matches('\r')
+            })
+        })
+}
+
 fn escape(text: &str) -> String {
     let mut escaped = String::new();
     for ch in text.chars() {
@@ -302,6 +334,40 @@ mod tests {
             status: status.into(),
             previous_path: None,
             patch: patch.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn removed_source_citations_publish_in_the_summary_at_the_base_revision() {
+        for status in ["removed", "modified"] {
+            let report = report(Some(PinnedDiff {
+                total_files: 1,
+                files: vec![file(
+                    "gone.rs",
+                    status,
+                    Some("@@ -1 +0,0 @@\n-    old();\n"),
+                )],
+                supporting_paths: vec![],
+            }));
+            assert!(matches_quote(&report, "gone.rs", 1, "    old();"));
+            assert!(!matches_quote(&report, "gone.rs", 1, "old();"));
+            assert!(anchor(&report, "gone.rs", 1).is_none());
+            let mut report = report;
+            report.report.findings.push(Finding {
+                path: "gone.rs".into(),
+                line: 1,
+                title: "Broken caller".into(),
+                impact: "Impact".into(),
+                evidence: "Evidence".into(),
+                attribution: Attribution::Introduced,
+            });
+            let prepared = crate::publish::prepare(&report, &[0], true);
+            assert!(prepared.comments.is_empty());
+            assert!(
+                prepared
+                    .body
+                    .contains(&format!("blob/{}/gone.rs#L1", report.base))
+            );
         }
     }
 

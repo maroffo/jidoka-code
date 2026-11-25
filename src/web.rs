@@ -855,6 +855,9 @@ fn status_badge(status: &str) -> String {
 }
 
 fn provider_name(label: &str) -> &str {
+    if label.starts_with("Antigravity CLI · ") {
+        return label;
+    }
     label
         .strip_suffix(')')
         .and_then(|s| s.rsplit_once(" ("))
@@ -971,7 +974,10 @@ fn position(report: &PublishedReport, path: &str, line: usize) -> String {
             escape(&anchor),
             escape(path)
         ),
-        None => source_link(report, &report.head, path, line),
+        None => match crate::diff::base_citation_path(report, path, line) {
+            Some(base_path) => source_link(report, &report.base, base_path, line),
+            None => source_link(report, &report.head, path, line),
+        },
     }
 }
 
@@ -1328,6 +1334,16 @@ fn failure_html(stored: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agy_display_preserves_the_provider_and_parenthesized_model_tier() {
+        let label = "Antigravity CLI · Gemini 4 Carbon (High)";
+        assert_eq!(super::provider_name(label), label);
+        assert_eq!(
+            super::provider_name("https://example.test (legacy-model)"),
+            "legacy-model"
+        );
+    }
+
     use super::*;
     use crate::contracts::{Finding, Focus, Report, Signal};
     use anyhow::anyhow;
@@ -2561,6 +2577,24 @@ mod tests {
         assert!(json.get("report").is_none());
         assert!(json.get("focus").unwrap().is_array());
         assert!(json.get("scan").unwrap().is_object());
+    }
+
+    #[test]
+    fn deleted_line_links_to_the_base_revision_in_the_report() {
+        let mut report = report(None);
+        report.diff = Some(crate::contracts::PinnedDiff {
+            total_files: 1,
+            files: vec![crate::contracts::DiffFile {
+                path: "gone.rs".into(),
+                status: "removed".into(),
+                previous_path: None,
+                patch: Some("@@ -1 +0,0 @@\n-old\n".into()),
+            }],
+            supporting_paths: vec![],
+        });
+        assert!(
+            position(&report, "gone.rs", 1).contains(&format!("/blob/{}/gone.rs#L1", report.base))
+        );
     }
 
     #[test]
