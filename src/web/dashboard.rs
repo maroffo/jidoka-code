@@ -25,21 +25,39 @@ pub(super) fn subject(connection: &Connection, id: i64) -> rusqlite::Result<Opti
 }
 
 /// The signal tone and the words beside it for one run. The words carry the outcome on their own.
-fn outcome(status: &str, score: Option<i64>, findings: Option<usize>) -> (&'static str, String) {
+///
+/// `partial` also covers a completed row whose saved report lists coverage limits.
+fn outcome(
+    status: &str,
+    partial: bool,
+    score: Option<u8>,
+    findings: Option<usize>,
+) -> (&'static str, String) {
     let count = |n: usize| match n {
         1 => "1 finding".to_owned(),
         n => format!("{n} findings"),
     };
-    match (status, score, findings) {
-        ("completed", Some(n), _) if n >= 90 => ("clear", format!("{n}/100 · Ready to merge")),
-        ("completed", Some(n), _) => ("stop", format!("{n}/100 · Hold merge")),
-        ("completed", None, Some(0)) => ("clear", "No findings".into()),
-        ("completed", None, Some(n)) => ("stop", count(n)),
-        ("partial", _, Some(n)) if n > 0 => ("stop", format!("Review incomplete · {}", count(n))),
-        ("partial", _, _) => ("hold", "Review incomplete".into()),
-        ("queued" | "running", _, _) => ("busy", status_label(status).into()),
-        _ => ("off", status_label(status).into()),
-    }
+    let finished = matches!(status, "completed" | "partial");
+    let partial = partial || status == "partial";
+    let Some(found) = findings.filter(|_| finished) else {
+        return match status {
+            "partial" => ("hold", "Review incomplete".into()),
+            "queued" | "running" => ("busy", status_label(status).into()),
+            _ => ("off", status_label(status).into()),
+        };
+    };
+    let score = score.filter(|_| !partial);
+    let words = match (partial, score) {
+        (true, _) if found > 0 => format!("Review incomplete · {}", count(found)),
+        (true, _) => "Review incomplete".into(),
+        (false, Some(n)) if n >= crate::contracts::MERGE_READY => {
+            format!("{n}/100 · Ready to merge")
+        }
+        (false, Some(n)) => format!("{n}/100 · Hold merge"),
+        (false, None) if found == 0 => "No findings".into(),
+        (false, None) => count(found),
+    };
+    (crate::contracts::outcome_tone(partial, score, found), words)
 }
 
 /// Name a UTC day relative to today, falling back to the weekday and date.
@@ -107,7 +125,9 @@ fn run_rows(db: &Connection, key: &str, latest: i64) -> rusqlite::Result<(String
         CASE WHEN json_valid(report) THEN CASE WHEN json_type(report,'$.mergeability_score')='integer'
           AND coalesce(json_array_length(report,'$.limits'),0)=0 AND coalesce(json_array_length(report,'$.scan.limits'),0)=0
           THEN json_extract(report,'$.mergeability_score') END END,
-        EXISTS(SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run)
+        EXISTS(SELECT 1 FROM review_prompts p WHERE p.review_id=reviews.id AND p.dry_run),
+        CASE WHEN json_valid(report) THEN coalesce(json_array_length(report,'$.limits'),0)
+          + coalesce(json_array_length(report,'$.scan.limits'),0) > 0 ELSE 0 END
         FROM reviews WHERE lower(rtrim(url,'/'))=? ORDER BY id DESC")?;
     let mut rows = stmt.query([key])?;
     let mut primary = String::new();
@@ -125,8 +145,9 @@ fn run_rows(db: &Connection, key: &str, latest: i64) -> rusqlite::Result<(String
         let findings = row.get::<_, Option<usize>>(5)?;
         let score = row
             .get::<_, Option<i64>>(6)?
-            .filter(|n| (0..=100).contains(n) && status == "completed");
-        let (tone, words) = outcome(status, score, findings);
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| *n <= 100 && status == "completed");
+        let (tone, words) = outcome(status, row.get(8)?, score, findings);
         // A scored row leads with the recommendation, so its finding count moves below.
         let detail = match (score, findings) {
             (Some(_), Some(1)) => "1 finding".to_owned(),
@@ -260,9 +281,10 @@ mod tests {
 
     #[test]
     fn every_outcome_reads_without_its_signal_and_days_are_named_in_utc() {
-        for (status, score, findings, tone, words) in [
+        for (status, partial, score, findings, tone, words) in [
             (
                 "completed",
+                false,
                 Some(90),
                 Some(2),
                 "clear",
@@ -270,28 +292,40 @@ mod tests {
             ),
             (
                 "completed",
+                false,
                 Some(89),
                 Some(0),
                 "stop",
                 "89/100 · Hold merge",
             ),
-            ("completed", None, Some(0), "clear", "No findings"),
-            ("completed", None, Some(1), "stop", "1 finding"),
-            ("completed", None, None, "off", "Completed"),
+            ("completed", false, None, Some(0), "clear", "No findings"),
+            ("completed", false, None, Some(1), "stop", "1 finding"),
+            ("completed", false, None, None, "off", "Completed"),
+            // A completed row whose saved report lists limits reads as the report page shows it.
+            (
+                "completed",
+                true,
+                Some(95),
+                Some(0),
+                "hold",
+                "Review incomplete",
+            ),
             (
                 "partial",
+                false,
                 None,
                 Some(2),
                 "stop",
                 "Review incomplete · 2 findings",
             ),
-            ("partial", None, Some(0), "hold", "Review incomplete"),
-            ("running", None, None, "busy", "In progress"),
-            ("canceled", None, None, "off", "Canceled"),
-            ("failed", None, None, "off", "Failed"),
+            ("partial", false, None, Some(0), "hold", "Review incomplete"),
+            ("partial", false, None, None, "hold", "Review incomplete"),
+            ("running", false, None, None, "busy", "In progress"),
+            ("canceled", false, None, None, "off", "Canceled"),
+            ("failed", false, None, Some(3), "off", "Failed"),
         ] {
             assert_eq!(
-                outcome(status, score, findings),
+                outcome(status, partial, score, findings),
                 (tone, words.to_owned()),
                 "{status}"
             );

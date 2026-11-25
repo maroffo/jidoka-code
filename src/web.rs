@@ -1165,18 +1165,22 @@ fn finding_card(
 
 /// The one-line outcome for the fixed header, with the tone of its signal.
 fn verdict(report: &PublishedReport, is_partial: bool) -> (&'static str, String) {
-    if is_partial {
-        return ("hold", "Review incomplete".into());
-    }
-    if let Some(label) = report.mergeability_label() {
-        let ready = report.report.mergeability_score.is_some_and(|n| n >= 90);
-        return (if ready { "clear" } else { "stop" }, label);
-    }
-    match report.report.findings.len() {
-        0 => ("clear", "No verified findings".into()),
-        1 => ("stop", "1 verified finding".into()),
-        n => ("stop", format!("{n} verified findings")),
-    }
+    let findings = report.report.findings.len();
+    let score = report.score().filter(|_| !is_partial);
+    let words = match (is_partial, score) {
+        (true, _) => "Review incomplete".to_owned(),
+        // The same sentence the GitHub summary carries.
+        (false, Some(_)) => report.mergeability_label().unwrap_or_default(),
+        (false, None) => match findings {
+            0 => "No verified findings".to_owned(),
+            1 => "1 verified finding".to_owned(),
+            n => format!("{n} verified findings"),
+        },
+    };
+    (
+        crate::contracts::outcome_tone(is_partial, score, findings),
+        words,
+    )
 }
 
 /// The numbers a reviewer needs before reading anything else.
@@ -1196,13 +1200,11 @@ fn facts(report: &PublishedReport, is_partial: bool, manual: usize) -> String {
         Some(tests) if tests.is_empty() => ("", "None requested".to_owned()),
         Some(tests) => ("", format!("{} run", tests.len())),
     };
-    let score = report
-        .report
-        .mergeability_score
-        .filter(|&n| n <= 100 && !is_partial && !report.is_partial());
-    let (score_tone, score) = match score {
-        Some(n) if n >= 90 => ("clear", format!("{n}/100")),
-        Some(n) => ("stop", format!("{n}/100")),
+    let (score_tone, score) = match report.score().filter(|_| !is_partial) {
+        Some(n) => (
+            crate::contracts::outcome_tone(false, Some(n), findings),
+            format!("{n}/100"),
+        ),
         None if is_partial => ("", "Not scored".to_owned()),
         None => ("", "Not recorded".to_owned()),
     };
@@ -1232,10 +1234,15 @@ fn facts(report: &PublishedReport, is_partial: bool, manual: usize) -> String {
     html
 }
 
-/// Return the report body and, separately, its tests and coverage panel.
-///
-/// The page places the changed files between the two.
-fn report_html(report: &PublishedReport, is_partial: bool) -> (String, String) {
+/// A rendered report. The page places the changed files between the body and the coverage panel.
+struct ReportHtml {
+    body: String,
+    coverage: String,
+    /// How many manual checks the body lists.
+    manual: usize,
+}
+
+fn report_html(report: &PublishedReport, is_partial: bool) -> ReportHtml {
     let manual: Vec<_> = report.manual_checks().collect();
     let mut focus = String::new();
     for item in &manual {
@@ -1357,13 +1364,14 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> (String, String) {
     } else {
         ""
     };
-    (
-        format!(
+    ReportHtml {
+        manual: manual.len(),
+        body: format!(
             r##"{}{warnings}<div id="findings">{content}</div>
         <section id="manual"><h2>What to check manually</h2>{focus}</section>"##,
             facts(report, is_partial, manual.len())
         ),
-        format!(
+        coverage: format!(
             r##"<section class="panel inspect" id="coverage"><div class="panel-head"><h2>Tests and coverage</h2></div><p class="coverage-line">{coverage}</p>{tests}{notes}{unfinished}{patches}
         <details><summary>Git revisions</summary><div class="detail-body"><b>Reviewed revision</b><code>{}</code><b>Base revision</b><code>{}</code></div></details>
         <details{scan_open}><summary>Semgrep scan</summary><div class="detail-body">{}</div></details></section>"##,
@@ -1371,7 +1379,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> (String, String) {
             escape(&report.base),
             scanner_html(report, report.scan.as_ref()),
         ),
-    )
+    }
 }
 
 fn review_page(
@@ -1432,15 +1440,8 @@ fn review_page(
                         )
                     };
                     let is_partial = status == "partial" || report.is_partial();
-                    // The submit routes refuse the same two cases; say why instead of hiding the action.
-                    let blocked = if report.report.dry_run {
-                        Some("Dry run: nothing is sent to GitHub.")
-                    } else if is_partial {
-                        Some("Coverage is incomplete, so this review cannot be submitted.")
-                    } else {
-                        None
-                    };
-                    action = match blocked {
+                    // Say why the action is unavailable instead of hiding it.
+                    action = match workflow::submit_blocked(report.report.dry_run, is_partial) {
                         Some(reason) => format!(
                             r#"<p class="submit-off"><span class="primary-link" aria-disabled="true">Submit review</span><small>{reason}</small></p>"#
                         ),
@@ -1449,9 +1450,15 @@ fn review_page(
                     let (tone, text) = verdict(&report, is_partial);
                     outcome = format!("{}<strong>{}</strong>", lamp(tone), escape(&text));
                     let findings = report.report.findings.len();
-                    let manual = report.manual_checks().count();
-                    let (summary, coverage) = report_html(&report, is_partial);
-                    let (files, diff) = crate::diff::render(&report);
+                    let ReportHtml {
+                        body: summary,
+                        coverage,
+                        manual,
+                    } = report_html(&report, is_partial);
+                    let crate::diff::Rendered {
+                        nav: files,
+                        section: diff,
+                    } = crate::diff::render(&report);
                     let details = format!(
                         r##"<div class="bench"><nav class="rail" aria-label="Report sections and files"><h2>Report</h2><ul class="rail-sections">
 <li><a href="#findings">{}<span>Verified findings</span><em>{findings}</em></a></li>
@@ -1459,7 +1466,11 @@ fn review_page(
 <li><a href="#review-diff">{}<span>Changed files</span></a></li>
 <li><a href="#coverage">{}<span>Tests and coverage</span></a></li></ul>{files}</nav>
 <div class="review-report">{summary}{diff}{load}{coverage}</div></div>"##,
-                        lamp(if findings > 0 { "stop" } else { "clear" }),
+                        lamp(match (findings, is_partial) {
+                            (0, false) => "clear",
+                            (0, true) => "off",
+                            _ => "stop",
+                        }),
                         lamp(if manual > 0 { "hold" } else { "off" }),
                         lamp("off"),
                         lamp("off"),
@@ -1535,6 +1546,16 @@ mod tests {
         report.report.mergeability_score = Some(89);
         assert_eq!(verdict(&report, false).0, "stop");
         assert_eq!(verdict(&report, true), ("hold", "Review incomplete".into()));
+        report.report.findings.push(Finding {
+            path: "src/a.rs".into(),
+            line: 1,
+            title: "Title".into(),
+            impact: "Impact".into(),
+            evidence: String::new(),
+            attribution: Attribution::Unknown,
+        });
+        // An incomplete review with a finding stops, in the header as in the history.
+        assert_eq!(verdict(&report, true), ("stop", "Review incomplete".into()));
         assert!(facts(&report, true, 0).contains("<dt>Mergeability</dt><dd>Not scored</dd>"));
     }
 
@@ -1568,8 +1589,8 @@ mod tests {
         "GitHub API rate limit reached. Try again after the limit resets.";
 
     fn report_text(report: &PublishedReport, is_partial: bool) -> String {
-        let (summary, coverage) = report_html(report, is_partial);
-        summary + &coverage
+        let html = report_html(report, is_partial);
+        html.body + &html.coverage
     }
 
     fn assert_history_row(html: &str, link: &str, repo: &str, number: &str, status: &str) {
@@ -1826,7 +1847,7 @@ mod tests {
         assert!(run_one(&f.db, |_| Ok(report(None))).unwrap());
         assert!(latest_review(&f.db, PROVIDER, URL).unwrap().is_none());
         let page = f.get("/reviews/1").await;
-        assert!(page.contains("Dry run: nothing is sent to GitHub."));
+        assert!(page.contains("<small>Dry runs cannot be submitted to GitHub.</small>"));
         assert!(!page.contains(r#"href="/reviews/1/submit""#));
         assert_eq!(
             f.request(Method::GET, "/reviews/1/submit", &[], "").await.0,
@@ -2432,7 +2453,9 @@ mod tests {
             let review = format!("/reviews/{id}");
             let html = fixture.get(&review).await;
             assert!(html.contains(r##"<a href="#review-diff">"##));
-            assert!(html.contains("Coverage is incomplete, so this review cannot be submitted."));
+            assert!(
+                html.contains("<small>Only completed reviews can be submitted to GitHub.</small>")
+            );
             assert!(html.contains("<strong>Review incomplete</strong>"));
             assert!(!html.contains(&format!(r#"href="{review}/submit""#)));
             for (method, path) in [

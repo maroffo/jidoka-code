@@ -5,7 +5,10 @@ use crate::{
     hunks,
     source::{safe_path, safe_previous_path},
 };
-use std::{collections::HashMap, fmt::Write};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+};
 
 type Row<'a> = (Option<usize>, Option<usize>, &'a str);
 
@@ -219,8 +222,8 @@ pub fn finding_id(index: usize) -> String {
     format!("finding-{}", index + 1)
 }
 
-/// What the report says about a changed file. The order is the display order.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// What the report says about a changed file.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Mark {
     Finding(usize),
     Manual,
@@ -228,6 +231,7 @@ enum Mark {
 }
 
 impl Mark {
+    /// The display rank of the group and its heading.
     fn group(self) -> (u8, &'static str) {
         match self {
             Mark::Finding(_) => (0, "Files with findings"),
@@ -256,6 +260,10 @@ impl Listed<'_> {
 }
 
 fn listed<'a>(report: &'a PublishedReport, diff: &'a PinnedDiff) -> Vec<Listed<'a>> {
+    let manual: HashSet<&str> = report
+        .manual_checks()
+        .map(|focus| focus.path.as_str())
+        .collect();
     diff.files
         .iter()
         .enumerate()
@@ -269,7 +277,7 @@ fn listed<'a>(report: &'a PublishedReport, diff: &'a PinnedDiff) -> Vec<Listed<'
                 .count();
             let mark = if findings > 0 {
                 Mark::Finding(findings)
-            } else if report.manual_checks().any(|focus| focus.path == file.path) {
+            } else if manual.contains(file.path.as_str()) {
                 Mark::Manual
             } else {
                 Mark::Quiet
@@ -304,13 +312,20 @@ fn counts_html(counts: Option<(usize, usize)>) -> String {
     html
 }
 
-/// List the changed files by directory, in the order GitHub reported them.
+/// List the changed files under one heading per directory, in order of first appearance.
 fn navigation(files: &[Listed<'_>]) -> String {
-    let mut html = String::from(r#"<h2>Changed files</h2><ul class="rail-files">"#);
-    let mut last: Option<&str> = None;
+    let mut dirs: Vec<(&str, Vec<(&Listed<'_>, &str)>)> = Vec::new();
     for item in files {
         let (dir, name) = split_path(&item.file.path);
-        if last != Some(dir) && !(last.is_none() && dir.is_empty()) {
+        match dirs.iter_mut().find(|(known, _)| *known == dir) {
+            Some((_, items)) => items.push((item, name)),
+            None => dirs.push((dir, vec![(item, name)])),
+        }
+    }
+    let mut html = String::from(r#"<h2>Changed files</h2><ul class="rail-files">"#);
+    for (position, (dir, items)) in dirs.iter().enumerate() {
+        // Root files that lead the list need no heading.
+        if !(position == 0 && dir.is_empty()) {
             let shown = if dir.is_empty() { "./" } else { dir };
             write!(
                 html,
@@ -319,54 +334,66 @@ fn navigation(files: &[Listed<'_>]) -> String {
             )
             .unwrap();
         }
-        last = Some(dir);
-        let (tone, note) = match item.mark {
-            Mark::Finding(1) => ("stop", " 1 finding".to_owned()),
-            Mark::Finding(count) => ("stop", format!(" {count} findings")),
-            Mark::Manual => ("hold", " manual check".to_owned()),
-            Mark::Quiet => ("", String::new()),
-        };
-        let marked = if tone.is_empty() {
-            ""
-        } else {
-            " class=\"marked\""
-        };
-        write!(
-            html,
-            r##"<li><a href="#{}"{marked}><span class="lamp {tone}" aria-hidden="true"></span><code>{}</code><span class="diff-sr-only">{note}</span>{}</a></li>"##,
-            file_id(item.index),
-            escape(name),
-            counts_html(item.counts())
-        )
-        .unwrap();
+        for (item, name) in items {
+            let (tone, note) = match item.mark {
+                Mark::Finding(1) => ("stop", " 1 finding".to_owned()),
+                Mark::Finding(count) => ("stop", format!(" {count} findings")),
+                Mark::Manual => ("hold", " manual check".to_owned()),
+                Mark::Quiet => ("", String::new()),
+            };
+            let marked = if tone.is_empty() {
+                ""
+            } else {
+                " class=\"marked\""
+            };
+            write!(
+                html,
+                r##"<li><a href="#{}"{marked}><span class="lamp {tone}" aria-hidden="true"></span><code>{}</code><span class="diff-sr-only">{note}</span>{}</a></li>"##,
+                file_id(item.index),
+                escape(name),
+                counts_html(item.counts())
+            )
+            .unwrap();
+        }
     }
     html.push_str("</ul>");
     html
+}
+
+/// The two places a saved diff appears on a report page.
+pub struct Rendered {
+    /// The file list for the side rail. Empty when no file can be listed.
+    pub nav: String,
+    /// The changed files section.
+    pub section: String,
 }
 
 /// Render the file navigation for the side rail and the changed files section.
 ///
 /// Files with findings come first, then files named in manual checks. Only those start open:
 /// a long pull request stays readable, and every in-page citation lands on a visible row.
-pub fn render(report: &PublishedReport) -> (String, String) {
+pub fn render(report: &PublishedReport) -> Rendered {
     let mut html = String::from(
         r#"<section id="review-diff" class="review-diff" aria-labelledby="diff-heading"><h2 id="diff-heading">Changed files</h2>"#,
     );
     let Some(diff) = &report.diff else {
         html.push_str("<p>The pinned diff was not saved for this review.</p></section>");
-        return (String::new(), html);
+        return Rendered {
+            nav: String::new(),
+            section: html,
+        };
     };
 
     let mut files = listed(report, diff);
-    let listed = files.len() as u64;
-    if listed < diff.total_files {
+    let shown = files.len() as u64;
+    if shown < diff.total_files {
         write!(
             html,
-            "<p>The saved list includes {listed} of {} changed files.</p>",
+            "<p>The saved list includes {shown} of {} changed files.</p>",
             diff.total_files
         )
         .unwrap();
-    } else if listed > diff.total_files {
+    } else if shown > diff.total_files {
         html.push_str("<p>The saved file list differs from the reported change count.</p>");
     } else if files.is_empty() {
         html.push_str("<p>No changed files were recorded.</p>");
@@ -451,7 +478,7 @@ pub fn render(report: &PublishedReport) -> (String, String) {
         html.push_str("</ul></details>");
     }
     html.push_str("</section>");
-    (nav, html)
+    Rendered { nav, section: html }
 }
 
 #[cfg(test)]
@@ -539,12 +566,13 @@ mod tests {
             evidence: String::new(),
             attribution: Attribution::Unknown,
         });
-        let (nav, html) = render(&report);
+        let Rendered { nav, section: html } = render(&report);
         assert!(!html.contains("<nav"));
         for text in ["views&lt;&amp;&gt;.rs", "image.dat", "gone.rs", "quiet.rs"] {
             assert_eq!(nav.matches(text).count(), 1, "{text}");
         }
-        assert_eq!(nav.matches(r#"class="rail-dir""#).count(), 3);
+        assert_eq!(nav.matches(r#"class="rail-dir""#).count(), 2);
+        assert!(nav.find("gone.rs").unwrap() < nav.find("assets/").unwrap());
         assert!(nav.contains(r##"<a href="#diff-file-1" class="marked"><span class="lamp stop""##));
         assert!(
             nav.contains(r#"<span class="diff-plus">+2</span><span class="diff-minus">−2</span>"#)
@@ -591,7 +619,7 @@ mod tests {
             ],
             supporting_paths: vec![],
         }));
-        let (nav, html) = render(&report);
+        let Rendered { nav, section: html } = render(&report);
         assert!(!nav.contains("escape.rs"));
         assert!(!html.contains("escape.rs"));
         assert!(!html.contains("-head-1"));
@@ -612,7 +640,7 @@ mod tests {
             files: vec![invalid, modified],
             supporting_paths: vec![],
         }));
-        let (_, html) = render(&report);
+        let html = render(&report).section;
         assert!(html.contains("Change type unavailable"));
         for text in ["Renamed", "../unsafe.rs", "src/unrelated.rs"] {
             assert!(!html.contains(text));
@@ -629,7 +657,7 @@ mod tests {
         assert!(!available(&report));
         assert!(
             render(&report)
-                .1
+                .section
                 .contains("The pinned diff was not saved for this review.")
         );
         assert!(anchor(&report, "original.rs", 1).is_none());

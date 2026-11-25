@@ -28,7 +28,6 @@ const MARKER: &str = "<!-- jidoka-review:";
 const REVIEW_BODY_BYTES: usize = 65_000;
 const MAX_COMMENTS: usize = 100;
 const MAX_LIMIT_DETAILS: usize = 5;
-const MAX_FOCUS: usize = 3;
 const SUMMARY_CHARS: usize = 220;
 const PAGE_SIZE: usize = 100;
 const MAX_PAGES: usize = 10;
@@ -64,7 +63,7 @@ pub fn prepare(report: &PublishedReport, selected: &[usize], inline: bool) -> Pr
         .into_iter()
         .collect();
     let mut prepared = prepare_findings(report, &selected, inline, true);
-    let mut focus = report.human_focus().take(MAX_FOCUS).peekable();
+    let mut focus = report.manual_checks().peekable();
     if focus.peek().is_some() {
         prepared.body.push_str("\n### Human follow-up\n\n");
         for item in focus {
