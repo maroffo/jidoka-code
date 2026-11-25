@@ -68,6 +68,23 @@ pub type HeadLines = (String, HashSet<usize>);
 /// Parsing a patch is the costly part of resolving a line, so callers that resolve many lines
 /// of one file ask once.
 pub fn head_lines(report: &PublishedReport, path: &str) -> Option<HeadLines> {
+    match citation_lines(report, path)? {
+        CitationLines::Head(file, lines) => Some((file, lines)),
+        CitationLines::Base { file, .. } => Some((file, HashSet::new())),
+    }
+}
+
+pub(crate) enum CitationLines {
+    Head(String, HashSet<usize>),
+    Base {
+        file: String,
+        path: String,
+        lines: HashSet<usize>,
+    },
+}
+
+/// Index the only revision a saved patch can cite, including removed and emptied files.
+pub(crate) fn citation_lines(report: &PublishedReport, path: &str) -> Option<CitationLines> {
     if !safe_path(path) {
         return None;
     }
@@ -77,8 +94,17 @@ pub fn head_lines(report: &PublishedReport, path: &str) -> Option<HeadLines> {
         .iter()
         .enumerate()
         .find(|(_, file)| file.path == path)?;
-    let lines = rows(diff, file)?.iter().filter_map(|row| row.1).collect();
-    Some((file_id(index), lines))
+    let rows = rows(diff, file)?;
+    let head: HashSet<_> = rows.iter().filter_map(|row| row.1).collect();
+    if head.is_empty() {
+        Some(CitationLines::Base {
+            file: file_id(index),
+            path: previous_path(file).unwrap_or(&file.path).to_owned(),
+            lines: rows.iter().filter_map(|row| row.0).collect(),
+        })
+    } else {
+        Some(CitationLines::Head(file_id(index), head))
+    }
 }
 
 /// Return the rendered ID only for a head line in a saved hunk.
@@ -576,7 +602,7 @@ mod tests {
             line: 10,
             title: "Verify <range>".into(),
             impact: "A & B".into(),
-            evidence: String::new(),
+            evidence: String::new().into(),
             attribution: Attribution::Unknown,
         });
         report.report.findings.push(Finding {
@@ -584,7 +610,7 @@ mod tests {
             line: 1,
             title: "Removed guard".into(),
             impact: "Callers lose the check".into(),
-            evidence: String::new(),
+            evidence: String::new().into(),
             attribution: Attribution::Unknown,
         });
         let Rendered { nav, section: html } = render(&report);

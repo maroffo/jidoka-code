@@ -161,7 +161,10 @@ fn focused_requests_keep_pinned_proof_and_report_unresolved_coverage() {
     .unwrap();
     assert_eq!((calls, reads), (3, 1));
     assert_eq!(result.report.findings.len(), 1);
-    let proof = &result.report.findings[0].evidence;
+    let jidoka_code::contracts::FindingEvidence::Text(proof) = &result.report.findings[0].evidence
+    else {
+        panic!("expected archived evidence")
+    };
     assert!(proof.contains(&format!("pool.rs:1 “{CAPACITY}”")));
     assert!(proof.contains(&format!("worker-contract.md:1 “{RULE}”")));
     assert_eq!(result.reviewed_files.as_ref().unwrap().len(), count - 1);
