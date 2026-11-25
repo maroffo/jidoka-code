@@ -498,21 +498,11 @@ impl ReviewRepository {
             "index pinned source",
         )?;
         std::fs::create_dir(destination)?;
-        let mut prefix = std::ffi::OsString::from("--prefix=");
-        prefix.push(destination);
-        prefix.push("/");
         run(
             self.git()
                 .env("GIT_INDEX_FILE", index)
-                .args([
-                    "-c",
-                    "core.bare=false",
-                    "-c",
-                    "core.symlinks=false",
-                    "checkout-index",
-                    "--all",
-                ])
-                .arg(prefix),
+                .env("GIT_WORK_TREE", destination.canonicalize()?)
+                .args(["-c", "core.symlinks=false", "checkout-index", "--all"]),
             "export pinned source",
         )?;
         Ok(())
@@ -1164,8 +1154,23 @@ mod tests {
         fs::write(work.join("binary.bin"), [0, 1, 2]).unwrap();
         symlink("helper.sql", work.join("unsafe.sql")).unwrap();
         let head = commit(work);
+        let bare = tempfile::tempdir().unwrap();
+        run(
+            git(work)
+                .args([
+                    "-c",
+                    "protocol.file.allow=always",
+                    "clone",
+                    "--bare",
+                    "--no-hardlinks",
+                    ".",
+                ])
+                .arg(bare.path()),
+            "create bare fixture",
+        )
+        .unwrap();
         let repo = ReviewRepository::open(
-            temp,
+            bare,
             &base,
             &head,
             "fork/project".into(),
