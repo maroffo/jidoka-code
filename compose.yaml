@@ -30,9 +30,28 @@ services:
       - no-new-privileges:true
     tmpfs: [/tmp, /run]
     networks: [reviewer, cloud]
+  test-sandbox:
+    build:
+      context: .
+      target: test-sandbox
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 2
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:exec,mode=1777,size=256m
+      - /work:exec,uid=65534,gid=65534,mode=0755,size=512m
+    volumes:
+      - test-control:/test-control
   agy:
     depends_on:
       - egress
+      - test-sandbox
     networks: [reviewer]
     build:
       context: .
@@ -54,12 +73,14 @@ services:
     tmpfs:
       - /tmp:mode=1777,size=1g
     volumes:
+      - test-control:/test-control:ro
       - jobs:/jobs:ro
       - control:/control
 volumes:
   reviews:
   jobs:
   control:
+  test-control:
 secrets:
   agy_adc:
     file: ${JIDOKA_AGY_ADC_FILE:?set the path to reviewer Application Default Credentials}

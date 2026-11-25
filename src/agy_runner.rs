@@ -121,10 +121,26 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
     BufReader::new(stdout.take(16)).read_line(&mut ready)?;
     let port: u16 = ready.trim().parse().map_err(|_| CredentialError)?;
     let metadata = format!("127.0.0.1:{port}");
+    // Only the relay can reach the sandbox control socket and write execution records.
+    let relay_dir = tempfile::Builder::new().prefix("agy-tests-").tempdir()?;
+    fs::set_permissions(relay_dir.path(), fs::Permissions::from_mode(0o711))?;
+    let relay = ProcessGroup(
+        Command::new("/usr/local/bin/python3")
+            .args(["-I", "/usr/local/lib/jidoka/test_gateway.py"])
+            .arg(Path::new(&job).join("source"))
+            .arg(relay_dir.path())
+            .env_clear()
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?,
+    );
     let mut cli = Command::new("/usr/local/bin/agy");
     cli.current_dir(home.path())
         .env_clear()
         .env("HOME", home.path())
+        .env("JIDOKA_TEST_SOCKET", relay_dir.path().join("test.sock"))
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("AGY_ADC_AUTH", "true")
         .env("GCE_METADATA_HOST", &metadata)
@@ -181,6 +197,13 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
         thread::sleep(Duration::from_millis(250));
     };
     drop(process);
+    drop(relay);
+    let ledger = relay_dir.path().join("tests.json");
+    let tests: Vec<jidoka_code::contracts::SandboxTest> = if ledger.exists() {
+        serde_json::from_reader(fs::File::open(ledger)?)?
+    } else {
+        Vec::new()
+    };
     ensure!(
         output.metadata()?.len() <= MAX_RESULT,
         "AGY result too large"
@@ -197,6 +220,7 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
         &mut peer,
         &serde_json::json!({
             "status":value["status"],"usage":value["usage"],"structured_output":value["structured_output"],
+            "tests": tests,
             "denied_actions":value.get("denied_actions").cloned().unwrap_or_else(|| serde_json::json!([]))
         }),
     )?;

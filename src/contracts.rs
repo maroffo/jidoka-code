@@ -99,8 +99,21 @@ pub enum Attribution {
     Preexisting,
     Unknown,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SandboxTest {
+    pub argv: Vec<String>,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub seconds: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Report {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// None distinguishes older reviews without execution records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<Vec<SandboxTest>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

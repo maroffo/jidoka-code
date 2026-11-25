@@ -1,0 +1,22 @@
+#!/usr/local/bin/python3 -I
+"""Run a command on a disposable copy of the current PR."""
+import json
+import os
+import socket
+import sys
+
+if len(sys.argv) < 2:
+    sys.exit("Usage: jidoka-test COMMAND [ARG ...]")
+with socket.socket(socket.AF_UNIX) as sock:
+    sock.settimeout(255)
+    try:
+        sock.connect(os.environ["JIDOKA_TEST_SOCKET"])
+        sock.sendall(json.dumps(sys.argv[1:]).encode() + b"\n")
+        with sock.makefile("rb") as response:
+            result = json.load(response)
+    except (KeyError, OSError, ValueError):
+        sys.exit("Test sandbox unavailable.")
+print(result["output"])
+exit_info = f" (exit {result['exit_code']})" if "exit_code" in result else ""
+print(f"Jidoka test: {result['status']}{exit_info}", file=sys.stderr)
+sys.exit(0 if result["status"] == "passed" else 1)

@@ -642,7 +642,8 @@ pub(super) fn metrics(db: &Connection, id: i64) -> rusqlite::Result<Option<Strin
             let ms: i64 = r.get(3)?;
             let unit = if turns == 1 { "turn" } else { "turns" };
             let agy = r.get::<_,bool>(5)?;
-            let mut summary = if agy { format!("1 AGY session · {}s elapsed", ms / 1000) }
+            let mut summary = if agy && ms == 0 { "AGY session started · elapsed time not yet recorded".to_owned() }
+                else if agy { format!("AGY session · {}m {}s elapsed", ms / 60_000, ms / 1000 % 60) }
                 else { format!("{turns} model {unit} · {}s waiting for model", ms / 1000) };
             if agy && let Some(cached) = r.get::<_,Option<i64>>(6)? {
                 summary.push_str(&format!(" · {cached} cached input tokens"));

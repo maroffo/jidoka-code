@@ -14,10 +14,19 @@ COPY runner/squid.conf /etc/squid/jidoka.conf
 USER proxy
 CMD ["squid", "-N", "-f", "/etc/squid/jidoka.conf"]
 
+FROM golang:1.26-bookworm AS test-go
+FROM python:3.12-slim-bookworm AS test-sandbox
+COPY --from=test-go /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+RUN install -d -m 0700 /test-control && install -d /work
+COPY runner/test_sandbox.py /usr/local/lib/jidoka/test_sandbox.py
+ENTRYPOINT ["/usr/local/bin/python3", "-I", "/usr/local/lib/jidoka/test_sandbox.py"]
+
 FROM python:3.12-slim-bookworm AS agy-runner
 RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates tini ripgrep && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir 'google-auth[requests]>=2.38,<3' && install -d -m 0700 /authority
-COPY runner/adc.py /usr/local/lib/jidoka/adc.py
+COPY runner/adc.py runner/test_gateway.py /usr/local/lib/jidoka/
+COPY --chmod=0755 runner/jidoka-test /usr/local/bin/jidoka-test
 ARG TARGETARCH
 RUN set -eu; case "$TARGETARCH" in \
       arm64) artifact="linux-arm/cli_linux_arm64"; hash="23c193151499a4986fd5fa0d8132665cc8ffbad6cc0b3ff4fd53a2cb68abb76b149a992b836d53063443cd89add335f14d8134fb02abdcecbf6e1eaef6c53d33" ;; \

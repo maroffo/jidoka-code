@@ -232,6 +232,8 @@ struct Envelope {
     structured_output: Option<Value>,
     #[serde(default)]
     denied_actions: Vec<Value>,
+    #[serde(default)]
+    tests: Option<Vec<jidoka_code::contracts::SandboxTest>>,
 }
 
 #[derive(Deserialize)]
@@ -239,6 +241,8 @@ struct Verdict {
     reviewed_files: Vec<String>,
     findings: Vec<CitedFinding>,
     focus: Vec<jidoka_code::contracts::Focus>,
+    #[serde(default)]
+    notes: Vec<String>,
     limits: Vec<String>,
 }
 
@@ -254,9 +258,10 @@ struct CitedFinding {
 
 fn apply_verdict(
     output: &mut PublishedReport,
-    envelope: Option<Envelope>,
+    mut envelope: Option<Envelope>,
     mut head_line: impl FnMut(&str, usize) -> Option<String>,
 ) {
+    output.report.tests = envelope.as_mut().and_then(|e| e.tests.take());
     if envelope.as_ref().and_then(|e| e.reason.as_deref()) == Some("credentials") {
         output
             .report
@@ -287,6 +292,7 @@ fn apply_verdict(
     }
     output.reviewed_files = Some(coverage);
     output.report.limits.extend(verdict.limits);
+    output.report.notes = verdict.notes;
     let mut score = 100;
     for cited in verdict.findings {
         let mut finding = cited.finding;
@@ -370,6 +376,7 @@ mod tests {
                 usage: None,
                 structured_output: Some(content),
                 denied_actions: vec![],
+                tests: None,
             }),
             |_, _| None,
         );
@@ -378,7 +385,15 @@ mod tests {
     #[test]
     fn complete_requires_terminal_success_coverage_and_exact_citations() {
         let mut v = json!({"reviewed_files":["x.rs"],"findings":[{"path":"x.rs","line":1,"title":"Title","impact":"Impact","evidence":"Evidence","attribution":"introduced","quote":"new","countercheck":"Checked the caller.","mergeability_score":89}],"focus":[],"limits":[]});
+        v["notes"] = json!([
+            "Static inspection was sufficient.",
+            "Unchanged documentation was outside the patch."
+        ]);
         let report = run("SUCCESS", v.clone());
+        assert_eq!(report.report.notes.len(), 2);
+        let mut blocked = v.clone();
+        blocked["limits"] = json!(["The required integration fixture was unavailable."]);
+        assert!(run("SUCCESS", blocked).is_partial());
         assert!(!report.is_partial());
         assert_eq!(report.report.findings.len(), 1);
         assert!(run("ERROR", v.clone()).is_partial());
