@@ -244,6 +244,8 @@ struct CitedFinding {
     finding: Finding,
     quote: String,
     countercheck: String,
+    #[serde(default)]
+    mergeability_score: Value,
 }
 
 fn apply_verdict(
@@ -281,6 +283,7 @@ fn apply_verdict(
     }
     output.reviewed_files = Some(coverage);
     output.report.limits.extend(verdict.limits);
+    let mut score = 100;
     for cited in verdict.findings {
         let mut finding = cited.finding;
         let valid_quote = !cited.quote.trim().is_empty()
@@ -297,6 +300,13 @@ fn apply_verdict(
                 "An AGY finding lacked a verified source line or supporting evidence.".into(),
             );
         } else {
+            if let Some(rating) = cited.mergeability_score.as_u64().filter(|&n| n <= 100) {
+                score = score.min(rating as u8);
+            } else {
+                output.report.limits.push(
+                    "A verified finding lacks a valid mergeability score from 0 to 100.".into(),
+                );
+            }
             finding.evidence.push_str("\nCountercheck: ");
             finding.evidence.push_str(cited.countercheck.trim());
             output.report.findings.push(finding);
@@ -317,6 +327,9 @@ fn apply_verdict(
                 .limits
                 .push("An AGY manual check lacked a verified source line or instructions.".into());
         }
+    }
+    if !output.is_partial() {
+        output.report.mergeability_score = Some(score);
     }
 }
 
@@ -360,7 +373,7 @@ mod tests {
     }
     #[test]
     fn complete_requires_terminal_success_coverage_and_exact_citations() {
-        let mut v = json!({"reviewed_files":["x.rs"],"findings":[{"path":"x.rs","line":1,"title":"Title","impact":"Impact","evidence":"Evidence","attribution":"introduced","quote":"new","countercheck":"Checked the caller."}],"focus":[],"limits":[]});
+        let mut v = json!({"reviewed_files":["x.rs"],"findings":[{"path":"x.rs","line":1,"title":"Title","impact":"Impact","evidence":"Evidence","attribution":"introduced","quote":"new","countercheck":"Checked the caller.","mergeability_score":89}],"focus":[],"limits":[]});
         let report = run("SUCCESS", v.clone());
         assert!(!report.is_partial());
         assert_eq!(report.report.findings.len(), 1);
@@ -373,6 +386,54 @@ mod tests {
         let rejected = run("SUCCESS", v);
         assert!(rejected.is_partial());
         assert!(rejected.report.findings.is_empty());
+    }
+
+    #[test]
+    fn only_complete_reviews_publish_the_lowest_verified_mergeability_score() {
+        use jidoka_code::publish::prepare;
+        let finding = json!({"path":"x.rs","line":1,"title":"Verified issue","impact":"Impact","evidence":"Caller","attribution":"introduced","quote":"new","countercheck":"Checked"});
+        let clean = json!({"reviewed_files":["x.rs"],"findings":[],"focus":[],"limits":[]});
+        let report = run("SUCCESS", clean.clone());
+        assert_eq!(
+            report.mergeability_label().as_deref(),
+            Some("Mergeability: 100/100 · Ready to merge")
+        );
+
+        for (score, decision) in [
+            (0, "Hold merge"),
+            (89, "Hold merge"),
+            (90, "Ready to merge"),
+            (100, "Ready to merge"),
+        ] {
+            let mut verdict = clean.clone();
+            let mut first = finding.clone();
+            first["mergeability_score"] = json!(score);
+            let mut other = finding.clone();
+            other["title"] = json!("Other issue");
+            other["mergeability_score"] = json!(100);
+            verdict["findings"] = json!([first, other]);
+            let report = run("SUCCESS", verdict);
+            assert!(!report.is_partial());
+            let expected = format!("**Mergeability: {score}/100 · {decision}**");
+            for inline in [false, true] {
+                assert!(prepare(&report, &[1], inline).body.contains(&expected));
+            }
+        }
+        for invalid in [Value::Null, json!(-1), json!(101), json!(90.5), json!("90")] {
+            let mut verdict = clean.clone();
+            let mut item = finding.clone();
+            if !invalid.is_null() {
+                item["mergeability_score"] = invalid;
+            }
+            verdict["findings"] = json!([item]);
+            let report = run("SUCCESS", verdict);
+            assert!(report.is_partial());
+            assert_eq!(report.report.findings.len(), 1);
+            assert!(report.mergeability_label().is_none());
+        }
+        let mut partial = clean;
+        partial["reviewed_files"] = json!([]);
+        assert!(run("SUCCESS", partial).mergeability_label().is_none());
     }
 
     #[test]

@@ -1141,8 +1141,16 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
             <details class="proof"><summary>What Jidoka checked</summary><div class="detail-body">{}</div></details></article>"#,
             escape(&item.action),position(report,&item.path,item.line),escape(&item.outcome),evidence_html(report,&item.checked)).unwrap();
     }
+    let score = if is_partial {
+        None
+    } else {
+        report.mergeability_label()
+    };
+    let score = score.map_or_else(String::new, |label| {
+        format!("<p><strong>{label}</strong></p>")
+    });
     let mut content = format!(
-        "<section><h2>Where to focus</h2>{}</section>",
+        "{score}<section><h2>Where to focus</h2>{}</section>",
         if focus.is_empty() {
             "<p class=empty>No additional manual checks.</p>".into()
         } else {
@@ -1334,6 +1342,15 @@ fn failure_html(stored: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn web_report_shows_the_same_recommendation_only_for_scored_completed_reviews() {
+        let mut report = report(None);
+        assert!(!report_html(&report, false).contains("Mergeability:"));
+        report.report.mergeability_score = Some(90);
+        assert!(report_html(&report, false).contains("Mergeability: 90/100 · Ready to merge"));
+        assert!(!report_html(&report, true).contains("Mergeability:"));
+    }
+
     #[test]
     fn agy_display_preserves_the_provider_and_parenthesized_model_tier() {
         let label = "Antigravity CLI · Gemini 4 Carbon (High)";

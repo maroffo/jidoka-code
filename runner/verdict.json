@@ -47,6 +47,12 @@
           },
           "countercheck": {
             "type": "string"
+          },
+          "mergeability_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "How safe is merging this PR with this verified finding unresolved? 90 or above is ready to merge. Below 90 requires a fix before merging."
           }
         },
         "required": [
@@ -57,7 +63,8 @@
           "evidence",
           "attribution",
           "quote",
-          "countercheck"
+          "countercheck",
+          "mergeability_score"
         ],
         "additionalProperties": false
       }

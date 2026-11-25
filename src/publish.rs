@@ -105,6 +105,9 @@ fn prepare_findings(
         selected: selected.to_vec(),
         inline,
     };
+    if compact && let Some(label) = report.mergeability_label() {
+        writeln!(prepared.body, "\n**{label}**").unwrap();
+    }
     let mut seen = HashSet::new();
     let mut inline_evidence = HashSet::new();
     let mut findings = selected

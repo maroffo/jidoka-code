@@ -29,7 +29,7 @@ Keep the existing reviews volume for the web service. AGY has a distinct provide
 
 The runner invokes `agy -p <prompt> --dangerously-skip-permissions` once for each review. Jidoka retains the database and all GitHub access. The runner sees the pinned checkout and diff through a read-only volume, runs AGY as a non-root user with a fresh temporary home, and exits after each job. Compose restarts it for the next job. The CLI has 30 minutes to produce a structured verdict. Revoking repository access, superseding a review or stopping Jidoka interrupts the session. After an interrupted paid invocation, use an explicit replay to start another one.
 
-The dashboard records reported token usage. Missing coverage, an invalid citation, a failed CLI run or an empty verdict produces a partial report. Partial reports stay in Jidoka. Only completed reports can be submitted to GitHub.
+The dashboard records reported token usage. Missing coverage, an invalid citation, a failed CLI run or an empty verdict produces a partial report. Partial reports stay in Jidoka. Only completed reports can be submitted to GitHub. New completed reviews show a mergeability score in Jidoka and in the GitHub review summary. A score of 90–100 recommends merging. Below 90, Jidoka recommends holding the merge. The lowest score among verified findings determines the result, even if only some findings are selected for publication. A completed review with no verified findings scores 100. GitHub approvals, branch protections and merge actions are unchanged.
 
 ## Reviewing and publishing
 
