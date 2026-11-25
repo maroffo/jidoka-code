@@ -687,6 +687,24 @@ impl ReviewRepository {
             snapshot.head == self.head && snapshot.base == self.base,
             "Source revision mismatch."
         );
+        self.read_pinned_context(requests)
+    }
+
+    /// Verify an exact regular-file location without following symlinks or guessing a path.
+    pub fn head_line(&self, path: &str, line: usize) -> Option<String> {
+        if line == 0 || !self.paths.contains_key(path) {
+            return None;
+        }
+        let request = ContextRead {
+            path: path.to_owned(),
+            term: format!("#L{line}"),
+        };
+        let windows = self.read_pinned_context(&[request]).ok()?;
+        let window = windows.iter().find(|w| w.path == path && w.start == line)?;
+        window.text.lines().next().map(str::to_owned)
+    }
+
+    fn read_pinned_context(&self, requests: &[ContextRead]) -> Result<Vec<SourceWindow>> {
         let mut windows = Vec::new();
         let mut remaining = TOOL_PAGE_BYTES;
         for request in requests {
@@ -1157,6 +1175,12 @@ mod tests {
         let transport = tempfile::tempdir().unwrap();
         let exported = transport.path().join("source");
         repo.export_head(&exported).unwrap();
+        assert_eq!(
+            repo.head_line("helper.sql", 101).as_deref(),
+            Some("select claim_once();")
+        );
+        assert!(repo.head_line("helper.sql", 102).is_none());
+        assert!(repo.head_line("unsafe.sql", 1).is_none());
         assert_eq!(
             fs::read_to_string(exported.join("unsafe.sql")).unwrap(),
             "helper.sql"

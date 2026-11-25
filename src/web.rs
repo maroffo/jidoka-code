@@ -855,6 +855,9 @@ fn status_badge(status: &str) -> String {
 }
 
 fn provider_name(label: &str) -> &str {
+    if label.starts_with("Antigravity CLI · ") {
+        return label;
+    }
     label
         .strip_suffix(')')
         .and_then(|s| s.rsplit_once(" ("))
@@ -1328,6 +1331,16 @@ fn failure_html(stored: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agy_display_preserves_the_provider_and_parenthesized_model_tier() {
+        let label = "Antigravity CLI · Gemini 4 Carbon (High)";
+        assert_eq!(super::provider_name(label), label);
+        assert_eq!(
+            super::provider_name("https://example.test (legacy-model)"),
+            "legacy-model"
+        );
+    }
+
     use super::*;
     use crate::contracts::{Finding, Focus, Report, Signal};
     use anyhow::anyhow;

@@ -1,6 +1,6 @@
 # Jidoka Code
 
-Jidoka is a single-user Rust web service for reviewing GitHub pull requests with the Google Antigravity CLI. Each run sends one pinned PR to AGY. The reviewer reads its diff, source tree, earlier findings and Semgrep leads. It returns findings with evidence, changed files it reviewed, and a short guide for manual review. Jidoka checks line references against the pinned diff before accepting the report.
+Jidoka is a single-user Rust web service for reviewing GitHub pull requests with the Google Antigravity CLI. Each run sends one pinned PR to AGY. The reviewer reads its diff, source tree, earlier findings and Semgrep leads. It returns findings with evidence, changed files it reviewed, and a short guide for manual review. Jidoka checks line references against the pinned source and diff before accepting the report.
 
 ## Getting started
 
@@ -39,7 +39,7 @@ For a single-user installation, set `JIDOKA_REVIEWER_TOKEN` to your own GitHub t
 
 Under **Repositories**, choose **Manual**, **Automatic summary**, or **Automatic summary and inline comments** per repository. Manual is the default. Set `JIDOKA_BOT_TOKEN` to a personal access token for a dedicated bot account with **Pull requests: write** on the selected repositories. Keep the read token configured for private source. Jidoka polls GitHub from the container and sends eligible changes to the configured provider. The bot posts comments. Approvals and change requests come from the operator.
 
-To queue a manual replay of a saved review at the original revisions, run `docker exec jidoka-code jidoka-code --replay-review ID`. The replay gets a new review ID and uses the currently authorized repository and provider.
+To queue a manual replay of a saved review at the original revisions, run `docker compose exec web jidoka-code --replay-review ID`. The replay gets a new review ID and uses the currently authorized repository and provider.
 
 ## Development
 

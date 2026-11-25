@@ -102,6 +102,14 @@ impl Session {
         Ok(Self { db, id, step: 0 })
     }
 
+    pub fn agy_invoked(&self) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agy_invocations WHERE review_id=?)",
+            [self.id],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Claim one AGY process per review. An interrupted paid run needs an explicit replay.
     pub fn claim_agy(&mut self) -> Result<bool> {
         let tx = self.db.transaction()?;

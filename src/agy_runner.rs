@@ -22,13 +22,17 @@ const MAX_RESULT: u64 = 8 * 1024 * 1024;
 
 pub fn serve() -> Result<()> {
     let path = Path::new("/control/agy.sock");
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        ensure!(meta.file_type().is_socket(), "Unexpected AGY control path");
-        fs::remove_file(path)?;
+    let staging = path.with_extension("starting");
+    for socket in [staging.as_path(), path] {
+        if let Ok(meta) = fs::symlink_metadata(socket) {
+            ensure!(meta.file_type().is_socket(), "Unexpected AGY control path");
+            fs::remove_file(socket)?;
+        }
     }
-    let listener = UnixListener::bind(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    chown(path, Some(10001), Some(10001))?;
+    let listener = UnixListener::bind(&staging)?;
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o600))?;
+    chown(&staging, Some(10001), Some(10001))?;
+    fs::rename(&staging, path)?;
     let (mut connection, _) = listener.accept()?;
     fs::remove_file(path)?;
     drop(listener);

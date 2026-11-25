@@ -50,6 +50,7 @@ fn main() -> Result<()> {
         .parse::<u16>()?;
     tokio::runtime::Runtime::new()?.block_on(async move {
         let listener = TcpListener::bind((address.as_str(), port)).await?;
+        let _jobs_lock = provider.recover_jobs()?;
         web::recover(&db, provider.label())?;
         let app = web::router(&db, provider.label(), &repositories)?;
         let mut term = signal(SignalKind::terminate())?;
