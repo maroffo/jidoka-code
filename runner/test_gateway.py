@@ -41,13 +41,22 @@ def dispatch(source, argv):
         return result
 
 
+def save_receipts(directory, receipts):
+    # The runner may stop the relay at any point after AGY returns its verdict.
+    tmp = directory / "tests.tmp"
+    tmp.write_text(json.dumps(receipts))
+    tmp.replace(directory / "tests.json")
+
+
 def serve(source, directory):
+    receipts = []
+    ledger = directory / "tests.json"
     with socket.socket(socket.AF_UNIX) as server:
         path = directory / "test.sock"
         server.bind(str(path))
         os.chmod(path, 0o666)
         server.listen(1)
-        for _ in range(32):
+        while True:
             client, _ = server.accept()
             with client:
                 try:
@@ -61,15 +70,18 @@ def serve(source, directory):
                         raise ValueError("Invalid arguments")
                 except (ValueError, OSError):
                     continue
-                try:
-                    result = dispatch(source, argv)
-                except (OSError, subprocess.SubprocessError, ValueError, KeyError):
-                    result = {"status": "unavailable", "output": "The offline test sandbox did not complete the request."}
-                # Persist only execution metadata. Raw test output is for the current review.
-                receipt = {k: v for k, v in result.items() if k != "output"}
-                receipt["argv"] = argv
-                with (directory / "tests.jsonl").open("a") as log:
-                    log.write(json.dumps(receipt) + "\n")
+                if ledger.exists() and ledger.stat().st_size >= 1024 * 1024:
+                    result = {"status": "unavailable", "output": "Test history is full. The command was not run."}
+                else:
+                    receipts.append({"argv": argv, "status": "interrupted"})
+                    save_receipts(directory, receipts)
+                    try:
+                        result = dispatch(source, argv)
+                    except (OSError, subprocess.SubprocessError, ValueError, KeyError):
+                        result = {"status": "unavailable", "output": "The offline test sandbox did not complete the request."}
+                    # Persist only execution metadata. Raw test output is for the current review.
+                    receipts[-1].update({k: v for k, v in result.items() if k != "output"})
+                    save_receipts(directory, receipts)
                 try:
                     client.sendall(json.dumps(result).encode())
                 except OSError:

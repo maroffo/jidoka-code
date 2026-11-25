@@ -73,6 +73,6 @@ To exercise the isolated runner with synthetic Python and Go tests, use a separa
 export JIDOKA_AGY_ADC_FILE=/dev/null GOOGLE_CLOUD_QUOTA_PROJECT=local
 docker compose -p jidoka-sandbox-qa build agy test-sandbox
 docker compose -p jidoka-sandbox-qa up -d test-sandbox
-docker compose -p jidoka-sandbox-qa run --rm --no-deps --entrypoint python3 -v "$PWD/tests/sandbox_probe.py:/probe.py:ro" agy /probe.py
+docker compose -p jidoka-sandbox-qa run --rm --no-deps --entrypoint python3 -v "$PWD/tests/sandbox_probe.py:/probe.py:ro" agy /probe.py --with-timeout
 docker compose -p jidoka-sandbox-qa down -v
 ```

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
 import time
 
 
@@ -42,7 +43,7 @@ Path('prior-test').touch()
                                    env={"PATH": os.environ["PATH"], "JIDOKA_TEST_SOCKET": str(sock)},
                                    user=10002, group=10002, extra_groups=[], timeout=260, capture_output=True, text=True)
                 assert (p.returncode == 0) == (expected == "passed"), (p.stderr, p.stdout)
-                row = json.loads((relay / "tests.jsonl").read_text().splitlines()[-1])
+                row = json.loads((relay / "tests.json").read_text())[-1]
                 assert row["argv"] == args and row["status"] == expected, row
                 print(expected, args[0], flush=True)
             check(["python3", "check.py"], "passed")
@@ -50,6 +51,9 @@ Path('prior-test').touch()
             check(["go", "test", "-run", "^TestSum$", "."], "passed")
             check(["python3", "-c", "raise SystemExit(3)"], "failed")
             check(["jidoka-uninstalled-test-executable"], "unavailable")
+            if "--with-timeout" in sys.argv:
+                check(["python3", "-c", "import time; time.sleep(135)"], "timeout")
+                check(["python3", "check.py"], "passed")
             assert not (src / "prior-test").exists()
         finally:
             gateway.terminate()

@@ -17,5 +17,6 @@ with socket.socket(socket.AF_UNIX) as sock:
     except (KeyError, OSError, ValueError):
         sys.exit("Test sandbox unavailable.")
 print(result["output"])
-print("Jidoka test:", result["status"], file=sys.stderr)
+exit_info = f" (exit {result['exit_code']})" if "exit_code" in result else ""
+print(f"Jidoka test: {result['status']}{exit_info}", file=sys.stderr)
 sys.exit(0 if result["status"] == "passed" else 1)

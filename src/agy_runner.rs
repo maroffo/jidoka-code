@@ -198,12 +198,9 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
     };
     drop(process);
     drop(relay);
-    let ledger = relay_dir.path().join("tests.jsonl");
+    let ledger = relay_dir.path().join("tests.json");
     let tests: Vec<jidoka_code::contracts::SandboxTest> = if ledger.exists() {
-        fs::read_to_string(ledger)?
-            .lines()
-            .map(serde_json::from_str)
-            .collect::<Result<_, _>>()?
+        serde_json::from_reader(fs::File::open(ledger)?)?
     } else {
         Vec::new()
     };

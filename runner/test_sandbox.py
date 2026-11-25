@@ -1,6 +1,7 @@
 """One offline test per container lifetime. No repository or credential volumes."""
 import json
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -20,20 +21,28 @@ def run(conn, argv):
                       "GOTOOLCHAIN": "local", "GOPROXY": "off", "CARGO_NET_OFFLINE": "true"})
     # The trusted gateway sends the pinned export only after receiving this byte.
     conn.sendall(b"+")
-    unpack = subprocess.run(["tar", "--extract", "--no-same-owner", "--no-same-permissions"],
-                            stdin=conn, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            timeout=45, **child)
-    if unpack.returncode:
-        return {"status": "unavailable", "output": "Could not prepare the pinned source."}
+    unpack = subprocess.Popen(["tar", "--extract", "--no-same-owner", "--no-same-permissions"],
+                              stdin=conn, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **child)
+    try:
+        if unpack.wait(timeout=45):
+            return {"status": "unavailable", "output": "Could not prepare the pinned source."}
+    except subprocess.TimeoutExpired:
+        return {"status": "unavailable", "output": "Preparing the pinned source timed out."}
     started = time.monotonic()
     with tempfile.TemporaryFile() as log:
         try:
-            proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                  timeout=120, **child)
-        except subprocess.TimeoutExpired:
-            return {"status": "timeout", "output": "Test exceeded 120 seconds."}
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, **child)
         except OSError:
             return {"status": "unavailable", "output": "Test executable unavailable in the sandbox."}
+        peer = select.poll()
+        peer.register(conn, select.POLLHUP | select.POLLERR)
+        while proc.poll() is None:
+            # The relay half-closes after uploading. A full hangup cancels the test.
+            if peer.poll(200):
+                return {"status": "interrupted", "output": "Review session ended."}
+            if time.monotonic() - started >= 120:
+                # Exiting PID 1 tears down the test namespace, including detached children.
+                return {"status": "timeout", "seconds": 120, "output": "Test exceeded 120 seconds."}
         log.seek(0)
         data = log.read(MAX_OUTPUT + 1)
         return {"status": "passed" if proc.returncode == 0 else "failed",
