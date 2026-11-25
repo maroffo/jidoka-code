@@ -19,7 +19,21 @@ services:
       - reviews:/data
       - jobs:/jobs
       - control:/control
+  egress:
+    build:
+      context: .
+      target: agy-egress
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs: [/tmp, /run]
+    networks: [reviewer, cloud]
   agy:
+    depends_on:
+      - egress
+    networks: [reviewer]
     build:
       context: .
       target: agy-runner
@@ -31,6 +45,7 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID, KILL]
     environment:
+      HTTPS_PROXY: http://egress:3128
       GOOGLE_CLOUD_QUOTA_PROJECT: ${GOOGLE_CLOUD_QUOTA_PROJECT:?set the AGY billing project}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-global}
     secrets:
@@ -48,3 +63,7 @@ volumes:
 secrets:
   agy_adc:
     file: ${JIDOKA_AGY_ADC_FILE:?set the path to reviewer Application Default Credentials}
+networks:
+  reviewer:
+    internal: true
+  cloud: {}

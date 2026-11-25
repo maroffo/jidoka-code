@@ -83,6 +83,7 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
         include_str!("../runner/prompt.txt")
     );
     // Refresh outside the agent identity. Never pass refresh tokens, signing keys or the ADC file to tools.
+    let proxy = std::env::var("HTTPS_PROXY").unwrap_or_default();
     let mut auth = ProcessGroup(
         Command::new("/usr/local/bin/python3")
             .args(["-I", "/usr/local/lib/jidoka/adc.py"])
@@ -91,6 +92,8 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
                 "GOOGLE_CLOUD_QUOTA_PROJECT",
                 std::env::var("GOOGLE_CLOUD_QUOTA_PROJECT")?,
             )
+            .env("HTTPS_PROXY", &proxy)
+            .env("NO_PROXY", "127.0.0.1,localhost")
             .env("TZ", "UTC")
             .process_group(0)
             .stdin(Stdio::null())
@@ -124,6 +127,7 @@ fn run(mut peer: &mut UnixStream) -> Result<()> {
         .env("GCE_METADATA_HOST", &metadata)
         .env("GCE_METADATA_IP", &metadata)
         .env("NO_PROXY", "localhost,127.0.0.1")
+        .env("HTTPS_PROXY", &proxy)
         .env(
             "GOOGLE_CLOUD_LOCATION",
             std::env::var("GOOGLE_CLOUD_LOCATION").unwrap_or_else(|_| "global".into()),

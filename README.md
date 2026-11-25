@@ -13,7 +13,7 @@ JIDOKA_MODEL="Gemini 4 Carbon (High)"
 JIDOKA_GITHUB_TOKEN=
 ```
 
-Enable model access on the billing project. Supply Application Default Credentials (ADC) for an identity dedicated to invoking the model on that project. A credential helper gives AGY a short-lived access token for that identity. Keep personal credentials, GitHub tokens and unrelated project permissions out of the runner. Only the runner supervisor can read the mounted ADC file. [Antigravity Cloud authentication](https://antigravity.google/docs/enterprise#adc-headless)
+Enable model access on the billing project. Supply Application Default Credentials (ADC) for an identity dedicated to invoking the model on that project. A credential helper gives AGY a short-lived access token for that identity. Keep personal credentials, GitHub tokens and unrelated project permissions out of the runner. Only the runner supervisor can read the mounted ADC file. The runner has an internal network. Its outbound proxy permits HTTPS to the Google model and authentication endpoints for global, US and EU locations. [Antigravity Cloud authentication](https://antigravity.google/docs/enterprise#adc-headless)
 
 ```sh
 docker compose up --build -d
