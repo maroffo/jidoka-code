@@ -178,7 +178,8 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 .verdict-bar .primary-link { white-space: nowrap; font-weight: 620; font-size: .9rem }
 .submit-off { display: flex; align-items: center; gap: .7rem }
 .submit-off small { max-width: 15rem; font-size: .76rem; line-height: 1.35; color: var(--sub); order: -1; text-align: right }
-.primary-link[aria-disabled=true] { background: var(--sunk); color: var(--sub); cursor: not-allowed }
+button.primary-link { width: auto; font-size: .9rem }
+button.primary-link:disabled { background: var(--sunk); color: var(--sub); cursor: not-allowed }
 .report-meta { padding: .6rem 0 0 }
 .report-meta .meta { margin: 0 }
 
@@ -213,20 +214,18 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 .review-report .card > p { max-width: 80ch; color: var(--ink) }
 .review-report .finding-impact { margin-bottom: 1rem; font-size: 1rem; line-height: 1.6; white-space: pre-line }
 .review-report .location { margin: .5rem 0 .75rem }
-.location a,.checks .location { display: inline-block; padding: .15rem .5rem; border-radius: .25rem; background: var(--sunk); text-decoration: none; font: .78rem var(--mono) }
-.checks .location a { padding: 0; background: none }
+.location a { display: inline-block; padding: .15rem .5rem; border-radius: .25rem; background: var(--sunk); text-decoration: none; font: .78rem var(--mono) }
 .location a:hover { background: var(--line); color: inherit }
 .manual-check code,.action code,.finding-impact code { display: inline; padding: .08em .25em; background: var(--sunk); border-radius: .2rem; font-size: .89em; white-space: pre-wrap }
 .checks { list-style: none; padding: 0; counter-reset: check; background: var(--surface); border: 1px solid var(--line); border-radius: .5rem }
-.checks > li { counter-increment: check }
+.checks > li { counter-increment: check; position: relative; padding: .85rem 1.1rem .2rem 3.5rem }
+.checks > li::before { content: counter(check); position: absolute; left: 1.1rem; top: .8rem; display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1.5px solid var(--hold); border-radius: 50%; color: var(--hold); font-size: .78rem; font-weight: 650 }
 .checks > li + li { border-top: 1px solid var(--line) }
-.manual-check > summary { display: grid; grid-template-columns: 1.6rem minmax(0,1fr) 1rem; gap: .3rem .8rem; align-items: start; padding: .85rem 1.1rem; font-size: .95rem; font-weight: 450 }
-.manual-check > summary::before { content: counter(check); grid-row: 1 / 3; display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1.5px solid var(--hold); border-radius: 50%; color: var(--hold); font-size: .78rem; font-weight: 650 }
-.manual-check > summary::after { grid-column: 3; grid-row: 1 }
-.manual-check .location { grid-column: 2; margin: 0; width: fit-content; max-width: 100% }
-.check-action { grid-column: 2; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; max-width: 90ch; line-height: 1.55 }
+.checks .location { margin: 0 }
+.manual-check > summary { align-items: start; padding: .35rem 0 .65rem; font-size: .95rem; font-weight: 450 }
+.check-action { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; max-width: 90ch; line-height: 1.55 }
 .manual-check[open] .check-action { display: block }
-.manual-check .detail-body { padding: 0 1.1rem 1rem 3.5rem; max-width: 96ch }
+.manual-check .detail-body { padding: 0 0 .8rem; max-width: 96ch }
 .manual-check .detail-body h3 { margin: .8rem 0 .2rem; font-size: .8rem; letter-spacing: 0; color: var(--sub) }
 .review-report .inspect { background: var(--surface) }
 .review-report .inspect .panel-head h2 { margin: 0; font-size: 1.1rem }
@@ -245,7 +244,6 @@ button span { float: right }button:hover { background: #285458 }.error { padding
   .rail h2,.rail-files { display: none }
   .rail-sections { display: flex; gap: .3rem; overflow-x: auto; padding-bottom: .2rem }
   .rail-sections a { white-space: nowrap; border: 1px solid var(--line); background: var(--surface) }
-  .manual-check .detail-body { padding-left: 1.1rem }
   .review-report section[id],.review-report #findings,.review-report .card { scroll-margin-top: 1rem }
 }
 @media (max-width: 650px) {

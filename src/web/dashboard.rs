@@ -147,7 +147,14 @@ fn run_rows(db: &Connection, key: &str, latest: i64) -> rusqlite::Result<(String
             .get::<_, Option<i64>>(6)?
             .and_then(|n| u8::try_from(n).ok())
             .filter(|n| *n <= 100 && status == "completed");
-        let (tone, words) = outcome(status, row.get(8)?, score, findings);
+        let partial: bool = row.get(8)?;
+        let (tone, words) = outcome(status, partial, score, findings);
+        // The state read aloud matches the words: a completed row with coverage limits is partial.
+        let shown = if partial && status == "completed" {
+            "partial"
+        } else {
+            status
+        };
         // A scored row leads with the recommendation, so its finding count moves below.
         let detail = match (score, findings) {
             (Some(_), Some(1)) => "1 finding".to_owned(),
@@ -178,7 +185,7 @@ fn run_rows(db: &Connection, key: &str, latest: i64) -> rusqlite::Result<(String
             count += 1;
             (&mut earlier, created.get(..16).unwrap_or(&created))
         };
-        write!(dst,r#"<a class="history-row" href="/reviews/{id}">{}<span class="pr-identity"><strong>{headline}</strong><small>{repo}{kind} {id}</small></span><span class="row-outcome {tone}">{} <span class="diff-sr-only">{}</span><small>{detail}</small></span><time class="row-when">{} UTC</time></a>"#,lamp(tone),escape(&words),status_label(status),escape(when)).unwrap();
+        write!(dst,r#"<a class="history-row" href="/reviews/{id}">{}<span class="pr-identity"><strong>{headline}</strong><small>{repo}{kind} {id}</small></span><span class="row-outcome {tone}">{} <span class="diff-sr-only">{}</span><small>{detail}</small></span><span class="row-when">{} UTC</span></a>"#,lamp(tone),escape(&words),status_label(shown),escape(when)).unwrap();
     }
     if count > 0 {
         let noun = if count == 1 { "run" } else { "runs" };

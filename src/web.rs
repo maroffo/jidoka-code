@@ -1246,7 +1246,7 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> ReportHtml {
     let manual: Vec<_> = report.manual_checks().collect();
     let mut focus = String::new();
     for item in &manual {
-        write!(focus, r#"<li><details class="manual-check"><summary><span class="location">{}</span><span class="check-action">{}</span></summary><div class="detail-body"><p>{}</p><h3>What Jidoka checked</h3>{}</div></details></li>"#,
+        write!(focus, r#"<li><p class="location">{}</p><details class="manual-check"><summary><span class="check-action">{}</span></summary><div class="detail-body"><p>{}</p><h3>What Jidoka checked</h3>{}</div></details></li>"#,
             position(report,&item.path,item.line),inline_code(&item.action),inline_code(&item.outcome),evidence_html(report,&item.checked)).unwrap();
     }
     let focus = if focus.is_empty() {
@@ -1443,7 +1443,7 @@ fn review_page(
                     // Say why the action is unavailable instead of hiding it.
                     action = match workflow::submit_blocked(report.report.dry_run, is_partial) {
                         Some(reason) => format!(
-                            r#"<p class="submit-off"><span class="primary-link" aria-disabled="true">Submit review</span><small>{reason}</small></p>"#
+                            r#"<p class="submit-off"><button type="button" class="primary-link" disabled aria-describedby="submit-reason">Submit review</button><small id="submit-reason">{reason}</small></p>"#
                         ),
                         None => format!(r#"<a class="primary-link" href="/reviews/{id}/submit">Submit review</a>"#),
                     };
@@ -1475,7 +1475,8 @@ fn review_page(
                         lamp("off"),
                         lamp("off"),
                     );
-                    (status, details)
+                    // A saved report with coverage limits is partial whatever status an older build stored.
+                    (if is_partial { "partial" } else { status }, details)
                 }
                 None => ("failed", failure_html(None)),
             }
@@ -1556,6 +1557,32 @@ mod tests {
         });
         // An incomplete review with a finding stops, in the header as in the history.
         assert_eq!(verdict(&report, true), ("stop", "Review incomplete".into()));
+
+        // The whole page: verdict, state and the one action sit together in the header.
+        let raw = serde_json::to_string(&report).unwrap();
+        let page = |status| {
+            review_page(
+                (5, "token", None, None, false, None),
+                URL,
+                PROVIDER,
+                status,
+                "2026-01-02 03:04:05",
+                Some(&raw),
+                None,
+            )
+        };
+        let html = page("completed");
+        assert!(html.contains(r#"<span class="lamp stop" aria-hidden="true"></span><strong>Mergeability: 89/100 · Hold merge</strong><span class="status done">Completed</span>"#));
+        assert!(
+            html.contains(r#"<a class="primary-link" href="/reviews/5/submit">Submit review</a>"#)
+        );
+        assert!(html.contains(r#"<div class="stop"><dt>Mergeability</dt><dd>89/100</dd>"#));
+        let html = page("partial");
+        assert!(html.contains(
+            r#"<strong>Review incomplete</strong><span class="status partial">Partial</span>"#
+        ));
+        assert!(html.contains("<dt>Mergeability</dt><dd>Not scored</dd>"));
+        assert!(!html.contains(r#"href="/reviews/5/submit""#));
         assert!(facts(&report, true, 0).contains("<dt>Mergeability</dt><dd>Not scored</dd>"));
     }
 
@@ -1847,7 +1874,9 @@ mod tests {
         assert!(run_one(&f.db, |_| Ok(report(None))).unwrap());
         assert!(latest_review(&f.db, PROVIDER, URL).unwrap().is_none());
         let page = f.get("/reviews/1").await;
-        assert!(page.contains("<small>Dry runs cannot be submitted to GitHub.</small>"));
+        assert!(page.contains(
+            r#"<small id="submit-reason">Dry runs cannot be submitted to GitHub.</small>"#
+        ));
         assert!(!page.contains(r#"href="/reviews/1/submit""#));
         assert_eq!(
             f.request(Method::GET, "/reviews/1/submit", &[], "").await.0,
@@ -2454,9 +2483,13 @@ mod tests {
             let html = fixture.get(&review).await;
             assert!(html.contains(r##"<a href="#review-diff">"##));
             assert!(
-                html.contains("<small>Only completed reviews can be submitted to GitHub.</small>")
+                html.contains(r#"<small id="submit-reason">Only completed reviews can be submitted to GitHub.</small>"#)
             );
-            assert!(html.contains("<strong>Review incomplete</strong>"));
+            assert!(html.contains(
+                r#"<strong>Review incomplete</strong><span class="status partial">Partial</span>"#
+            ));
+            assert_eq!(html.matches("<nav class=\"rail\"").count(), 1);
+            assert!(html.contains(r#"<button type="button" class="primary-link" disabled"#));
             assert!(!html.contains(&format!(r#"href="{review}/submit""#)));
             for (method, path) in [
                 (Method::GET, "submit"),

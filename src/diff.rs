@@ -155,6 +155,8 @@ fn render_rows(
         <table><thead><tr><th scope="col">Base</th><th scope="col">Head</th><th scope="col">Source</th></tr></thead><tbody>"#,
         escape(&file.path)).unwrap();
     let (mut last_base, mut last_head): (Option<usize>, Option<usize>) = (None, None);
+    // A removed or emptied file has no head lines, so its findings cite the base.
+    let removed = rows.iter().all(|row| row.1.is_none());
     for &(base, head, text) in rows {
         let gap = |current: Option<usize>, previous: Option<usize>| {
             current
@@ -176,7 +178,8 @@ fn render_rows(
             (Some(_), None) => ("diff-removed", "−", "Removed line"),
             _ => ("diff-context", " ", "Context line"),
         };
-        let noted = head.and_then(|line| findings.get(&(file.path.as_str(), line)));
+        let cited = head.or(if removed { base } else { None });
+        let noted = cited.and_then(|line| findings.get(&(file.path.as_str(), line)));
         let flag = if noted.is_some() { " diff-flagged" } else { "" };
         write!(html, r#"<tr class="{class}{flag}""#).unwrap();
         let head_anchor = head.map(|line| head_id(id, line));
@@ -324,8 +327,8 @@ fn navigation(files: &[Listed<'_>]) -> String {
     }
     let mut html = String::from(r#"<h2>Changed files</h2><ul class="rail-files">"#);
     for (position, (dir, items)) in dirs.iter().enumerate() {
-        // Root files that lead the list need no heading.
-        if !(position == 0 && dir.is_empty()) {
+        // Root files need no heading when nothing else is listed.
+        if !(position == 0 && dir.is_empty() && dirs.len() == 1) {
             let shown = if dir.is_empty() { "./" } else { dir };
             write!(
                 html,
@@ -566,8 +569,25 @@ mod tests {
             evidence: String::new(),
             attribution: Attribution::Unknown,
         });
+        report.report.findings.push(Finding {
+            path: "src/gone.rs".into(),
+            line: 1,
+            title: "Removed guard".into(),
+            impact: "Callers lose the check".into(),
+            evidence: String::new(),
+            attribution: Attribution::Unknown,
+        });
         let Rendered { nav, section: html } = render(&report);
+        // The page wraps the rail in its one navigation landmark; the diff adds none.
         assert!(!html.contains("<nav"));
+        // A removed file shows its finding on the base line it cites.
+        assert!(html.contains(
+            r##"<strong>Removed guard</strong><p>Callers lose the check</p><a href="#finding-2">"##
+        ));
+        assert_eq!(
+            html.matches(r#"class="diff-removed diff-flagged""#).count(),
+            1
+        );
         for text in ["views&lt;&amp;&gt;.rs", "image.dat", "gone.rs", "quiet.rs"] {
             assert_eq!(nav.matches(text).count(), 1, "{text}");
         }
@@ -578,6 +598,7 @@ mod tests {
             nav.contains(r#"<span class="diff-plus">+2</span><span class="diff-minus">−2</span>"#)
         );
         assert!(html.contains(r##"<a href="#finding-1">Read the finding</a>"##));
+        assert_eq!(html.matches("Read the finding").count(), 2);
         assert!(html.contains("4 of 5 changed files"));
         assert!(html.contains("No text patch was saved for this change."));
         assert!(html.contains("Supporting context"));

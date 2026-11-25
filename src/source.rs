@@ -2630,7 +2630,11 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
         assert!(saved.report.findings.is_empty());
         assert!(crate::diff::anchor(&saved, "src/task.rs", 1).is_some());
-        assert!(crate::diff::render(&saved).section.contains("sample.bin"));
+        assert!(
+            crate::diff::render(&saved)
+                .section
+                .contains("<span>assets/</span>sample.bin")
+        );
     }
 
     fn context_snapshot(changed: &str) -> Snapshot {
