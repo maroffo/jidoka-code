@@ -820,6 +820,7 @@ fn publish_finished(
         }
         let number = finished.number;
         let outcome = match eligible_report(&finished, repo) {
+            Some(report) if finished.status == "partial" || report.is_partial() => Outcome::Skipped,
             Some(report) => match publish(&report, number as u64, finished.inline) {
                 Ok(()) => Outcome::Published,
                 Err(_) => {
@@ -853,7 +854,7 @@ fn publish_finished(
                 "The automatic review for PR #{number} did not match the expected pull request and head."
             )),
         };
-        failed |= !matches!(outcome, Outcome::Published);
+        failed |= !matches!(outcome, Outcome::Published | Outcome::Skipped);
         finish_job(conn, repo, expected_generation, finished.review_id, outcome)?;
     }
     Ok(failed)
@@ -861,6 +862,7 @@ fn publish_finished(
 
 enum Outcome {
     Published,
+    Skipped,
     Invalid(String),
     AnalysisFailed { error: String, retry: Option<i64> },
     PublishFailed { error: String, retry: Option<i64> },
@@ -891,6 +893,7 @@ fn finish_job(
     let tx = immediate(conn)?;
     let (state, wait, analysis, publication, error) = match outcome {
         Outcome::Published => ("published", None, 0, 1, None),
+        Outcome::Skipped => ("skipped", None, 0, 0, None),
         Outcome::Invalid(error) => ("stopped", None, 0, 0, Some(error)),
         Outcome::AnalysisFailed { error, retry } => (
             if retry.is_some() {
@@ -1500,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn only_matching_completed_or_partial_reports_publish_in_current_mode() {
+    fn only_matching_complete_reports_publish_in_current_mode() {
         let conn = fixture("inline");
         snapshot(&conn, &[]);
         let latest = [
@@ -1536,9 +1539,61 @@ mod tests {
             },
         );
         assert!(result.is_err());
-        assert_eq!(submissions, [(1, false, 0), (2, false, 1)]);
+        assert_eq!(submissions, [(1, false, 0)]);
+        assert_eq!(
+            conn.query_row(
+                "SELECT state,publish_attempts,retry_at FROM automation_jobs WHERE review_id=2",
+                [],
+                |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?
+                ))
+            )
+            .unwrap(),
+            ("skipped".into(), 0, 0)
+        );
         assert!(last_error(&conn, REPO).unwrap().unwrap().contains("PR #6"));
         snapshot(&conn, &latest);
+    }
+
+    #[test]
+    fn partial_jobs_are_terminal_without_a_post_or_retry_in_either_mode() {
+        for mode in ["inline", "summary"] {
+            let conn = fixture(mode);
+            snapshot(&conn, &[]);
+            snapshot(&conn, &[(1, OLD, true)]);
+            finish(&conn, 1, "partial", Some(report(REPO, OLD, &[])));
+            for _ in 0..2 {
+                publish_ready_with(&conn, PROVIDER, &repos(), |_, _, _| {
+                    panic!("posted partial review")
+                })
+                .unwrap();
+                snapshot(&conn, &[(1, OLD, true)]);
+            }
+            assert!(last_error(&conn, REPO).unwrap().is_none());
+            assert_eq!(
+                conn.query_row(
+                    "SELECT state FROM automation_jobs WHERE review_id=1",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "skipped"
+            );
+            snapshot(&conn, &[(1, NEW, true)]);
+            assert_eq!(conn.execute(
+                "UPDATE reviews SET status='completed', report=? WHERE id=(SELECT review_id FROM automation_jobs WHERE repo=? AND number=1 AND head=?)",
+                params![report(REPO, NEW, &[]),REPO,NEW],
+            ).unwrap(),1);
+            let mut posted = Vec::new();
+            publish_ready_with(&conn, PROVIDER, &repos(), |report, number, inline| {
+                posted.push((report.head.clone(), number, inline));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(posted, [(NEW.into(), 1, mode == "inline")]);
+        }
     }
 
     #[test]

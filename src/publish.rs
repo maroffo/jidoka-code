@@ -515,6 +515,10 @@ pub fn submit(
     event: &str,
     automatic: bool,
 ) -> Result<String> {
+    ensure!(
+        !report.is_partial(),
+        "Only completed reviews can be submitted to GitHub."
+    );
     let submission = Submission::new(report, number, prepared, event, automatic)?;
     let token = token(automatic, |name| env::var(name).ok())?;
     let github = GitHub::new(&token)?;
