@@ -54,6 +54,7 @@ def main():
         os.replace(staging, CONTROL)
         conn, _ = listener.accept()
     # Exiting PID 1 destroys all descendants, including detached tests, before reuse.
+    signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
     signal.alarm(180)
     with conn, conn.makefile("rb") as header:
         argv = json.loads(header.readline(4097))

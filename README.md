@@ -66,3 +66,13 @@ Open **Review prompt** to edit the instructions used across authorized repositor
 AGY can request a focused test through `jidoka-test COMMAND [ARG ...]`. A trusted relay copies the pinned source to a separate offline container. Each request gets a fresh filesystem. The sandbox has no credentials, Docker socket, repository volume, or network access. Compose limits it to two CPUs, 1 GiB of memory, and 120 seconds per command. The default image includes Go and Python. Repositories that require extra tools or dependencies can supply them in the test-sandbox image or vendor them in the checkout.
 
 The review page shows each requested command and its outcome. Routine scope notes do not change a complete verdict. A missing prerequisite makes a review partial when it leaves a material question unresolved. Historical reports retain their original verdict and may have no test records.
+
+To exercise the isolated runner with synthetic Python and Go tests, use a separate Compose project:
+
+```sh
+export JIDOKA_AGY_ADC_FILE=/dev/null GOOGLE_CLOUD_QUOTA_PROJECT=local
+docker compose -p jidoka-sandbox-qa build agy test-sandbox
+docker compose -p jidoka-sandbox-qa up -d test-sandbox
+docker compose -p jidoka-sandbox-qa run --rm --no-deps --entrypoint python3 -v "$PWD/tests/sandbox_probe.py:/probe.py:ro" agy /probe.py
+docker compose -p jidoka-sandbox-qa down -v
+```

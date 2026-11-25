@@ -134,3 +134,5 @@ button span { float: right }button:hover { background: #285458 }.error { padding
 .review-blockers { border-left: .25rem solid var(--accent); padding: .6rem 1rem; background: var(--surface) }
 .review-report .decision { margin: 1rem 0; font-size: 1.25rem }
 .review-report .inspect > p,.review-report .inspect > ul { padding: .8rem 1.2rem }
+.review-report h2 + .card,.review-report h2 + .manual-check { margin-top: .55rem }
+.run-metrics summary { width: fit-content; color: var(--sub); font: .8rem/1.55 var(--mono); padding: .35rem 0 }

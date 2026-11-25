@@ -1163,9 +1163,12 @@ fn report_html(report: &PublishedReport, is_partial: bool) -> String {
         focus.push_str("<p class=empty>No additional manual checks.</p>");
     }
     let score = (!is_partial).then(|| report.mergeability_label()).flatten();
-    let mut content = score.map_or_else(String::new, |label| {
+    let mut content = score.as_deref().map_or_else(String::new, |label| {
         format!("<p class=decision><strong>{label}</strong></p>")
     });
+    if !is_partial && score.is_none() {
+        content.push_str("<p class=meta>No mergeability score was recorded for this review.</p>");
+    }
     let mut extra = String::new();
     for item in &report.report.findings {
         // Earlier reports stored the suggested action for a finding in its focus row.
@@ -1354,7 +1357,14 @@ fn review_page(
         _ => ("failed", failure_html(failure)),
     };
     let metrics = metrics.map_or_else(String::new, |value| {
-        format!(r#"<details class="run-metrics"><summary>Run details</summary><p class="meta">{}</p></details>"#, escape(&value))
+        let (summary, rest) = value.split_once(" · ").unwrap_or((&value, ""));
+        let (timing, usage) = rest.split_once(" · ").unwrap_or((rest, ""));
+        let summary = if timing.is_empty() { escape(summary) } else { format!("{} · {}", escape(summary), escape(timing)) };
+        if usage.is_empty() {
+            format!(r#"<p class="meta">{summary}</p>"#)
+        } else {
+            format!(r#"<details class="run-metrics"><summary>{summary}</summary><p class="meta">{}</p></details>"#, escape(usage))
+        }
     });
     page(
         &format!("Review {id}"),
