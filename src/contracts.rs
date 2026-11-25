@@ -89,9 +89,82 @@ pub struct Finding {
     pub line: usize,
     pub title: String,
     pub impact: String,
-    pub evidence: String,
+    pub evidence: FindingEvidence,
     pub attribution: Attribution,
 }
+/// Archived reports and replayed decisions retain the text evidence they originally recorded.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum FindingEvidence {
+    Text(String),
+    Structured(StructuredEvidence),
+}
+
+impl From<String> for FindingEvidence {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for FindingEvidence {
+    fn from(text: &str) -> Self {
+        Self::Text(text.into())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct StructuredEvidence {
+    pub trigger: String,
+    pub steps: Vec<EvidenceStep>,
+    pub test_gap: String,
+    pub countercheck: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceStep {
+    pub explanation: String,
+    pub path: String,
+    pub line: usize,
+}
+
+/// Bounds reviewer-controlled text before it is stored or rendered. Markdown may
+/// use line breaks and tabs; other invisible controls are rejected just as in engine prose.
+pub fn valid_review_text(value: &str, max_chars: usize) -> bool {
+    value.len() <= max_chars.saturating_mul(4)
+        && !value.trim().is_empty()
+        && value.chars().count() <= max_chars
+        && value.split_inclusive('\n').all(|line| {
+            let line = line
+                .strip_suffix("\r\n")
+                .or_else(|| line.strip_suffix('\n'))
+                .unwrap_or(line);
+            line.split('\t').all(crate::source::printable)
+        })
+}
+
+pub fn valid_review_location(path: &str, line: usize) -> bool {
+    line > 0 && crate::source::safe_path(path)
+}
+
+impl StructuredEvidence {
+    /// Validate the runner's response again at ingestion, including every pinned location.
+    pub fn valid(&self, impact: &str, mut has_line: impl FnMut(&str, usize) -> bool) -> bool {
+        valid_review_text(impact, 240)
+            && !impact.contains(['\n', '\r', '\t'])
+            && valid_review_text(&self.trigger, 600)
+            && valid_review_text(&self.test_gap, 400)
+            && valid_review_text(&self.countercheck, 400)
+            && (1..=6).contains(&self.steps.len())
+            && self.steps.iter().all(|step| {
+                valid_review_text(&step.explanation, 240)
+                    && valid_review_location(&step.path, step.line)
+                    && has_line(&step.path, step.line)
+            })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Attribution {
@@ -140,14 +213,36 @@ pub struct PublishedReport {
     pub diff: Option<PinnedDiff>,
 }
 
+/// The lowest mergeability score that recommends merging.
+pub const MERGE_READY: u8 = 90;
+
+/// How many human follow-ups a report lists, on the page and in the GitHub summary.
+pub const MANUAL_CHECKS: usize = 3;
+
+/// The one signal shown for a finished review, wherever it appears.
+///
+/// `partial` is the displayed state, which also covers a stored status the report itself
+/// does not explain. A score only counts for a complete review.
+pub fn outcome_tone(partial: bool, score: Option<u8>, findings: usize) -> &'static str {
+    match (partial, score) {
+        (true, _) if findings == 0 => "hold",
+        (false, Some(score)) if score >= MERGE_READY => "clear",
+        (false, None) if findings == 0 => "clear",
+        _ => "stop",
+    }
+}
+
 impl PublishedReport {
     /// Older and incomplete reviews do not have a merge recommendation.
-    pub fn mergeability_label(&self) -> Option<String> {
-        let score = self
-            .report
+    pub fn score(&self) -> Option<u8> {
+        self.report
             .mergeability_score
-            .filter(|&n| n <= 100 && !self.is_partial())?;
-        let decision = if score >= 90 {
+            .filter(|&n| n <= 100 && !self.is_partial())
+    }
+
+    pub fn mergeability_label(&self) -> Option<String> {
+        let score = self.score()?;
+        let decision = if score >= MERGE_READY {
             "Ready to merge"
         } else {
             "Hold merge"
@@ -173,6 +268,11 @@ impl PublishedReport {
                 .filter(|path| !reviewed.contains(path))
                 .collect(),
         )
+    }
+
+    /// The human follow-ups a report page shows, capped so the list stays actionable.
+    pub fn manual_checks(&self) -> impl Iterator<Item = &Focus> {
+        self.human_focus().take(MANUAL_CHECKS)
     }
 
     /// Return distinct human follow-ups in report order, including for older saved reports.

@@ -45,19 +45,21 @@ async fn target(state: &WebState, id: i64) -> Result<Target, PageError> {
     })
 }
 
+/// Why a saved review cannot be submitted, for the routes that refuse it and the page that says so.
+pub(super) fn submit_blocked(dry_run: bool, is_partial: bool) -> Option<&'static str> {
+    if dry_run {
+        Some("Dry runs cannot be submitted to GitHub.")
+    } else if is_partial {
+        Some("Only completed reviews can be submitted to GitHub.")
+    } else {
+        None
+    }
+}
+
 async fn submission_target(state: &WebState, id: i64) -> Result<Target, PageError> {
     let target = target(state, id).await?;
-    if target.report.report.dry_run {
-        return Err(PageError::new(
-            StatusCode::CONFLICT,
-            "Dry runs cannot be submitted to GitHub.",
-        ));
-    }
-    if target.is_partial {
-        return Err(PageError::new(
-            StatusCode::CONFLICT,
-            "Only completed reviews can be submitted to GitHub.",
-        ));
+    if let Some(reason) = submit_blocked(target.report.report.dry_run, target.is_partial) {
+        return Err(PageError::new(StatusCode::CONFLICT, reason));
     }
     Ok(target)
 }
