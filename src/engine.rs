@@ -1198,7 +1198,7 @@ fn confirmed<'a>(
         line: anchor.line,
         title: text(&item["title"])?.into(),
         impact: impact.into(),
-        evidence: evidence.join("\n"),
+        evidence: evidence.join("\n").into(),
         attribution,
     };
     Some(Assessment {
@@ -2591,6 +2591,12 @@ fn review_passes<'a>(
 
 #[cfg(test)]
 mod tests {
+    fn legacy_evidence(finding: &crate::contracts::Finding) -> &str {
+        match &finding.evidence {
+            crate::contracts::FindingEvidence::Text(text) => text,
+            _ => panic!("expected archived evidence"),
+        }
+    }
     use super::*;
 
     // Both engines accept these replies. The expected report uses the Rust engine's English labels.
@@ -2824,15 +2830,10 @@ mod tests {
         assert_eq!((finding.path.as_str(), finding.line), ("cache.go", 502));
         assert_eq!(finding.attribution, Attribution::Introduced);
         assert!(
-            finding
-                .evidence
+            legacy_evidence(finding)
                 .contains("Proposed revision cache.go:502 “\treturn slots - 1”")
         );
-        assert!(
-            finding
-                .evidence
-                .contains("Proposed revision requirements.md:1")
-        );
+        assert!(legacy_evidence(finding).contains("Proposed revision requirements.md:1"));
     }
 
     #[test]
@@ -2854,11 +2855,10 @@ mod tests {
         assert_eq!(finding.line, 5000);
         assert_eq!(finding.attribution, Attribution::Unknown);
         assert!(
-            finding
-                .evidence
+            legacy_evidence(finding)
                 .contains("Proposed revision cache.go:5000 “\treturn slots - 1”")
         );
-        assert!(!finding.evidence.contains("Base revision"));
+        assert!(!legacy_evidence(finding).contains("Base revision"));
     }
 
     #[test]
@@ -2877,7 +2877,7 @@ mod tests {
             vec![indexed_capacity_finding(1, "H4", "B2", "B4")],
         );
         assert_eq!(report.findings[0].attribution, Attribution::Unknown);
-        assert!(!report.findings[0].evidence.contains("Base revision"));
+        assert!(!legacy_evidence(&report.findings[0]).contains("Base revision"));
     }
 
     #[test]
@@ -2927,8 +2927,7 @@ mod tests {
         );
         assert!(report.limits.is_empty(), "{:?}", report.limits);
         assert!(
-            report.findings[0]
-                .evidence
+            legacy_evidence(&report.findings[0])
                 .contains("Proposed revision cache.go:2 “\treturn slots - 1”")
         );
 
@@ -3289,7 +3288,7 @@ mod tests {
         assert!(report.limits.is_empty(), "{:?}", report.limits);
         let finding = &report.findings[0];
         assert_eq!(finding.attribution, Attribution::Unknown);
-        assert!(finding.evidence.contains(&format!(
+        assert!(legacy_evidence(finding).contains(&format!(
             "Proposed revision ui/field/field.component.tsx:121 “{caller}”"
         )));
     }
@@ -3526,11 +3525,10 @@ mod tests {
             panic!("Expected one grounded finding")
         };
         assert!(
-            confirmed
-                .evidence
+            legacy_evidence(confirmed)
                 .contains("Absence checked in complete proposed files. cache.go")
         );
-        assert!(confirmed.evidence.contains("Proposed revision cache.go:1"));
+        assert!(legacy_evidence(confirmed).contains("Proposed revision cache.go:1"));
 
         for bad_check in [
             json!({"references": ["H2"], "absence_paths": ["requirements.md"]}),
@@ -3732,7 +3730,7 @@ mod tests {
         assert_eq!(calls, 3);
         assert!(report.limits.is_empty(), "{:?}", report.limits);
         assert_eq!(report.findings[0].attribution, Attribution::Introduced);
-        assert!(report.findings[0].evidence.contains(&format!(
+        assert!(legacy_evidence(&report.findings[0]).contains(&format!(
             "Proposed revision cache.go:{caller_line} “{caller}”"
         )));
     }
@@ -3823,7 +3821,7 @@ mod tests {
         assert_eq!(calls, 3);
         assert!(report.limits.is_empty(), "{:?}", report.limits);
         assert_eq!(report.findings[0].attribution, Attribution::Introduced);
-        assert!(report.findings[0].evidence.contains(&format!(
+        assert!(legacy_evidence(&report.findings[0]).contains(&format!(
             "Proposed revision web/submit.go:{caller_line} “{caller}”"
         )));
     }
@@ -4223,7 +4221,7 @@ mod tests {
         assert!(report.limits.is_empty());
         let finding = &report.findings[0];
         assert_eq!(finding.attribution, Attribution::Unknown);
-        assert!(!finding.evidence.contains("Base revision"));
+        assert!(!legacy_evidence(finding).contains("Base revision"));
     }
 
     #[test]
@@ -4663,7 +4661,7 @@ mod tests {
         }, |_,_| Ok(true), &[]).unwrap();
         assert_eq!((calls, reads), (5, 1));
         assert_eq!(result.report.findings.len(), 1);
-        assert!(result.report.findings[0].evidence.contains("caller.go:21"));
+        assert!(legacy_evidence(&result.report.findings[0]).contains("caller.go:21"));
         assert!(result.unfinished_patches().unwrap().is_empty());
         assert!(result.report.limits.is_empty());
     }
@@ -4696,7 +4694,7 @@ mod tests {
         }, |_,_| Ok(vec![SourceWindow{path:"caller.go".into(),start:21,text:"return new_cache(1)".into()}]), |_,_|Ok(true),&[]).unwrap();
         assert_eq!(calls, 4);
         assert_eq!(result.report.findings.len(), 1);
-        assert!(result.report.findings[0].evidence.contains("caller.go:21"));
+        assert!(legacy_evidence(&result.report.findings[0]).contains("caller.go:21"));
         assert!(result.unfinished_patches().unwrap().is_empty());
         assert!(result.report.limits.is_empty());
     }
@@ -4987,7 +4985,7 @@ mod tests {
         assert_eq!(turn, 4);
         assert_eq!(paths, ["caller.go", "guard.go"]);
         assert_eq!(result.report.findings.len(), 1);
-        assert!(result.report.findings[0].evidence.contains("caller.go:8"));
+        assert!(legacy_evidence(&result.report.findings[0]).contains("caller.go:8"));
         assert!(result.report.limits.is_empty());
     }
 
@@ -5013,7 +5011,7 @@ mod tests {
         |_,data|{if data["allow_assessment_reads"]==true{open_denials+=1;Err(ReviewBudgetClosed.into())}else{Ok(true)}},&[]).unwrap();
         assert_eq!((turns, open_denials), (3, 1));
         assert!(result.report.limits.is_empty());
-        assert!(result.report.findings[0].evidence.contains("caller.go:21"));
+        assert!(legacy_evidence(&result.report.findings[0]).contains("caller.go:21"));
     }
 
     #[test]

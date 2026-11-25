@@ -33,6 +33,8 @@ The dashboard records reported token usage. Missing coverage, an invalid citatio
 
 ## Reviewing and publishing
 
+For new AGY findings, **View evidence** shows an example input, numbered steps linked to the reviewed code, what the tests missed (or what is unknown), and what the reviewer ruled out. Older findings keep their original evidence.
+
 A report lists its **Changed files** in the side rail and below the manual checks, at the reviewed revisions. Files with a finding or a manual check come first and start open; expand any other file to read it. Select a line reference in a finding or a manual check to jump into the patch. For older reports, **Load reviewed diff from GitHub** retrieves the patch when both revisions still match.
 
 For a single-user installation, set `JIDOKA_REVIEWER_TOKEN` to your own GitHub token with **Pull requests: write** for the repositories you review. Open **Submit review**, select findings and a decision, then preview the summary and inline comments. The final button submits one GitHub review. Findings outside the patch appear in the summary. Jidoka checks the current PR revision before submission.

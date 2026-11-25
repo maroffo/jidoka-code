@@ -125,11 +125,7 @@ fn prepare_findings(
     for finding in findings {
         let title = markdown(&finding.title);
         let location = location(report, &finding.path, finding.line);
-        let evidence = (
-            finding.path.as_str(),
-            finding.line,
-            finding.evidence.as_str(),
-        );
+        let evidence = (finding.path.as_str(), finding.line, &finding.evidence);
         let existing = prepared
             .comments
             .iter_mut()
@@ -139,6 +135,7 @@ fn prepare_findings(
             writeln!(comment.body, "\n**{title}**").unwrap();
             details(
                 &mut comment.body,
+                report,
                 finding,
                 !compact || inline_evidence.insert(evidence),
             );
@@ -151,7 +148,7 @@ fn prepare_findings(
             writeln!(prepared.body, "\n- **{title}** ({location}, inline)").unwrap();
             let mut body = format!("**{title}**\n");
             inline_evidence.insert(evidence);
-            details(&mut body, finding, true);
+            details(&mut body, report, finding, true);
             prepared.comments.push(Inline {
                 path: finding.path.clone(),
                 line: finding.line,
@@ -159,7 +156,7 @@ fn prepare_findings(
             });
         } else {
             writeln!(prepared.body, "\n**{title}** ({location})").unwrap();
-            details(&mut prepared.body, finding, true);
+            details(&mut prepared.body, report, finding, true);
         }
     }
 
@@ -434,20 +431,51 @@ fn summary_text(text: &str) -> String {
     }
 }
 
-fn details(body: &mut String, finding: &Finding, show_evidence: bool) {
+fn details(body: &mut String, report: &PublishedReport, finding: &Finding, show_evidence: bool) {
     writeln!(body, "\n{}", markdown(&finding.impact)).unwrap();
     match finding.attribution {
         Attribution::Introduced => (),
         Attribution::Preexisting => body.push_str("\nThis issue predates the pull request.\n"),
         Attribution::Unknown => body.push_str("\nWhen this issue was introduced is unclear.\n"),
     }
-    if show_evidence && !finding.evidence.trim().is_empty() {
-        body.push_str("\nEvidence\n\n");
-        // Keep source text in a code block so its syntax, links and mentions stay literal.
-        let evidence = finding.evidence.replace("\r\n", "\n").replace('\r', "\n");
-        for line in evidence.lines() {
-            writeln!(body, "    {line}").unwrap();
+    use crate::contracts::FindingEvidence;
+    if !show_evidence {
+        return;
+    }
+    match &finding.evidence {
+        FindingEvidence::Text(text) if !text.trim().is_empty() => {
+            body.push_str("\nEvidence\n\n");
+            code_block(body, text);
         }
+        FindingEvidence::Text(_) => (),
+        FindingEvidence::Structured(proof) => {
+            body.push_str("\n**Triggering input**\n\n");
+            code_block(body, &proof.trigger);
+            body.push_str("\n**How it fails**\n\n");
+            for (i, step) in proof.steps.iter().enumerate() {
+                writeln!(
+                    body,
+                    "{}. {} ({})",
+                    i + 1,
+                    markdown(&step.explanation),
+                    location(report, &step.path, step.line)
+                )
+                .unwrap();
+            }
+            writeln!(
+                body,
+                "\n**Test coverage**\n\n{}\n\n**What was ruled out**\n\n{}",
+                markdown(&proof.test_gap),
+                markdown(&proof.countercheck)
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn code_block(body: &mut String, text: &str) {
+    for line in text.replace("\r\n", "\n").replace('\r', "\n").lines() {
+        writeln!(body, "    {line}").unwrap();
     }
 }
 
@@ -1158,7 +1186,7 @@ mod tests {
             line,
             title: title.to_owned(),
             impact: "[image](https://untrusted.invalid/) @team/review #104".to_owned(),
-            evidence: "    let label = \"@company\";\r\n<!-- jidoka-review:example -->".to_owned(),
+            evidence: "    let label = \"@company\";\r\n<!-- jidoka-review:example -->".into(),
             attribution: Attribution::Introduced,
         };
         PublishedReport {

@@ -576,7 +576,7 @@ mod tests {
             line: 10,
             title: "Verify <range>".into(),
             impact: "A & B".into(),
-            evidence: String::new(),
+            evidence: String::new().into(),
             attribution: Attribution::Unknown,
         });
         report.report.findings.push(Finding {
@@ -584,7 +584,7 @@ mod tests {
             line: 1,
             title: "Removed guard".into(),
             impact: "Callers lose the check".into(),
-            evidence: String::new(),
+            evidence: String::new().into(),
             attribution: Attribution::Unknown,
         });
         let Rendered { nav, section: html } = render(&report);

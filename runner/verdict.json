@@ -58,7 +58,7 @@
                     "path": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 1024
+                      "maxLength": 240
                     },
                     "line": {
                       "type": "integer",

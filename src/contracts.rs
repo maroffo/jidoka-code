@@ -89,9 +89,65 @@ pub struct Finding {
     pub line: usize,
     pub title: String,
     pub impact: String,
-    pub evidence: String,
+    pub evidence: FindingEvidence,
     pub attribution: Attribution,
 }
+/// Archived reports and replayed decisions retain the text evidence they originally recorded.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum FindingEvidence {
+    Text(String),
+    Structured(StructuredEvidence),
+}
+
+impl From<String> for FindingEvidence {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for FindingEvidence {
+    fn from(text: &str) -> Self {
+        Self::Text(text.into())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct StructuredEvidence {
+    pub trigger: String,
+    pub steps: Vec<EvidenceStep>,
+    pub test_gap: String,
+    pub countercheck: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceStep {
+    pub explanation: String,
+    pub path: String,
+    pub line: usize,
+}
+
+impl StructuredEvidence {
+    /// Validate the runner's response again at ingestion, including every pinned location.
+    pub fn valid(&self, impact: &str, mut has_line: impl FnMut(&str, usize) -> bool) -> bool {
+        let text = |s: &str, max| !s.trim().is_empty() && s.chars().count() <= max;
+        text(impact, 240)
+            && !impact.trim().contains(['\n', '\r'])
+            && text(&self.trigger, 600)
+            && text(&self.test_gap, 400)
+            && text(&self.countercheck, 400)
+            && (1..=6).contains(&self.steps.len())
+            && self.steps.iter().all(|step| {
+                text(&step.explanation, 240)
+                    && crate::source::safe_path(&step.path)
+                    && step.line > 0
+                    && has_line(&step.path, step.line)
+            })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Attribution {

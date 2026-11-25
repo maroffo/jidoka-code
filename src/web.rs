@@ -1139,6 +1139,45 @@ fn attribution_label(value: &Attribution) -> &'static str {
     }
 }
 
+fn finding_evidence_html(
+    report: &PublishedReport,
+    evidence: &crate::contracts::FindingEvidence,
+) -> String {
+    use crate::contracts::FindingEvidence;
+    let proof = match evidence {
+        FindingEvidence::Text(text) => return evidence_html(report, text),
+        FindingEvidence::Structured(proof) => proof,
+    };
+    let citations = Citations::new(report);
+    let mut steps = String::new();
+    for step in &proof.steps {
+        let label = format!("{}:{}", escape(&step.path), step.line);
+        let url = match citations.href(&step.path, step.line) {
+            Some(anchor) if anchor.starts_with('#') => Some(anchor),
+            head => match crate::diff::base_citation_path(report, &step.path, step.line) {
+                Some(path) => source_href(report, &report.base, path, step.line),
+                None => head.or_else(|| source_href(report, &report.head, &step.path, step.line)),
+            },
+        };
+        let location = match url {
+            Some(url) => format!(r#"<a href="{}">{label}</a>"#, escape(&url)),
+            None => label,
+        };
+        write!(
+            steps,
+            r#"<li><div class="prose">{}</div><small>{location}</small></li>"#,
+            crate::markdown::block(&step.explanation, &|_, _| None)
+        )
+        .unwrap();
+    }
+    format!(
+        "<h4>Triggering input</h4><pre><code>{}</code></pre><h4>How it fails</h4><ol>{steps}</ol><h4>Test coverage</h4>{}<h4>What was ruled out</h4>{}",
+        escape(&proof.trigger),
+        prose(report, &proof.test_gap),
+        prose(report, &proof.countercheck)
+    )
+}
+
 /// Evidence in two parts when the engine appended what the reviewer ruled out.
 fn evidence_html(report: &PublishedReport, evidence: &str) -> String {
     match evidence.split_once("\nCountercheck: ") {
@@ -1206,7 +1245,7 @@ fn finding_card(
         position(report, &item.path, item.line),
         prose(report, &item.impact),
         attribution_label(&item.attribution),
-        evidence_html(report, &item.evidence)
+        finding_evidence_html(report, &item.evidence)
     )
 }
 
@@ -1599,7 +1638,7 @@ mod tests {
             line: 1,
             title: "Title".into(),
             impact: "Impact".into(),
-            evidence: String::new(),
+            evidence: String::new().into(),
             attribution: Attribution::Unknown,
         });
         // An incomplete review with a finding stops, in the header as in the history.
@@ -1761,7 +1800,7 @@ mod tests {
             path: path.into(),
             line: 2,
             impact: "A job can be lost.".into(),
-            evidence: format!("Base revision {path}:9 “queue.wait();”"),
+            evidence: format!("Base revision {path}:9 “queue.wait();”").into(),
             attribution: Attribution::Introduced,
         });
         report.report.focus.push(Focus {
@@ -2597,6 +2636,44 @@ mod tests {
             patch_files: None,
             diff: None,
             scan,
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_structured_finding_shows_literal_input_and_linked_ordered_steps() {
+        let fixture = Fixture::new();
+        let mut saved = report(None);
+        let finding = serde_json::json!({
+            "path":"rules.rs","line":1,"title":"Cannot save","impact":"Saving an empty list loses the draft.",
+            "attribution":"introduced","evidence":{"trigger":"<empty>","steps":[
+                {"explanation":"The caller sends an **empty** list.","path":"rules.rs","line":1},
+                {"explanation":"The store returns early.","path":"src/store.rs","line":9}
+            ],"test_gap":"The test supplies an item.","countercheck":"The caller accepts empty lists."}
+        });
+        saved
+            .report
+            .findings
+            .push(serde_json::from_value(finding).unwrap());
+        connect(&fixture.db)
+            .unwrap()
+            .execute(
+                "INSERT INTO reviews(id,url,provider,status,report) VALUES(1,?,?,'completed',?)",
+                params![URL, PROVIDER, serde_json::to_string(&saved).unwrap()],
+            )
+            .unwrap();
+        let html = fixture.get("/reviews/1").await;
+        for part in [
+            "<h4>Triggering input</h4>",
+            "<code>&lt;empty&gt;</code>",
+            "<ol><li>",
+            "<strong>empty</strong>",
+            "/rules.rs#L1",
+            "rules.rs:1",
+            "/src/store.rs#L9",
+            "<h4>Test coverage</h4>",
+            "<h4>What was ruled out</h4>",
+        ] {
+            assert!(html.contains(part), "{part}");
         }
     }
 
